@@ -1,0 +1,574 @@
+---
+title: "Solving DSGE models with dynhr"
+output: rmarkdown::html_vignette
+vignette: >
+  %\VignetteIndexEntry{Solving DSGE models with dynhr}
+  %\VignetteEngine{knitr::rmarkdown}
+  %\VignetteEncoding{UTF-8}
+---
+
+```{r setup, include = FALSE}
+knitr::opts_chunk$set(
+  collapse  = TRUE,
+  comment   = "#>",
+  fig.width = 7,
+  fig.height = 4,
+  eval = TRUE
+)
+```
+
+## Overview
+
+This vignette covers the **deterministic** and **stochastic** solution
+pipeline in dynhr:
+
+1. Parse and compile a model
+2. Find the steady state
+3. Solve the linearised model (first- through fifth-order perturbation)
+4. Compute impulse response functions and theoretical moments
+5. Simulate model paths
+6. Evaluate the Kalman likelihood (standard, Chandrasekhar, DARE, univariate methods)
+7. Solve models with occasionally binding constraints (OBC)
+
+For Bayesian estimation, see `vignette("estimation")`.  For the diagnostic
+battery, see `vignette("diagnostics")`.
+
+---
+
+## 1  Model setup
+
+We use the textbook RBC model shipped with the package.
+
+```{r setup-model}
+library(dynhr)
+
+mod_path <- system.file("extdata", "models", "rbc.mod", package = "dynhr")
+model    <- parse_mod(mod_path, verbose = FALSE)
+compiled <- compile_model(model, verbose = FALSE)
+
+cat(sprintf("Endogenous : %d\nExogenous  : %d\nParameters : %d\nEquations  : %d\n",
+            length(model$var_names),
+            length(model$varexo_names),
+            length(model$param_names),
+            length(model$equations)))
+```
+
+`parse_mod()` returns a `dynhr_mod` list; `compile_model()` builds the
+symbolic residual and Jacobian functions used by the steady-state solver and
+Kalman filter.
+
+---
+
+## 2  Steady state
+
+### 2.1  Newton solver (default)
+
+For models without a `steady_state_model` block, dynhr uses a Newton
+method with backtracking line search:
+
+```{r steady}
+params <- model$param_values
+steady  <- solve_steady(compiled, params,
+                        endo_names = model$var_names,
+                        exo_names  = model$varexo_names,
+                        verbose    = FALSE)
+print(steady)
+```
+
+The `$values` slot holds the named steady-state vector; `$converged` is
+`TRUE` when the residual norm is below the solver tolerance (default
+`1e-10`).
+
+### 2.2  Checking steady-state residuals
+
+```{r ss-residual}
+ss <- steady$values
+cat("Max |F(ss)|:", format(max(abs(steady$residuals)), scientific = TRUE), "\n")
+```
+
+All residuals should be below `1e-10` for reliable perturbation.
+
+### 2.3  Models with an analytical block
+
+When a `.mod` file contains a `steady_state_model` block, dynhr evaluates
+it analytically and uses the result as the Newton starting point — or
+directly if it already satisfies the model equations.  The RBC model uses
+numerical Newton only; models that ship a `steady_state_model` block seed the
+solver from that closed-form starting point instead.
+
+---
+
+## 3  First-order perturbation
+
+### 3.1  Computing decision rules
+
+`solve_perturbation()` calls the QZ decomposition (via the `QZ` package,
+if installed) and returns the **decision-rule matrices** `ghx` and `ghu`:
+
+```{r dr}
+dr <- solve_perturbation(model, compiled, steady$values, params,
+                         verbose = FALSE)
+print(dr)
+```
+
+| Output        | Dimension             | Meaning |
+|---------------|-----------------------|---------|
+| `dr$ghx`      | `n_endo × n_state`   | State transition: how state variables respond to the previous state |
+| `dr$ghu`      | `n_endo × n_exo`     | Impact matrix: how all endogenous variables respond to shocks on impact |
+| `dr$bk_satisfied` | logical           | `TRUE` iff Blanchard–Kahn conditions hold |
+
+### 3.2  Blanchard–Kahn conditions
+
+The BK count is reported automatically:
+
+```{r bk}
+cat("BK satisfied:", dr$bk_satisfied, "\n")
+cat("  n_stable   :", dr$n_stable,    "\n")
+cat("  n_unstable :", dr$n_unstable,  "\n")
+cat("  n_forward  :", dr$n_forward,   "\n")
+```
+
+`n_stable == n_forward` is the standard uniqueness-and-existence
+condition.  If it fails, check your calibration for policy rule
+coefficients below the Taylor principle.
+
+### 3.3  Eigenvalue spectrum
+
+```{r eigenvalues}
+evs <- sort(Mod(dr$eigenvalues))
+cat("Largest stable  :", round(evs[dr$n_stable], 4), "\n")
+cat("Smallest unstable:", round(evs[dr$n_stable + 1L], 4), "\n")
+```
+
+The gap between the largest stable and smallest unstable eigenvalue
+measures BK robustness.  A gap below 0.01 warrants attention.
+
+### 3.4  Solver selection
+
+`solve_perturbation()` has no `method` argument.  The solver is chosen
+automatically at run time: it tries the `QZ` package (generalized Schur
+decomposition) first, falls back to `geigen` if `QZ` is unavailable, and
+finally falls back to base-R `eigen` for regular pencils.  There is no
+user-facing way to pin a specific solver — the automatic cascade is the
+only supported mode.
+
+| Internal backend | Package  | Notes |
+|------------------|----------|-------|
+| QZ               | `QZ`     | Default; generalized Schur decomposition |
+| geigen           | `geigen` | Alternative QZ; used when `QZ` is unavailable |
+| eigen            | base R   | Fallback; exact only for regular pencils |
+
+---
+
+## 3.5  Higher-order perturbation
+
+dynhr supports perturbation up to **order 5**, each with its own solver
+and decision-rule class:
+
+| Order | Solver | Decision-rule class | Key feature |
+|-------|--------|---------------------|-------------|
+| 2 | `solve_perturbation_order2()` | `DecisionRules2` | Quadratic terms, pruned state space |
+| 3 | `solve_perturbation_order3()` | `DecisionRules3` | Cubic terms, skewness |
+| 4 | `solve_perturbation_order4()` | `DecisionRules4` | Compact Sylvester (Levintal 2017) |
+| 5 | `solve_perturbation_order5()` | `DecisionRules5` | Quintic terms |
+
+`solve_perturbation()` dispatches automatically: pass `order = 2` (or
+`3`, `4`, `5`) to select the solver, or pass a precomputed
+`DecisionRules2/3/4/5` to the pipeline functions that accept `dr`.
+
+Higher-order solutions include **σ-correction terms** for stochastic
+steady-state shifts (`solve_sigma_cross()`, `solve_sigma_order4()`,
+`solve_sigma_order5()`).
+
+### 3.6  Cumulant computation
+
+From a second-order perturbation, `compute_third_cumulant()` and
+`compute_fourth_cumulant()` compute the closed-form skewness and excess
+kurtosis of the pruned state space (Mutschler 2015), used by
+`make_log_posterior_cumulant()` for cumulant-based Bayesian estimation.
+
+---
+
+## 4  Impulse response functions
+
+```{r irfs}
+irfs <- compute_irfs(dr, model, n_periods = 40L)
+names(irfs)   # one matrix per shock
+dim(irfs$eps_a)   # 40 × n_endo
+```
+
+Each element is a `T × n_endo` matrix.  Rows are horizons 1…T; columns
+are endogenous variables in model order.
+
+For higher-order solutions, use `compute_irfs_order2()`,
+`compute_irfs_order3()`, `compute_irfs_order4()`, or
+`compute_irfs_order5()`, which apply the pruned state-space
+approximation (Andreasen et al. 2018).
+
+### 4.1  Plotting a single shock
+
+```{r irf-plot, fig.height=5}
+vars  <- c("y", "c", "k", "l")
+irf_a <- irfs$eps_a[, vars]
+
+old_par <- par(mfrow = c(2, 2), mar = c(3, 3, 2, 1))
+for (v in vars) {
+  plot(irf_a[, v], type = "l", main = v, xlab = "Quarters", ylab = "% dev.")
+  abline(h = 0, lty = 2, col = "grey60")
+}
+par(old_par)
+```
+
+---
+
+## 5  Theoretical moments
+
+`compute_moments()` solves the Lyapunov equation for the unconditional
+variance–covariance matrix and returns correlations, autocorrelations, and
+variance decompositions:
+
+```{r moments}
+moms <- compute_moments(dr, model)
+cat("Variables:", colnames(moms$var_cov), "\n\n")
+cat("Standard deviations (% of SS):\n")
+sds <- sqrt(diag(moms$var_cov))
+round(sds * 100, 3)
+```
+
+```{r correlations}
+cat("Contemporaneous correlations:\n")
+round(moms$correlation[1:4, 1:4], 3)
+```
+
+### 5.1  Variance decomposition
+
+```{r vardec}
+if (!is.null(moms$variance_decomposition)) {
+  vd <- moms$variance_decomposition
+  cat("Variance shares (%) attributed to eps_a:\n")
+  round(vd["eps_a", ] * 100, 1)
+}
+```
+
+For a single-shock model like RBC, all variance comes from `eps_a`.
+Multi-shock models show the breakdown across shocks.
+
+---
+
+## 6  Stochastic simulation paths
+
+`simulate_model()` draws forward paths by propagating shocks through
+the state equation:
+
+```{r simulate}
+set.seed(123)
+paths <- simulate_model(dr, n_periods = 200L, model = model, burn_in = 40L)
+cat("Simulation shape:", nrow(paths), "x", ncol(paths), "\n")
+```
+
+```{r sim-plot, fig.height=3}
+old_par <- par(mar = c(3, 3, 2, 1))
+plot(paths[, "y"], type = "l", main = "Simulated output (y)",
+     xlab = "Quarters", ylab = "Level")
+par(old_par)
+```
+
+---
+
+## 7  Kalman filter
+
+Given an observed data matrix, `kalman_filter()` evaluates the
+log-likelihood under the state-space representation implied by the
+decision rules.  Multiple solver methods are available:
+
+| Method | Description | Use case |
+|--------|-------------|----------|
+| `"auto"` | Picks fastest method automatically | Default |
+| `"standard"` | Textbook Kalman filter | General use |
+| `"chandrasekhar"` | Chandrasekhar recursions | Large state spaces, T >> n_state |
+| `"dare"` | Bit-exact per-step filter (no steady-state shortcut) | Correctness oracle |
+| `"reference"` | Alias for `"dare"` | Backward compatibility |
+| `"univariate"` | Sequential scalar updates | Stochastically singular models |
+
+```{r kf}
+# Use a fragment of the simulated paths as stand-in for observed data
+obs_vars <- c("y", "c")
+Y_obs    <- as.matrix(paths[1:80, obs_vars])
+
+suppressWarnings(
+  kf <- kalman_filter(Y_obs, dr, model, params,
+                      obs_vars        = obs_vars,
+                      return_filtered = TRUE,
+                      me_variance     = 1e-6)
+)
+cat("Log-likelihood  :", round(kf$loglik, 3), "\n")
+cat("Filtered states  : dim", paste(dim(kf$filtered_states), collapse = " x "), "\n")
+```
+
+The `me_variance` argument adds a small measurement error on the diagonal
+of the observation noise matrix.  This regularises the filter for
+stochastically singular models where some observables are exactly linear
+combinations of state variables.
+
+### 7.1  Filter convergence
+
+For stationary models the Kalman gain typically converges to a steady
+state after 20–40 periods.  You can verify this by comparing
+`kf$filtered_states` across time.
+
+### 7.2  OBC Kalman filter
+
+For models with occasionally binding constraints, `kalman_filter_obc_pkf()`
+implements the **partially-Kalman filter (PKF)** of Boehl (2020), which
+handles regime-dependent state-space representations.  The companion
+`pkf_smoother_obc()` and `historical_decomposition_obc()` extend the
+narrative to smoothed shocks and historical decompositions under OBC.
+
+---
+
+## 8  Models with occasionally binding constraints (OBC)
+
+dynhr provides a comprehensive toolset for solving and analysing models
+with occasionally binding constraints (ZLB, borrowing limits, etc.).
+
+### 8.1  OccBin (piecewise linear)
+
+The `occbin_solve_path()` function implements the OccBin algorithm —
+guessing a regime path and verifying it against the model's piecewise-
+linear decision rules:
+
+```{r occbin, eval = FALSE}
+parsed_tags <- obc_parse_tags(model)
+regime_path <- occbin_solve_path(model, compiled, steady$values,
+                                  params, parsed_tags, verbose = FALSE)
+```
+
+### 8.2  Boehl complementarity (LCP)
+
+`solve_obc_lcp()` formulates the OBC problem as a linear complementarity
+problem (LCP), which can detect binding regimes without guessing:
+
+```{r lcp, eval = FALSE}
+lcp_result <- solve_obc_lcp(model, compiled, steady$values, params,
+                             tags = parsed_tags, verbose = FALSE)
+```
+
+### 8.3  Perfect-foresight Newton
+
+`pf_newton_solve()` stacks all periods into a large nonlinear system and
+solves with a Newton method.  Suitable for deterministic simulations of
+OBC models.
+
+### 8.4  OBC simulation and IRFs
+
+- `simulate_sep()` — simulation with occasionally binding constraints
+  using the stacked-epochs approach.
+- `occbin_compute_irfs()` — IRFs under OBC, showing the effect of binding
+  constraints on shock propagation.
+
+---
+
+## 9  Putting it together: `stoch_simul()`
+
+`stoch_simul()` is a convenience wrapper that runs the perturbation solver,
+computes IRFs, moments, and optionally simulates — matching the Dynare
+`stoch_simul` command:
+
+```{r stochsimul}
+sim <- stoch_simul(model, verbose = FALSE)
+names(sim)
+```
+
+```{r stochsimul-dr}
+cat("BK satisfied :", sim$dr$bk_satisfied, "\n")
+cat("IRF shocks   :", names(sim$irfs), "\n")
+```
+
+---
+
+## 10  Solver options and tolerances
+
+Key options can be passed via arguments or set globally:
+
+| Concern                  | Argument / default                 |
+|--------------------------|------------------------------------|
+| Steady-state tolerance   | `tol = 1e-10` in `solve_steady()`  |
+| Max Newton iterations    | `max_iter = 100`                   |
+| BK strict mode           | `bk_strict = TRUE`                 |
+| QZ imaginary tolerance   | `qz_imag_tol = 1e-12`              |
+| Measurement error floor  | `me_variance = 0`                  |
+| Perturbation order       | `order = 1` in `solve_perturbation()` |
+| Numerical FD step        | `h = 1e-6` (adaptive per order)    |
+| Rcpp backend             | `dynhr.use_rcpp = TRUE`            |
+
+For models near a unit root, relaxing `qz_imag_tol` to `1e-6` is
+sometimes needed.  Set `dynhr.use_rcpp = FALSE` to force the pure-R
+Kalman filter fallback.
+
+---
+
+## 11  Changing parameters and re-solving
+
+dynhr has no `set_param_value()` function.  To re-solve a model with
+modified parameters, edit the `params` vector directly and re-run the
+pipeline:
+
+```{r reparameterise, eval = FALSE}
+# Start from the calibrated values
+params2 <- model$param_values
+
+# Change one or more parameters
+params2["rho"] <- 0.95
+
+# Re-solve — no recompilation needed
+ss2 <- solve_steady(compiled, params2,
+                    endo_names = model$var_names,
+                    exo_names  = model$varexo_names,
+                    verbose    = FALSE)
+dr2 <- solve_perturbation(model, compiled, ss2$values, params2, verbose = FALSE)
+```
+
+`params` is a plain named numeric vector, so standard R subsetting and
+assignment apply.  `compile_model()` is called only once; the compiled
+symbolic functions accept any `params` vector at evaluation time.
+
+---
+
+## 12  Log-linear models and the level-deviation convention
+
+### 12.1  How dynhr represents decision-rule output
+
+dynhr always works in **levels**.  The perturbation solution is:
+
+```
+y_t  ≈  y_ss  +  ghx · (x_{t-1} − x_ss)  +  ghu · ε_t
+```
+
+where `y_ss` is the (deterministic) steady-state vector and the matrices
+`ghx`, `ghu` are measured in **level** units.  `simulate_model()` and
+`compute_moments()` return deviations from the steady state in levels.
+
+### 12.2  Converting a log-linearised Dynare model
+
+Dynare's `loglinear` option log-linearises the model before solving, so its
+`dr.ghx` and `dr.ghu` are in **log-deviation** units.  To recover dynhr's
+level-deviation solution from Dynare's log-deviation solution, apply the
+following element-wise conversion:
+
+```
+G_log[i, j]  =  (ys[j] / ys[i]) * G_lev[i, j]
+H_log[i, j]  =  (1 / ys[i])     * H_lev[i, j]
+```
+
+where `ys` is the steady-state vector, `G_lev` = dynhr's `ghx`, and
+`H_lev` = dynhr's `ghu`.  These formulas recover **machine precision** when
+applied to a model solved in levels (confirmed across Hansen_1985 and
+Ghironi_Melitz_2005 in the replication test suite).
+
+To convert dynhr simulated paths to **log-deviations** (matching Dynare
+`loglinear` output), divide each variable column by its steady-state value:
+
+```r
+## sim is (n_periods x n_endo) deviations from SS in levels
+## ys is the named steady-state vector
+sim_logdev <- sweep(sim, 2, dr$ys[colnames(sim)], `/`)
+```
+
+Note that `simulate_model()` returns **level deviations** (`sim[t, v]` = the
+level-space deviation of variable `v` at time `t` from its steady state),
+not log-deviations.
+
+### 12.3  Models with a `loglinear;` statement in the `.mod` file
+
+dynhr does not currently implement the `loglinear;` block option.  To compare
+with a Dynare `loglinear` run:
+
+1. Solve the model in dynhr (levels, as usual).
+2. Apply the `G_log` / `H_log` conversion above to dynhr's `ghx` / `ghu`
+   matrices before comparing.
+3. Divide simulation paths by `dr$ys` to convert to log-deviations.
+
+This workflow recovers numerical agreement with Dynare's `loglinear` results
+to machine precision for the standard linearised models.
+
+---
+
+## 13  Seeding the steady-state solver
+
+For models with multiple steady states or slow Newton convergence, pass an
+initial guess `y0` to `solve_steady()`:
+
+```{r ss-seeding, eval = FALSE}
+## y0 is a named numeric vector of starting values for the solver.
+## Useful when the default zero-start point misses the intended equilibrium.
+ss_seeded <- solve_steady(compiled, params,
+                          endo_names = model$var_names,
+                          exo_names  = model$varexo_names,
+                          y0         = c(C = 0.8, k = 9.2, z = 1.0),
+                          verbose    = FALSE)
+```
+
+`y0` accepts a **named** vector; only the names present in `endo_names` are
+used, so a partial vector is fine.  Unspecified variables start from zero.
+
+This is the recommended approach when:
+
+- dynhr's Newton converges to a different equilibrium than Dynare's (e.g.
+  because Dynare's `*_steadystate.m` pins a specific root): seed from Dynare's
+  steady-state values.
+- The model has multiple steady states (e.g. indeterminacy with multiple
+  fixed points): supply the economically-relevant starting point.
+- Newton diverges from the zero start: seed from approximate analytical values.
+
+```{r ss-seeding-example, eval = FALSE}
+## Example: re-solve after seeding from a known steady state
+dynare_ys <- c(Y = 1.099, C = 0.741, k = 14.36, ...)   # from Dynare's oo_.steady_state
+ss_seeded <- solve_steady(compiled, params,
+                          endo_names = model$var_names,
+                          exo_names  = model$varexo_names,
+                          y0 = dynare_ys, verbose = FALSE)
+```
+
+---
+
+## See also
+
+- `vignette("estimation")` — Bayesian estimation pipeline
+- `vignette("diagnostics")` — diagnostic battery D1–D30
+- `?solve_perturbation_order2`, `?solve_perturbation_order3` — higher-order solvers
+- `?solve_obc_lcp`, `?occbin_solve_path` — OBC tools
+- `?solve_sigma_cross`, `?solve_sigma_order4` — sigma-correction terms
+
+---
+
+## References
+
+Anderson, B. D. O., & Moore, J. B. (1979). *Optimal Filtering*. Prentice-Hall.
+
+Andreasen, M. M., Fernandez-Villaverde, J., & Rubio-Ramirez, J. F. (2018). The pruned state-space system for non-linear DSGE models. *Review of Economic Studies*, 85(1), 1-49.
+
+Binning, A. (2013). Underidentified SVAR models: A framework for combining short-run and long-run restrictions. *Norges Bank Working Paper*.
+
+Boehl, G. (2020). Efficient solution and computation of models with occasionally binding constraints. *Deutsche Bundesbank Discussion Paper*, 38/2020.
+
+Cottle, R. W., Pang, J.-S., & Stone, R. E. (2009). *The Linear Complementarity Problem*. SIAM.
+
+Guerrieri, L., & Iacoviello, M. (2015). OccBin: A toolkit for solving dynamic models with occasionally binding constraints easily. *Journal of Monetary Economics*, 70, 22-38.
+
+Kalman, R. E. (1960). A new approach to linear filtering and prediction problems. *Journal of Basic Engineering*, 82(1), 35-45.
+
+Klein, P. (2000). Using the generalized Schur form to solve a multivariate linear rational expectations model. *Journal of Economic Dynamics and Control*, 24(10), 1405-1423.
+
+Levintal, O. (2017). Fifth-order perturbation solution of DSGE models. *Journal of Economic Dynamics and Control*, 80, 1-16.
+
+Mutschler, W. (2015). Identification of DSGE models — The effect of higher-order approximation and pruning. *Journal of Economic Dynamics and Control*, 56, 1-33.
+
+Schmitt-Grohé, S., & Uribe, M. (2004). Solving dynamic general equilibrium models using a second-order approximation to the policy function. *Journal of Economic Dynamics and Control*, 28(4), 755-775.
+
+Strid, I., & Walentin, K. (2011). Block Kalman filtering for large-scale DSGE models. *Computational Economics*, 39(2), 145-160.
+
+Villemot, S. (2011). Solving rational expectations models by first-order perturbation. *Dynare Working Paper Series*, 6.
+
+```{r session}
+sessionInfo()
+```

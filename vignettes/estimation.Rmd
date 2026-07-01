@@ -1,0 +1,486 @@
+---
+title: "Bayesian estimation with dynhr"
+output: rmarkdown::html_vignette
+vignette: >
+  %\VignetteIndexEntry{Bayesian estimation with dynhr}
+  %\VignetteEngine{knitr::rmarkdown}
+  %\VignetteEncoding{UTF-8}
+---
+
+```{r setup, include = FALSE}
+knitr::opts_chunk$set(
+  collapse = TRUE,
+  comment  = "#>",
+  eval     = FALSE   # estimation is slow; show code without running
+)
+```
+
+## Overview
+
+This vignette walks through Bayesian estimation of a DSGE model in dynhr:
+
+1. Specify priors from the `.mod` file
+2. Build a log-posterior evaluator (Gaussian or cumulant-based)
+3. Find the posterior mode
+4. Draw from the posterior (RWMH, SMC, or NUTS)
+5. Inspect convergence and run diagnostics (D1–D30)
+6. (Optional) Evaluate Ramsey, OSR, discretionary, or Nash welfare
+
+For a one-call pipeline skip to §6.
+
+---
+
+## 1  Prior specification
+
+Priors live in the `estimated_params` block of the `.mod` file:
+
+```
+// example: nk_hs2016.mod
+estimated_params;
+  tau,    gamma_pdf,  2.00, 0.50;   // IES (inverse)
+  kappa,  beta_pdf,   0.33, 0.10;   // NK slope
+  psi1,   gamma_pdf,  1.50, 0.25;   // Taylor inflation
+  rho_R,  beta_pdf,   0.75, 0.10;   // interest rate smoothing
+  stderr eps_R, inv_gamma_pdf, 0.20, 0.10;
+end;
+```
+
+Extract the prior specification in R:
+
+```{r priors}
+library(dynhr)
+mod    <- system.file("extdata", "models", "nk_hs2016.mod", package = "dynhr")
+model  <- parse_mod(mod, verbose = FALSE)
+priors <- prior_spec(model)   # extracts estimated_params block
+print(priors)
+```
+
+`priors` is a data.frame with columns `name`, `distribution`, `p1`, `p2`,
+`lower`, `upper`, `mean`, `std`.
+
+---
+
+## 2  Build the log-posterior
+
+```{r posterior}
+compiled <- compile_model(model, verbose = FALSE)
+
+# Observed data (T × n_obs matrix; column names must match obs vars in model)
+Y <- read.csv("my_data.csv")
+Y <- as.matrix(Y[, c("YGR", "INFL", "INT")])
+
+# Build the closure
+log_post <- make_posterior(model, data = Y, prior_spec = priors,
+                           obs_vars    = c("YGR", "INFL", "INT"),
+                           compiled    = compiled,
+                           me_variance = 0)
+
+# Test at prior means
+theta0 <- setNames(priors$mean, priors$name)
+val    <- log_post(theta0)
+cat("logpost:", val$logpost, " loglik:", val$loglik, " logprior:", val$logprior)
+```
+
+`make_posterior()` caches the compiled model structure; evaluating the
+returned closure is fast (one Kalman filter pass per call).
+
+#### Likelihood initialization for (near-)unit-root models
+
+The Kalman filter initialization is controlled by `lik_init`, which defaults
+to `"auto"` and almost never needs to be set by hand. `"auto"` picks the
+cheapest *valid* initialization: it uses the stationary Lyapunov
+initialization whenever that yields a valid (finite, positive semi-definite)
+initial covariance, and falls back to the exact-diffuse filter only for a
+genuine unit or explosive root (e.g. a random-walk trend), where the
+stationary variance does not exist.
+
+This matters for any model whose feasible region is *near* a unit root (debt,
+net foreign assets, trends). A root just inside the unit circle is still
+stationary, so `"auto"` keeps the fast stationary path (~10 ms/eval) rather
+than the per-step exact-diffuse phase (~500–800 ms/eval) — and returns the
+*exact* stationary likelihood there, not a diffuse approximation. Because
+global mode-finders (CMA-ES) and MCMC sample the feasibility boundary
+heavily, this is frequently the difference between a tractable and an
+intractable estimation. If you genuinely want the exact-diffuse treatment for
+every near-unit root, pass `lik_init = "diffuse"` explicitly via
+`posterior_options`.
+
+### Cumulant-based likelihood
+
+Instead of the standard Gaussian (Kalman) likelihood, pass
+`likelihood = "cumulant"` to match first through fourth moments
+(mean, variance, skewness, kurtosis) of the pruned state space
+against the data (Mutschler 2015).  This is particularly useful
+when the data exhibit non-Gaussian features:
+
+```{r cumulant, eval = FALSE}
+log_post_cumulant <- make_posterior(model, data = Y,
+  prior_spec   = priors,
+  obs_vars     = c("YGR", "INFL", "INT"),
+  compiled     = compiled,
+  likelihood   = "cumulant",
+  orders       = 1:4        # which cumulants to match
+)
+```
+
+The underlying `make_log_posterior_cumulant()` is also callable directly,
+and the individual cumulant functions `compute_third_cumulant()` and
+`compute_fourth_cumulant()` can be used standalone for analysis.
+
+---
+
+## 3  Find the posterior mode
+
+```{r mode}
+mode <- find_mode(
+  log_post_fn = log_post,
+  theta_init  = theta0,
+  prior_spec  = priors,
+  n_iter      = 10000L,
+  method      = "newrat",     # default: csminwel quasi-Newton (= Dynare mode_compute 4)
+  verbose     = TRUE
+)
+cat("Mode logpost:", mode$logpost, "\n")
+cat("Mode estimate:\n")
+print(round(mode$theta_mode, 4))
+```
+
+The `mode` list contains `theta_mode`, `logpost`, `hessian` (numerical),
+`V_mode` (inverse-Hessian as proposal covariance), and `se_mode`.
+
+#### Choosing the optimizer
+
+The default `method = "newrat"` is the csminwel quasi-Newton optimizer —
+the same algorithm as Dynare's `mode_compute = 4`. It is gradient-based
+(using the analytic gradient, built automatically for Gaussian/cumulant/
+Whittle likelihoods) with an infeasibility-backtracking line search, which
+makes it both the most robust and the cheapest choice on near-unit-root
+models: it typically converges in hundreds of evaluations, where the
+gradient-free CMA-ES search needs thousands and tends to stall on the
+feasibility boundary. If the posterior is multimodal or the starting point is
+poor, use `method = "cmaes_newrat"` (CMA-ES global search to escape poor
+starts, then newrat polish) or the previous default `method = "combined"`
+(CMA-ES then L-BFGS-B).
+
+#### Hessian performance levers
+
+The proposal-covariance Hessian (the inverse of which is `V_mode`) is the
+main cost after the optimizer itself. Two knobs control it, and the
+performance-optimal choice depends on model size:
+
+- **`parallel = TRUE`** (default `FALSE`) is the single biggest lever. The
+  default computes the finite-difference Hessian serially
+  (\eqn{O(n_{par}^2)} likelihood evaluations); `parallel = TRUE` spreads
+  those over a mirai daemon pool for a roughly \eqn{n}-fold speed-up on
+  \eqn{n} cores. It is opt-in (not auto-enabled) because the daemon pool has
+  setup/teardown cost and is undesirable in CI or embedded runs — but for a
+  large parameter vector it is the recommended setting.
+
+- **`use_exact_hessian = TRUE`** (default `FALSE`) swaps the finite-difference
+  Hessian for the analytic `posterior_hessian`. This is *not* a universal
+  speed-up: the analytic Hessian costs
+  \eqn{O(n_{par}^2 \cdot n_{state}^3)} and is the faster route only for a
+  small parameter vector / long sample. For a large state and many parameters
+  (e.g. \eqn{n_{par} \gtrsim 60}, \eqn{n_{state} \gtrsim 70}) the
+  finite-difference Hessian wins, which is why it is the default — reach for
+  `parallel = TRUE` rather than `use_exact_hessian = TRUE` on big models. (A
+  related option, `use_analytic_hess`, default `TRUE`, uses the analytic
+  Hessian only to seed the newrat optimizer's initial curvature; set
+  `dynhr_set_options(use_analytic_hess = FALSE)` to skip that expensive seed
+  on a large model.)
+
+Both can be set per call or globally via `dynhr_set_options()`.
+
+---
+
+## 4  RWMH sampling
+
+```{r rwmh}
+# Scale the Hessian-based proposal
+n_par      <- length(mode$theta_mode)
+Sigma_prop <- mode$V_mode * (2.38^2 / n_par)
+
+chains_rwmh <- mcmc(
+  log_post_fn = log_post,
+  theta0      = mode$theta_mode,
+  Sigma_prop  = Sigma_prop,
+  n_draws     = 100000L,
+  n_warmup    = 25000L
+)
+print(chains_rwmh)
+summary(chains_rwmh)
+```
+
+The returned `dynhr_chains` object has a `$chain` slot (\eqn{n_{\text{draws}} \times n_p}
+post-warmup matrix).
+
+### Multi-chain RWMH
+
+Pass `n_chains > 1` to `run_full_estimation()` for automatic multi-chain
+dispatch with Gelman--Rubin convergence diagnostics.
+
+---
+
+## 5  SMC (no mode required)
+
+SMC is a particle filter over the parameter space.  It does not require
+a mode estimate and provides a free log-marginal-likelihood estimate:
+
+```{r smc}
+chains_smc <- smc(
+  log_post_fn = log_post,
+  prior_spec  = priors,
+  n_particles = 5000L,
+  verbose     = TRUE
+)
+print(chains_smc)
+cat("log p(Y|M):", chains_smc$log_marginal_lik, "\n")
+```
+
+---
+
+## 6  NUTS
+
+NUTS adapts its step size and mass matrix automatically:
+
+```{r nuts}
+chains_nuts <- nuts(
+  log_post_fn = log_post,
+  theta0      = mode$theta_mode,
+  n_draws     = 4000L,
+  n_warmup    = 2000L
+)
+print(chains_nuts)
+```
+
+Check divergences with `chains_nuts$n_divergent`.  A well-tuned run
+should have zero divergences.
+
+---
+
+## 7  One-call pipeline
+
+All of the above in \(<30\) lines:
+
+```{r onecall}
+result <- run_full_estimation(
+  mod_file    = "nk_hs2016.mod",
+  data        = Y,
+  obs_vars    = c("YGR", "INFL", "INT"),
+  output_dir  = "output/",
+  sampler     = "rwmh",
+  n_draws     = 100000L,
+  n_warmup    = 25000L,
+  n_chains    = 4L,
+  seed        = 42L,
+  run_diag    = TRUE,
+  verbose     = TRUE
+)
+print(result)
+```
+
+`output/dynhr_est_mode.rds` and `output/dynhr_est_chains.rds` are
+written automatically.
+
+### Gradient samplers, the parameter transform, and metrics
+
+`method = "NUTS"`, `"MALA"`, `"CHEES"` and `"HMC"` are gradient-based. By default
+(`transform_params = TRUE`) they sample on an unconstrained reparameterisation of
+the bounded parameter vector, built from the priors. This is the recommended
+default: in the constrained geometry of parameters near a unit root every
+gradient sampler suffers step-size collapse, which the transform resolves while
+leaving the target distribution unchanged. Set `transform_params = FALSE` to
+sample in raw parameter space.
+
+`MALA` and `NUTS` accept a `metric`: `"diagonal"` (default, identity mass),
+`"hessian"` (a constant dense metric from the mode covariance — the best choice
+for ill-conditioned posteriors), or `"monge"`. **The `"monge"` metric is
+experimental and disabled by default**: \(G = I + \alpha^2 g g^\top\) inflates
+along the gradient, so the proposal step collapses on sharp / near-unit-root
+posteriors (in testing it explored a tight direction to only ~1% of its variance
+where `"hessian"` recovered it fully). It errors unless you set
+`dynhr_set_options(allow_monge_metric = TRUE)`, and warns when used — prefer
+`"hessian"`.
+
+---
+
+## 8  Convergence and diagnostics
+
+After any sampler:
+
+```{r diag}
+# Run the 30-diagnostic battery (D1–D30)
+diags <- run_diagnostics(
+  model    = model,
+  compiled = compiled,
+  draws    = result$chains$chain,
+  data     = Y
+)
+
+# Write a structured report
+write_report(diags, file = "output/report.md")
+```
+
+The diagnostic suite covers pre-estimation identification (D1–D4, D19–D26),
+MCMC quality (D5–D7), post-estimation fit (D8–D18), and advanced topics
+such as OBC identification (D27), regime-switching identification (D28),
+data-driven constraints (D29), and arbitrary-precision rank checks (D30).
+See `vignette("diagnostics")` for details.
+
+Key convergence checks:
+
+| Metric | Good | Concern |
+|---|---|---|
+| R-hat | \(<1.05\) | \(>1.10\) |
+| Bulk ESS | \(>400\) per chain | \(<100\) |
+| Acceptance rate (RWMH) | 20–35% | \(<10\%\) or \(>50\%\) |
+| Divergences (NUTS) | 0 | \(>0\) |
+
+---
+
+## 9  Optimal policy (optional)
+
+dynhr ships a comprehensive optimal-policy toolkit that goes well beyond
+the simple simulation-based approach:
+
+### 9.1  Ramsey optimal commitment
+
+Two complementary engines are available:
+
+| Method | Function | Description |
+|--------|----------|-------------|
+| **Augmented system** | `ramsey_model()` | Derives FOCs symbolically, double state space (Bodenstein–Guerrieri) |
+| **(n, n+1) approximation** | `ramsey_nn1()` | Modified objective without doubling the state (Gross & Hansen 2021) |
+
+`ramsey_model()` is the gold standard; `ramsey_nn1()` is lighter weight
+and scales naturally to OBC problems.
+
+Both can be called from `run_full_estimation(..., run_ramsey = TRUE)`:
+
+```{r ramsey, eval = FALSE}
+result_ramsey <- ramsey_model(model, compiled, params,
+                               planner_objective = "log(c)",
+                               order = 1L, verbose = TRUE)
+print(result_ramsey)
+```
+
+### 9.2  Optimal simple rules (OSR)
+
+`osr()` optimises the coefficients of a pre-specified policy rule to
+minimise the unconditional variance of target variables, using CMA-ES:
+
+```{r osr, eval = FALSE}
+osr_result <- osr(model, free_params = c(phi_pi = 1.5, phi_y = 0.5),
+                   loss_vars = c("pi", "y_gap"),
+                   loss_weights = c(pi = 1, y_gap = 0.5))
+```
+
+### 9.3  Discretionary policy
+
+`discretionary_policy()` computes the Markov-perfect equilibrium under
+discretion via Riccati fixed-point iteration:
+
+```{r disc, eval = FALSE}
+disc_result <- discretionary_policy(model,
+                                     policy_instrument = "i",
+                                     loss_vars = c("pi", "y_gap"))
+```
+
+### 9.4  Nash–Ramsey games
+
+- `nash_ramsey_cooperative()` — multiple policymakers with a weighted-sum objective
+- `nash_ramsey_openloop()` — open-loop Nash equilibrium (welfare matrix)
+
+### 9.5  Ramsey with OBC
+
+- `ramsey_obc_pf()` — perfect-foresight Ramsey under binding constraints
+- `ramsey_obc_pwlinear()` — piecewise-linear Ramsey commitment
+- `ramsey_obc_welfare_cost()` — compare welfare across OBC regimes
+
+### 9.6  Regime-dependent Ramsey
+
+- `ramsey_regime_deterministic()` — deterministic regime path with per-regime objectives
+- `ramsey_regime_markov()` — Markov-switching Ramsey with ergodic welfare
+
+### 9.7  Sufficient-statistics optimal policy
+
+`opp_sufficient_stats()` implements the Barnichon & Mesters (2023)
+approach: given IRFs to a policy instrument, compute the optimal
+instrument deviation that minimises a quadratic loss subject to the
+IRF-based transmission:
+
+```{r opp, eval = FALSE}
+opp_result <- opp_sufficient_stats(model,
+                                    target_vars = c("pi", "y_gap"),
+                                    loss_weights = c(pi = 1, y_gap = 0.5))
+```
+
+### 9.8  Welfare toolkit
+
+- `welfare_compute()` — simulation-based welfare evaluation
+- `welfare_ce_diff()` — consumption-equivalent welfare difference
+- `welfare_cost_of_rule()` — cost of a given policy rule
+- `welfare_decompose()` — welfare decomposition into steady-state, variance, and higher-order components
+- `conditional_welfare()` — conditional welfare under alternative policies
+- `evaluate_planner_objective()` — evaluate the planner's objective at a given solution
+
+`run_diagnostics()` will consume Ramsey output in D18 welfare plausibility when
+available; otherwise D18 remains informational.
+
+---
+
+## 10  Saving and loading chains
+
+```{r save}
+saveRDS(result$chains, "output/chains.rds")
+chains <- readRDS("output/chains.rds")
+
+# Convert to coda::mcmc.list for standard diagnostics
+chain_mat <- chains$chain
+# Use coda::as.mcmc(chain_mat) if coda is installed
+```
+
+---
+
+## See also
+
+- `?run_full_estimation` -- complete argument reference
+- `?prior_spec` -- prior distribution families supported
+- `?make_posterior` -- posterior evaluator options
+- `?find_mode` -- optimiser methods (CMA-ES, Nelder-Mead, JADE)
+- `?estimate_mode`, `?estimate_posterior` -- stepwise estimation API
+- `?make_log_posterior_cumulant` -- cumulant-based posterior
+- `?ramsey_model`, `?ramsey_nn1` -- Ramsey optimal policy
+- `?osr`, `?discretionary_policy` -- OSR and discretionary policy
+- `?nash_ramsey_cooperative`, `?nash_ramsey_openloop` -- Nash games
+- `?ramsey_obc_pf`, `?ramsey_obc_pwlinear` -- Ramsey with OBC
+- `?ramsey_regime_deterministic`, `?ramsey_regime_markov` -- regime-dependent
+- `?opp_sufficient_stats` -- sufficient-statistics OPP
+- `?welfare_compute`, `?welfare_ce_diff` -- welfare toolkit
+- `vignette("diagnostics")` -- the D1–D30 diagnostic battery
+
+---
+
+## References
+
+Barnichon, R., & Mesters, G. (2023). A sufficient statistics approach for macro policy evaluation. *Journal of Political Economy*, 131(1), 159-197.
+
+Bodenstein, M., & Guerrieri, L. (2011). The welfare-optimal degree of central bank transparency. *Journal of Money, Credit and Banking*, 43(5), 857-889.
+
+Chopin, N. (2002). A sequential particle filter method for static models. *Biometrika*, 89(3), 539-552.
+
+Gelman, A., Carlin, J. B., Stern, H. S., & Rubin, D. B. (2013). *Bayesian Data Analysis* (3rd ed.). Chapman & Hall/CRC.
+
+Gross, T., & Hansen, J. (2021). Optimal policy design in nonlinear DSGE models: An n-order accurate approximation. *Working Paper*.
+
+Hansen, N. (2016). The CMA evolution strategy: A tutorial. *arXiv:1604.00772*.
+
+Herbst, E. P., & Schorfheide, F. (2015). *Bayesian Estimation of DSGE Models*. Princeton University Press.
+
+Hoffman, M. D., & Gelman, A. (2014). The No-U-Turn sampler: Adaptively setting path lengths in Hamiltonian Monte Carlo. *Journal of Machine Learning Research*, 15(1), 1593-1623.
+
+Mutschler, W. (2015). Identification of DSGE models — The effect of higher-order approximation and pruning. *Journal of Economic Dynamics and Control*, 56, 1-33.
+
+Schmitt-Grohé, S., & Uribe, M. (2004). Solving dynamic general equilibrium models using a second-order approximation to the policy function. *Journal of Economic Dynamics and Control*, 28(4), 755-775.
+
+Söderlind, P. (1999). Solution and estimation of RE macromodels with optimal policy. *European Economic Review*, 43(4-6), 813-823.

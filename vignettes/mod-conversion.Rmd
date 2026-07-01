@@ -1,0 +1,574 @@
+---
+title: "Converting Dynare .mod files for dynhr"
+output: rmarkdown::html_vignette
+vignette: >
+  %\VignetteIndexEntry{Converting Dynare .mod files for dynhr}
+  %\VignetteEngine{knitr::rmarkdown}
+  %\VignetteEncoding{UTF-8}
+---
+
+```{r setup, include = FALSE}
+knitr::opts_chunk$set(
+  collapse = TRUE,
+  comment  = "#>",
+  eval     = TRUE
+)
+```
+
+## Overview
+
+dynhr parses standard Dynare `.mod` files with `parse_mod()`, so most
+existing Dynare models can be loaded with no modifications.  On top of
+the standard Dynare grammar, dynhr recognises a set of **optional
+extensions** that live inside `//` comment blocks (so they are ignored
+by Dynare itself) and drive the diagnostic suite, narrative analysis,
+OBC specification, and optimal-policy engine.
+
+This vignette documents every dynhr-specific annotation you can add
+to a `.mod` file and shows how to convert an existing Dynare model to
+make full use of the dynhr toolkit.
+
+```{r library}
+library(dynhr)
+```
+
+---
+
+## 1  Basic parsing
+
+The entry point is `parse_mod()`, which accepts any standard Dynare
+`.mod` file:
+
+```{r basic-parse}
+mod_path <- system.file("extdata", "models", "rbc.mod", package = "dynhr")
+model    <- parse_mod(mod_path, verbose = FALSE)
+print(model)
+```
+
+The returned `dynhr_mod` object contains parsed equations, variable
+declarations, parameter calibrations, `estimated_params` blocks, and
+any `@dynhr:` metadata blocks (extracted into `model$metadata`).
+
+Use `check_mod_metadata()` for a quick summary of what dynhr recognised:
+
+```{r check-meta}
+check_mod_metadata(mod_path)
+```
+
+---
+
+## 2  Dynare → dynhr field-name map
+
+Several Dynare output names differ from their dynhr equivalents.  The
+table below covers the most common translation traps:
+
+| Dynare name | dynhr name | Where |
+|-------------|------------|-------|
+| `oo_.dr.ghs2` | `dr$ghss` | Order-2 σ² uncertainty-correction vector (the "constant correction" to the mean from stochastic volatility) |
+| `oo_.var` | `moms$var_cov` | Unconditional variance-covariance from `compute_moments()` |
+| `oo_.mean` | *(not yet available)* | Order-2 ergodic mean; use `ys + 0.5 * dr$ghss` manually |
+| `oo_.dr.ghx` | `dr$ghx` | State transition matrix (same name) |
+| `oo_.dr.ghu` | `dr$ghu` | Shock-impact matrix (same name) |
+
+**Key points:**
+
+- `dr$ghss` is the dynhr field; `oo_.dr.ghs2` is the Dynare field — they
+  contain the same quantity.  The `2` suffix is Dynare's internal convention
+  for "second-order sigma term"; dynhr uses `ghss` to follow the standard
+  mathematical notation (g_{σσ}).
+- `compute_moments()` returns a list with field `var_cov`, not
+  `variance_covariance`.  Other fields: `std_dev`, `correlation`,
+  `autocorr`, `var_decomp`, `var_decomp_pct`.
+
+### 2.1  `stoch_simul(loglinear)` — log-deviation scaling
+
+When a Dynare model is solved with `stoch_simul(loglinear)`, Dynare
+internally log-linearises the model around its steady state and returns
+decision rules in **log-deviation** units: each entry \eqn{G_{ij}} in
+Dynare's `oo_.dr.ghx` measures the response of \eqn{\log y_i} to a unit
+change in \eqn{\log x_j}.
+
+dynhr always returns decision rules in **level-deviation** units (deviations
+from the deterministic steady state \eqn{y^*}), regardless of whether the
+`.mod` file uses `loglinear`.  To compare dynhr's \eqn{G} against Dynare's
+loglinear \eqn{G_{\log}}, apply the steady-state scaling:
+\deqn{G_{\log}[i,j] = G[i,j] \cdot \frac{y^*_j}{y^*_i}}
+
+In R, with `dr` from `solve_perturbation()` and `ys = dr$ys`:
+
+```r
+# Convert dynhr level-deviation ghx to Dynare loglinear log-deviation ghx
+G_log <- dr$ghx * outer(1 / ys[dr$endo_names], ys[dr$endo_names[dr$state_idx]])
+```
+
+The same scaling applies to `ghu`, `ghxx`, `ghxu`, `ghuu`, and any IRF
+matrix: multiply each entry by \eqn{y^*_j / y^*_i} for the appropriate
+input/output pair.  Note that `dr$ys` for a `model(linear)` block returns
+all ones (the log-level at the zero log-deviation point), not the original
+model steady state; the relevant \eqn{y^*} is the *original* (pre-log)
+steady state, recoverable from `ss$params` after `solve_steady()`.
+
+**Worked example:** `GarciaCicco_et_al_2010` (`stoch_simul(loglinear)`)
+after applying the scaling above: \eqn{\Delta \log(y^*) = 4.4 \times
+10^{-15}}, \eqn{\max|\Delta G| = 5.8 \times 10^{-10}},
+\eqn{\max|\Delta \text{IRF}| = 2.7 \times 10^{-11}},
+\eqn{\max|\Delta \text{std}| = 6.1 \times 10^{-12}} versus Dynare 7.1
+--- machine precision throughout.  Without the scaling the apparent difference
+is \eqn{O(y^*)} and looks like a solver failure, making this the most common
+comparison trap for loglinear models.
+
+---
+
+## 3  Standard Dynare blocks supported
+
+| Block | dynhr support | Notes |
+|-------|---------------|-------|
+| `var`, `varexo`, `parameters` | ✅ Full | Including `var(log)` and `%(long_name='...')` annotations |
+| `model;` ... `end;` | ✅ Full | Linear and nonlinear; lead/lag detection |
+| `steady_state_model;` | ✅ Full | Analytical steady state |
+| `shocks;` | ✅ Full | Shock variances |
+| `estimated_params;` | ✅ Full | Prior distributions (beta, gamma, inv_gamma, normal, uniform) |
+| `estimated_params_init;` | ✅ Full | Overrides for initial values |
+| `varobs;` | ✅ Full | Observable variable declaration |
+| `planner_objective(...);` | ✅ Full | Used by `ramsey_model()` and `ramsey_nn1()` |
+| `occbin_constraints;` | ✅ Full | OBC constraint declarations |
+| `model(linear);` | ✅ Full | Required for OBC piecewise-linear methods |
+| `steady;`, `check;`, `stoch_simul;` | ✅ Parsed | Executed by `solve_steady()`, `solve_perturbation()`, `stoch_simul()` |
+
+---
+
+## 3a  Preserving Dynare syntax when converting: what you do NOT need to inline
+
+A common conversion mistake is flattening Dynare-native constructs
+before loading the model.  **dynhr supports all of the following
+natively** — there is no need to pre-process the file:
+
+### 3a.1  Model-local `#` intermediates
+
+Dynare lets you define intermediate expressions inside the `model`
+block with `#name = expr;`.  These are called *model-local variables*
+and are distinct from endogenous or exogenous variables.  dynhr
+preserves them in `model$local_variables` and substitutes them when
+computing the Jacobian.
+
+```
+model;
+  #theta = (1 - gamma) / (1 - 1/psi);   // Epstein-Zin aggregator exponent
+  V = ((1 - beta) * c^((1 - gamma)/theta) + beta * s^(1/theta))^(theta/(1 - gamma));
+  ...
+end;
+```
+
+You do **not** need to substitute `(1 - gamma)/(1 - 1/psi)` everywhere
+`theta` appears — just keep the `#theta` line as-is.
+
+Verified in `caldara_rp.mod` and `nk_hs2016.mod`.
+
+### 3a.2  `steady_state_model` blocks
+
+An analytical steady state expressed as a sequence of assignments is
+parsed directly.  dynhr's `solve_steady()` calls
+`eval_steady_state_model()` which evaluates the assignments
+top-to-bottom and returns the SS vector.
+
+```
+steady_state_model;
+  dA   = exp(gam);
+  m    = mst;
+  k    = ((1 - gst*bet*(1-del)) / (alp*gst^alp*bet))^(1/(alp-1));
+  ...
+end;
+```
+
+You do **not** need to convert this into a hand-coded R function.
+Keep the `steady_state_model` block in the `.mod` file.
+
+Verified in `fs2000.mod` (18 assignments) and `caldara_rp.mod`.
+
+### 3a.3  `@#` macro directives
+
+dynhr expands Dynare's macro language **before** block parsing.  All
+of the following are supported:
+
+- `@#define NAME = VALUE` or `@#define NAME = ["a","b","c"]`
+- `@#for V in [list]`, `@#for V in A:B`, `@#for V in defined_array`
+- `@#endfor`
+- `@#if COND`, `@#else`, `@#endif`
+- `@#ifdef NAME`, `@#ifndef NAME`
+- `@#include "file.inc"` (resolved relative to the `.mod` file's directory)
+- `@{expr}` interpolation inside any line
+
+You do **not** need to pre-expand macros before loading.  Run
+`parse_mod()` directly on the unexpanded source.
+
+Note: `@#elseif` is **not** supported (it errors loudly) — rewrite as
+nested `@#if`/`@#else`.
+
+### 3a.4  Common conversion gotchas
+
+| Situation | What to do |
+|-----------|-----------|
+| `#theta = ...` inside model | Leave it — dynhr handles it |
+| `steady_state_model;` block | Leave it — dynhr calls `eval_steady_state_model()` |
+| `@#for`, `@#define`, `@#include` | Leave them — dynhr expands macros first |
+| Parameters computed in `*_steadystate.m` | `parse_mod()` warns; use `inject_params(model, vals)` to supply them |
+| `x(+1)` lead, `x(-1)` lag | Standard Dynare timing, fully supported |
+| `x(+2)`, `eps(-1)` multi-period | dynhr auto-introduces auxiliary variables |
+| `predetermined_variables k;` | Supported — dynhr shifts timing by -1 in ASTs |
+| `model(linear)` | Supported — passed through in `model$model_options` |
+| `var(log)` annotation | Supported — variable name stripped of `(log)` |
+
+See `vignette("mod-syntax")` for the complete syntax reference with
+verified examples.
+
+---
+
+## 4  dynhr-specific metadata blocks
+
+dynhr recognises several `// @dynhr:<name>` comment blocks that are
+**silently ignored by Dynare** (they are `//` comments).  They are
+extracted by `extract_mod_metadata()` and stored in `model$metadata`.
+
+### 4.1  `@dynhr:expectations`
+
+Declares quantitative checks that `run_diagnostics()` evaluates
+automatically.  Five check types are supported:
+
+| Type | Fields | What it checks |
+|------|--------|----------------|
+| `data_mean` | `variable`, `min`, `max` | Mean of a data column is in range |
+| `data_sd` | `variable`, `min`, `max` | Std dev of a data column is in range |
+| `data_ratio` | `numerator`, `denominator`, `min`, `max` | Ratio of two column means is in range |
+| `param_range` | `variable`, `min`, `max` | A parameter value is in range |
+| `irf_sign` | `shock`, `variable`, `horizon`, `sign` | IRF has expected sign at horizon |
+
+Example from the NK-HS2016 model:
+
+```
+// @dynhr:expectations
+// infl_mean:  type="data_mean",   variable="INFL",  min=0.0,  max=6.0,
+//             description="Annualised inflation should be positive and moderate"
+// rho_R_hi:   type="param_range", variable="rho_R", min=0.5,  max=0.99,
+//             description="Interest rate smoothing should be moderate to high"
+// @dynhr:end
+```
+
+Pass data and parameters to `diag_expectations()` to evaluate them, or
+let `run_diagnostics()` handle it automatically.
+
+### 4.2  `@dynhr:benchmarks`
+
+Declares expected IRF sign patterns that D8 (IRF plausibility) checks
+automatically.  Each benchmark has the form:
+
+```
+// shock_name: shock=<VAR>, variable=<VAR>, direction=<positive|negative>,
+//             description="<text>"
+```
+
+Example from the `03j` NZ production model:
+
+```
+// @dynhr:benchmarks
+// monetary_y:    shock=eps_r,     variable=y,  direction=negative,
+//                description="Contractionary MP reduces output"
+// technology_y:  shock=eps_a,     variable=y,  direction=positive,
+//                description="Positive TFP shock raises output"
+// commodity_y:   shock=eps_cp,    variable=y,  direction=positive,
+//                description="Commodity price boom raises output"
+// @dynhr:end
+```
+
+### 4.3  `@dynhr:variable_labels`
+
+Provides human-readable labels for endogenous variables, used in
+diagnostic plots and reports:
+
+```
+// @dynhr:variable_labels
+// y:   Output gap
+// pi:  CPI inflation
+// r:   Nominal interest rate
+// q:   Real exchange rate
+// @dynhr:end
+```
+
+You can also use Dynare's standard `%(long_name='...')` annotation on
+`var` declarations — dynhr merges both sources, preferring the
+`@dynhr:variable_labels` block.
+
+### 4.4  `@dynhr:shock_categories`
+
+Groups shocks into named categories for narrative analysis (D17) and
+for aggregated shock decompositions:
+
+```
+// @dynhr:shock_categories
+// monetary:      eps_r
+// technology:    eps_a
+// demand:        eps_pref_
+// foreign:       eps_ys, eps_ps, eps_rs
+// commodity:     eps_cp
+// @dynhr:end
+```
+
+Each category maps to one or more shock names.  A shock can belong to
+at most one category.  Uncategorised shocks are treated as their own
+category.
+
+### 4.5  `@dynhr:narratives`
+
+Declares historical episodes for narrative identification (D17).  Each
+episode specifies a date range, a shock category, a variable, and the
+expected sign of the shock contribution:
+
+```
+// @dynhr:narratives
+// gfc_demand:      date_range=2008-Q4:2009-Q2, shock=foreign,
+//                  variable=y, sign=negative, min_sd=1.5,
+//                  description="GFC global demand collapse"
+// covid_demand:    date_range=2020-Q1:2020-Q2, shock=demand,
+//                  variable=y, sign=negative, min_sd=2.0,
+//                  description="COVID lockdown demand collapse"
+// @dynhr:end
+```
+
+D17 checks whether, during each episode's date range, the smoothed
+shocks from the specified category dominate the historical
+decomposition with the expected sign at least `min_sd` standard
+deviations above zero.
+
+---
+
+## 5  OccBin / OBC annotations
+
+### 5.1  MCP equation tags
+
+For models with occasionally binding constraints (ZLB, borrowing
+limits, etc.), dynher recognises Dynare's `[mcp = '...']` equation
+tags.  The syntax follows Dynare's convention:
+
+```
+model;
+  [mcp = 'r > -0.00401606']
+  r = rho_r * r(-1) + (1 - rho_r) * (phi_pi * pi + phi_y * y_gap) + m;
+end;
+```
+
+The tag format is `mcp = 'VAR OP BOUND'` where `VAR` is the constrained
+variable, `OP` is `>` (lower bound) or `<` (upper bound), and `BOUND` is
+the numeric bound in model units.
+
+Use `obc_parse_tags()` to extract OBC specs, then pass them to
+`solve_obc_lcp()` or `occbin_solve_path()`:
+
+```{r obc-tags, eval = FALSE}
+# Extract OBC spec from equation tags
+obc_specs <- obc_parse_tags(model)
+
+# Solve with LCP complementarity approach
+lcp_result <- solve_obc_lcp(model, compiled, steady$values, params,
+                             tags = obc_specs, verbose = FALSE)
+```
+
+### 5.2  `occbin_constraints` block
+
+Dynare-style `occbin_constraints` blocks are also parsed:
+
+```
+occbin_constraints;
+  name 'ZLB'; bind log_R - log(steady_state(R)) < -1e-6;
+end;
+```
+
+Use `obc_collect_specs()` to merge both tag-based and block-based
+constraints:
+
+```{r obc-collect, eval = FALSE}
+specs <- obc_collect_specs(model)
+```
+
+### 5.3  `model(linear)` requirement
+
+OBC piecewise-linear methods require `model(linear);` in the model
+block.  dynhr enforces this with `obc_assert_linear()`.
+
+---
+
+## 6  `planner_objective(...)` block
+
+For Ramsey optimal policy, add a `planner_objective(...)` block to
+the `.mod` file (standard Dynare syntax):
+
+```
+planner_objective(log(c) + 0.5 * log(l));
+```
+
+This is consumed by `ramsey_model()` (augmented-system approach) and
+`ramsey_nn1()` (Gross–Hansen (n, n+1) approximation):
+
+```{r ramsey-from-mod, eval = FALSE}
+# Both engines automatically detect the planner_objective block
+ramsey_result <- ramsey_model(model, compiled, params)
+nn1_result    <- ramsey_nn1(model, compiled, params, n = 2L)
+```
+
+If the `.mod` file lacks a `planner_objective` block, you can pass the
+objective expression directly:
+
+```{r ramsey-explicit, eval = FALSE}
+ramsey_result <- ramsey_model(model, compiled, params,
+                               planner_objective = "log(c) + 0.5 * log(l)")
+```
+
+---
+
+## 7  Variable annotations
+
+Dynare's `%(...)` variable annotations are captured by `parse_mod()`:
+
+```
+var y %(long_name='Output gap')
+    pi %(long_name='CPI inflation')
+    r  %(long_name='Nominal interest rate');
+```
+
+These are stored in `model$metadata$annotations` and merged into
+`model$metadata$var_labels`, used by diagnostic plots and reports.
+
+---
+
+## 8  Model registry and metadata checking
+
+dynhr provides several tools for inspecting model metadata:
+
+### 8.1  `check_mod_metadata()`
+
+Prints a human-readable summary of all recognised metadata:
+
+```{r check-meta-2}
+check_mod_metadata(mod_path)
+```
+
+### 8.2  `model_registry()`
+
+Lists all models found in the package's `inst/extdata/models/`
+directory, along with their metadata summary:
+
+```{r registry}
+reg <- model_registry()
+print(reg)
+```
+
+### 8.3  `print_model_registry()`
+
+Formatted table of the model registry:
+
+```{r print-reg}
+print_model_registry(reg)
+```
+
+### 8.4  `extract_mod_metadata()`
+
+Low-level metadata extraction — returns the structured metadata list
+without requiring full model parsing:
+
+```{r extract-meta}
+meta <- extract_mod_metadata(mod_path)
+str(meta, max.level = 2)
+```
+
+---
+
+## 9  Injecting external parameters (HA / .mat models)
+
+Winberry-class heterogeneous-agent models and other models with external
+steady-state scripts often store dozens of Chebyshev or quadrature parameters
+in MATLAB `.mat` files.  These parameters are absent from the `.mod` file
+(which only declares them in a `parameters` block), so `parse_mod()` will
+warn that they are `NA`.  The two-stage workflow is:
+
+```r
+## 1. Parse the .mod file — many params will be NA
+m <- parse_mod("winberry_dynhr.mod", verbose = FALSE)
+
+## 2a. Load params from a MATLAB .mat file (requires R.matlab)
+#      install.packages("R.matlab")   # once
+pars <- read_mat_params("grids.mat")         # named numeric vector
+
+## 2b. Alternative: load from JSON exported from Octave
+#  pars <- unlist(jsonlite::fromJSON("grids.json"))
+
+## 3. Inject into the model — warns on extra names, silently ignores them
+##    (unlike set_param_values(), which errors on any unknown name)
+m <- inject_params(m, pars)
+## inject_params: filled 25 previously-NA parameter(s) out of 312 injected.
+
+## 4. Compile, seed the steady state from the external solver, perturbate
+comp <- compile_model(m)
+ss   <- solve_steady(comp, m$param_values, y0 = external_ss_vector)
+dr   <- solve_perturbation(comp, ss, order = 1)
+```
+
+**Why `inject_params()` and not `set_param_values()`?**
+
+`set_param_values()` errors if any name in the supplied vector is not a
+declared model parameter.  When the `.mat` file contains the full MATLAB
+workspace (grid arrays, helper scalars, etc.), the list will contain many
+names that are not in the `.mod` `parameters` block.  `inject_params()`
+handles this gracefully: it warns about unknown names and drops them, then
+fills the matching entries in `model$param_values`.
+
+See `?inject_params` and `?read_mat_params` for full documentation.
+
+---
+
+## 10  Completing a conversion checklist
+
+When porting an existing Dynare `.mod` file to dynhr, follow these
+steps for full functionality:
+
+| Step | What to add | Why |
+|------|-------------|-----|
+| 1 | Basic `.mod` file | `parse_mod()` reads it as-is |
+| 2 | `@dynhr:expectations` | Quantitative sanity checks in D1–D30 |
+| 3 | `@dynhr:benchmarks` | IRF plausibility check (D8) |
+| 4 | `@dynhr:variable_labels` | Better plot labels in diagnostics |
+| 5 | `@dynhr:shock_categories` | Narrative analysis (D17) |
+| 6 | `@dynhr:narratives` | Narrative identification (D17) |
+| 7 | `[mcp = '...']` equation tags | OBC solving (OccBin, LCP, PKF) |
+| 8 | `planner_objective(...);` | Ramsey optimal policy |
+| 9 | `%(long_name='...')` annotations | Richer variable labels |
+| 10 | `estimated_params;` block | Bayesian estimation pipeline |
+
+The models bundled in `inst/extdata/models/` show real-world patterns.
+Inspect one for the block/tag conventions above:
+
+```{r full-example, eval = FALSE}
+file.show(system.file("extdata", "models", "nk_zlb_dynare.mod",
+                      package = "dynhr"))
+```
+
+---
+
+## References
+
+Boehl, G. (2020). Efficient solution and computation of models with occasionally binding constraints. *Deutsche Bundesbank Discussion Paper*, 38/2020.
+
+Cottle, R. W., Pang, J.-S., & Stone, R. E. (2009). *The Linear Complementarity Problem*. SIAM.
+
+Guerrieri, L., & Iacoviello, M. (2015). OccBin: A toolkit for solving dynamic models with occasionally binding constraints easily. *Journal of Monetary Economics*, 70, 22-38.
+
+Iskrev, N. (2010). Local identification in DSGE models. *Journal of Monetary Economics*, 57(2), 189-202.
+
+Komunjer, I., & Ng, S. (2011). Dynamic identification of dynamic stochastic general equilibrium models. *Econometrica*, 79(6), 1995-2032.
+
+Mutschler, W. (2015). Identification of DSGE models — The effect of higher-order approximation and pruning. *Journal of Economic Dynamics and Control*, 56, 1-33.
+
+Schmitt-Grohé, S., & Uribe, M. (2004). Solving dynamic general equilibrium models using a second-order approximation to the policy function. *Journal of Economic Dynamics and Control*, 28(4), 755-775.
+
+---
+
+```{r session}
+sessionInfo()
+```

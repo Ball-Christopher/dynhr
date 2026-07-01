@@ -1,0 +1,527 @@
+---
+title: "`r params$model_name` -- dynhr Diagnostic Report"
+date: "`r format(Sys.time(), '%Y-%m-%d %H:%M')`"
+params:
+  diags_rds:         ""     # path to RDS holding the dynhr_diagnostic_suite
+  irfs_rds:          ""     # path to RDS holding a named IRF list (optional)
+  llm_txt:           ""     # path to pre-rendered LLM summary text
+  exec_txt:          ""     # path to pre-rendered executive summary text
+  model_name:        "model"
+  show_explanations: true   # show collapsible methodology blocks per diagnostic
+format:
+  html:
+    toc: true
+    toc-depth: 3
+    toc-location: left
+    embed-resources: true
+    code-fold: true
+    theme: cosmo
+    mainfont: "Source Sans 3, Source Sans Pro, Segoe UI, sans-serif"
+    monofont: "JetBrains Mono, Consolas, monospace"
+    fontsize: "1.05rem"
+    fig-width: 9
+    fig-height: 6.5
+    fig-dpi: 150
+    fig-align: center
+    include-in-header:
+      text: |
+        <link rel="preconnect" href="https://fonts.googleapis.com">
+        <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+        <link rel="stylesheet"
+              href="https://fonts.googleapis.com/css2?family=Source+Sans+3:wght@400;600;700&family=Source+Serif+4:wght@400;600&family=JetBrains+Mono&display=swap">
+        <style>
+          :root {
+            --dynhr-blue:     #0077BB;   /* Tol vibrant blue (primary) */
+            --dynhr-teal:     #009988;
+            --dynhr-magenta:  #EE3377;
+            --dynhr-orange:   #EE7733;
+            --dynhr-cyan:     #33BBEE;
+            --dynhr-red:      #CC3311;
+            --dynhr-grey:     #BBBBBB;
+            --dynhr-ink:      #1A1A1A;
+            --dynhr-body:     #333333;
+            --dynhr-muted:    #777777;
+            --dynhr-rule:     #DDDDDD;
+            --bs-primary:     #0077BB;
+            --bs-link-color:  #0077BB;
+          }
+          html, body { font-family: 'Source Sans 3', 'Source Sans Pro', 'Segoe UI', sans-serif;
+                       font-size: 17px; color: var(--dynhr-body); }
+          h1, h2, h3, h4, h5, h6, .title, .subtitle {
+            font-family: 'Source Serif 4', 'Source Serif Pro', Georgia, serif;
+            color: var(--dynhr-ink); font-weight: 600;
+          }
+          h1.title { color: var(--dynhr-blue); border-bottom: 3px solid var(--dynhr-blue);
+                     padding-bottom: 6px; }
+          h2 { color: var(--dynhr-blue); border-bottom: 1px solid var(--dynhr-rule);
+               padding-bottom: 4px; margin-top: 1.6em; }
+          h3 { color: var(--dynhr-ink); }
+          a, a:visited { color: var(--dynhr-blue); }
+          code, kbd, pre, samp { font-family: 'JetBrains Mono', Consolas, monospace;
+                                  font-size: 0.92em; }
+          .badge.bg-success  { background-color: var(--dynhr-teal)    !important; }
+          .badge.bg-danger   { background-color: var(--dynhr-red)     !important; }
+          .badge.bg-secondary{ background-color: var(--dynhr-grey)    !important; }
+          .callout-tip       { border-left-color: var(--dynhr-teal)   !important; }
+          .callout-warning   { border-left-color: var(--dynhr-orange) !important; }
+          .callout-note      { border-left-color: var(--dynhr-blue)   !important; }
+          .table thead th { background-color: rgba(0,119,187,0.08);
+                            color: var(--dynhr-ink); border-bottom: 2px solid var(--dynhr-blue); }
+          .table tbody tr:hover { background-color: rgba(0,119,187,0.04); }
+          .panel-tabset > .nav-tabs .nav-link.active { color: var(--dynhr-blue);
+            border-bottom: 3px solid var(--dynhr-blue); font-weight: 600; }
+          details > summary { color: var(--dynhr-blue) !important; }
+          blockquote { border-left: 4px solid var(--dynhr-blue); color: var(--dynhr-muted); }
+        </style>
+execute:
+  echo: false
+  warning: false
+  message: false
+---
+
+```{r setup}
+`%||%` <- function(a, b) if (is.null(a) || (is.character(a) && !nzchar(a))) b else a
+.default_fig_height <- knitr::opts_chunk$get("fig.height") %||% 6.5
+diags <- if (nzchar(params$diags_rds %||% "") && file.exists(params$diags_rds))
+  readRDS(params$diags_rds) else NULL
+irfs  <- if (nzchar(params$irfs_rds  %||% "") && file.exists(params$irfs_rds))
+  readRDS(params$irfs_rds)  else NULL
+model_name        <- params$model_name
+show_explanations <- isTRUE(params$show_explanations)
+
+# Escape markdown special characters that turn into link / table / footnote
+# syntax inside a Quarto callout, breaking the block:
+#   '[' and ']'  -> Pandoc tries to resolve as link references ([PASS] ...)
+#   '|'          -> Pandoc treats run-on lines starting with '|' as table rows
+.md_safe <- function(x) {
+  if (is.null(x)) return("")
+  x <- as.character(x)
+  x <- gsub("[",  "\\[", x, fixed = TRUE)
+  x <- gsub("]",  "\\]", x, fixed = TRUE)
+  x
+}
+
+# Render multi-line $summary text as a bullet list so each line stays on its
+# own row inside the Quarto callout block (otherwise paragraph folding can
+# strand the closing ::: and the whole callout renders as raw markdown).
+.render_summary <- function(summary_text) {
+  if (is.null(summary_text) || !nzchar(summary_text)) return("")
+  lines <- strsplit(summary_text, "\n", fixed = TRUE)[[1]]
+  lines <- lines[nzchar(lines)]
+  if (length(lines) <= 1L) return(.md_safe(summary_text))
+  # Render as <ul> so it survives Quarto's smart-quote / table-detection
+  # heuristics inside a fenced-div callout (markdown bullets sometimes
+  # cause Pandoc to fold the closing ::: into a paragraph).
+  items <- paste0("<li>", .md_safe(lines), "</li>", collapse = "")
+  paste0("<ul>", items, "</ul>")
+}
+
+# Build a faceted IRF ggplot for one shock from a (T x n_var) IRF matrix.
+.irf_plot <- function(irf_mat, shock_nm, palette) {
+  if (!is.matrix(irf_mat) && !is.data.frame(irf_mat)) return(NULL)
+  irf_mat <- as.data.frame(irf_mat)
+  if (nrow(irf_mat) == 0L || ncol(irf_mat) == 0L) return(NULL)
+  irf_mat$horizon <- seq_len(nrow(irf_mat))
+  vars <- setdiff(names(irf_mat), "horizon")
+  long <- do.call(rbind, lapply(vars, function(v)
+    data.frame(horizon = irf_mat$horizon, variable = v,
+               value = irf_mat[[v]], stringsAsFactors = FALSE)
+  ))
+  long$variable <- factor(long$variable, levels = vars)
+  p <- ggplot2::ggplot(long, ggplot2::aes(x = horizon, y = value)) +
+    ggplot2::geom_hline(yintercept = 0, colour = "grey60", linewidth = 0.25) +
+    ggplot2::geom_line(colour = palette, linewidth = 0.5) +
+    ggplot2::facet_wrap(~ variable, scales = "free_y") +
+    theme_rbnz_diagnostic() +
+    ggplot2::labs(title = sprintf("IRF: shock = %s", shock_nm),
+                  x = "Horizon (quarters)", y = "Response")
+  attr(p, "dynhr_fig_height") <- 7.5
+  p
+}
+
+.print_plot <- function(p) {
+  if (!inherits(p, "gg")) return(invisible(NULL))
+  h <- attr(p, "dynhr_fig_height", exact = TRUE)
+  if (!is.null(h) && is.finite(h)) {
+    knitr::opts_chunk$set(fig.height = as.numeric(h))
+  } else {
+    knitr::opts_chunk$set(fig.height = .default_fig_height)
+  }
+  cat("\n\n")
+  print(p)
+  cat("\n\n")
+  knitr::opts_chunk$set(fig.height = .default_fig_height)
+  invisible(NULL)
+}
+
+.badge_html <- function(pass, errored = FALSE) {
+  if (isTRUE(errored))
+    '<span class="badge" style="background:#CC6600;color:white;">ERROR</span>'
+  else if (is.na(pass))
+    '<span class="badge bg-secondary">INFO</span>'
+  else if (pass)
+    '<span class="badge bg-success">PASS</span>'
+  else
+    '<span class="badge bg-danger">FAIL</span>'
+}
+
+.callout_type <- function(pass, errored = FALSE) {
+  if (isTRUE(errored)) "danger" else if (is.na(pass)) "note" else if (pass) "tip" else "warning"
+}
+
+diag_items <- if (!is.null(diags)) {
+  Filter(function(r) inherits(r, "dynhr_diagnostic"), diags)
+} else list()
+
+n_pass <- sum(vapply(diag_items, function(r) isTRUE(r$pass),    logical(1)))
+n_fail <- sum(vapply(diag_items, function(r) identical(r$pass, FALSE), logical(1)))
+n_err  <- sum(vapply(diag_items, function(r) isTRUE(r$errored), logical(1)))
+n_info <- length(diag_items) - n_pass - n_fail - n_err
+
+# Per-diagnostic explanation text (what it checks, what to look for, citation)
+.diag_info <- list(
+  expectations = list(
+    what   = "Checks user-declared quantitative expectations from the `@dynhr:expectations` block in the `.mod` file: data means/SDs, parameter ranges, and IRF signs.",
+    look   = "All checks should PASS. FAIL on a `data_mean` or `data_ratio` check suggests the data are inconsistent with model priors. FAIL on `param_range` may indicate an implausible mode.",
+    ref    = "User-defined; see `?diag_expectations`."
+  ),
+  d1 = list(
+    what   = "Local identification (Iskrev 2010): checks whether the Jacobian of model-implied moments with respect to estimated parameters has full column rank at the calibration point.",
+    look   = "PASS = full rank (model is locally identified). FAIL = rank deficient; the listed 'weak parameters' are linearly dependent on others given the chosen moment set. Add moments, calibrate one, or reparameterise.",
+    ref    = "Iskrev (2010) JME; Komunjer & Ng (2011) Econometrica."
+  ),
+  d2 = list(
+    what   = "Spectral identification (Komunjer-Ng 2011, Qu-Tkachenko 2012): checks identification using the spectral density of observables.",
+    look   = "Placeholder in this version.",
+    ref    = "Komunjer & Ng (2011); Qu & Tkachenko (2012, 2017)."
+  ),
+  d3 = list(
+    what   = "Morris elementary-effects sensitivity screening: ranks parameters by their mean absolute effect (mu*) on model moments. Negligible mu* flags parameters that cannot be identified from the chosen moment set.",
+    look   = "Parameters with mu* near zero are insensitive to moments and likely unidentified. Consider calibrating them or choosing additional informative moments.",
+    ref    = "Morris (1991) Technometrics; Saltelli et al. (2008) Global Sensitivity Analysis."
+  ),
+  d4 = list(
+    what   = "Prior predictive checks: draws from the joint prior, solves the model, and checks that observed data moments lie within the 95% prior-predictive interval.",
+    look   = "All moments should have PPP in [0.025, 0.975]. Failure means the prior is inconsistent with data -- tighten/widen the relevant priors.",
+    ref    = "Gelman, Meng & Stern (1996) Statistica Sinica."
+  ),
+  d5 = list(
+    what   = "MCMC convergence: rank-normalised R-hat (Vehtari 2021), Bulk-ESS, Tail-ESS, trace plots, rank overlay, ACF, and (for NUTS) BFMI and treedepth.",
+    look   = "R-hat < 1.01 (strict) or < 1.05 (loose). Bulk-ESS > 1000. Tail-ESS > 400. ACF decaying quickly. BFMI > 0.3. No divergences.",
+    ref    = "Vehtari et al. (2021) Bayesian Analysis; Gelman & Rubin (1992) Statistical Science."
+  ),
+  d6 = list(
+    what   = "Prior-posterior overlap: overlays prior and posterior densities for each estimated parameter and reports the overlap coefficient (fraction of shared density area).",
+    look   = "Overlap < 0.80 = data is informative for this parameter (good). Overlap > 0.80 = data adds little information; check identification.",
+    ref    = "Geweke (1992) Bayesian Statistics 4."
+  ),
+  d7 = list(
+    what   = "Mode-finding robustness: checks whether all optimisation starts converged to the same posterior mode.",
+    look   = "One basin, all chains at best mode = robust. Multiple basins = posterior may be multimodal; try SMC sampler.",
+    ref    = "Gelman & Rubin (1992)."
+  ),
+  d8 = list(
+    what   = "IRF plausibility: checks that impulse responses satisfy user-declared sign and magnitude benchmarks from the `@dynhr:benchmarks` block.",
+    look   = "All benchmarks should PASS. A failed sign check often indicates a mis-specified Taylor rule or incorrect shock calibration.",
+    ref    = "Christiano, Eichenbaum & Evans (1999) Handbook of Macroeconomics."
+  ),
+  d9 = list(
+    what   = "Moment matching: compares the model's theoretical standard deviations (at posterior mode) to empirical data SDs for each observable.",
+    look   = "SD ratios (model/data) in [0.5, 2.0] = acceptable fit. Ratio > 2 = model over-predicts volatility. Ratio < 0.5 = under-predicts.",
+    ref    = "Schorfheide (2000) JAE; Smets & Wouters (2007) AER."
+  ),
+  d10 = list(
+    what   = "Variance decomposition: reports the fraction of each observable's forecast-error variance attributable to each structural shock.",
+    look   = "For open economies, foreign shocks should account for ~20-40% of output variance (Kamber et al. 2018). Concentration in one shock may signal misspecification.",
+    ref    = "Sims (1980) Econometrica; Kamber, Morley & Wong (2018) REStat."
+  ),
+  d11 = list(
+    what   = "Historical decomposition: decomposes the observed time-series path into contributions from each structural shock, using the Kalman smoother output.",
+    look   = "Informational. Look for whether major historical episodes (recessions, booms) are attributed to plausible shock combinations.",
+    ref    = "Banbura, Giannone & Reichlin (2010) JAE."
+  ),
+  d12 = list(
+    what   = "Smoothed shock diagnostics: tests whether smoothed structural shocks are serially uncorrelated (Ljung-Box) and approximately normally distributed.",
+    look   = "Ljung-Box p > 0.05 for all shocks. Serial correlation or non-zero mean indicates the model is missing a persistent component.",
+    ref    = "Ljung & Box (1978) Biometrika."
+  ),
+  d13 = list(
+    what   = "Cross-equation restrictions (Del Negro-Schorfheide 2004): compares DSGE-implied reduced-form VAR (via Yule-Walker from state-space) to unrestricted OLS VAR.",
+    look   = "Frobenius rel. diff < 0.5 + Wald p > 0.05 = PASS (restrictions supported).",
+    ref    = "Del Negro & Schorfheide (2004, 2009) JBES."
+  ),
+  d14 = list(
+    what   = "Bayes factor model comparison: computes log marginal likelihoods and pairwise Bayes factors across supplied models.",
+    look   = "log10 BF > 2 = decisive evidence. log10 BF 1-2 = strong. 0.5-1 = substantial. SMC provides exact log marginal likelihood.",
+    ref    = "Kass & Raftery (1995) JASA; Jeffreys (1961) Theory of Probability."
+  ),
+  d15 = list(
+    what   = "DSGE-VAR (Del Negro-Schorfheide 2006): estimates DSGE-prior-weighted VAR with hyperparameter lambda controlling model vs data weight.",
+    look   = "lambda* > 2 = DSGE restrictions supported. lambda* < 0.5 = DSGE restrictions rejected by data.",
+    ref    = "Del Negro & Schorfheide (2006) JBES."
+  ),
+  d16 = list(
+    what   = "Subsample stability: compares posterior estimates across full sample and subsamples; flags parameters whose credible intervals do not overlap across splits.",
+    look   = "Overlapping CrIs = stable. Non-overlap flags structural breaks or time-varying behaviour.",
+    ref    = "Lubik & Schorfheide (2004) AER."
+  ),
+  d17 = list(
+    what   = "Narrative identification: checks that smoothed shocks satisfy user-specified sign and magnitude restrictions for historical episodes from `@dynhr:narratives`.",
+    look   = "PASS = shock story consistent with narrative. WEAK = shock present but below threshold. FAIL = shock story contradicts narrative.",
+    ref    = "Antolin-Diaz & Rubio-Ramirez (2018) AER."
+  ),
+  d18 = list(
+    what   = "Welfare cost of business cycles: estimates the consumption-equivalent welfare cost implied by the estimated model (requires second-order perturbation).",
+    look   = "Placeholder in this version.",
+    ref    = "Lucas (1987) Models of Business Cycles."
+  ),
+  d19 = list(
+    what   = "Local rank identification gate (Iskrev 2010): Jacobian rank test for model-implied moments with respect to parameters, run pre-estimation.",
+    look   = "PASS = full rank. FAIL = rank deficiency and at least one unidentified parameter direction; estimation should be paused until resolved.",
+    ref    = "Iskrev (2010) JME."
+  ),
+  d20 = list(
+    what   = "Identification strength via Fisher information: decomposes strength into sensitivity and collinearity and reports CRLB-based strength index s_i.",
+    look   = "Low |s_i| parameters are weakly identified even if rank condition passes. These are prime candidates for reparameterisation or calibration.",
+    ref    = "Andrle (2010); Ratto & Iskrev (2011)."
+  ),
+  d21 = list(
+    what   = "Bayesian KPS precision-updating diagnostic: tests whether posterior precision scales approximately linearly with sample size.",
+    look   = "Slope near 1 implies strong identification. Much lower slopes indicate weak or non-identification for those parameters.",
+    ref    = "Koop, Pesaran & Smith (2013) JBES."
+  ),
+  d22 = list(
+    what   = "Observable informativeness ranking: maps local sensitivity contributions from moments to observables for each parameter.",
+    look   = "Use dominant-observable map to decide which data series identify each parameter and where observables are redundant.",
+    ref    = "Iskrev (2019) EER."
+  ),
+  ppc = list(
+    what   = "Posterior predictive checks: draws from the posterior, solves the model, computes model-implied moments, and compares their distribution to data moments via posterior predictive p-values (PPP).",
+    look   = "PPP near 0.5 = good fit. PPP < 0.05 = model systematically under-produces. PPP > 0.95 = systematically over-produces.",
+    ref    = "Gelman et al. (1996); Herbst & Schorfheide (2016) Bayesian Estimation of DSGE Models."
+  )
+)
+
+# Look up info by diagnostic name (try exact match, then strip leading 'd')
+.get_info <- function(nm) {
+  key <- tolower(nm)
+  # Direct match
+  if (!is.null(.diag_info[[key]])) return(.diag_info[[key]])
+  # Strip trailing _* suffix (e.g. d5_convergence -> d5)
+  base <- sub("_.*$", "", key)
+  if (!is.null(.diag_info[[base]])) return(.diag_info[[base]])
+  # Match partial prefix (e.g. diag_convergence -> d5 unlikely but try)
+  NULL
+}
+
+.explanation_block <- function(nm) {
+  if (!show_explanations) return(invisible(NULL))
+  info <- .get_info(nm)
+  if (is.null(info)) return(invisible(NULL))
+  cat(sprintf(
+    '<details>\n<summary style="cursor:pointer;color:#555;font-size:0.85em;">',
+    NULL
+  ))
+  cat('&#9432; What this diagnostic checks</summary>\n')
+  cat(sprintf('<div style="padding:8px 16px;font-size:0.9em;color:#444;">\n'))
+  cat(sprintf('<p><strong>What:</strong> %s</p>\n', info$what))
+  cat(sprintf('<p><strong>What to look for:</strong> %s</p>\n', info$look))
+  cat(sprintf('<p><strong>Reference:</strong> <em>%s</em></p>\n', info$ref))
+  cat('</div>\n</details>\n\n')
+}
+```
+
+## Executive Summary
+
+```{r exec-summary}
+#| results: asis
+# Read the pre-rendered executive summary text (written by write_report()).
+# Pre-rendering avoids depending on dynhr being installed in the Quarto
+# subprocess; fall back to an in-process call if the file is absent.
+exec_lines <- NULL
+if (nzchar(params$exec_txt %||% "") && file.exists(params$exec_txt)) {
+  exec_lines <- readLines(params$exec_txt, warn = FALSE)
+} else if (!is.null(diags) &&
+           requireNamespace("dynhr", quietly = TRUE) &&
+           exists("format_executive_summary",
+                  where = asNamespace("dynhr"), inherits = FALSE)) {
+  exec_lines <- dynhr:::format_executive_summary(diags,
+                  model_name = model_name, unicode = FALSE)
+}
+if (!is.null(exec_lines)) {
+  cat("::: {.callout-important}\n")
+  cat("## Executive Summary\n\n")
+  cat('<pre style="font-family:monospace;font-size:0.85em;white-space:pre-wrap;">\n')
+  # HTML-escape so '<'/'>' in the text can't open stray tags inside <pre>
+  esc <- gsub("&", "&amp;", exec_lines, fixed = TRUE)
+  esc <- gsub("<", "&lt;",  esc,        fixed = TRUE)
+  esc <- gsub(">", "&gt;",  esc,        fixed = TRUE)
+  cat(paste(esc, collapse = "\n"))
+  cat("\n</pre>\n")
+  cat(":::\n")
+} else {
+  cat("::: {.callout-note}\nNo diagnostic suite loaded (diags_rds not supplied).\n:::\n")
+}
+```
+
+## Summary dashboard
+
+```{r dashboard}
+#| results: asis
+cat(sprintf(
+  "<p><strong>%d PASS &nbsp; %d FAIL &nbsp; %d ERROR &nbsp; %d INFO</strong> &mdash; %d diagnostics</p>\n",
+  n_pass, n_fail, n_err, n_info, length(diag_items)
+))
+cat('<table class="table table-sm table-hover">\n')
+cat('<thead><tr><th>ID</th><th>Status</th><th>Summary</th></tr></thead>\n<tbody>\n')
+for (nm in names(diag_items)) {
+  r     <- diag_items[[nm]]
+  badge <- .badge_html(r$pass, errored = isTRUE(r$errored))
+  short <- substr(r$summary %||% "", 1L, 110L)
+  if (nchar(r$summary %||% "") > 110L) short <- paste0(short, "...")
+  cat(sprintf('<tr><td><code>%s</code></td><td>%s</td><td>%s</td></tr>\n',
+              nm, badge, short))
+}
+cat("</tbody></table>\n")
+```
+
+---
+
+## Diagnostic details
+
+::: {.panel-tabset}
+
+### FAIL
+
+```{r tab-fail}
+#| results: asis
+fail_items <- Filter(function(r) identical(r$pass, FALSE), diag_items)
+if (length(fail_items) == 0) {
+  cat("*No failing diagnostics.*\n")
+} else {
+  for (nm in names(fail_items)) {
+    r <- fail_items[[nm]]
+    cat(sprintf('\n::: {.callout-warning}\n## %s\n\n', nm))
+    cat(.render_summary(r$summary), "\n\n", sep = "")
+    .explanation_block(nm)
+    cat(":::\n\n")
+    for (pnm in names(r$plots)) .print_plot(r$plots[[pnm]])
+  }
+}
+```
+
+### PASS
+
+```{r tab-pass}
+#| results: asis
+pass_items <- Filter(function(r) isTRUE(r$pass), diag_items)
+if (length(pass_items) == 0) {
+  cat("*No passing diagnostics.*\n")
+} else {
+  for (nm in names(pass_items)) {
+    r <- pass_items[[nm]]
+    cat(sprintf('\n::: {.callout-tip}\n## %s\n\n', nm))
+    cat(.render_summary(r$summary), "\n\n", sep = "")
+    .explanation_block(nm)
+    cat(":::\n\n")
+    for (pnm in names(r$plots)) .print_plot(r$plots[[pnm]])
+  }
+}
+```
+
+### ERROR
+
+```{r tab-error}
+#| results: asis
+error_items <- Filter(function(r) isTRUE(r$errored), diag_items)
+if (length(error_items) == 0) {
+  cat("*No errored diagnostics.*\n")
+} else {
+  for (nm in names(error_items)) {
+    r <- error_items[[nm]]
+    cat(sprintf('\n::: {.callout-danger}\n## %s\n\n', nm))
+    cat(.render_summary(r$summary), "\n\n", sep = "")
+    .explanation_block(nm)
+    cat(":::\n\n")
+    for (pnm in names(r$plots)) .print_plot(r$plots[[pnm]])
+  }
+}
+```
+
+### INFO
+
+```{r tab-info}
+#| results: asis
+info_items <- Filter(function(r) is.na(r$pass) && !isTRUE(r$errored), diag_items)
+if (length(info_items) == 0) {
+  cat("*No informational diagnostics.*\n")
+} else {
+  for (nm in names(info_items)) {
+    r <- info_items[[nm]]
+    cat(sprintf('\n::: {.callout-note}\n## %s\n\n', nm))
+    cat(.render_summary(r$summary), "\n\n", sep = "")
+    .explanation_block(nm)
+    cat(":::\n\n")
+    for (pnm in names(r$plots)) .print_plot(r$plots[[pnm]])
+  }
+}
+```
+
+### All diagnostics
+
+```{r tab-all}
+#| results: asis
+for (nm in names(diag_items)) {
+  r     <- diag_items[[nm]]
+  ctype <- .callout_type(r$pass, errored = isTRUE(r$errored))
+  cat(sprintf('\n::: {.callout-%s}\n## %s\n\n', ctype, nm))
+  cat(.render_summary(r$summary), "\n\n", sep = "")
+  .explanation_block(nm)
+  cat(":::\n\n")
+  for (pnm in names(r$plots)) .print_plot(r$plots[[pnm]])
+}
+```
+
+:::
+
+---
+
+## Impulse responses
+
+```{r irfs-static}
+#| results: asis
+if (is.null(irfs) || length(irfs) == 0L) {
+  cat("::: {.callout-note}\nNo IRFs were supplied to `write_report()`.\n:::\n")
+} else {
+  cat("::: {.panel-tabset}\n\n")
+  for (shock_nm in names(irfs)) {
+    cat(sprintf("### %s\n\n", shock_nm))
+    .print_plot(irfs[[shock_nm]])
+    cat("\n\n")
+  }
+  cat(":::\n")
+}
+```
+
+---
+
+## LLM-readable summary
+
+Paste this block into an LLM prompt to get targeted modelling suggestions.
+
+```{r llm-block}
+#| results: asis
+if (nzchar(params$llm_txt %||% "") && file.exists(params$llm_txt)) {
+  cat("````text\n")
+  cat(paste(readLines(params$llm_txt, warn = FALSE), collapse = "\n"))
+  cat("\n````\n")
+}
+```
+
+---
+
+## Session info
+
+```{r session}
+sessionInfo()
+```

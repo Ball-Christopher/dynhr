@@ -1,0 +1,632 @@
+---
+title: "Model diagnostics with dynhr"
+output: rmarkdown::html_vignette
+vignette: >
+  %\VignetteIndexEntry{Model diagnostics with dynhr}
+  %\VignetteEngine{knitr::rmarkdown}
+  %\VignetteEncoding{UTF-8}
+---
+
+```{r setup, include = FALSE}
+knitr::opts_chunk$set(
+  collapse = TRUE,
+  comment  = "#>",
+  eval     = FALSE   # most diagnostics require estimation; show code only
+)
+```
+
+## Overview
+
+dynhr ships an extended diagnostic battery (D1–D30) that evaluates a DSGE model
+across six stages of the workflow:
+
+| Stage | Diagnostics | When to run |
+|-------|-------------|-------------|
+| Pre-estimation | D1–D4, D19–D26, Expectations | Before drawing from the posterior |
+| MCMC quality | D5–D7 | After sampling |
+| Post-estimation fit | D8–D18 | After sampling |
+| OBC identification | D27 | After OBC model setup |
+| Regime-switching | D28 | After Markov-switching specification |
+| Data-driven constraints | D29 | When external data moments are available |
+| Arbitrary-precision | D30 | For high-precision rank validation |
+| Model comparison | Bayes factor, parent comparison | When comparing two models |
+
+Every diagnostic returns a `dynhr_diagnostic` object with a standardised
+shape:
+
+```r
+list(
+  pass    = TRUE / FALSE / NA,   # NA means "informational only"
+  summary = "text description",
+  result  = <diagnostic-specific data>,
+  plots   = list(...)            # ggplot2 objects, if any
+)
+```
+
+`run_diagnostics()` runs all of them conditionally — skipping those whose
+required inputs are absent — and returns a named list of class
+`dynhr_diagnostic_suite`.
+
+---
+
+## 1  Running all diagnostics
+
+```{r run-all}
+library(dynhr)
+
+# Assume you have completed estimation (see vignette("estimation"))
+diags <- run_diagnostics(
+  model            = model,        # from parse_mod()
+  compiled         = compiled,
+  ss               = steady$values,
+  params           = theta_mode,
+  priors           = priors,
+  data             = Y,
+  draws            = chains$chain,
+  chains_list      = list(chains$chain),   # for Gelman-Rubin
+  irf              = irfs,
+  vd               = moms$variance_decomposition,
+  hd               = hd,           # from historical_decomposition()
+  shocks           = shocks,       # smoothed shocks
+  obs_names        = colnames(Y),
+  param_names      = colnames(chains$chain),
+  data_moments     = list(sigma_y = empirical_sd, acf_y = empirical_acf),
+  model_moments    = moms,
+  dates            = dates,        # optional Date vector for plots
+  model_name       = "nk_hs2016",
+  verbose          = TRUE
+)
+```
+
+### Printing the suite
+
+```{r print-diags}
+print(diags)
+```
+
+The console output shows one line per diagnostic with a `[PASS]`,
+`[FAIL]`, or `[INFO]` badge plus a truncated summary.
+
+---
+
+## 2  Pre-estimation diagnostics
+
+### D1 — Local identification
+
+```{r d1}
+d1 <- diag_identification <- diags$d1
+cat(d1$summary)
+```
+
+Checks that the model is locally identifiable by examining whether the
+Jacobian of model-implied moments with respect to estimated parameters
+has full column rank.  A rank defect flags unidentified parameter
+combinations.
+
+**Inputs required:** `model_solve_fn` (a function `theta -> moments`),
+calibrated `params`, `param_names`, `moment_names`.
+
+### D2 — Spectral identification (retired)
+
+D2 was a placeholder stub for the Komunjer–Ng (2011) spectral identification
+test and has been retired.  The full implementation is now in D23 (see
+below); running `diag_meta()` will not list a D2 entry.
+
+### D3 — Sensitivity analysis (Morris screening)
+
+```{r d3}
+cat(diags$d3$summary)
+```
+
+Uses Morris one-at-a-time screening to identify which parameters have
+negligible influence on model moments, suggesting they cannot be
+identified from data.
+
+**Inputs required:** `model_solve_fn`, `params`, `param_bounds`,
+`moment_names`.
+
+### D4 — Prior predictive checks
+
+```{r d4}
+cat(diags$d4$summary)
+```
+
+Draws parameter vectors from the prior and checks that the resulting
+model moments are consistent with the data moments (means, standard
+deviations).  A prior that consistently places moment predictions far
+outside the data should be tightened.
+
+**Inputs required:** `model_solve_fn`, `prior_draw_fn`, `data_moments`.
+
+### Expectations check
+
+```{r expectations}
+cat(diags$expectations$summary)
+```
+
+Checks user-declared expectations from the `@dynhr:expectations` block
+in the `.mod` file.  Typical checks:
+
+- **`data_mean`**: Is the mean of an observed series in a plausible range?
+- **`data_ratio`**: Is one series's mean a plausible multiple of another?
+- **`param_range`**: Does an estimated parameter fall in a reasonable range?
+- **`irf_sign`**: Does an IRF have the expected sign at a given horizon?
+
+Add expectations to any `.mod` file:
+
+```
+// @dynhr:expectations
+// infl_mean:  type="data_mean",   variable="INFL", min=0.0, max=6.0,
+//             description="Annualised inflation should be positive and moderate"
+// rho_R_hi:   type="param_range", variable="rho_R", min=0.5, max=0.99,
+//             description="Interest rate smoothing should be moderate to high"
+// @dynhr:end
+```
+
+Run it directly:
+
+```{r expectations-direct, eval = TRUE}
+library(dynhr)
+mod_path <- system.file("extdata", "models", "nk_hs2016.mod", package = "dynhr")
+model_nk <- parse_mod(mod_path, verbose = FALSE)
+
+# Check param_range expectations with calibrated values
+theta_calib <- c(rho_R = 0.85, rho_g = 0.70, rho_z = 0.65)
+exp_result  <- diag_expectations(model_nk, params = theta_calib)
+cat(exp_result$summary, "\n")
+```
+
+---
+
+## 3  MCMC quality diagnostics
+
+### D5 — Convergence (R-hat, ESS, trace)
+
+```{r d5}
+cat(diags$d5$summary)
+```
+
+Computes the Gelman–Rubin potential scale reduction factor (R̂) and
+effective sample size (ESS) for each parameter.  The diagnostic
+**passes** when `max(R̂) < 1.05` and `min(ESS) > 100`.
+
+Plots (if `ggplot2` is installed):
+- Trace plots for each parameter
+- R̂ bar chart
+
+**Rule of thumb:**
+- R̂ > 1.1: chain mixing is poor — increase draws or run more warmup
+- ESS < 50: proposal scale is too large or the posterior is highly correlated
+
+### D6 — Posterior vs prior
+
+```{r d6}
+cat(diags$d6$summary)
+```
+
+For each estimated parameter, overlays the prior and posterior densities
+and reports the **overlap coefficient** (fraction of shared density area).
+Large overlap (> 0.8) may indicate the data contain little information
+about that parameter.
+
+The ridge-plot output shows all parameters on one panel for easy
+comparison.
+
+### D7 — Mode robustness
+
+```{r d7}
+cat(diags$d7$summary)
+```
+
+If `find_mode()` was run with `n_starts > 1`, D7 checks whether all
+starting points converged to the same mode.  Dispersion in modal log-posterior
+values greater than 2 natural-log units suggests a multimodal posterior.
+
+---
+
+## 4  Post-estimation fit diagnostics
+
+### D8 — IRF plausibility
+
+```{r d8}
+cat(diags$d8$summary)
+```
+
+Checks that each IRF benchmark declared in the `@dynhr:benchmarks`
+block of the `.mod` file is met.  For example:
+
+```
+// @dynhr:benchmarks
+// mp_output: shock="eps_R", variable="y", horizon=4, sign="negative",
+//            description="Monetary contraction depresses output"
+// @dynhr:end
+```
+
+Returns **PASS** when all declared benchmarks are satisfied; lists the
+failing ones otherwise.
+
+### D9 — Moment matching
+
+```{r d9}
+cat(diags$d9$summary)
+```
+
+Compares theoretical moments (standard deviations, cross-correlations,
+autocorrelations) from the model at the posterior mode against empirical
+moments from the data.  Reports the ratio of model SD to data SD for
+each observable — ratios outside [0.5, 2.0] flag a systematic fit
+problem.
+
+### D10 — Variance decomposition
+
+```{r d10}
+cat(diags$d10$summary)
+```
+
+Reports the fraction of variance in each observable attributable to each
+structural shock.  Useful for identifying whether the estimated model is
+driven by implausibly few (or many) shocks.
+
+### D11 — Historical decomposition
+
+```{r d11}
+cat(diags$d11$summary)
+```
+
+Decomposes the historical path of each observed variable into shock
+contributions.  Uses the smoother output from `kalman_smoother()`.
+The plot shows stacked bar charts of shock contributions for each
+observable through the sample period.
+
+### D12 — Smoothed shocks
+
+```{r d12}
+cat(diags$d12$summary)
+```
+
+Checks distributional properties of smoothed shocks: are they roughly
+serially uncorrelated (Ljung–Box test) and normally distributed
+(Shapiro–Wilk test)?  Persistent or fat-tailed shocks suggest model
+misspecification.
+
+### D13 — Cross-equation restrictions
+
+D13 compares the DSGE-implied VAR coefficients (derived via Yule–Walker
+from the state-space representation) against an unrestricted OLS VAR on
+the same data.  The diagnostic reports the Frobenius norm of the
+difference between DSGE and OLS coefficient matrices and computes a
+Wald-type test p-value.  A low p-value suggests the model's
+cross-equation restrictions are rejected by the data.
+
+**Inputs required:** `dr`, `data`, `obs_names`.
+
+### D14 — Bayes factor model comparison
+
+```{r d14}
+# Compare two models
+models_list <- list(
+  baseline  = list(log_ml = chains_baseline$log_marginal_lik),
+  augmented = list(log_ml = chains_augmented$log_marginal_lik)
+)
+d14 <- d14_bayes_factor(models_list)
+cat(d14$summary)
+```
+
+Computes log Bayes factors between all pairs in `models_list`.  SMC
+provides the log marginal likelihood `log p(Y | M)` directly; for RWMH
+chains, use the Harmonic Mean estimator (with caution).
+
+| log₁₀ BF | Interpretation |
+|----------|----------------|
+| 0 – 0.5  | Barely worth mentioning |
+| 0.5 – 1  | Substantial |
+| 1 – 2    | Strong |
+| > 2      | Decisive |
+
+### D15 — DSGE-VAR tightness
+
+D15 searches over a grid of hyperparameter λ (the tightness of the
+model prior relative to the unrestricted VAR) and computes the optimal
+λ* that maximises the log marginal likelihood.  Returns the optimal
+tightness, marginal likelihoods across the grid, and a comparison of
+DSGE-VAR coefficients vs the unrestricted OLS VAR.
+
+**Inputs required:** `dr`, `data`, `obs_names`.
+
+### D16 — Subsample stability
+
+```{r d16}
+# Split chains at the midpoint and compare
+n_mid <- nrow(chains$chain) %/% 2L
+results_sub <- list(
+  first_half  = chains$chain[1:n_mid, ],
+  second_half = chains$chain[(n_mid+1):nrow(chains$chain), ]
+)
+d16 <- d16_subsample_stability(chains$chain, results_sub, param_names)
+cat(d16$summary)
+```
+
+Compares posterior means and standard deviations across two subsamples.
+Instability flags parameters whose posterior means shift by more than
+one posterior standard deviation across subsamples.
+
+### D17 — Narrative identification
+
+```{r d17}
+d17 <- d17_narrative_identification(hd, shocks, episodes = model$metadata$narratives)
+cat(d17$summary)
+```
+
+Evaluates narrative sign restrictions from the `@dynhr:narratives` block.
+For each episode (e.g. a financial crisis), checks whether the shocks from
+that category dominate the smoothed shocks during that period.
+
+### D18 — Welfare plausibility
+
+D18 consumes `ramsey_result` when available (for example from
+`run_full_estimation(..., run_ramsey = TRUE)`) and reports:
+
+- simulated mean planner objective
+- discounted steady welfare
+- discounted unconditional welfare
+- welfare gap relative to steady state
+
+If no Ramsey output is provided, D18 remains informational and explains how to
+enable the welfare check.
+
+---
+
+## 4  Extended diagnostics (D19–D30)
+
+The extended diagnostic suite covers identification, calibration,
+nonlinear, and data-driven checks that go beyond the core battery.
+
+### D19 — IRF comparison
+
+```{r d19}
+cat(diags$d19$summary)
+```
+
+Compares IRFs from the estimated model against empirical IRFs (from a
+VAR or local projections) or against a reference model.  Reports the
+mean-squared deviation across horizons and flags IRFs that fall outside
+the empirical confidence bands.
+
+**Inputs required:** `irf` (model IRFs), `data` (for empirical IRFs).
+
+### D20 — Fisher information strength
+
+```{r d20}
+cat(diags$d20$summary)
+```
+
+Computes the Fisher information matrix of the model moments with respect
+to the estimated parameters.  Reports the determinant, condition number,
+and per-parameter strength (the inverse of the Cramér–Rao lower bound).
+Low strength indicates parameters that are difficult to identify from the
+data.
+
+### D21 — KPS precision
+
+```{r d21}
+cat(diags$d21$summary)
+```
+
+Implements the KPS (Koop–Pesaran–Smith) precision measure, which
+evaluates how precisely parameters can be estimated at different sample
+sizes.  Useful for experimental design and for determining the data
+requirements for reliable estimation.
+
+### D22 — Observable information
+
+```{r d22}
+cat(diags$d22$summary)
+```
+
+Decomposes the Fisher information by observable variable, identifying
+which observed series contribute the most information for each parameter.
+This helps focus data collection and assess whether the observable set
+is sufficient for the parameter set.
+
+### D23 — Spectral identification
+
+```{r d23}
+cat(diags$d23$summary)
+```
+
+Full implementation of the Komunjer–Ng (2011) spectral identification
+test.  Assesses local identification in the frequency domain by
+examining the rank of the spectral density matrix at each frequency.
+Complements the time-domain D1 check.
+
+### D24 — Global KL identification
+
+```{r d24}
+cat(diags$d24$summary)
+```
+
+Computes the Kullback–Leibler divergence between the spectral density
+at the baseline parameter vector and at perturbed values (Qu & Tkachenko
+2017).  Parameters whose KL divergence is small over a wide range are
+globally unidentified.  Accepts Ramsey-augmented decision rules when a
+`ramsey_result` is provided.
+
+### D25 — Higher-order identification
+
+```{r d25}
+cat(diags$d25$summary)
+```
+
+Extends the D1/D19 local identification analysis to higher-order moments:
+skewness (third cumulant) and, when available, excess kurtosis (fourth
+cumulant).  Reports the gain in identification strength from including
+higher-order information versus first-order moments alone.
+
+### D26 — Calibration sensitivity
+
+```{r d26}
+cat(diags$d26$summary)
+```
+
+Screens all calibrated (non-estimated) parameters for their influence on
+the model moments, using Morris one-at-a-time screening.  Parameters with
+high sensitivity should be closely scrutinised or moved to the estimated
+set; parameters with negligible sensitivity can be safely calibrated.
+
+### D27 — OBC identification
+
+```{r d27}
+cat(diags$d27$summary)
+```
+
+Assesses identification across OBC slack and binding regimes.  Builds
+regime-specific Jacobians and computes per-regime identification strength.
+Parameters that are well identified in one regime but not another may
+require regime-specific priors or data splits.
+
+**Inputs required:** `obc_specs` (a list of OBC specification objects).
+
+### D28 — Regime-switching identification
+
+```{r d28}
+cat(diags$d28$summary)
+```
+
+For Markov-switching models, computes per-regime and ergodic-weighted
+identification diagnostics.  Uses the ergodic distribution over regimes
+to weight the regime-specific Jacobians into an overall identification
+assessment.
+
+### D29 — Data-driven constraints
+
+```{r d29}
+cat(diags$d29$summary)
+```
+
+Implements the Lanne & Luoto (2017) approach: compares model-implied
+identification constraints against data-driven constraints derived from
+a HAC (Newey–West) covariance matrix of the data moments.  Parameters
+that are identified by the data but constrained by the model (or vice
+versa) are flagged.
+
+### D30 — Arbitrary-precision rank checks
+
+```{r d30}
+cat(diags$d30$summary)
+```
+
+Recomputes the SVD-based rank of the moment Jacobian at elevated
+precision using either the **Rmpfr** package (preferred) or **JuliaCall**
+(fallback).  Default precision is 128 bits (~38 decimal digits).  A rank
+that increases at high precision suggests near-rank deficiency that may
+be masked by floating-point rounding at standard double precision.
+
+---
+
+## 5  OBC diagnostics
+
+The OBC diagnostic section summarises binding episodes from a solved
+OBC path:
+
+```{r obc, eval = FALSE}
+obc_diag <- d_obc_binding_summary(
+  regime_path      = occbin_result$regimes,
+  constraint_names = c("zlb"),
+  var_paths        = occbin_result$paths,
+  var_names        = model$var_names
+)
+cat(obc_diag$summary)
+```
+
+This is informational (`[INFO]`) when called via `run_diagnostics()`
+without explicit OBC simulation data; pass OBC results directly for
+a full binding-episodes analysis.
+
+---
+
+## 6  Writing a report
+
+```{r write-report}
+write_report(diags, file = "output/report.md")
+```
+
+`write_report()` writes a structured plain-text report optimised for
+LLM consumption: each diagnostic's pass/fail/error status, numeric
+summary, and a brief interpretation.  HTML and PDF report formats
+are also supported via `format_llm_report()`.
+
+---
+
+## 7  Running individual diagnostics
+
+Every diagnostic is also callable directly for targeted inspection:
+
+```{r individual}
+# Run only D5 (convergence) and D8 (IRF plausibility)
+d5 <- d5_mcmc_convergence(chains$chain, param_names, chains_list = list(chains$chain))
+d8 <- d8_irf_plausibility(irfs)
+
+cat("D5:", d5$summary, "\n")
+cat("D8:", d8$summary, "\n")
+```
+
+---
+
+## 8  Custom expectations
+
+The `@dynhr:expectations` block is the recommended way to encode
+model-specific quantitative checks.  These checks replace ad hoc Stage 4
+logic in pipeline scripts:
+
+```
+// @dynhr:expectations
+// cy_ratio:    type="data_ratio",  numerator="c_obs", denominator="y_obs",
+//              min=0.5, max=2.0,   description="C/Y plausibility"
+// rho_a_hi:    type="param_range", variable="rho_a",
+//              min=0.5, max=0.999, description="Tech AR persistence"
+// mp_irf_sign: type="irf_sign",    shock="eps_R", variable="y",
+//              horizon=4, sign="negative",
+//              description="Monetary contraction depresses output at h=4"
+// @dynhr:end
+```
+
+Call `diag_expectations()` directly or let `run_diagnostics()` invoke it
+automatically via the model's metadata.
+
+---
+
+## References
+
+Antolin-Diaz, J., & Rubio-Ramirez, J. F. (2018). Narrative sign restrictions for DSGE models. *Journal of Monetary Economics*, 102, 95-112.
+
+Gelman, A., & Rubin, D. B. (1992). Inference from iterative simulation using multiple sequences. *Statistical Science*, 7(4), 457-472.
+
+Gelman, A., Meng, X.-L., & Stern, H. (1996). Posterior predictive assessment of model fitness via realized discrepancies. *Statistica Sinica*, 6(4), 733-760.
+
+Geweke, J. (1992). Evaluating the accuracy of sampling-based approaches to the calculation of posterior moments. In *Bayesian Statistics 4*, 169-193. Oxford University Press.
+
+Iskrev, N. (2010). Local identification in DSGE models. *Journal of Monetary Economics*, 57(2), 189-202.
+
+Kass, R. E., & Raftery, A. E. (1995). Bayes factors. *Journal of the American Statistical Association*, 90(430), 773-795.
+
+Komunjer, I., & Ng, S. (2011). Dynamic identification of dynamic stochastic general equilibrium models. *Econometrica*, 79(6), 1995-2032.
+
+Lanne, M., & Luoto, J. (2017). Data-driven constraints for DSGE models. *Journal of Applied Econometrics*, 32(3), 609-624.
+
+Ljung, G. M., & Box, G. E. P. (1978). On a measure of lack of fit in time series models. *Biometrika*, 65(2), 297-303.
+
+Lubik, T. A., & Schorfheide, F. (2004). Testing for indeterminacy: An application to U.S. monetary policy. *American Economic Review*, 94(1), 190-217.
+
+Morris, M. D. (1991). Factorial sampling plans for preliminary computational experiments. *Technometrics*, 33(2), 161-174.
+
+Qu, Z., & Tkachenko, D. (2017). Global identification in DSGE models. *Journal of Econometrics*, 200(2), 271-292.
+
+Schorfheide, F. (2000). Loss function-based evaluation of DSGE models. *Journal of Applied Econometrics*, 15(6), 645-670.
+
+Sims, C. A. (1980). Macroeconomics and reality. *Econometrica*, 48(1), 1-48.
+
+---
+
+```{r session, eval = TRUE}
+sessionInfo()
+```

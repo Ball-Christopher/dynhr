@@ -1,0 +1,304 @@
+---
+title: "`r params$model_name` -- dynhr Diagnostic Report"
+date: "`r format(Sys.time(), '%Y-%m-%d %H:%M')`"
+params:
+  diags_rds:         ""
+  irfs_rds:          ""
+  llm_txt:           ""
+  exec_txt:          ""
+  model_name:        "model"
+  show_explanations: true
+format:
+  typst:
+    toc: true
+    toc-depth: 3
+    section-numbering: 1.1.a
+    papersize: a4
+    margin:
+      x: 2cm
+      y: 2cm
+    mainfont: "Source Sans 3"
+    sansfont: "Source Sans 3"
+    monofont: "JetBrains Mono"
+    fontsize: 11pt
+    fig-width: 8
+    fig-height: 6.5
+    fig-dpi: 200
+    fig-pos: H
+    fig-align: center
+    out-width: 100%
+    default-image-extension: png
+    # Force PNG rendering for ggplots so Typst doesn't have to font-substitute
+    # glyphs embedded in SVGs (titles blur when Source Sans 3 is missing).
+    fig-format: png
+    keep-typ: false
+    include-in-header:
+      text: |
+        // dynhr Paul-Tol vibrant brand for Typst
+        #let dynhr-blue    = rgb("#0077BB")
+        #let dynhr-teal    = rgb("#009988")
+        #let dynhr-magenta = rgb("#EE3377")
+        #let dynhr-orange  = rgb("#EE7733")
+        #let dynhr-cyan    = rgb("#33BBEE")
+        #let dynhr-red     = rgb("#CC3311")
+        #let dynhr-grey    = rgb("#BBBBBB")
+        #set text(font: ("Source Sans 3", "Source Sans Pro", "Segoe UI"), size: 11pt)
+        #show heading.where(level: 1): set text(fill: dynhr-blue,  font: ("Source Serif 4", "Source Serif Pro", "Georgia"))
+        #show heading.where(level: 2): set text(fill: dynhr-blue,  font: ("Source Serif 4", "Source Serif Pro", "Georgia"))
+        #show heading.where(level: 3): set text(fill: rgb("#1A1A1A"), font: ("Source Serif 4", "Source Serif Pro", "Georgia"))
+        #show link: set text(fill: dynhr-blue)
+        #show raw: set text(font: ("JetBrains Mono", "Consolas"), size: 9pt)
+execute:
+  echo: false
+  warning: false
+  message: false
+---
+
+```{r setup}
+`%||%` <- function(a, b) if (is.null(a) || (is.character(a) && !nzchar(a))) b else a
+# Track the chunk default so we can restore it after a per-plot override.
+.default_fig_height <- knitr::opts_chunk$get("fig.height") %||% 6.5
+diags <- if (nzchar(params$diags_rds %||% "") && file.exists(params$diags_rds)) {
+  readRDS(params$diags_rds)
+} else NULL
+irfs  <- if (nzchar(params$irfs_rds  %||% "") && file.exists(params$irfs_rds)) {
+  readRDS(params$irfs_rds)
+} else NULL
+model_name        <- params$model_name
+show_explanations <- isTRUE(params$show_explanations)
+
+diag_items <- if (!is.null(diags)) {
+  Filter(function(r) inherits(r, "dynhr_diagnostic"), diags)
+} else list()
+
+n_pass <- sum(vapply(diag_items, function(r) isTRUE(r$pass),    logical(1)))
+n_fail <- sum(vapply(diag_items, function(r) identical(r$pass, FALSE), logical(1)))
+n_err  <- sum(vapply(diag_items, function(r) isTRUE(r$errored), logical(1)))
+n_info <- length(diag_items) - n_pass - n_fail - n_err
+
+.badge_txt <- function(pass, errored = FALSE) {
+  if (isTRUE(errored)) "ERROR" else if (is.na(pass)) "INFO" else if (pass) "PASS" else "FAIL"
+}
+.callout_type <- function(pass, errored = FALSE) {
+  if (isTRUE(errored)) "danger" else if (is.na(pass)) "note" else if (pass) "tip" else "warning"
+}
+
+# Escape characters that Pandoc / Typst treat specially in markdown text:
+#  '@'  -> Pandoc treats `@key` as a citation, which Typst turns into a cite()
+#          that fails when there is no bibliography.
+#  '<', '>'  -> Typst syntax characters; safer to escape.
+.pdf_safe <- function(x) {
+  if (is.null(x)) return("")
+  x <- as.character(x)
+  x <- gsub("@", "\\@", x, fixed = TRUE)
+  x <- gsub("<", "\\<", x, fixed = TRUE)
+  x <- gsub(">", "\\>", x, fixed = TRUE)
+  x
+}
+
+# Flatten multi-line summary text into a single paragraph (safe inside a
+# markdown table cell or callout title).  Replaces \n with " - ".
+.pdf_inline <- function(x) {
+  if (is.null(x)) return("")
+  x <- as.character(x)
+  x <- gsub("\r\n", "\n", x, fixed = TRUE)
+  x <- gsub("\n+", " | ", x)
+  .pdf_safe(x)
+}
+
+.diag_info <- list(
+  expectations = list(what = "User-declared quantitative expectations (data means/SDs, parameter ranges, IRF signs).",
+                      look = "All PASS expected. Failures suggest data/prior inconsistency.",
+                      ref  = "User-defined; ?diag_expectations."),
+  d1  = list(what = "Local identification (Iskrev 2010): rank of Jacobian of moments w.r.t. parameters.",
+             look = "Rank deficiency lists weak parameters; add moments or reparameterise.",
+             ref  = "Iskrev (2010); Komunjer & Ng (2011)."),
+  d3  = list(what = "Morris elementary-effects sensitivity screening on moments.",
+             look = "Parameters with mu* near zero are insensitive and likely unidentified.",
+             ref  = "Morris (1991); Saltelli et al. (2008)."),
+  d4  = list(what = "Prior predictive: data moments inside the 95% prior-predictive interval.",
+             look = "Failure -> tighten/widen relevant priors.",
+             ref  = "Gelman, Meng & Stern (1996)."),
+  d5  = list(what = "MCMC convergence: rank-normalised R-hat, Bulk/Tail-ESS, trace, ACF.",
+             look = "R-hat < 1.01, Bulk-ESS > 1000, Tail-ESS > 400, BFMI > 0.3, no divergences.",
+             ref  = "Vehtari et al. (2021); Gelman & Rubin (1992)."),
+  d6  = list(what = "Prior-posterior overlap per estimated parameter.",
+             look = "Overlap < 0.80 means data is informative.",
+             ref  = "Geweke (1992)."),
+  d7  = list(what = "Mode-finding robustness across optimisation starts.",
+             look = "One basin = robust; multiple basins = possible multimodality.",
+             ref  = "Gelman & Rubin (1992)."),
+  d8  = list(what = "IRF plausibility against @dynhr:benchmarks sign and magnitude rules.",
+             look = "Failed sign often indicates mis-specified Taylor rule or shock calibration.",
+             ref  = "Christiano, Eichenbaum & Evans (1999)."),
+  d9  = list(what = "Moment matching: model vs data standard deviations.",
+             look = "SD ratio in [0.5, 2.0] acceptable.",
+             ref  = "Schorfheide (2000); Smets & Wouters (2007)."),
+  d10 = list(what = "Variance decomposition of forecast error.",
+             look = "Concentration in one shock may signal misspecification.",
+             ref  = "Sims (1980); Kamber, Morley & Wong (2018)."),
+  d11 = list(what = "Historical decomposition from Kalman smoother.",
+             look = "Plausibility check of shock contributions to historical episodes.",
+             ref  = "Banbura, Giannone & Reichlin (2010)."),
+  d12 = list(what = "Smoothed shocks: Ljung-Box and normality.",
+             look = "Serial correlation indicates a missing persistent component.",
+             ref  = "Ljung & Box (1978)."),
+  d13 = list(what = "Cross-equation restrictions: DSGE-implied VAR (Yule-Walker) vs unrestricted OLS VAR.",
+             look = "Frobenius rel. diff < 0.5 + Wald p > 0.05 = restrictions supported.",
+             ref  = "Del Negro & Schorfheide (2004, 2009) JBES."),
+  d14 = list(what = "Bayes factor model comparison (log marginal likelihoods).",
+             look = "log10 BF > 2 decisive; 1-2 strong; 0.5-1 substantial.",
+             ref  = "Kass & Raftery (1995); Jeffreys (1961)."),
+  d15 = list(what = "DSGE-VAR (Del Negro-Schorfheide): DSGE-prior-weighted VAR with hyperparameter lambda.",
+             look = "lambda* > 2 = DSGE restrictions supported; lambda* < 0.5 = rejected.",
+             ref  = "Del Negro & Schorfheide (2006) JBES."),
+  d16 = list(what = "Subsample stability: full vs subsample CrIs.",
+             look = "Non-overlap suggests structural breaks.",
+             ref  = "Lubik & Schorfheide (2004)."),
+  d17 = list(what = "Narrative identification: @dynhr:narratives sign/magnitude on smoothed shocks.",
+             look = "PASS = consistent; FAIL = contradicts narrative.",
+             ref  = "Antolin-Diaz & Rubio-Ramirez (2018).")
+)
+
+.get_info <- function(nm) {
+  key <- tolower(nm); if (!is.null(.diag_info[[key]])) return(.diag_info[[key]])
+  base <- sub("_.*$", "", key); if (!is.null(.diag_info[[base]])) return(.diag_info[[base]])
+  NULL
+}
+```
+
+## Executive Summary
+
+```{r exec-summary}
+#| results: asis
+# Prefer the pre-rendered executive summary (written by write_report()), so we
+# don't depend on dynhr being installed in the Quarto subprocess.
+exec_lines <- NULL
+if (nzchar(params$exec_txt %||% "") && file.exists(params$exec_txt)) {
+  exec_lines <- readLines(params$exec_txt, warn = FALSE)
+} else if (!is.null(diags) &&
+           requireNamespace("dynhr", quietly = TRUE) &&
+           exists("format_executive_summary",
+                  where = asNamespace("dynhr"), inherits = FALSE)) {
+  exec_lines <- dynhr:::format_executive_summary(diags,
+                  model_name = model_name, unicode = FALSE)
+}
+if (!is.null(exec_lines)) {
+  # Fenced code block -> monospace in Typst, preserving the scorecard's
+  # fixed-width column alignment.
+  cat("```\n")
+  cat(paste(exec_lines, collapse = "\n"))
+  cat("\n```\n")
+} else {
+  cat("> No diagnostic suite loaded (diags_rds not supplied).\n")
+}
+```
+
+## Summary
+
+`r sprintf("**%d PASS  |  %d FAIL  |  %d ERROR  |  %d INFO**  --  %d diagnostics", n_pass, n_fail, n_err, n_info, length(diag_items))`
+
+```{r summary-table}
+#| results: asis
+if (length(diag_items) > 0) {
+  rows <- lapply(seq_along(diag_items), function(i) {
+    nm <- names(diag_items)[i]
+    r  <- diag_items[[i]]
+    s  <- .pdf_inline(r$summary %||% "")
+    if (nchar(s) > 110) s <- paste0(substr(s, 1, 107), "...")
+    sprintf("| `%s` | %s | %s |",
+            .pdf_safe(nm), .badge_txt(r$pass, errored = isTRUE(r$errored)), s)
+  })
+  cat("| ID | Status | Summary |\n")
+  cat("|:---|:------:|:--------|\n")
+  cat(paste(unlist(rows), collapse = "\n"), "\n\n", sep = "")
+}
+```
+
+## Diagnostic details
+
+```{r details}
+#| results: asis
+render_summary_block <- function(summary_text) {
+  # Render multi-line $summary as a bullet list so each line stays separate
+  # and the callout block doesn't get broken by Pandoc folding paragraphs.
+  if (is.null(summary_text) || !nzchar(summary_text)) return("")
+  lines <- strsplit(summary_text, "\n", fixed = TRUE)[[1]]
+  lines <- lines[nzchar(lines)]
+  if (length(lines) <= 1L) {
+    return(.pdf_safe(summary_text))
+  }
+  paste(paste0("- ", .pdf_safe(lines)), collapse = "\n")
+}
+
+for (nm in names(diag_items)) {
+  r     <- diag_items[[nm]]
+  ctype <- .callout_type(r$pass, errored = isTRUE(r$errored))
+  badge <- .badge_txt(r$pass, errored = isTRUE(r$errored))
+  cat(sprintf('\n::: {.callout-%s}\n## %s -- %s\n\n',
+              ctype, .pdf_safe(nm), badge))
+  cat(render_summary_block(r$summary %||% ""), "\n\n", sep = "")
+  if (show_explanations) {
+    info <- .get_info(nm)
+    if (!is.null(info)) {
+      cat(sprintf("**What:** %s\n\n",            .pdf_safe(info$what)))
+      cat(sprintf("**What to look for:** %s\n\n", .pdf_safe(info$look)))
+      cat(sprintf("*Reference:* %s\n\n",          .pdf_safe(info$ref)))
+    }
+  }
+  cat(":::\n\n")
+  for (pnm in names(r$plots)) {
+    p <- r$plots[[pnm]]
+    if (inherits(p, "gg")) {
+      h <- attr(p, "dynhr_fig_height", exact = TRUE)
+      if (!is.null(h) && is.finite(h)) {
+        knitr::opts_chunk$set(fig.height = as.numeric(h))
+      } else {
+        knitr::opts_chunk$set(fig.height = .default_fig_height)
+      }
+      print(p)
+      cat("\n\n")
+    }
+  }
+  knitr::opts_chunk$set(fig.height = .default_fig_height)
+}
+```
+
+## Impulse responses
+
+```{r irfs-static}
+#| results: asis
+if (is.null(irfs) || length(irfs) == 0L) {
+  cat("\n*No IRFs were supplied to `write_report()`.*\n\n")
+} else {
+  for (shock_nm in names(irfs)) {
+    cat(sprintf("\n### Shock: %s\n\n", .pdf_safe(shock_nm)))
+    p <- irfs[[shock_nm]]
+    if (!inherits(p, "gg")) next
+    h <- attr(p, "dynhr_fig_height", exact = TRUE)
+    if (!is.null(h) && is.finite(h)) {
+      knitr::opts_chunk$set(fig.height = as.numeric(h))
+    }
+    print(p)
+    knitr::opts_chunk$set(fig.height = .default_fig_height)
+    cat("\n\n")
+  }
+}
+```
+
+## LLM-readable summary
+
+```{r llm-block}
+#| results: asis
+if (nzchar(params$llm_txt %||% "") && file.exists(params$llm_txt)) {
+  cat("```\n")
+  cat(paste(readLines(params$llm_txt, warn = FALSE), collapse = "\n"))
+  cat("\n```\n")
+}
+```
+
+## Session info
+
+```{r session}
+sessionInfo()
+```

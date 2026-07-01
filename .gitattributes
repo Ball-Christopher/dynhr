@@ -1,0 +1,6 @@
+# Enforce LF line endings repo-wide (canonical Unix/macOS convention).
+# Stops CRLF churn when files are edited on Windows and then on macOS.
+* text=auto eol=lf
+
+# Binary files: never normalize.
+*.mat binary

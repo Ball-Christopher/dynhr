@@ -1,0 +1,37 @@
+linters: linters_with_defaults(
+  line_length_linter = NULL,
+  object_name_linter = NULL,
+  cyclocomp_linter   = NULL,
+  commented_code_linter = NULL,
+  trailing_whitespace_linter = NULL,
+  indentation_linter = NULL,
+  semicolon_linter   = NULL,
+  paren_body_linter  = NULL
+)
+exclusions: list(
+  "R/aux-expansion-monolith.R",
+  "R/parser-monolith.R",
+  "R/log-parser-monolith.R",
+  "R/jacobian-monolith.R",
+  "R/steady-monolith.R",
+  "R/perturbation-monolith.R",
+  "R/stochsimul-monolith.R",
+  "R/transform-monolith.R",
+  "R/backend-monolith.R",
+  "R/kalman-filter-v4-monolith.R",
+  "R/smoother-monolith.R",
+  "R/estimation-monolith.R",
+  "R/sigma-prop-robust-monolith.R",
+  "R/mcmc-parallel-monolith.R",
+  "R/estimate-monolith.R",
+  "R/estimate-runner.R",
+  "R/smc-monolith.R",
+  "R/nuts-monolith.R",
+  "R/diagnostics-monolith.R",
+  "R/obc-monolith.R",
+  "R/obc-kf-monolith.R",
+  "inst/scripts",
+  "inst/pipelines",
+  "inst/benchmarks",
+  "inst/examples"
+)

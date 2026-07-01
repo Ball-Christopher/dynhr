@@ -1,0 +1,257 @@
+---
+title: "Getting started with dynhr"
+output: rmarkdown::html_vignette
+vignette: >
+  %\VignetteIndexEntry{Getting started with dynhr}
+  %\VignetteEngine{knitr::rmarkdown}
+  %\VignetteEncoding{UTF-8}
+---
+
+```{r setup, include = FALSE}
+knitr::opts_chunk$set(
+  collapse  = TRUE,
+  comment   = "#>",
+  fig.width = 7,
+  fig.height = 4,
+  eval = TRUE
+)
+```
+
+## Overview
+
+**dynhr** is a self-contained R toolkit for DSGE modelling.  It parses
+Dynare-format `.mod` files, solves the model by first- through
+fifth-order perturbation, runs the Kalman filter and smoother (including
+block-Kalman and OBC PKF variants), and provides a suite of Bayesian
+estimation samplers (RWMH, SMC, NUTS).  A 30-diagnostic battery
+(D1–D30) helps you evaluate whether the estimated model is numerically
+and economically plausible.
+
+The package ships with a small corpus of reference models (RBC, three-equation
+New Keynesian, Herbst–Schorfheide 2016, Lubik–Schorfheide 2003,
+Fagiolo–Schorfheide 2000, the `03j` NZ production model, and the
+Caldara et al. 2012 financial-accelerator model) with regression goldens
+produced from Dynare.jl and Octave Dynare 7.0.
+
+```{r library}
+library(dynhr)
+```
+
+---
+
+## 1  Parse a model
+
+The entry point is `parse_mod()`.  Point it at any Dynare `.mod` file:
+
+```{r parse}
+mod_path <- system.file("extdata", "models", "rbc.mod", package = "dynhr")
+model    <- parse_mod(mod_path, verbose = FALSE)
+print(model)
+```
+
+The result is a `dynhr_mod` list with named slots for endogenous
+variables, exogenous shocks, parameters, equations, lead/lag incidence,
+and (optionally) estimated-parameter priors and `@dynhr:` metadata blocks.
+
+---
+
+## 2  Compile
+
+Compilation builds the static and dynamic residual/Jacobian functions via
+symbolic differentiation:
+
+```{r compile}
+compiled <- compile_model(model, verbose = FALSE)
+```
+
+---
+
+## 3  Solve
+
+### 3a  Steady state
+
+```{r steady}
+params <- model$param_values
+steady  <- solve_steady(compiled, params,
+                        endo_names = model$var_names,
+                        exo_names  = model$varexo_names,
+                        verbose    = FALSE)
+print(steady)
+```
+
+### 3b  First-order perturbation (decision rules)
+
+```{r dr}
+dr <- solve_perturbation(model, compiled, steady$values, params,
+                         verbose = FALSE)
+print(dr)
+```
+
+`dr$bk_satisfied` is `TRUE` when the model satisfies Blanchard–Kahn
+conditions.  `dr$ghx` (state transition) and `dr$ghu` (shock impact)
+are the standard decision-rule matrices.
+
+---
+
+## 4  Simulate
+
+### 4a  Impulse response functions
+
+```{r irfs}
+irfs <- compute_irfs(dr, model, n_periods = 40L)
+# irfs$eps_a is a 40 × 7 matrix (horizons × variables)
+head(irfs$eps_a[, c("y", "c", "k")])
+```
+
+### 4b  Theoretical moments
+
+```{r moments}
+moms <- compute_moments(dr, model)
+round(moms$correlation[1:4, 1:4], 3)
+```
+
+### 4c  Stochastic simulation
+
+```{r stochsimul}
+sim <- stoch_simul(model, verbose = FALSE)
+```
+
+`stoch_simul()` wraps all three in one call and returns a list with
+`$dr`, `$irfs`, and `$moments`.
+
+### 4d  Monte Carlo simulation paths
+
+```{r simulate}
+set.seed(42)
+paths <- simulate_model(dr, n_periods = 100L, model = model, burn_in = 20L)
+head(paths[, c("y", "c", "k")], 3)
+```
+
+---
+
+## 5  Kalman filter
+
+Given observed data, evaluate the log-likelihood:
+
+```{r kf}
+# Use simulated data as a stand-in for real observations
+obs_vars <- c("y", "c")
+Y <- as.matrix(paths[, obs_vars])
+
+suppressWarnings(
+  kf <- kalman_filter(Y, dr, model, params,
+                      obs_vars        = obs_vars,
+                      return_filtered = TRUE,
+                      me_variance     = 1e-6)
+)
+cat("Log-likelihood:", round(kf$loglik, 3), "\n")
+```
+
+---
+
+## 6  Full estimation in one call
+
+For a model with an `estimated_params` block, `run_full_estimation()`
+runs the entire pipeline — parse → compile → mode-finding → MCMC →
+optional diagnostics — and saves outputs to a directory:
+
+```{r rfe, eval = FALSE}
+result <- run_full_estimation(
+  mod_file    = "mymodel.mod",
+  data        = Y,            # T × n_obs matrix
+  obs_vars    = c("YGR", "INFL", "INT"),
+  output_dir  = "output/",
+  sampler     = "rwmh",
+  n_draws     = 50000L,
+  n_warmup    = 10000L,
+  n_chains    = 4L,
+  seed        = 42L,
+  verbose     = TRUE
+)
+print(result)
+```
+
+The returned `dynhr_estimation_result` object carries the parsed model,
+compiled model, prior specification, mode, chains, convergence
+diagnostics, and run metadata.
+
+Alternatively, use the stepwise API: `estimate_mode()` for mode-finding
+only, or `estimate_posterior()` for sampling from a pre-computed mode.
+`make_posterior()` also accepts `likelihood = "cumulant"` to estimate
+using third- and fourth-order cumulants (skewness and kurtosis) alongside
+the usual Gaussian likelihood, following Mutschler (2015).
+
+---
+
+## 7  Diagnostics
+
+After estimation, run the 30-diagnostic battery (D1–D30) covering
+pre-estimation identification, MCMC quality, post-estimation fit, OBC
+identification, regime-switching identification, and more:
+
+```{r diag, eval = FALSE}
+diags <- run_diagnostics(
+  model    = model,
+  compiled = compiled,
+  dr       = dr,
+  chains   = result$chains,
+  data     = Y
+)
+```
+
+Write a structured report (LLM-optimised or plain Markdown):
+
+```{r report, eval = FALSE}
+write_report(diags, file = "output/report.md")
+```
+
+---
+
+## 8  What's next
+
+- `vignette("solving")` — steady-state solvers, perturbation through order 5, OBC, IRFs, moments, Kalman filter variants
+- `vignette("estimation")` — prior specification, mode-finding, RWMH/SMC/NUTS, cumulant-based likelihood
+- `vignette("diagnostics")` — the D1–D30 diagnostic battery explained
+- `?ramsey_model`, `?ramsey_nn1` — Ramsey optimal policy (augmented-system and Gross–Hansen (n, n+1) approximation)
+- `?osr`, `?discretionary_policy` — optimal simple rules and Markov-perfect discretionary policy
+- `?nash_ramsey_cooperative`, `?nash_ramsey_openloop` — Nash–Ramsey games
+- `?ramsey_obc_pf`, `?ramsey_obc_pwlinear` — Ramsey with occasionally binding constraints
+- `?ramsey_regime_deterministic`, `?ramsey_regime_markov` — regime-dependent Ramsey
+- `?opp_sufficient_stats` — sufficient-statistics optimal policy (Barnichon & Mesters 2023)
+- `?run_full_estimation` — complete argument reference for the one-call pipeline
+- `?run_diagnostics` — orchestrator and individual diagnostic docs
+- `?welfare_compute`, `?welfare_ce_diff` — welfare evaluation toolkit
+
+---
+
+## 9  References
+
+Andreasen, M. M., Fernandez-Villaverde, J., & Rubio-Ramirez, J. F. (2018). The pruned state-space system for non-linear DSGE models. *Review of Economic Studies*, 85(1), 1-49.
+
+Barnichon, R., & Mesters, G. (2023). A sufficient statistics approach for macro policy evaluation. *Journal of Political Economy*, 131(1), 159-197.
+
+Binning, A. (2013). Underidentified SVAR models: A framework for combining short-run and long-run restrictions. *Norges Bank Working Paper*.
+
+Bodenstein, M., & Guerrieri, L. (2011). The welfare-optimal degree of central bank transparency. *Journal of Money, Credit and Banking*, 43(5), 857-889.
+
+Boehl, G. (2020). Efficient solution and computation of models with occasionally binding constraints. *Deutsche Bundesbank Discussion Paper*, 38/2020.
+
+Gross, T., & Hansen, J. (2021). Optimal policy design in nonlinear DSGE models: An n-order accurate approximation. *Working Paper*.
+
+Guerrieri, L., & Iacoviello, M. (2015). OccBin: A toolkit for solving dynamic models with occasionally binding constraints easily. *Journal of Monetary Economics*, 70, 22-38.
+
+Klein, P. (2000). Using the generalized Schur form to solve a multivariate linear rational expectations model. *Journal of Economic Dynamics and Control*, 24(10), 1405-1423.
+
+Levintal, O. (2017). Fifth-order perturbation solution of DSGE models. *Journal of Economic Dynamics and Control*, 80, 1-16.
+
+Mutschler, W. (2015). Identification of DSGE models — The effect of higher-order approximation and pruning. *Journal of Economic Dynamics and Control*, 56, 1-33.
+
+Schmitt-Grohé, S., & Uribe, M. (2004). Solving dynamic general equilibrium models using a second-order approximation to the policy function. *Journal of Economic Dynamics and Control*, 28(4), 755-775.
+
+Villemot, S. (2011). Solving rational expectations models by first-order perturbation. *Dynare Working Paper Series*, 6.
+
+---
+
+```{r session}
+sessionInfo()
+```

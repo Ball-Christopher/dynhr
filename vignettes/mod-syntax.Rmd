@@ -1,0 +1,680 @@
+---
+title: "dynhr .mod syntax reference"
+output: rmarkdown::html_vignette
+vignette: >
+  %\VignetteIndexEntry{dynhr .mod syntax reference}
+  %\VignetteEngine{knitr::rmarkdown}
+  %\VignetteEncoding{UTF-8}
+---
+
+```{r setup, include = FALSE}
+knitr::opts_chunk$set(
+  collapse = TRUE,
+  comment  = "#>",
+  eval     = TRUE
+)
+```
+
+## Overview
+
+dynhr reads standard Dynare `.mod` files with `parse_mod()`.  This
+vignette enumerates the complete supported syntax, with short verified
+examples for each feature, and ends with a clear "Not currently
+supported" section.
+
+Every `.mod` snippet shown below has been confirmed to parse without
+error under the current package build.
+
+```{r library}
+library(dynhr)
+```
+
+---
+
+## 1  Declaration blocks
+
+### 1.1  `var` — endogenous variables
+
+```{r var-decl}
+m <- parse_mod("
+  var y c k;
+  varexo e;
+  parameters rho; rho = 0.9;
+  model(linear);
+    y = rho * y(-1) + e;
+    c = y;
+    k = y;
+  end;
+")
+m$var_names
+```
+
+The `var` keyword also accepts:
+
+- **`var(log)`** — marks a variable as log-transformed (Dynare
+  `loglinear` convention); the name is still parsed without the `(log)`:
+
+```{r var-log}
+m_log <- suppressWarnings(parse_mod("
+  var c(log) y;
+  varexo e;
+  parameters b; b = 0.99;
+  model; c = b*c(+1) + e; y = c; end;
+"))
+m_log$var_names   # c and y, without the (log) suffix
+```
+
+- **LaTeX labels** — `var c $c$ y;` attaches a display label; ignored
+  by the parser but preserved for downstream renderers.
+
+- **Long-name annotations** — `var y %(long_name='Output');` stores the
+  label in `model$metadata`.
+
+### 1.2  `varexo` — exogenous shocks
+
+```{r varexo-decl}
+m2 <- parse_mod("
+  var y;
+  varexo eps_a eps_m;
+  parameters rho; rho = 0.8;
+  model(linear); y = rho*y(-1) + eps_a + eps_m; end;
+")
+m2$varexo_names
+```
+
+### 1.3  `varexo_det` — deterministic exogenous
+
+`varexo_det` variables are declared identically to `varexo` but are
+treated as deterministic.  They appear in `model$varexo_det_names`.
+
+### 1.4  `parameters` — calibrated and estimated parameters
+
+```{r param-decl}
+m3 <- suppressWarnings(parse_mod("
+  var y;
+  varexo e;
+  parameters alpha beta;
+  alpha = 0.36;
+  beta  = 0.99;
+  model(linear); y = alpha*y(-1) + e; end;
+"))
+m3$param_names
+m3$param_values
+```
+
+Top-level assignments (`alpha = 0.36;`) calibrate parameters.
+Assignments may use expressions that reference earlier-declared
+parameters: `sigma = 1 / (1 - alpha);`.
+
+### 1.5  `predetermined_variables`
+
+Variables declared `predetermined` are beginning-of-period stocks.
+dynhr shifts their timing by -1 in the equation ASTs so that writing
+`k` in the model means `k(-1)` in standard Dynare timing.
+
+```{r predet}
+m_pre <- suppressWarnings(parse_mod("
+  var k y;
+  varexo e;
+  parameters delta; delta = 0.025;
+  predetermined_variables k;
+  model;
+    y = k^0.36;
+    k = (1 - delta) * k + e;
+  end;
+"))
+m_pre$predetermined_vars
+```
+
+### 1.6  `varobs` — observed variables
+
+```{r varobs}
+m_obs <- suppressWarnings(parse_mod("
+  var y c;
+  varexo e;
+  parameters b; b = 0.99;
+  varobs y;
+  model(linear); c = b*c(+1) + e; y = c; end;
+"))
+m_obs$varobs_names
+```
+
+---
+
+## 2  The `model` block
+
+### 2.1  Basic nonlinear equations
+
+Equations inside `model; ... end;` are written in standard Dynare
+notation.  Each equation ends with a semicolon.
+
+```{r model-basic}
+m_nl <- suppressWarnings(parse_mod("
+  var c y k;
+  varexo e;
+  parameters alpha beta delta;
+  alpha = 0.36; beta = 0.99; delta = 0.025;
+  model;
+    1/c = beta * (1/c(+1)) * (alpha * k^(alpha-1) + 1 - delta);
+    y = k(-1)^alpha;
+    k = (1 - delta) * k(-1) + y - c;
+  end;
+"))
+length(m_nl$equations)
+```
+
+### 2.2  `model(linear)` — linearised models
+
+When the model block is declared with `model(linear)`, equations are
+treated as already log-linearised (deviations from steady state).
+dynhr passes this option through to `model$model_options`:
+
+```{r model-linear}
+m_lin <- parse_mod("
+  var y pi i;
+  varexo eps_r;
+  parameters phi kappa rho; phi = 1.5; kappa = 0.1; rho = 0.8;
+  model(linear);
+    y  = y(+1) - (i - pi(+1));
+    pi = kappa * y + pi(+1);
+    i  = rho * i(-1) + (1 - rho) * phi * pi + eps_r;
+  end;
+")
+m_lin$model_options
+```
+
+### 2.3  Timing convention — leads and lags
+
+- `x(+1)` — one-period lead (next period's expectation)
+- `x(-1)` — one-period lag (last period's value)
+- `x(+2)`, `x(-3)`, etc. — multi-period leads/lags (dynhr
+  automatically introduces auxiliary variables for `|lag| > 1` on
+  endogenous variables and for any nonzero timing on exogenous
+  variables)
+
+```{r timing}
+m_lead <- suppressWarnings(parse_mod("
+  var c y;
+  varexo e;
+  parameters b; b = 0.99;
+  model;
+    c = b * c(+1) + e;
+    y = c;
+  end;
+"))
+# Variable classification reflects the lead on c
+m_lead$variable_classification$forward
+```
+
+### 2.4  Model-local `#` variables
+
+Inside the `model` block, `#name = expr;` defines a model-local
+intermediate variable that is substituted into the equations before
+the Jacobian is computed.  These are stored in `model$local_variables`
+and are **not** declared as endogenous or exogenous variables.
+
+```{r model-local}
+m_local <- parse_mod("
+  var c y;
+  varexo e;
+  parameters alpha; alpha = 0.36;
+  model;
+    #theta = alpha / (1 - alpha);
+    c = theta * y;
+    y = c + e;
+  end;
+")
+names(m_local$local_variables)    # 'theta'
+length(m_local$var_names)         # 2 (c, y) — theta is NOT endogenous
+```
+
+This is one of the most commonly overlooked features: you do **not**
+need to inline `#` intermediates before loading into dynhr.  They are
+supported natively.
+
+### 2.5  Equation tags
+
+Equations can carry a tag in square brackets immediately before the
+equation:
+
+```{r eq-tags}
+m_tagged <- parse_mod("
+  var y pi i;
+  varexo eps_r;
+  parameters phi kappa rho; phi = 1.5; kappa = 0.1; rho = 0.8;
+  model(linear);
+    [name=IS]     y  = y(+1) - (i - pi(+1));
+    [name=NKPC]   pi = kappa * y + pi(+1);
+    [name=Taylor] i  = rho * i(-1) + (1 - rho) * phi * pi + eps_r;
+  end;
+")
+sapply(m_tagged$equations, function(e) e$tag)
+```
+
+Tags are also used for OBC / MCP constraints (see Section 9).
+
+### 2.6  Supported operators and functions
+
+Standard arithmetic: `+`, `-`, `*`, `/`, `^` (power).
+
+The following math functions are recognised in equations:
+
+```{r known-fns, echo = FALSE}
+fns <- c(
+  "exp, log, ln, log2, log10",
+  "sqrt, cbrt, abs, sign",
+  "sin, cos, tan, asin, acos, atan",
+  "sinh, cosh, tanh",
+  "max, min",
+  "normcdf, normpdf, erf, erfc",
+  "diff, adl",
+  "STEADY_STATE() / steady_state()",
+  "EXPECTATION()"
+)
+cat(paste(fns, collapse = "\n"))
+```
+
+### 2.7  `STEADY_STATE()` operator
+
+`STEADY_STATE(x)` refers to the steady-state value of `x` and is
+recognised in nonlinear models:
+
+```{r steady-state-op}
+m_ssop <- suppressWarnings(parse_mod("
+  var y c;
+  varexo e;
+  parameters beta; beta = 0.99;
+  model;
+    c = beta * c(+1) * (1 + STEADY_STATE(y) - y);
+    y = c + e;
+  end;
+"))
+length(m_ssop$equations)
+```
+
+---
+
+## 3  `steady_state_model` block
+
+An analytical steady state can be provided as a sequence of
+assignments inside `steady_state_model; ... end;`.  Assignments are
+evaluated top-to-bottom, so earlier values are available to later
+ones.
+
+```{r ssm}
+m_ssm <- parse_mod("
+  var y c;
+  varexo e;
+  parameters bet; bet = 0.99;
+  model;
+    c = bet * c(+1) + e;
+    y = c;
+  end;
+  steady_state_model;
+    c = 0;
+    y = 0;
+  end;
+")
+length(m_ssm$steady_state_model)   # 2 assignments
+```
+
+Canonical fixtures:
+
+- `fs2000.mod` — money-in-utility model with 18-line analytical SS
+- `caldara_rp.mod` — Epstein-Zin model with SS that also sets a
+  parameter (`nu`)
+- `kpr1988.mod` — King-Plosser-Rebelo RBC
+
+When a parameter is assigned inside `steady_state_model`, dynhr warns
+that the `.mod` calibration value is a placeholder (the SS value wins
+at solve time).
+
+---
+
+## 4  `initval` and `endval` blocks
+
+Initial and terminal values for perfect-foresight simulations or as
+starting points for the steady-state solver:
+
+```{r initval}
+m_iv <- suppressWarnings(parse_mod("
+  var y c;
+  varexo e;
+  parameters rho; rho = 0.99;
+  model;
+    c = rho * c(+1) + e;
+    y = c;
+  end;
+  initval;
+    c = 1.0;
+    y = 1.0;
+  end;
+"))
+m_iv$initval
+```
+
+`endval` follows the same syntax and stores into `model$endval`.
+
+---
+
+## 5  `shocks` block
+
+### 5.1  Standard deviations and variances
+
+```{r shocks-stderr}
+m_shk <- parse_mod("
+  var x y;
+  varexo eps_x eps_y;
+  parameters a b; a = 0.8; b = 0.5;
+  model(linear);
+    x = a * x(-1) + eps_x;
+    y = b * y(-1) + eps_y;
+  end;
+  shocks;
+    var eps_x; stderr 0.1;
+    var eps_y; variance 0.04;
+  end;
+")
+m_shk$shocks$variances[, c("name", "stderr", "variance")]
+```
+
+### 5.2  Covariances and correlations
+
+```{r shocks-corr}
+m_corr <- parse_mod("
+  var x y;
+  varexo eps_x eps_y;
+  parameters a b; a = 0.8; b = 0.5;
+  model(linear);
+    x = a * x(-1) + eps_x;
+    y = b * y(-1) + eps_y;
+  end;
+  shocks;
+    var eps_x; stderr 0.1;
+    var eps_y; stderr 0.2;
+    corr eps_x, eps_y = 0.3;
+  end;
+")
+m_corr$shocks$correlations[, c("var1", "var2", "corr")]
+```
+
+### 5.3  Multiple `shocks` blocks
+
+dynhr merges multiple `shocks` blocks (later block wins per shock).
+`shocks(overwrite)` discards the prior specification entirely before
+applying its own entries.  A warning is emitted when two blocks define
+conflicting values for the same shock.
+
+---
+
+## 6  `estimated_params` block
+
+Prior distributions for Bayesian estimation follow standard Dynare
+syntax.  Five prior families are supported: `beta`, `gamma`,
+`inv_gamma`, `normal`, `uniform`.
+
+```{r est-params, eval = FALSE}
+# (Not evaluated: requires a more complete model with data)
+estimated_params;
+  rho,  beta_pdf,     0.5, 0.2;
+  sig,  inv_gamma_pdf, 0.1, 2;
+  stderr eps_a, inv_gamma_pdf, 0.01, 4;
+end;
+```
+
+The parsed table is in `model$estimated_params`.
+
+`estimated_params_init` (with optional `use_calibration`) is also
+supported and stored in `model$estimated_params_init`.
+
+---
+
+## 7  `@#` macro language
+
+dynhr expands Dynare's macro preprocessor **before** parsing.  The
+following directives are supported:
+
+### 7.1  `@#define`
+
+```{r macro-define}
+m_def <- parse_mod("
+  @#define N = 3
+  var x1 x2 x3;
+  varexo e;
+  parameters rho; rho = 0.9;
+  model(linear);
+    @#for j in 1:N
+    x@{j} = rho * x@{j}(-1) + e;
+    @#endfor
+  end;
+")
+m_def$var_names
+```
+
+`@#define` also accepts string values and array literals:
+
+```{r macro-array}
+m_arr <- parse_mod('
+  @#define COUNTRIES = ["H","F"]
+  @#for X in COUNTRIES
+  var y_@{X};
+  @#endfor
+  varexo e;
+  parameters r; r = 0.7;
+  model(linear);
+    @#for X in COUNTRIES
+    y_@{X} = r * y_@{X}(-1) + e;
+    @#endfor
+  end;
+')
+sort(m_arr$var_names)
+```
+
+### 7.2  `@#for` / `@#endfor`
+
+Iterates over an explicit list `[a, b, c]`, an integer range `A:B`,
+or a `@#define`-d array variable.  Supports `@{expr}` interpolation
+including arithmetic on the loop index (e.g. `x@{j-1}`).  Nested
+loops are supported.
+
+### 7.3  `@#if` / `@#else` / `@#endif`
+
+Conditional inclusion based on a macro-language expression:
+
+```{r macro-if}
+txt_flag <- function(flag) paste(
+  sprintf("@#define USE_AR = %d", flag),
+  "var x; varexo e; parameters r; r = 0.9;",
+  "model(linear);",
+  "@#if USE_AR",
+  "x = r*x(-1) + e;",
+  "@#else",
+  "x = e;",
+  "@#endif",
+  "end;",
+  sep = "\n"
+)
+m_on  <- parse_mod(txt_flag(1L))
+m_off <- parse_mod(txt_flag(0L))
+dynhr:::ast_to_string(m_on$equations[[1]]$rhs)   # AR(1)
+dynhr:::ast_to_string(m_off$equations[[1]]$rhs)  # just e
+```
+
+### 7.4  `@#ifdef` / `@#ifndef`
+
+Tests whether a macro variable is defined (or not defined):
+
+```{r macro-ifdef}
+m_ifd <- parse_mod('
+  @#define MYVAR = 1
+  @#ifdef MYVAR
+  var y;
+  @#endif
+  @#ifndef MYVAR
+  var z;
+  @#endif
+  varexo e; parameters p; p = 0.5;
+  model; y = p*y(-1) + e; end;
+')
+m_ifd$var_names   # only y, not z
+```
+
+### 7.5  `@#include`
+
+Textually splices another file into the current source.  The path is
+resolved relative to the including file's directory.  Nested includes
+(up to depth 32) are supported.  Definitions made inside the included
+file are visible after the `@#include`.
+
+```{r macro-include, eval = FALSE}
+# In parent.mod:
+@#include "helper_equations.inc"
+```
+
+### 7.6  `@{expr}` interpolation
+
+Inside any non-directive line (including declaration blocks and
+equation bodies), `@{expr}` is replaced by the evaluated macro
+expression.  Arithmetic on the loop index is supported:
+`p@{j-1}_fwrd`.  Quoted string elements have their quotes stripped
+when spliced into identifiers.
+
+### 7.7  What is NOT supported in the macro language
+
+- **`@#elseif`** — rewrite as nested `@#if`/`@#else`.
+- **`@#echo` / `@#error`** — silently dropped (no structural effect).
+- Any other unrecognised `@#` directive causes an **immediate error**
+  rather than silent omission.
+
+---
+
+## 8  Comments
+
+Three comment styles are supported, all stripped before parsing:
+
+- `// ...` — C++ single-line comment
+- `/* ... */` — C-style block comment (may span lines)
+- `% ...` — MATLAB/Dynare percent comment
+
+---
+
+## 9  Other supported blocks and commands
+
+### 9.1  `occbin_constraints` block
+
+```
+occbin_constraints;
+  name 'ZLB'; bind log_R - log(steady_state(R)) < -1e-6;
+end;
+```
+
+Parsed into `model$occbin_constraints`.
+
+### 9.2  MCP equation tags
+
+```
+model;
+  [mcp = 'r > -0.004']
+  r = rho_r * r(-1) + (1 - rho_r) * phi_pi * pi + eps_r;
+end;
+```
+
+Used by `solve_obc_lcp()` and related solvers.
+
+### 9.3  `planner_objective`
+
+```
+planner_objective(log(c) + 0.5 * log(l));
+```
+
+Stored in `model$planner_objective`.  Used by `ramsey_model()`.
+
+### 9.4  Commands
+
+The following command keywords are extracted (stored in
+`model$commands` as a list with `name`, `options`, and `var_list`):
+
+`stoch_simul`, `estimation`, `steady`, `check`, `model_diagnostics`,
+`model_info`, `forecast`, `calib_smoother`, `shock_decomposition`,
+`conditional_forecast`, `osr`, `ramsey_model`, `ramsey_policy`,
+`planner_objective`, `discretionary_policy`,
+`perfect_foresight_setup`, `perfect_foresight_solver`,
+`extended_path`, `simul`.
+
+### 9.5  `verbatim` blocks
+
+`verbatim; ... end;` blocks contain raw R code that is evaluated into
+an environment whose scalar bindings seed parameter values.  This lets
+you compute parameters programmatically (e.g. from matrix steady-state
+computations) without exposing the intermediate objects as declared
+parameters.
+
+### 9.6  dynhr-specific metadata blocks
+
+`// @dynhr:expectations`, `@dynhr:benchmarks`,
+`@dynhr:variable_labels`, `@dynhr:shock_categories`,
+`@dynhr:narratives`, and `@dynhr:end` comment blocks are extracted by
+`extract_mod_metadata()` and drive the 30-diagnostic battery.  They
+are plain `//` comments so Dynare ignores them.  See
+`vignette("mod-conversion")` for full syntax.
+
+---
+
+## 10  Not currently supported
+
+The following Dynare constructs are **not** parsed or executed by
+dynhr.  Using them will not crash `parse_mod()` — the unrecognised
+block or option is silently ignored — unless noted otherwise.
+
+| Construct | Status |
+|-----------|--------|
+| `model_local_variable` block (distinct from `#` inside model) | Not parsed |
+| `external_function` declarations | Not parsed |
+| `load_mh_file`, `mh_recover` in estimation | Not executed |
+| `shock_groups` | Not parsed |
+| `heteroskedastic_shocks` scaling (dynhr extension) | Parsed; dynhr-only |
+| `filter_tunes` block (dynhr extension) | Parsed; dynhr-only |
+| `@#elseif` in macros | Errors loudly — rewrite as nested `@#if` |
+| Dynare `use_dll` compilation | Ignored |
+| `datafile =` in `estimation(...)` | Option parsed, file loaded by estimation engine |
+| `global_initialization` block | Not parsed |
+
+**External `*_steadystate.m` files**: Dynare models that compute
+parameter values in an external `<name>_steadystate.m` file will
+produce a warning listing the unset parameters.  Use
+`inject_params(model, named_vec)` to supply them from R.
+
+**`@#elseif`** causes an explicit error rather than silent behaviour —
+this is intentional so that a missing branch is not silently wrong.
+
+---
+
+## 11  Canonical fixture models
+
+The package ships with several reference `.mod` files under
+`inst/extdata/models/` that exercise the full supported syntax:
+
+| File | Features |
+|------|----------|
+| `rbc.mod` | Basic nonlinear RBC, `shocks`, `steady`, `stoch_simul` |
+| `nk_canonical.mod` | 3-equation NK, `model(linear)`, `initval` |
+| `nk_hs2016.mod` | Linear NK with `#` local vars, `estimated_params` |
+| `caldara_rp.mod` | Recursive preferences, `#theta` local var, `steady_state_model` |
+| `fs2000.mod` | Money-in-utility, `steady_state_model`, `estimated_params`, aux expansion |
+| `kpr1988.mod` | King-Plosser-Rebelo, `steady_state_model` |
+| `aikman_3obc.mod` | OBC model, `model(linear)`, `occbin_constraints`, MCP tags |
+| `nz_base_nonlinear.mod` | Large nonlinear open-economy, `#` local vars |
+
+```{r fixture-path}
+system.file("extdata", "models", "rbc.mod", package = "dynhr")
+```
+
+---
+
+## See also
+
+- `?parse_mod` — function documentation with argument details
+- `vignette("mod-conversion")` — converting Dynare models and using
+  dynhr-specific annotations
+- `vignette("solving")` — perturbation solver after parsing
+- `vignette("estimation")` — Bayesian estimation workflow
