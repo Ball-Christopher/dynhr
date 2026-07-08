@@ -23,10 +23,8 @@
 extract_prior_spec <- function(model, verbose = TRUE) {
   ep <- model$estimated_params
   if (is.null(ep) || nrow(ep) == 0) {
-    ep <- .parse_estimated_params(model)
-  }
-  if (is.null(ep) || nrow(ep) == 0) {
-    stop("No estimated_params found in model")
+    stop("No estimated_params found in model (add an estimated_params block ",
+         "to the .mod file, or supply model$estimated_params directly)")
   }
 
   cnames <- tolower(names(ep))

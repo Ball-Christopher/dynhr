@@ -767,6 +767,12 @@
     if (is.null(dr_slack) || !isTRUE(dr_slack$bk_satisfied))
       stop("conditional_forecast (pkf): BK condition not satisfied.", call. = FALSE)
 
+    ## me-floor hazard guard (see R/obc-regime.R .obc_warn_me_floor_lock() and
+    ## R/pruned-state-space.R); single-shot call site, no closure latch needed.
+    .obc_warn_me_floor_lock(
+      dr_slack, model, params, obs_names, obs_idx, me_var,
+      check = isTRUE(getOption("dynhr.me_floor_check", TRUE)))
+
     ## Seed regime cache with the slack policy.
     regime_cache <- new.env(parent = emptyenv(), hash = TRUE)
     obc_ensure_policy(0L, regime_cache, sys, dr_slack, specs, obs_idx)

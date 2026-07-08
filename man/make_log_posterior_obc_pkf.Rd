@@ -28,7 +28,10 @@ make_log_posterior_obc_pkf(
 
 \item{specs}{OBC spec list (from obc_parse_tags), or NULL to parse}
 
-\item{me_variance}{Measurement error variance (default 1e-8)}
+\item{me_variance}{Measurement error variance (default 1e-8). Guarded
+(warn-only, once per closure) against a near-degenerate slack-regime
+innovation covariance via \code{getOption("dynhr.me_floor_check", TRUE)};
+see \code{.obc_warn_me_floor_lock()} in R/obc-regime.R.}
 
 \item{max_inner}{Max inner iterations per period (default 10)}
 }

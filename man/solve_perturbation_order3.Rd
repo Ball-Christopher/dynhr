@@ -12,7 +12,9 @@ solve_perturbation_order3(
   dr2,
   verbose = FALSE,
   solver_method = c("auto", "direct", "qz"),
-  backend = c("auto", "symbolic", "fd")
+  backend = c("auto", "symbolic", "fd"),
+  sparse = NULL,
+  sparse_threshold = 8000L
 )
 }
 \arguments{
@@ -38,6 +40,22 @@ tractable model sizes (when eligible) and `"symbolic"` otherwise;
 `"symbolic"` uses the Faà di Bruno chain-rule expansion; `"fd"` uses
 a finite-difference oracle (requires single-period leads/lags and no
 AUX variables).}
+
+\item{sparse}{Logical or `NULL` (default). Controls the ghxxx Kronecker
+solve. `FALSE` uses the default dense-eligible `.solve_kron_compact`
+solver (eigenbasis fast path + dense real-Schur fallback) — unchanged
+numerical output. `TRUE` uses the memory-light complex-Schur Kronecker
+Bartels–Stewart solver `.solve_kron_compact_sparse`, which never
+materialises the ns^3 × ns^3 Kronecker matrix and so breaks the dense
+order-3 wall on high-dimensional-but-sparse state blocks (e.g. the
+emitted finite HANK, n_s ≈ 32). `NULL` (auto) turns the sparse route on
+automatically once `n_state^3` exceeds `sparse_threshold`. The sparse
+route is bit-parity to the dense path on well-conditioned models and
+residual-verified (with dense fallback) otherwise.}
+
+\item{sparse_threshold}{Integer. When `sparse = NULL`, the sparse ghxxx
+solve is used iff `n_state^3 >= sparse_threshold` (default 8000, i.e.
+n_state >= 20). Ignored when `sparse` is `TRUE`/`FALSE`.}
 }
 \value{
 A DecisionRules3 object extending DecisionRules2 with fields

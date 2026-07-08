@@ -106,10 +106,19 @@
 #'                   dZZ, dDD, dd, dSigma_e.
 #' @param me_variance scalar measurement-error variance (parameter-independent).
 #'
+#' @param return_bars when TRUE, additionally return the raw adjoint (bar)
+#'   matrices wrt the state-space system as \code{bars = list(G_TT, G_RR,
+#'   G_ZZ, G_DD, g_d, G_Sig)} -- the inputs \code{.solution_adjoint()}
+#'   (Tier-18 A2) contracts against the analytic primitive derivatives.
+#'   Served by both kernels: the compiled fast path exports the bars it
+#'   accumulates internally (A2 phase 2); the R kernel remains the spec.
+#'
 #' @return list(loglik, grad) -- same contract as .kf_loglik_tangent.
+#'   With \code{return_bars = TRUE}, also \code{bars}.
 #' @noRd
 .kf_loglik_adjoint <- function(Y, ss, d_ss_list, me_variance = 0,
-                               me_extra = NULL, shock_scale = NULL) {
+                               me_extra = NULL, shock_scale = NULL,
+                               return_bars = FALSE) {
 
   TT <- ss$TT; RR <- ss$RR; ZZ <- ss$ZZ; DD <- ss$DD
   d  <- as.numeric(ss$d); Sigma_e <- ss$Sigma_e
@@ -165,12 +174,18 @@
     out <- kf_adjoint_cpp(Y, TT, RR, ZZ, DD, d, Sigma_e,
                           dTT_cube, dRR_cube, dZZ_cube, dDD_cube, dd_mat,
                           dSigma_cube, me_variance, .KF_LL_MIN,
-                          shock_scale_cpp, me_extra_cpp)
+                          shock_scale_cpp, me_extra_cpp, return_bars)
 
     if (!isTRUE(out$ok)) {
       return(list(loglik = -Inf, grad = rep(NA_real_, n_par)))
     }
-    return(list(loglik = out$loglik, grad = as.numeric(out$grad)))
+    res <- list(loglik = out$loglik, grad = as.numeric(out$grad))
+    if (return_bars)
+      res$bars <- list(G_TT  = out$bars$G_TT, G_RR = out$bars$G_RR,
+                       G_ZZ  = out$bars$G_ZZ, G_DD = out$bars$G_DD,
+                       g_d   = as.numeric(out$bars$g_d),
+                       G_Sig = out$bars$G_Sig)
+    return(res)
   }
 
   ## ---------------------------------------------------------------------------
@@ -188,6 +203,13 @@
 
   ## -- Stationary initialisation (Lyapunov P_0) -----------------------------
   P0 <- .solve_lyapunov(TT, QQ)
+  if (!all(is.finite(P0)))
+    ## The kron vec-solve's rcond gate fires on HIGHLY NON-NORMAL stable TT
+    ## (e.g. Reiter-HANK transition matrices): rcond(I - TT %x% TT) underflows
+    ## machine eps while the Lyapunov equation itself is well-posed. Doubling
+    ## recovery (solve_lyapunov tries doubling first and still returns NaN for
+    ## genuine unit/explosive roots, so the fail contract is preserved).
+    P0 <- solve_lyapunov(TT, QQ)
   if (!all(is.finite(P0))) return(fail)
 
   ## -- Forward pass: run the filter, storing per-step quantities ------------
@@ -256,6 +278,11 @@
 
     s <- as.numeric(TT %*% s) + as.numeric(K %*% v)
     P <- tcrossprod(A %*% P, A) + tcrossprod(B %*% Se_t, B)
+    ## Joseph true-noise term for me_extra (mirrors kalman_filter's standard
+    ## path): P' += K diag(me_extra[, t]) K'. me_variance stays F-only
+    ## (regularizer convention; no Joseph term).
+    if (has_me_extra)
+      P <- P + (K %*% diag(me_extra[, t], n_obs)) %*% t(K)
     P <- .sym(P)
   }
 
@@ -327,6 +354,12 @@
 
     ## bar_K_from_s: d/dK tr(bar_s' K v) => += outer(bar_s, v)
     bar_K <- outer(bar_s, v)                               # [n x q]
+
+    ## Adjoint of the me_extra Joseph term in P_t (P_t += K me_x K', with
+    ## me_x = diag(me_extra[, t]) being DATA, not differentiated): with
+    ## bar_P symmetrized above, d tr(bar_P K me_x K') / dK = 2 bar_P K me_x.
+    if (has_me_extra)
+      bar_K <- bar_K + 2 * bar_P %*% K %*% diag(me_extra[, t], n_obs)
 
     ## bar_v_from_s: d/dv tr(bar_s' K v) => K' bar_s
     bar_v <- as.numeric(t(K) %*% bar_s)                   # [q]
@@ -446,6 +479,11 @@
     ## (I - TT'^T ⊗ TT'^T) vec(bar_QQ) = vec(bar_P_0),
     ## which is the Lyapunov equation P - TT' P TT = bar_P_0.
     bar_QQ <- tryCatch(.solve_lyapunov(t(TT), bar_P0), error = function(e) NULL)
+    if (is.null(bar_QQ) || !all(is.finite(bar_QQ)))
+      ## Same non-normal-TT recovery as the forward P0 solve above; doubling
+      ## converges for any symmetric (possibly indefinite) bar_P0 when the
+      ## spectral radius is < 1.
+      bar_QQ <- tryCatch(solve_lyapunov(t(TT), bar_P0), error = function(e) NULL)
     if (is.null(bar_QQ) || !all(is.finite(bar_QQ))) return(fail)
     bar_QQ <- .sym(bar_QQ)
 
@@ -485,5 +523,9 @@
     grad[j] <- gj
   }
 
-  list(loglik = loglik, grad = grad)
+  out <- list(loglik = loglik, grad = grad)
+  if (return_bars)
+    out$bars <- list(G_TT = G_TT, G_RR = G_RR, G_ZZ = G_ZZ, G_DD = G_DD,
+                     g_d = g_d, G_Sig = G_Sig)
+  out
 }

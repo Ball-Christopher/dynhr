@@ -46,8 +46,17 @@
 ## SBC.  Miwa() IS deterministic and exact for q <= 5.  A tryCatch wraps the
 ## Miwa call so that non-PD edge-cases fall back to ME without crashing.
 ##
+## miwa_qmax: largest dimension evaluated with the deterministic-exact Miwa
+## algorithm before falling back to Mendell-Elston.  The 2026-07-03 pruning-
+## bias investigation (scratchpad/pskf-*.R; memory note
+## pskf-multishock-pruning-bias) proved with an exact 2-D grid-filter oracle
+## that the entire multi-shock "pruning" bias (-7.3 nats at T=12 for
+## alpha=(+2,-2)) was Mendell-Elston evaluation error at q>5, NOT discarded
+## skew mass: swapping ME for an exact Phi_q at unchanged cut_tol=0.01
+## collapsed the gap to |0.005|.  Keeping q inside the Miwa-exact range via
+## rank-capped pruning (see dim_red4_r max_q) is therefore the fix.
 #' @noRd
-logcdf_ME_r <- function(x, S) {
+logcdf_ME_r <- function(x, S, miwa_qmax = 5L) {
   q <- length(x)
   if (q == 0L) return(0)
 
@@ -55,6 +64,48 @@ logcdf_ME_r <- function(x, S) {
   if (q == 1L) {
     b <- x[1] / sqrt(S[1, 1])
     return(pnorm(b, log.p = TRUE))
+  }
+
+  ## ---- SNAP + BLOCK FACTORIZATION (2026-07 Miwa-pocket fix) ---------------
+  ## mvtnorm's Miwa algorithm has an instability pocket for TINY-but-nonzero
+  ## correlations: measured on a well-conditioned 3x3 with mixed-sign
+  ## rho ~ 1e-5..1e-3 it returned Phi_3 = 1.0856 (> 1!) at steps = 128 and was
+  ## still 0.04 absolute off at steps = 512, while rho = 0, 1e-7 and 0.2 are
+  ## all ~1e-6 accurate (scratchpad m5_trace_cdf.R, Reiter-HANK PSKF
+  ## investigation -- this made the filter's likelihood IMPROPER).  Fix:
+  ## (a) standardize to correlation form and SNAP |rho| < 1e-3 to exactly 0
+  ##     (error bound: |dPhi/drho| = phi_2 <= 1/(2*pi) per pair, so <= ~1.6e-4
+  ##     per snapped pair -- strictly smaller than Miwa's own pocket error);
+  ## (b) factor the CDF over the connected components of the snapped
+  ##     correlation graph (EXACT given the snap) -- singletons/pairs then use
+  ##     the exact pnorm/bivariate paths and Miwa only sees well-coupled
+  ##     blocks.
+  sdv <- sqrt(pmax(diag(as.matrix(S)), .Machine$double.eps))
+  Cm  <- as.matrix(S) / outer(sdv, sdv)
+  off <- row(Cm) != col(Cm)
+  Cm[off & abs(Cm) < 1e-3] <- 0
+  x <- as.numeric(x) / sdv
+  S <- Cm
+  adj  <- Cm != 0
+  comp <- integer(q); n_comp <- 0L
+  for (s0 in seq_len(q)) {
+    if (comp[s0] > 0L) next
+    n_comp <- n_comp + 1L
+    stack <- s0
+    while (length(stack) > 0L) {
+      v <- stack[[1L]]; stack <- stack[-1L]
+      if (comp[v] > 0L) next
+      comp[v] <- n_comp
+      stack <- c(stack, which(adj[v, ] & comp == 0L))
+    }
+  }
+  if (n_comp > 1L) {
+    out <- 0
+    for (cc in seq_len(n_comp)) {
+      ii  <- which(comp == cc)
+      out <- out + logcdf_ME_r(x[ii], Cm[ii, ii, drop = FALSE], miwa_qmax)
+    }
+    return(out)
   }
 
   ## q = 2: exact via stats::integrate (deterministic, accurate ~1e-10)
@@ -84,16 +135,20 @@ logcdf_ME_r <- function(x, S) {
   ## 3 <= q <= 5: use deterministic Miwa algorithm via mvtnorm if available.
   ## Miwa (2004) is exact for any q; O(n_pts^q) cost is practical for q <= 5.
   ## A tryCatch guards against non-PD edge cases; those fall through to ME.
-  if (q <= 5L && requireNamespace("mvtnorm", quietly = TRUE)) {
+  if (q <= miwa_qmax && requireNamespace("mvtnorm", quietly = TRUE)) {
     val <- tryCatch(
       mvtnorm::pmvnorm(upper = as.numeric(x), sigma = as.matrix(S),
                        algorithm = mvtnorm::Miwa())[1L],
       error = function(e) NA_real_
     )
-    if (!is.na(val)) {
-      return(log(max(val, .Machine$double.eps)))
+    ## IMPOSSIBLE-VALUE guard (Miwa-pocket fix, part c): Miwa can return
+    ## probabilities > 1 or <= 0 WITHOUT erroring on pathological inputs --
+    ## treat those like an error and fall through to the deterministic ME
+    ## approximation instead of corrupting the loglik.
+    if (!is.na(val) && is.finite(val) && val > 0 && val <= 1 + 1e-8) {
+      return(log(max(min(val, 1), .Machine$double.eps)))
     }
-    ## Fall through to ME on error (non-PD S, etc.)
+    ## Fall through to ME on error / impossible value (non-PD S, etc.)
   }
 
   ## q > 5 (or Miwa unavailable / errored): Mendell-Elston sequential conditioning.
@@ -107,12 +162,16 @@ logcdf_ME_r <- function(x, S) {
   ##   - Moderate correlations (max |rho_ij| ~ 0.3-0.5): absolute error ~0.01.
   ##   - High correlations (max |rho_ij| > 0.8): absolute error ~0.03-0.05.
   ##   These translate to per-period loglik errors of O(abs_err/Phi_q) in the
-  ##   CSN loglik correction terms. For the PSKF at q<=3 (typical after pruning
-  ##   with cut_tol=0.01), q>5 is rarely encountered in practice; q>5 arises
-  ##   only in long filter runs on very high-dimensional models before pruning.
-  ## Recommendation: for q > 5, the loglik is approximate with error ~0.01-0.05
-  ## absolute per CDF call. Use cut_tol >= 0.01 to keep q small. If q > 5 is
-  ## frequent, install mvtnorm and increase cut_tol to reduce q to <= 5.
+  ##   CSN loglik correction terms.
+  ## MEASURED (2026-07-03, scratchpad/step3-evaluators.R): under strong
+  ## multi-shock skew (2 shocks, |alpha| = 2-3) the CSN correction arguments
+  ## sit deep in the orthant tails and the ME error per call reaches SEVERAL
+  ## NATS at q = 6-16, accumulating to -7.3 nats by T=12 for alpha=(+2,-2)
+  ## (sign follows the sign of the off-diagonal correlations of S).
+  ## The filter therefore rank-caps q at max_q = 5 (dim_red4_r), so this
+  ## branch is only reached when the caller explicitly raises max_q (or
+  ## mvtnorm is unavailable); the loglik is then approximate and biased
+  ## under strong skew -- see memory note pskf-multishock-pruning-bias.
   ##
   ## Algorithm (Mendell & Elston 1974, corrected for covariance -- not correlation -- form):
   ## For j = 1 .. q-1:
@@ -167,11 +226,70 @@ logcdf_ME_r <- function(x, S) {
 ## Without pruning the skewness dimension q grows by n_exo every period;
 ## pruning keeps q bounded (typically 1-3 for small DSGE, brief Landmine 2).
 ##
-## Returns list(Gamma = q'xp, nu = q', Delta = q'xq') with q' <= q.
+## max_q: HARD rank-based cap on the retained skew dimension.  After the
+## cut_tol threshold filter, if more than max_q rows survive, only the max_q
+## rows with the LARGEST skew-vs-state correlation are kept (in original
+## order).  Rationale (2026-07-03 investigation, scratchpad/pskf-*.R): the
+## Phi_q evaluator is deterministic-exact (Miwa) only for q <= 5; beyond that
+## the Mendell-Elston approximation's error GROWS with the per-period loglik
+## contribution and accumulates (measured -7.3 nats at T=12, 2 shocks,
+## alpha=(+2,-2)).  Rank-capping q at 5 keeps every CDF call inside the
+## exact-evaluator range; the discarded low-correlation skew mass costs far
+## less (|gap| <= ~0.3 nat at T=12 on the worst measured fixture) than the
+## ME error it avoids.
+##
+## Mean offset of a CSN(0, Sigma, Gamma, nu, Delta) relative to its Gaussian
+## location:  E[X] - mu = Sigma Gamma' g,
+##   g_j = phi(-nu_j; V_jj) * Phi_{q-1}(cond_j) / Phi_q(-nu; V),
+##   V = Delta + Gamma Sigma Gamma',
+## (gradient of the log-normaliser wrt nu; verified against rejection-sampling
+## MC, 2026-07 pruning-mean-drift investigation). The conditional CDFs use the
+## cheap ME path (miwa_qmax = 2): errors largely cancel in the ratio and the
+## offset is itself a correction term -- Miwa-5 here would dominate filter
+## cost under saturated pruning (one cut per period).
 #' @noRd
-dim_red4_r <- function(Gamma, nu, Delta, Sigma, cut_tol = 0.01) {
+.csn_mean_offset <- function(Gamma, nu, Delta, Sigma) {
   q <- nrow(Gamma)
-  if (q == 0L) return(list(Gamma = Gamma, nu = nu, Delta = Delta))
+  if (q == 0L) return(rep(0, ncol(Gamma)))
+  V <- Delta + Gamma %*% Sigma %*% t(Gamma)
+  V <- (V + t(V)) / 2
+  logZ <- logcdf_ME_r(-nu, V, miwa_qmax = 2L)
+  g <- numeric(q)
+  for (j in seq_len(q)) {
+    Vjj <- V[j, j]
+    if (Vjj <= 0) next
+    lphi <- dnorm(-nu[j], 0, sqrt(Vjj), log = TRUE)
+    if (q == 1L) {
+      lcond <- 0
+    } else {
+      mcond <- (-nu[-j]) - V[-j, j] / Vjj * (-nu[j])
+      Scond <- V[-j, -j, drop = FALSE] -
+               V[-j, j, drop = FALSE] %*% V[j, -j, drop = FALSE] / Vjj
+      Scond <- (Scond + t(Scond)) / 2
+      lcond <- logcdf_ME_r(mcond, Scond, miwa_qmax = 2L)
+    }
+    g[j] <- exp(lphi + lcond - logZ)
+  }
+  if (!all(is.finite(g))) return(rep(0, ncol(Gamma)))
+  as.numeric(Sigma %*% t(Gamma) %*% g)
+}
+
+## Returns list(Gamma = q'xp, nu = q', Delta = q'xq', mu_shift = p-vector)
+## with q' <= q.  mu_shift is the FIRST-MOMENT COMPENSATION for the cut:
+## deleting a skew row removes that dimension's contribution to the CSN mean
+## (first-order in its skew-state correlation), so the caller must add
+## mu_shift = offset(before) - offset(after) to the Gaussian location.
+## Without it, saturated pruning (rank cap binding every period, e.g. a
+## persistent single-shock model with |alpha| large) accumulates a systematic
+## state-mean drift that makes the likelihood IMPROPER (one-step predictive
+## densities integrating to 0.03-0.97) -- caught by the alpha_z SBC on the
+## Reiter HANK state space (2026-07; coverage collapsed to 3-6%).
+#' @noRd
+dim_red4_r <- function(Gamma, nu, Delta, Sigma, cut_tol = 0.01, max_q = 5L) {
+  q <- nrow(Gamma)
+  no_shift <- rep(0, ncol(Gamma))
+  if (q == 0L)
+    return(list(Gamma = Gamma, nu = nu, Delta = Delta, mu_shift = no_shift))
 
   ## Pruning criterion (reference dim_red4): the correlation between each
   ## skewness dimension and the STATE,
@@ -192,20 +310,56 @@ dim_red4_r <- function(Gamma, nu, Delta, Sigma, cut_tol = 0.01) {
   max_corr <- apply(corr_sx, 1, max)
 
   keep_idx <- which(max_corr >= cut_tol)
-  if (length(keep_idx) == q) {
-    return(list(Gamma = Gamma, nu = nu, Delta = Delta))
+  ## COLLINEARITY guard (2026-07, Reiter-HANK investigation): when the skew
+  ## rows are propagated images of the SAME shock direction (persistent
+  ## single-shock models), corr among skew dims -> 1 within a few periods.
+  ## Near-singular V = Delta + G S G' breaks the Phi_q evaluators (Miwa
+  ## errors -> ME fallback whose ~0.03 ABSOLUTE error on ~1e-8 tail CDFs is
+  ## tens of nats in the top-minus-bottom log difference -> IMPROPER
+  ## likelihood, one-step predictive integrals 0.04-1e14). Nearly-duplicate
+  ## constraints are nearly-free to drop UNDER MEAN COMPENSATION (below), so
+  ## iteratively drop the weaker row of any pair with |corr| > 0.995 -- this
+  ## keeps V numerically nonsingular and the Miwa path exact.
+  if (length(keep_idx) > 1L) {
+    repeat {
+      Vk <- cov_full[keep_idx, keep_idx, drop = FALSE]
+      dk <- d_skew[keep_idx]
+      Ck <- abs(Vk) / outer(dk, dk)
+      diag(Ck) <- 0
+      mx <- which(Ck == max(Ck), arr.ind = TRUE)[1L, ]
+      if (Ck[mx[1L], mx[2L]] <= 0.9 || length(keep_idx) <= 1L) break
+      pair <- keep_idx[c(mx[1L], mx[2L])]
+      drop_row <- pair[which.min(max_corr[pair])]
+      keep_idx <- setdiff(keep_idx, drop_row)
+    }
   }
+  ## Rank-based cap: keep the max_q rows with the largest skew-vs-state
+  ## correlation (original row order preserved for reproducibility).
+  if (is.finite(max_q) && length(keep_idx) > max_q) {
+    keep_idx <- keep_idx[order(max_corr[keep_idx],
+                               decreasing = TRUE)[seq_len(max_q)]]
+    keep_idx <- sort(keep_idx)
+  }
+  if (length(keep_idx) == q) {
+    return(list(Gamma = Gamma, nu = nu, Delta = Delta, mu_shift = no_shift))
+  }
+  off_before <- .csn_mean_offset(Gamma, nu, Delta, Sigma)
   if (length(keep_idx) == 0L) {
     return(list(
-      Gamma = matrix(0, nrow = 0L, ncol = ncol(Gamma)),
-      nu    = numeric(0),
-      Delta = matrix(0, nrow = 0L, ncol = 0L)
+      Gamma    = matrix(0, nrow = 0L, ncol = ncol(Gamma)),
+      nu       = numeric(0),
+      Delta    = matrix(0, nrow = 0L, ncol = 0L),
+      mu_shift = off_before
     ))
   }
+  G_k <- Gamma[keep_idx, , drop = FALSE]
+  n_k <- nu[keep_idx]
+  D_k <- Delta[keep_idx, keep_idx, drop = FALSE]
   list(
-    Gamma = Gamma[keep_idx, , drop = FALSE],
-    nu    = nu[keep_idx],
-    Delta = Delta[keep_idx, keep_idx, drop = FALSE]
+    Gamma    = G_k,
+    nu       = n_k,
+    Delta    = D_k,
+    mu_shift = off_before - .csn_mean_offset(G_k, n_k, D_k, Sigma)
   )
 }
 
@@ -303,6 +457,25 @@ dim_red4_r <- function(Gamma, nu, Delta, Sigma, cut_tol = 0.01) {
   ## (validate-sbc.R) is replaced by the MATCHING joint CSN rejection sampler so
   ## the DGP and likelihood share the same law (A3.3 consistency).
 
+  .csn_state_noise_lift(RR, DD, Sigma_e, alpha, me_variance)
+}
+
+
+#' Lift a skewed shock law through a linear state-space loading (generic core)
+#'
+#' The generic CSN state-noise construction shared by the DSGE path
+#' (\code{.get_csn_shock_params}, which extracts \code{RR}/\code{DD} from a
+#' perturbation solution) and non-DSGE linear state spaces (e.g. the Reiter
+#' HANK adapter \code{hank_reiter_pskf_loglik}): given state loading
+#' \code{eta = RR e}, observation feedthrough \code{DD e}, seed covariance
+#' \code{Sigma_e} and per-shock skewness \code{alpha}, build the CSN
+#' parameters of \code{eta} consumed by \code{.pskf_filter}. All derivation
+#' notes live at the (single) call site above.
+#' @noRd
+.csn_state_noise_lift <- function(RR, DD, Sigma_e, alpha, me_variance = 0) {
+  n_exo <- ncol(RR)
+  n_obs <- nrow(DD)
+
   ## State noise covariance (Landmine 1: ghu excludes Sigma_e)
   Sigma_eta <- RR %*% Sigma_e %*% t(RR)   # n_state x n_state
 
@@ -323,25 +496,24 @@ dim_red4_r <- function(Gamma, nu, Delta, Sigma, cut_tol = 0.01) {
   Gamma_e   <- diag(alpha / sigma_e, nrow = n_exo)  # n_exo x n_exo
 
   ## Gamma_eta = Gamma_e Sigma_e RR' (RR Sigma_e RR')^{-1}   (n_exo x n_state)
-  ## If Sigma_eta is nearly singular, use pseudoinverse (models with
-  ## n_state > n_exo have redundant states that don't get shocked).
-  tryCatch({
-    S_eta_inv  <- solve(Sigma_eta)
-    Gamma_eta  <- Gamma_e %*% Sigma_e %*% t(RR) %*% S_eta_inv
-  }, error = function(e) {
-    ## Pseudoinverse fallback for singular Sigma_eta (degenerate models)
-    S_eta_pinv <- MASS::ginv(Sigma_eta)
-    Gamma_eta  <<- Gamma_e %*% Sigma_e %*% t(RR) %*% S_eta_pinv
-  })
+  ## If Sigma_eta is singular, use the pseudoinverse (models with
+  ## n_state > n_exo have redundant states that don't get shocked; a tall
+  ## full-loading RR -- the Reiter case -- ALWAYS lands here, and the
+  ## pseudoinverse Gamma_eta is exact: Gamma_eta (RR e) = Gamma_e e).
+  Gamma_eta <- tryCatch(
+    Gamma_e %*% Sigma_e %*% t(RR) %*% solve(Sigma_eta),
+    error = function(e)
+      Gamma_e %*% Sigma_e %*% t(RR) %*% MASS::ginv(Sigma_eta))
 
   ## Delta_eta = I + Gamma_e Sigma_e_perp Gamma_e'
-  ## Sigma_e_perp = Sigma_e - Sigma_e RR' S_eta^{-1} RR Sigma_e (Schur complement)
-  tryCatch({
+  ## Sigma_e_perp = Sigma_e - Sigma_e RR' S_eta^{-1} RR Sigma_e (Schur
+  ## complement). Fallback I when Sigma_eta is singular -- EXACT whenever
+  ## every shock loads fully into the state (rank(RR) = n_exo), since the
+  ## Schur complement is then identically zero.
+  Delta_eta <- tryCatch({
     Sigma_e_perp <- Sigma_e - Sigma_e %*% t(RR) %*% solve(Sigma_eta) %*% RR %*% Sigma_e
-    Delta_eta    <- diag(n_exo) + Gamma_e %*% Sigma_e_perp %*% t(Gamma_e)
-  }, error = function(e) {
-    Delta_eta <<- diag(n_exo)  # fallback: square invertible case
-  })
+    diag(n_exo) + Gamma_e %*% Sigma_e_perp %*% t(Gamma_e)
+  }, error = function(e) diag(n_exo))
 
   ## nu_eta = 0 (standard CSN for skew-normal shocks)
   nu_eta <- rep(0, n_exo)
@@ -380,10 +552,20 @@ dim_red4_r <- function(Gamma, nu, Delta, Sigma, cut_tol = 0.01) {
 ## Gamma_filt_path, nu_filt_path, Delta_filt_path,
 ## Gamma_pred_path, nu_pred_path, Delta_pred_path) — per-period arrays
 ## needed by the CSN backward pass in pskf_smoother().
+## max_q (default 5): hard rank-based cap on the retained skew dimension,
+## chosen so every Phi_q call stays inside the deterministic-EXACT Miwa range
+## (q <= 5).  Verified 2026-07-03 (scratchpad/pskf-*.R + memory note
+## pskf-multishock-pruning-bias): the historical multi-shock bias
+## (-7.3 nats at T=12, alpha=(+2,-2)) was ENTIRELY Mendell-Elston Phi_q
+## evaluation error at q > 5, not discarded skew mass; capping q at 5 cuts
+## it to |gap| <= 0.14 nat on the worst measured fixture.  max_q = Inf
+## restores the old uncapped behavior (cut_tol-threshold pruning only, ME
+## for q > 5) -- NOT recommended for multi-shock skew.
 #' @noRd
 .pskf_filter <- function(Y, TT, ZZ, mu_eta, Sigma_eta, Gamma_eta, nu_eta,
                           Delta_eta, mu_eps, Sigma_eps,
                           cut_tol = 0.01,
+                          max_q = 5L,
                           store_path = FALSE) {
   ## Y: n_obs x T matrix
   n_obs   <- nrow(Y)
@@ -539,10 +721,14 @@ dim_red4_r <- function(Gamma, nu, Delta, Sigma, cut_tol = 0.01) {
     ## ---- PRUNE ---------------------------------------------------------------
     ## Keep q bounded (brief Landmine 2). Pruning after prediction before update.
     if (q_new > 0L) {
-      pruned <- dim_red4_r(Gamma_pred, nu_pred, Delta_pred, Sigma_pred, cut_tol)
+      pruned <- dim_red4_r(Gamma_pred, nu_pred, Delta_pred, Sigma_pred, cut_tol,
+                           max_q = max_q)
       Gamma_pred <- pruned$Gamma
       nu_pred    <- pruned$nu
       Delta_pred <- pruned$Delta
+      ## first-moment compensation for the cut skew mass (see dim_red4_r):
+      ## without this, saturated pruning drifts the state mean systematically
+      mu_pred <- mu_pred + pruned$mu_shift
     }
     q_pred <- nrow(Gamma_pred)
 
@@ -761,6 +947,9 @@ dim_red4_r <- function(Gamma, nu, Delta, Sigma, cut_tol = 0.01) {
 #' @param me_variance Measurement error variance (default 0)
 #' @param system_priors Named list of system-prior closures, or NULL
 #' @param cut_tol     Pruning tolerance (default 0.01; brief Landmine 2)
+#' @param max_q       Hard cap on the retained skew dimension (default 5,
+#'   the Miwa-exact Phi_q range; see .pskf_filter). Inf = old uncapped
+#'   behavior (Mendell-Elston for q > 5; biased under strong multi-shock skew).
 #' @param ...         Ignored (for interface compatibility)
 #' @return function(theta) -> list(logpost, loglik, logprior)
 #' @noRd
@@ -768,6 +957,7 @@ make_log_posterior_pskf <- function(model, data, prior_spec, obs_vars,
                                      compiled, me_variance = 0,
                                      system_priors = NULL,
                                      cut_tol = 0.01,
+                                     max_q = 5L,
                                      ...) {
   ## Validate data orientation: need T x n_obs
   if (ncol(data) == length(obs_vars)) {
@@ -862,7 +1052,8 @@ make_log_posterior_pskf <- function(model, data, prior_spec, obs_vars,
         Delta_eta = csn$Delta_eta,
         mu_eps    = csn$mu_eps,
         Sigma_eps = csn$Sigma_eps,
-        cut_tol   = cut_tol
+        cut_tol   = cut_tol,
+        max_q     = max_q
       ),
       error = function(e) -Inf
     )
@@ -881,6 +1072,255 @@ make_log_posterior_pskf <- function(model, data, prior_spec, obs_vars,
 
     ## power-posterior: temper the LIKELIHOOD only; lp (prior) and lsp (system
     ## prior) are prior-side and untempered.
+    logpost <- lp + .dynhr_opt("power_posterior", default = 1) * ll + lsp
+    list(logpost = logpost, loglik = ll, logprior = lp)
+  }
+}
+
+
+## ===========================================================================
+## PSKF ON THE PRUNED ORDER-2 STATE SPACE
+## ===========================================================================
+## The order-2 AFVRR augmented system (R/pruned-state-space.R) is LINEAR in the
+## augmented state xi_t = [x1; x2; x1(x)x1]:
+##   xi_{t+1} = Tlin xi_t + c_drift + G  r_t
+##   y_t      = Dxi  xi_t + d_y     + Gv r_t
+## with the single "raw innovation" r_t = [eps; eps(x)x1; x1(x)eps; eps(x)eps]
+## driving BOTH the state (via G) and the observation (via Gv) -- i.e. the state
+## and observation noise are CORRELATED (Cov = G Cr0 Gv' =: SS != 0, verified
+## ~23 on rbc2shock).  .pskf_filter has no cross-covariance slot; it assumes
+## eta_t (state) INDEPENDENT of eps_t (obs).
+##
+## RESOLUTION (exact, keeps .pskf_filter verbatim): carry the raw innovation
+## r_t IN the augmented state.  Define chi_t = [xi_t; r_t] (dim d + Dr).  Then
+##   chi_{t+1} = [ Tlin  G ] chi_t + [ 0 ] r_{t+1}
+##               [  0    0 ]         [ I ]
+##   y_t       = [ Dxi  Gv ] chi_t                     (NOISE-FREE observation!)
+## The observation feedthrough Gv r_t is now a deterministic map of the state
+## block r_t, so the state noise (r_{t+1}, loading [0; I]) is uncorrelated with
+## the -- now zero -- observation noise.  This is EXACTLY the .pskf_filter form
+##   chi_t = TT chi_{t-1} + eta_t,   y_t = ZZ chi_t + eps_t (Sigma_eps = 0),
+## with TT = [[Tlin, G],[0,0]], ZZ = [Dxi, Gv], RR = [0; I_Dr], DD = 0.
+## The innovation Omega = ZZ Sigma_pred ZZ' stays PD because the r-block of the
+## state carries the full Cr0 (Omega picks up Gv Cr0 Gv' = HH > 0).
+##
+## SKEW LIFT: the raw-innovation covariance is Cr0 (dim Dr); the CSN skew lives
+## ONLY on its first n_u components (the eps block).  Feed the generic lift
+## .csn_state_noise_lift(RR, DD, Sigma_e = Cr0, alpha = [alpha_shocks; 0..0]):
+## the eps rows carry Gamma_e = diag(alpha/sigma_e) and the mean correction; the
+## Gaussian/quadratic augmentation rows (eps(x)x1, x1(x)eps, eps(x)eps) all have
+## alpha = 0, so their Gamma_e rows and mean corrections vanish -- exactly the
+## brief's "original shocks carry the skew, augmentation blocks are Gaussian."
+##
+## TIMING / DEMEANING (for exact Gaussian-limit parity with pruned_ss_loglik):
+## .pskf_filter inits mu_filt = 0, Sigma_filt = P0 (Lyapunov fixed point of
+## (TT, Sigma_eta)) then does ONE predict before the first update, so its t=1
+## prediction is the augmented STATIONARY (mean 0, cov P0).  pruned_ss_loglik
+## instead inits directly at the stationary (mu0, Sxi0).  To align, we work in
+## DEVIATIONS from the stationary mean (state mean 0, matching .pskf_filter's
+## init exactly) and subtract the Gaussian stationary observation mean
+## d_y + Dxi mu0 (mu0 = (I - Tlin)^{-1} c_drift) from Y.  Under skew the filter's
+## own mu_eta keeps E[eta] = 0, so subtracting the Gaussian mean stays correct.
+## Verified: alpha=0 parity vs pruned_ss_loglik = O(1e-13) (test-pskf-order2.R).
+
+## Assemble the augmented CSN order-2 state space from a pruned_ss object.
+## Returns list(TT, ZZ, RR, DD, Cr0, obs_mean, n_u, Dr) for the demeaned filter.
+#' @noRd
+.pskf_order2_augment <- function(pss, obs_vars) {
+  sys     <- pss$sys
+  d       <- sys$d
+  n_u     <- sys$n_u
+  obs_idx <- match(obs_vars, pss$endo_names)
+  if (any(is.na(obs_idx)))
+    stop(".pskf_order2_augment: obs_vars not in pss: ",
+         paste(obs_vars[is.na(obs_idx)], collapse = ", "))
+  n_obs <- length(obs_vars)
+
+  Tlin <- sys$Tlin                        # d x d
+  G    <- sys$G                           # d x Dr
+  Dr   <- ncol(G)
+  Dxi  <- sys$Dxi[obs_idx, , drop = FALSE]  # n_obs x d
+  Gv   <- sys$Gv[obs_idx,  , drop = FALSE]  # n_obs x Dr
+
+  ## Stationary raw-innovation covariance Cr0 (a = 0, P = Sigma_x)
+  Sigma_x <- solve_lyapunov(sys$hx, sys$hu %*% sys$Sigma_e %*% t(sys$hu))
+  Cr0     <- .order2_cov_r(numeric(sys$n_s), Sigma_x, sys$Sigma_e)
+
+  da <- d + Dr
+  TT <- matrix(0, da, da)
+  TT[seq_len(d), seq_len(d)]        <- Tlin
+  TT[seq_len(d), (d + 1L):da]       <- G
+  ZZ <- matrix(0, n_obs, da)
+  ZZ[, seq_len(d)]                  <- Dxi
+  ZZ[, (d + 1L):da]                 <- Gv
+  RR <- rbind(matrix(0, d, Dr), diag(Dr))   # da x Dr  (noise into r block only)
+  DD <- matrix(0, n_obs, Dr)                 # no direct obs feedthrough
+
+  ## Gaussian stationary observation mean (demean target):
+  ##   d_y = ys + 0.5*ghss + c_v ;  mu0 = (I - Tlin)^{-1} c_drift
+  ##   obs_mean = Dxi mu0 + d_y
+  c_drift  <- sys$cc + sys$c_u
+  mu0      <- as.numeric(solve(diag(d) - Tlin, c_drift))
+  d_y      <- pss$ys[obs_vars] + 0.5 * sys$ghss[obs_idx] + sys$c_v[obs_idx]
+  obs_mean <- as.numeric(Dxi %*% mu0) + d_y
+
+  list(TT = TT, ZZ = ZZ, RR = RR, DD = DD, Cr0 = Cr0,
+       obs_mean = obs_mean, n_u = n_u, Dr = Dr)
+}
+
+
+#' Create a PSKF log-posterior evaluator on the pruned ORDER-2 state space
+#'
+#' Factory (mirror of \code{make_log_posterior_pskf}) that runs the
+#' closed-skew-normal (CSN) Kalman filter on the AFVRR (2018) pruned
+#' second-order augmented state space, so skewed shocks propagate through the
+#' second-order dynamics.  The augmented system is linear in the augmented
+#' state, so the SAME CSN machinery (\code{.pskf_filter} + the shock-CSN lift
+#' \code{.csn_state_noise_lift}) applies once the raw innovation \eqn{r_t} is
+#' carried in the state (decorrelating the state/observation noise; see the
+#' derivation note in this file).
+#'
+#' At \code{alpha = 0} for every shock this reduces EXACTLY (to \eqn{O(10^{-13})})
+#' to the Gaussian pruned-order-2 filter \code{\link{pruned_ss_loglik}}.
+#'
+#' @param model       dynhr_mod (from \code{parse_mod}).
+#' @param data        Observation matrix (T x n_obs or n_obs x T).
+#' @param prior_spec  Prior specification (from \code{extract_prior_spec}).
+#' @param obs_vars    Character vector of observed variable names.
+#' @param compiled    dynhr_compiled (from \code{compile_model}, order >= 2).
+#' @param me_variance Measurement-error variance (default 0).
+#' @param system_priors Named list of system-prior closures, or NULL.
+#' @param cut_tol     Pruning tolerance (default 0.01; see \code{.pskf_filter}).
+#' @param max_q       Hard cap on the retained skew dimension (default 5, the
+#'   Miwa-exact Phi_q range).
+#' @param ...         Ignored (interface compatibility).
+#' @return function(theta) -> list(logpost, loglik, logprior)
+#' @export
+make_log_posterior_pskf_order2 <- function(model, data, prior_spec, obs_vars,
+                                            compiled, me_variance = 0,
+                                            system_priors = NULL,
+                                            cut_tol = 0.01,
+                                            max_q = 5L,
+                                            ...) {
+  ## Validate data orientation: need n_obs x T
+  if (ncol(data) == length(obs_vars)) {
+    Y <- t(data)   # -> n_obs x T
+  } else {
+    Y <- data       # assume already n_obs x T
+  }
+
+  if (is.null(compiled$lead_lag_incidence) &&
+      !is.null(compiled$model$lead_lag_incidence))
+    compiled$lead_lag_incidence <- compiled$model$lead_lag_incidence
+
+  sys_cache <- cache_system_structure(compiled)
+  ss_warm   <- NULL
+
+  function(theta) {
+    lp <- log_prior(theta, prior_spec)
+    if (!is.finite(lp))
+      return(list(logpost = -Inf, loglik = -Inf, logprior = lp))
+
+    params <- .apply_theta_to_params(model, theta)
+
+    ## --- Steady state ---
+    ss_result <- solve_steady_state(model, compiled, params,
+                                    y0 = ss_warm, verbose = FALSE)
+    if (is.null(ss_result) || !isTRUE(ss_result$converged)) {
+      if (!is.null(ss_warm))
+        ss_result <- solve_steady_state(model, compiled, params,
+                                        verbose = FALSE)
+      if (is.null(ss_result) || !isTRUE(ss_result$converged)) {
+        ss_warm <<- NULL
+        return(list(logpost = -Inf, loglik = -Inf, logprior = lp))
+      }
+    }
+    ss_warm <<- ss_result$ss
+    params  <- ss_result$params %||% params
+
+    ## --- Order-1 solve (for BK / stationarity guard + order-2 input) ---
+    sys <- extract_system_matrices_fast(sys_cache, ss_result$ss, params)
+    dr1 <- .solve_from_system(sys, model, compiled, ss_result$ss, params, FALSE)
+    if (is.null(dr1) || !isTRUE(dr1$bk_satisfied))
+      return(list(logpost = -Inf, loglik = -Inf, logprior = lp))
+
+    ns <- length(dr1$state_idx)
+    ev <- dr1$eigenvalues
+    spectral_radius <- if (!is.null(ev) && length(ev) >= ns)
+      max(Mod(ev[seq_len(ns)]))
+    else
+      max(Mod(eigen(dr1$ghx[dr1$state_idx, , drop = FALSE],
+                    only.values = TRUE)$values))
+    if (spectral_radius >= 1)
+      return(list(logpost = -Inf, loglik = -Inf, logprior = lp))
+
+    ## --- Order-2 solve + pruned-SS object ---
+    dr2 <- tryCatch(
+      solve_perturbation_order2(model, compiled, ss_result$ss, params, dr1,
+                                verbose = FALSE),
+      error = function(e) NULL
+    )
+    if (is.null(dr2))
+      return(list(logpost = -Inf, loglik = -Inf, logprior = lp))
+
+    pss <- tryCatch(
+      pruned_state_space(dr2, model, params),
+      error = function(e) NULL
+    )
+    if (is.null(pss))
+      return(list(logpost = -Inf, loglik = -Inf, logprior = lp))
+
+    ## --- Assemble augmented CSN order-2 state space ---
+    aug <- tryCatch(.pskf_order2_augment(pss, obs_vars),
+                    error = function(e) NULL)
+    if (is.null(aug))
+      return(list(logpost = -Inf, loglik = -Inf, logprior = lp))
+
+    ## Per-shock skewness lifted onto the raw innovation r_t: only the first
+    ## n_u components (the eps block) carry alpha; augmentation blocks = 0.
+    alpha_shocks <- .get_shock_skewness(model, dr2$exo_names, params)
+    alpha_aug    <- c(as.numeric(alpha_shocks), rep(0, aug$Dr - aug$n_u))
+
+    csn <- tryCatch(
+      .csn_state_noise_lift(aug$RR, aug$DD, aug$Cr0, alpha_aug, me_variance),
+      error = function(e) NULL
+    )
+    if (is.null(csn))
+      return(list(logpost = -Inf, loglik = -Inf, logprior = lp))
+
+    ## Demean Y by the Gaussian stationary observation mean (see timing note)
+    Y_dm <- Y - aug$obs_mean
+
+    ll <- tryCatch(
+      .pskf_filter(
+        Y         = Y_dm,
+        TT        = aug$TT,
+        ZZ        = aug$ZZ,
+        mu_eta    = csn$mu_eta,
+        Sigma_eta = csn$Sigma_eta,
+        Gamma_eta = csn$Gamma_eta,
+        nu_eta    = csn$nu_eta,
+        Delta_eta = csn$Delta_eta,
+        mu_eps    = csn$mu_eps,
+        Sigma_eps = csn$Sigma_eps,
+        cut_tol   = cut_tol,
+        max_q     = max_q
+      ),
+      error = function(e) -Inf
+    )
+    if (!is.finite(ll))
+      return(list(logpost = -Inf, loglik = -Inf, logprior = lp))
+
+    ## --- System priors ---
+    lsp <- 0
+    if (!is.null(system_priors) && length(system_priors) > 0L) {
+      for (fn in system_priors) {
+        v <- tryCatch(fn(dr2, params), error = function(e) -Inf)
+        lsp <- lsp + v
+        if (!is.finite(lsp)) break
+      }
+    }
+
     logpost <- lp + .dynhr_opt("power_posterior", default = 1) * ll + lsp
     list(logpost = logpost, loglik = ll, logprior = lp)
   }

@@ -342,6 +342,20 @@
 #'   `"symbolic"` uses the Faà di Bruno chain-rule expansion; `"fd"` uses
 #'   a finite-difference oracle (requires single-period leads/lags and no
 #'   AUX variables).
+#' @param sparse Logical or `NULL` (default). Controls the ghxxx Kronecker
+#'   solve. `FALSE` uses the default dense-eligible `.solve_kron_compact`
+#'   solver (eigenbasis fast path + dense real-Schur fallback) — unchanged
+#'   numerical output. `TRUE` uses the memory-light complex-Schur Kronecker
+#'   Bartels–Stewart solver `.solve_kron_compact_sparse`, which never
+#'   materialises the ns^3 × ns^3 Kronecker matrix and so breaks the dense
+#'   order-3 wall on high-dimensional-but-sparse state blocks (e.g. the
+#'   emitted finite HANK, n_s ≈ 32). `NULL` (auto) turns the sparse route on
+#'   automatically once `n_state^3` exceeds `sparse_threshold`. The sparse
+#'   route is bit-parity to the dense path on well-conditioned models and
+#'   residual-verified (with dense fallback) otherwise.
+#' @param sparse_threshold Integer. When `sparse = NULL`, the sparse ghxxx
+#'   solve is used iff `n_state^3 >= sparse_threshold` (default 8000, i.e.
+#'   n_state >= 20). Ignored when `sparse` is `TRUE`/`FALSE`.
 #' @return A DecisionRules3 object extending DecisionRules2 with fields
 #'   ghxxx, ghxxu, ghxuu, ghuuu (and all lower-order fields preserved)
 #'
@@ -355,7 +369,9 @@
 solve_perturbation_order3 <- function(model, compiled, ss, params, dr2,
                                        verbose = FALSE,
                                        solver_method = c("auto", "direct", "qz"),
-                                       backend = c("auto", "symbolic", "fd")) {
+                                       backend = c("auto", "symbolic", "fd"),
+                                       sparse = NULL,
+                                       sparse_threshold = 8000L) {
   if (!inherits(dr2, "DecisionRules2")) {
     stop("dr2 must be a DecisionRules2 object from solve_perturbation_order2().")
   }
@@ -601,7 +617,22 @@ solve_perturbation_order3 <- function(model, compiled, ss, params, dr2,
   # the retired legacy order-3 solver: A_L * X + fp * X * hx^{otimes 3} = RHS
   # (verified bit-parity on rbc/medium_nonlinear_test). `solver_method` is
   # retained for back-compat but is now a no-op (the solver self-selects).
-  ghxxx <- .solve_kron_compact(A_L, fp, hx, 3L, -Phi_xxx, verbose = verbose)
+  #
+  # OPT-IN sparse route: for high-dimensional-but-sparse state blocks (finite
+  # HANK, n_s ~ 32 -> ns^3 ~ 3.3e4 RHS cols) the dense fallback of
+  # .solve_kron_compact forms an 8.6 GB ns^3 x ns^3 Kronecker matrix -- a
+  # documented >4h / 27 GB wall. .solve_kron_compact_sparse never materialises
+  # it (complex-Schur Kronecker Bartels-Stewart). It is bit-parity on
+  # well-conditioned models and residual-verified (dense fallback) otherwise.
+  use_sparse <- if (is.null(sparse)) (n_s^3 >= sparse_threshold) else isTRUE(sparse)
+  if (use_sparse) {
+    if (verbose) cat(sprintf(
+      "  ghxxx: sparse Kronecker solve (n_s=%d, ns^3=%d cols).\n", n_s, n_s^3))
+    ghxxx <- .solve_kron_compact_sparse(A_L, fp, hx, 3L, -Phi_xxx,
+                                        verbose = verbose)
+  } else {
+    ghxxx <- .solve_kron_compact(A_L, fp, hx, 3L, -Phi_xxx, verbose = verbose)
+  }
 
   ghxxx <- .symmetrize_cube_cols(ghxxx, n_s)
 

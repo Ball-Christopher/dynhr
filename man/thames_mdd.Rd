@@ -130,5 +130,5 @@ cat(sprintf("Estimated logZ = \%.4f  (truth = \%.4f, se = \%.4f)\n",
 Metodiev, M., Perrot-Dockès, M., Ouadah, S., Irons, N. J., & Raftery,
 A. E. (2023). Easily Computed Marginal Likelihoods from Posterior
 Simulation Using the THAMES Estimator.
-\url{https://doi.org/10.48550/arXiv.2301.08847}
+\doi{10.48550/arXiv.2301.08847}
 }

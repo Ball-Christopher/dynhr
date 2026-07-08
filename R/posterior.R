@@ -172,6 +172,74 @@ shock_cov <- function(model, params = NULL, exo_names = NULL) {
   invisible(NULL)
 }
 
+## Shared solve pipeline: theta -> (dr, params) or NULL on infeasibility.
+##
+## Factored out of make_log_posterior's gaussian-path closure so that
+## make_loglik_contrib() (R/posterior.R) can reuse the EXACT same
+## steady-state-solve -> BK-check -> stationarity-guard pipeline rather than
+## re-deriving a subtly different one (the source of the make_posterior vs
+## hand-rolled-pipeline loglik discrepancy on nk_small this closes).
+##
+## `state` is a mutable environment holding the per-closure warm-start cache
+## (`state$ss_warm`), so repeated calls across theta draws keep warm-starting
+## the steady-state solve exactly like make_log_posterior does.
+##
+## @param model, compiled, sys_cache As in make_log_posterior.
+## @param theta      Named numeric draw.
+## @param state      environment with a `ss_warm` field (mutable cache).
+## @param shock_scale Passed through only to decide whether a near-unit-root
+##   draw must be rejected outright (heteroskedastic shocks are incompatible
+##   with the diffuse phase) -- mirrors make_log_posterior's guard exactly.
+## @param lik_init   As in kalman_filter(); used only to resolve which init
+##   would be "in force" for the stationarity guard (mirrors
+##   make_log_posterior's resolution so the SAME draws are rejected).
+## @return list(dr = <decision rules>, params = <params>) on success, or
+##   NULL on infeasibility (BK violation or unit root under a stationary
+##   init).
+.solve_dr_for_theta <- function(model, compiled, sys_cache, theta, state,
+                                lik_init = "auto", shock_scale = NULL) {
+  params <- .apply_theta_to_params(model, theta)
+
+  ss_result <- solve_steady_state(model, compiled, params,
+                                  y0 = state$ss_warm, verbose = FALSE)
+  if (is.null(ss_result) || !isTRUE(ss_result$converged)) {
+    ## Retry once from the cold initval-based guess before declaring
+    ## infeasible (mirrors make_log_posterior's warm-start retry).
+    if (!is.null(state$ss_warm))
+      ss_result <- solve_steady_state(model, compiled, params,
+                                      verbose = FALSE)
+    if (is.null(ss_result) || !isTRUE(ss_result$converged)) {
+      state$ss_warm <- NULL
+      return(NULL)
+    }
+  }
+  state$ss_warm <- ss_result$ss
+
+  ## Re-derive any steady_state_model-computed parameter (Tier 13 #1 fix).
+  params <- ss_result$params %||% params
+  sys <- extract_system_matrices_fast(sys_cache, ss_result$ss, params)
+  dr  <- .solve_from_system(sys, model, compiled, ss_result$ss, params, FALSE)
+  if (is.null(dr) || !isTRUE(dr$bk_satisfied)) return(NULL)
+
+  ## Stationarity guard identical to make_log_posterior's gaussian path.
+  ns <- length(dr$state_idx)
+  ev <- dr$eigenvalues
+  spectral_radius <- if (!is.null(ev) && length(ev) >= ns)
+    max(Mod(ev[seq_len(ns)]))
+  else
+    max(Mod(eigen(dr$ghx[dr$state_idx, , drop = FALSE],
+                  only.values = TRUE)$values))
+  init_in_force <- if (identical(lik_init, "auto"))
+    (if (spectral_radius > 1 - 1e-6) "diffuse" else "stationary")
+  else lik_init
+  if (spectral_radius >= 1 &&
+      (identical(init_in_force, "stationary") || !is.null(shock_scale))) {
+    return(NULL)
+  }
+
+  list(dr = dr, params = params)
+}
+
 #' Create a cached log-posterior evaluator for MCMC
 #'
 #' Call this ONCE before MCMC. Returns a closure that evaluates the
@@ -219,6 +287,10 @@ shock_cov <- function(model, params = NULL, exo_names = NULL) {
 #'   need the true likelihood are unaffected. Only \code{$logpost} is tempered.
 #'   Can also be set globally via
 #'   \code{dynhr_set_options(power_posterior = 0.5)}.
+#' @param pruned_order For \code{likelihood = "pruned"}: the perturbation order
+#'   of the AFVRR pruned state space, \code{2L} (default) or \code{3L}. Order 3
+#'   uses \code{pruned_ss_loglik3} (skewness/kurtosis content via the cubic
+#'   augmented state). Ignored for other likelihoods.
 #' @param ...         Additional arguments passed to the cumulant likelihood
 #'   constructor when \code{likelihood = "cumulant"} (e.g. \code{order},
 #'   \code{cumulant_orders}, \code{cumulant_weight}), or to
@@ -226,7 +298,7 @@ shock_cov <- function(model, params = NULL, exo_names = NULL) {
 #'   \code{n_particles}, \code{ess_target}, \code{n_mh}, \code{seed}).
 #' @return function(theta) -> list(logpost, loglik, logprior)
 #' @noRd
-make_log_posterior <- function(model, data, prior_spec, obs_vars,
+make_log_posterior <- function(model, data, prior_spec, obs_vars = NULL,
                                compiled, me_variance = 0,
                                likelihood = c("gaussian", "cumulant",
                                               "whittle", "tpf", "pskf",
@@ -241,6 +313,7 @@ make_log_posterior <- function(model, data, prior_spec, obs_vars,
                                ctx = NULL,
                                power = NULL,
                                student_df = NULL,
+                               pruned_order = 2L,
                                ...) {
   ## When a ctx is supplied, unpack its fields over the individual args.
   ## Individual args supplied alongside ctx are silently overridden by ctx.
@@ -258,9 +331,22 @@ make_log_posterior <- function(model, data, prior_spec, obs_vars,
     ms_spec_ctx        <- ctx$ms_spec        # shock-variance MS path
     ms_struct_spec_ctx <- ctx$ms_struct_spec # structural MS path (new)
     student_df         <- ctx$student_df %||% student_df
+    pruned_order       <- ctx$pruned_order %||% pruned_order
     ## tpf_options are merged into ... via do.call below when likelihood="tpf"
   }
   likelihood <- match.arg(likelihood)
+  if (!pruned_order %in% c(2L, 3L))
+    stop("make_log_posterior: `pruned_order` must be 2 or 3.")
+
+  ## Default obs_vars from the model's varobs declaration (parse_mod also
+  ## exposes it as model$obs_vars) — pathological-DSGE paper gap #4.
+  if (is.null(obs_vars) || length(obs_vars) == 0L) {
+    obs_vars <- model$obs_vars %||% model$varobs_names
+    if (is.null(obs_vars) || length(obs_vars) == 0L)
+      stop("make_log_posterior: `obs_vars` not supplied and the model ",
+           "declares no `varobs`; pass obs_vars= or add a varobs line to ",
+           "the .mod.", call. = FALSE)
+  }
 
   ## Power-posterior (generalised-Bayes) tempering exponent zeta in (0, 1].
   ## Resolves: explicit arg > global option `power_posterior` > default 1.
@@ -451,12 +537,14 @@ make_log_posterior <- function(model, data, prior_spec, obs_vars,
     ## Merge any cut_tol from ... for exposed pruning parameter.
     pskf_dots <- list(...)
     cut_tol   <- if (!is.null(pskf_dots$cut_tol)) pskf_dots$cut_tol else 0.01
+    max_q     <- if (!is.null(pskf_dots$max_q)) pskf_dots$max_q else 5L
     return(make_log_posterior_pskf(
       model, data, prior_spec, obs_vars,
       compiled,
       me_variance   = me_variance,
       system_priors = system_priors,
-      cut_tol       = cut_tol
+      cut_tol       = cut_tol,
+      max_q         = max_q
     ))
   }
 
@@ -528,8 +616,13 @@ make_log_posterior <- function(model, data, prior_spec, obs_vars,
   }
 
   if (likelihood == "pruned") {
-    ## Pruned-SS Gaussian KF: linear KF on the AFVRR order-2 augmented state.
-    ## Analytic gradient NOT available; gradient-based optimizers use numerical FD.
+    ## Pruned-SS Gaussian KF on the AFVRR augmented state (order 2 by default,
+    ## order 3 when pruned_order = 3L).  Analytic gradient NOT available;
+    ## gradient-based optimizers use numerical FD.
+    if (pruned_order == 3L)
+      return(make_log_posterior_pruned3(model, data, prior_spec, obs_vars,
+                                        compiled, me_variance = me_variance,
+                                        system_priors = system_priors))
     return(make_log_posterior_pruned(model, data, prior_spec, obs_vars,
                                       compiled, me_variance = me_variance,
                                       system_priors = system_priors))
@@ -703,6 +796,9 @@ make_log_posterior <- function(model, data, prior_spec, obs_vars,
   ## saving (see inst/benchmarks/posterior.R). Per-closure state, so each
   ## parallel chain keeps its own warm start.
   ss_warm <- NULL
+  ## me-floor hazard guard (see R/pruned-state-space.R and kalman_filter()'s
+  ## me_floor_check arg): warn at most once per closure, not once per draw.
+  .me_floor_checked <- FALSE
 
   function(theta) {
     lp <- log_prior(theta, prior_spec)
@@ -813,7 +909,9 @@ make_log_posterior <- function(model, data, prior_spec, obs_vars,
         kalman_filter(data, dr, model, params, obs_vars,
                       return_filtered = FALSE, me_variance = me_variance,
                       lik_init = lik_init, me_extra = me_extra,
-                      shock_scale = shock_scale),
+                      shock_scale = shock_scale,
+                      me_floor_check = !.me_floor_checked &&
+                        isTRUE(getOption("dynhr.me_floor_check", TRUE))),
         error = function(e) {
           ## Lyapunov / inv_sympd / other KF failures must not propagate: they
           ## indicate an infeasible parameter draw (singular covariance, unit-root
@@ -826,6 +924,7 @@ make_log_posterior <- function(model, data, prior_spec, obs_vars,
           NULL
         }
       )
+      .me_floor_checked <<- TRUE   # guard once per closure, not per MCMC draw
     }
     if (is.null(kf) || !is.finite(kf$loglik))
       return(list(logpost = -Inf, loglik = -Inf, logprior = lp))
@@ -849,6 +948,144 @@ make_log_posterior <- function(model, data, prior_spec, obs_vars,
     ## SMC tempering, marginal-likelihood estimators, and diagnostics see the
     ## true likelihood unchanged.
     list(logpost = power * kf$loglik + lp, loglik = kf$loglik, logprior = lp)
+  }
+}
+
+#' Build a per-period log-likelihood-contribution closure
+#'
+#' \code{robust_confidence_set()} (Andrews-Mikusheva LM2,
+#' \code{\link{robust_confidence_set}}) and \code{run_diagnostics(loglik_contrib_fn
+#' = )} need a \code{theta -> } length-\eqn{T} per-period log-likelihood
+#' closure. Hand-reconstructing \code{solve_perturbation -> kalman_filter}
+#' outside \code{make_log_posterior} risks a likelihood that differs
+#' from the posterior's (a config mismatch in \code{me_variance} handling,
+#' observable steady-state constants, or \code{lik_init} routing). This
+#' builder reuses \code{make_log_posterior}'s EXACT steady-state-solve,
+#' Blanchard-Kahn / stationarity feasibility guards, and
+#' \code{kalman_filter()} call (via the shared internal
+#' \code{.solve_dr_for_theta()} helper) so that
+#' \code{sum(make_loglik_contrib(...)(theta))} equals the \code{$loglik}
+#' that \code{make_log_posterior}/\code{\link{make_posterior}} would
+#' return for the same \code{theta}, to floating-point precision.
+#'
+#' Only the Gaussian (Kalman filter) likelihood exposes per-period
+#' contributions; other likelihoods (cumulant, whittle, pskf, tpf, pruned,
+#' ...) do not exist as a single per-period decomposition in the same sense
+#' and this builder errors clearly rather than approximate one.
+#'
+#' @param model       dynhr_mod (from \code{\link{parse_mod}})
+#' @param data        Observation matrix (\eqn{T \times n_{\text{obs}}}),
+#'   columns matching \code{obs_vars}
+#' @param prior_spec  Prior specification data.frame (from
+#'   \code{extract_prior_spec}). Unused for the returned
+#'   likelihood-only contributions (no prior term is added), but
+#'   \code{theta} must still supply every name the likelihood needs (the
+#'   builder validates unknown prior targets the same way
+#'   \code{make_log_posterior} does, in case the caller shares a
+#'   \code{prior_spec} with \code{theta}'s naming). Pass \code{NULL} to skip
+#'   this cross-check entirely.
+#' @param obs_vars    Character vector of observed variable names. Defaults
+#'   to \code{model$obs_vars} (populated from a \code{varobs} declaration)
+#'   when \code{NULL}, mirroring \code{make_log_posterior}'s default.
+#' @param compiled    dynhr_compiled (from \code{\link{compile_model}})
+#' @param me_variance Measurement error variance (default 0), identical
+#'   convention to \code{make_log_posterior} / \code{\link{kalman_filter}}.
+#' @param lik_init    Kalman filter \code{P0} initialization, forwarded to
+#'   \code{\link{kalman_filter}} (default \code{"auto"}); see
+#'   \code{make_log_posterior}.
+#' @param me_extra    \code{n_obs x T} matrix of additional per-observable,
+#'   per-period measurement-error variance (filter_tunes soft tunes); see
+#'   \code{\link{kalman_filter}}.
+#' @param shock_scale \code{n_exo x T} heteroskedastic shock-scale matrix;
+#'   see \code{\link{kalman_filter}}.
+#' @param likelihood  Likelihood type. Only \code{"gaussian"} (the default)
+#'   is supported; any other value errors ("gaussian only for now") rather
+#'   than silently approximating a per-period decomposition it does not have.
+#' @param ...         Accepted for signature parity with
+#'   \code{make_log_posterior}; unused (errors are raised instead of
+#'   silently ignoring arguments that would change the likelihood, except
+#'   arguments consumed by the gaussian path already listed above).
+#' @return A function \code{function(theta)} returning a numeric vector of
+#'   length \code{nrow(data)}: the per-period Gaussian log-likelihood
+#'   contribution (prediction-error decomposition), \strong{likelihood
+#'   only} (no prior term). Returns a length-\code{nrow(data)} vector of
+#'   \code{-Inf} for an out-of-domain \code{theta} (steady-state solve
+#'   failure, Blanchard-Kahn violation, or a unit root under a stationary
+#'   \code{lik_init}) rather than erroring, matching
+#'   \code{\link{robust_confidence_set}}'s contract.
+#' @seealso \code{make_log_posterior}, \code{\link{make_posterior}},
+#'   \code{\link{robust_confidence_set}}
+#' @export
+make_loglik_contrib <- function(model, data, prior_spec = NULL, obs_vars = NULL,
+                                compiled, me_variance = 0,
+                                lik_init = "auto",
+                                me_extra = NULL,
+                                shock_scale = NULL,
+                                likelihood = "gaussian",
+                                ...) {
+  if (!identical(likelihood, "gaussian"))
+    stop("make_loglik_contrib: likelihood = \"", likelihood, "\" is not ",
+         "supported -- gaussian only for now. Per-period log-likelihood ",
+         "contributions are only exposed by the Kalman-filter (gaussian) ",
+         "path; the other likelihoods (cumulant, whittle, pskf, tpf, ",
+         "pruned, student_t, ppf/copf, MS-DSGE) do not have a per-period ",
+         "decomposition wired up and this builder will not silently ",
+         "approximate one.", call. = FALSE)
+
+  ## Default obs_vars from the model's varobs declaration, identical to
+  ## make_log_posterior (pathological-DSGE paper gap #4 / v9024).
+  if (is.null(obs_vars) || length(obs_vars) == 0L) {
+    obs_vars <- model$obs_vars %||% model$varobs_names
+    if (is.null(obs_vars) || length(obs_vars) == 0L)
+      stop("make_loglik_contrib: `obs_vars` not supplied and the model ",
+           "declares no `varobs`; pass obs_vars= or add a varobs line to ",
+           "the .mod.", call. = FALSE)
+  }
+
+  ## Same fail-loud guard as make_log_posterior (only when a prior_spec is
+  ## actually supplied -- the contributions are likelihood-only, so a caller
+  ## may reasonably pass prior_spec = NULL and skip this cross-check).
+  if (!is.null(prior_spec))
+    .validate_prior_targets(model, prior_spec, where = "make_loglik_contrib")
+
+  if (is.null(compiled$lead_lag_incidence) &&
+      !is.null(compiled$model$lead_lag_incidence))
+    compiled$lead_lag_incidence <- compiled$model$lead_lag_incidence
+
+  sys_cache <- cache_system_structure(compiled)
+  n_T       <- nrow(data)
+
+  ## Per-closure mutable state: warm-started steady state (mirrors
+  ## make_log_posterior's ss_warm cache) and the me-floor-check once-guard.
+  state             <- new.env(parent = emptyenv())
+  state$ss_warm     <- NULL
+  .me_floor_checked <- FALSE
+
+  function(theta) {
+    solved <- .solve_dr_for_theta(model, compiled, sys_cache, theta, state,
+                                  lik_init = lik_init, shock_scale = shock_scale)
+    if (is.null(solved)) return(rep(-Inf, n_T))
+
+    kf <- tryCatch(
+      kalman_filter(data, solved$dr, model, solved$params, obs_vars,
+                    return_filtered = FALSE, me_variance = me_variance,
+                    return_ll_contrib = TRUE,
+                    lik_init = lik_init, me_extra = me_extra,
+                    shock_scale = shock_scale,
+                    me_floor_check = !.me_floor_checked &&
+                      isTRUE(getOption("dynhr.me_floor_check", TRUE))),
+      error = function(e) {
+        if (isTRUE(.dynhr_opt("debug_kf_errors", default = FALSE))) stop(e)
+        NULL
+      }
+    )
+    .me_floor_checked <<- TRUE
+
+    if (is.null(kf) || is.null(kf$loglik_contrib) ||
+        length(kf$loglik_contrib) != n_T || !is.finite(kf$loglik))
+      return(rep(-Inf, n_T))
+
+    kf$loglik_contrib
   }
 }
 

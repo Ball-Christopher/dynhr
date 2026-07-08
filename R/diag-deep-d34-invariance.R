@@ -289,9 +289,9 @@ d34_policy_invariance <- function(model       = NULL,
                        ggplot2::aes(x = median, y = param,
                                     colour = sample)) +
     ggplot2::geom_point(position = ggplot2::position_dodge(width = 0.6), size = 1.9) +
-    ggplot2::geom_errorbarh(ggplot2::aes(xmin = lo, xmax = hi),
-                            position = ggplot2::position_dodge(width = 0.6),
-                            height = 0.3, linewidth = 0.45) +
+    ggplot2::geom_errorbar(ggplot2::aes(xmin = lo, xmax = hi),
+                           position = ggplot2::position_dodge(width = 0.6),
+                           orientation = "y", width = 0.3, linewidth = 0.45) +
     ggplot2::facet_grid(rows = ggplot2::vars(block),
                         scales = "free_y", space = "free_y",
                         # Wrap long strip labels so "must be invariant" is not truncated

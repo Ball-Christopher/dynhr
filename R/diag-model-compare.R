@@ -162,9 +162,9 @@ model_comparison <- function(models,
                                                  colour = model, shape = model)) +
           ggplot2::geom_point(
             position = ggplot2::position_dodge(width = 0.55), size = 2) +
-          ggplot2::geom_errorbarh(ggplot2::aes(xmin = lo, xmax = hi),
+          ggplot2::geom_errorbar(ggplot2::aes(xmin = lo, xmax = hi),
             position = ggplot2::position_dodge(width = 0.55),
-            height = 0.2, linewidth = 0.5) +
+            orientation = "y", width = 0.2, linewidth = 0.5) +
           ggplot2::scale_colour_manual(values = model_pal, name = NULL) +
           theme_dynhr_diagnostic() +
           ggplot2::labs(

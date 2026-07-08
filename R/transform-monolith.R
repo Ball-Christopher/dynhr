@@ -23,6 +23,11 @@
 ## `requireNamespace("data.table", quietly = TRUE)` and emits a clear
 ## error if missing. See .ensure_dt() helper below.
 
+## data.table's `[` checks the calling package for this flag (cedta());
+## without it, every dt[...] call from this namespace is evaluated with
+## data.frame semantics and NSE like dt[order(date)] fails.
+.datatable.aware <- TRUE
+
 ## Helper: ensure data.table is available, return the namespace.
 .ensure_dt <- function() {
   if (!requireNamespace("data.table", quietly = TRUE)) {
@@ -116,15 +121,15 @@
 ## -- Neutral OCR --
 .build_neutral_r <- function(dt) {
   dt[, r_anchor := NA_real_]
-  dt[date >= as.IDate("1982-01-01") & date <= as.IDate("2008-01-01"),
+  dt[date >= data.table::as.IDate("1982-01-01") & date <= data.table::as.IDate("2008-01-01"),
      r_anchor := 5.75 / 400]
-  dt[date >= as.IDate("2010-01-01") & date <= as.IDate("2010-04-01"),
+  dt[date >= data.table::as.IDate("2010-01-01") & date <= data.table::as.IDate("2010-04-01"),
      r_anchor := 4.25 / 400]
-  dt[date == as.IDate("2016-04-01"), r_anchor := 3.50 / 400]
-  dt[date == as.IDate("2017-10-01"), r_anchor := 3.25 / 400]
-  dt[date >= as.IDate("2020-07-01") & date <= as.IDate("2021-07-01"),
+  dt[date == data.table::as.IDate("2016-04-01"), r_anchor := 3.50 / 400]
+  dt[date == data.table::as.IDate("2017-10-01"), r_anchor := 3.25 / 400]
+  dt[date >= data.table::as.IDate("2020-07-01") & date <= data.table::as.IDate("2021-07-01"),
      r_anchor := 2.00 / 400]
-  dt[date >= as.IDate("2024-01-01"), r_anchor := 3.00 / 400]
+  dt[date >= data.table::as.IDate("2024-01-01"), r_anchor := 3.00 / 400]
   
   dt[, r_trend := .hp_anchored(r_anchor, lambda = 1600)]
   invisible(dt)
@@ -137,9 +142,9 @@
   postGFCspread <- 2.117 / 400
   
   dt[, rh_anchor := NA_real_]
-  dt[date >= as.IDate("1982-01-01") & date <= as.IDate("2008-01-01"),
+  dt[date >= data.table::as.IDate("1982-01-01") & date <= data.table::as.IDate("2008-01-01"),
      rh_anchor := r_trend + preGFCspread]
-  dt[date >= as.IDate("2010-01-01"),
+  dt[date >= data.table::as.IDate("2010-01-01"),
      rh_anchor := r_trend + postGFCspread]
   
   dt[, rh_trend := .hp_anchored(rh_anchor, lambda = 1600)]
@@ -150,9 +155,9 @@
 ## -- Neutral world interest rate --
 .build_neutral_rstar <- function(dt) {
   dt[, rstar_anchor := NA_real_]
-  dt[date >= as.IDate("1982-01-01") & date <= as.IDate("2007-07-01"),
+  dt[date >= data.table::as.IDate("1982-01-01") & date <= data.table::as.IDate("2007-07-01"),
      rstar_anchor := 3.75 / 400]
-  dt[date >= as.IDate("2010-01-01"),
+  dt[date >= data.table::as.IDate("2010-01-01"),
      rstar_anchor := 3.25 / 400]
   
   dt[, rstar_trend := .hp_anchored(rstar_anchor, lambda = 1600)]
@@ -169,13 +174,22 @@
 ### (SUPERSEDED by v4 below; renamed to avoid shadowing v4)
 ### ======================================================================
 ### Changes from v2:
-###   - potential_params: if provided, uses Kalman filter for y_trend
+###   - potential_params: NOT IMPLEMENTED. The Kalman potential-output
+###     path was never built (its builder functions do not exist); supplying
+###     potential_params errors immediately with a fail-loud stop(). Use
+###     potential_y_trend_override= or the HP-filter fallback instead.
 ###   - potential_obs_override: pre-built (extended) obs table for filter
 ###   - potential_y_trend_override: directly inject y_trend (bypass filter)
 ###   - u_k=0 override for Kalman path (capital stock is deterministic)
 ###   - HP fallback for dates outside Kalman coverage
 ### ======================================================================
 
+## NOTE: potential_params is NOT IMPLEMENTED. Passing a non-NULL value
+## selects the Kalman potential-output path (PATH B below), which errors
+## immediately via stop() because its three builder functions (the
+## potential-obs constructor, its endpoint extender, and the state-space
+## spec builder) do not exist anywhere in the package. Use
+## potential_y_trend_override= or the HP-filter fallback instead.
 .dynhr_transform_v3 <- function(
     est,
     nzsim_ref_path   = NULL,
@@ -188,8 +202,9 @@
     potential_n_extend = 60L,
     potential_y_trend_override = NULL
 ) {
-  
-  full <- copy(attr(est, "full_data"))
+
+  .ensure_dt()
+  full <- data.table::copy(attr(est, "full_data"))
   dt <- full[order(date)]
   
   message("=== dynhr_transform v3: Building gap dataset ===")
@@ -256,8 +271,8 @@
   if (!is.null(potential_y_trend_override)) {
     ## -- PATH A: Direct y_trend injection ----------------------
     ## Pre-computed y_trend (e.g. from standalone extended Kalman run)
-    yt <- copy(potential_y_trend_override)
-    yt[, date := as.IDate(date)]
+    yt <- data.table::copy(potential_y_trend_override)
+    yt[, date := data.table::as.IDate(date)]
     dt[yt, y_trend := i.y_trend, on = .(date)]
     n_filled <- dt[!is.na(y_trend), .N]
     n_total  <- dt[!is.na(ngdpp_z), .N]
@@ -272,81 +287,16 @@
     
   } else if (!is.null(potential_params)) {
     ## -- PATH B: Kalman filter potential model -----------------
-    message("  y_trend: using dynhr potential model (Kalman filter)")
-    
-    ## Build potential obs from full data
-    tp <- dynhr_build_potential_obs(full, alpha = potential_alpha,
-                                    delta_q = potential_delta)
-    
-    ## Extend for endpoint anchoring
-    if (potential_n_extend > 0) {
-      tp <- dynhr_extend_potential_obs(tp, potential_params,
-                                       n_extend = potential_n_extend)
-    }
-    
-    ## Build state space
-    spec <- build_potential_spec(potential_params)
-    nsys <- build_state_space(spec, sigma_u_overrides = c(u_k = 0))
-    
-    ## Prepare observation matrix
-    starthist_trend <- as.IDate(potential_start)
-    tp_filt <- tp[date >= starthist_trend]
-    obs_cols <- nsys$obs_names
-    Y <- as.matrix(tp_filt[, ..obs_cols])
-    
-    ## Run Kalman smoother.
-    ## NOTE: dynhr_kalman_smoother uses the CURRENT-STATE (Convention C) convention:
-    ##   y_t = H_mat x_{t|t-1}  where x_{t|t-1} = F_mat x_{t-1|t-1}.
-    ## This is intentional — this is a general GLS / potential-output state-space,
-    ## NOT a DSGE decision-rule state-space.  Do NOT swap for kalman_smoother()
-    ## (DSGE lagged-state convention) without converting matrices.
-    filt <- dynhr_kalman_smoother(
-      Y       = Y,
-      F_mat   = nsys$F_mat,
-      G_mat   = nsys$G_mat,
-      H_mat   = nsys$H_mat,
-      Q_mat   = nsys$Q_mat,
-      R_mat   = nsys$R_mat,
-      const   = nsys$const,
-      d_const = nsys$d_const,
-      x0      = nsys$x0_unc,
-      P0      = nsys$P0,
-      init_Q2 = nsys$Q2
-    )
-
-    ## Extract smoothed y_trend
-    sm <- data.table(date = tp_filt$date, filt$smoothed_states)
-    setnames(sm, c("date", nsys$state_names))
-    
-    y_col <- if ("y" %in% nsys$state_names) "y" else nsys$state_names[1]
-    sm[, y_trend := exp(get(y_col))]
-    
-    ## Trim to original observation period (before extension)
-    last_obs <- tp[!is.na(get(obs_cols[1])), max(date)]
-    ## Use attr if available, else infer from obs
-    if (!is.null(attr(tp, "last_obs_date"))) {
-      last_obs <- attr(tp, "last_obs_date")
-    }
-    sm_orig <- sm[date <= last_obs]
-    
-    ## Inject into dt
-    dt[sm_orig, y_trend := i.y_trend, on = .(date)]
-    n_kalman <- dt[!is.na(y_trend), .N]
-    n_total  <- dt[!is.na(ngdpp_z), .N]
-    
-    ## Fill gaps with HP fallback (dates outside Kalman range)
-    if (n_kalman < n_total) {
-      hp_fallback <- .hp_trend_log(dt$ngdpp_z, L$y)
-      idx_fill <- which(is.na(dt$y_trend) & !is.na(hp_fallback))
-      if (length(idx_fill) > 0) {
-        set(dt, idx_fill, "y_trend", hp_fallback[idx_fill])
-      }
-      message(sprintf("  Filling %d y_trend gaps with HP fallback",
-                      length(idx_fill)))
-    }
-    
-    message(sprintf("  Kalman log-likelihood: %.2f", filt$loglik))
-    
+    ## NOT IMPLEMENTED: this path used to call three builder functions (the
+    ## potential-obs constructor, its endpoint extender, and the state-space
+    ## spec builder), none of which are defined anywhere in the package.
+    ## Fail loud instead of letting a "could not find function" error
+    ## surface deep in the call stack. See
+    ## .claude/orchestration/track-p-hardening/brief-A2-pathb-failloud.md.
+    stop("dynhr_transform: the Kalman potential-output path ",
+         "(potential_params=) was never implemented (its builder ",
+         "functions do not exist). Use potential_y_trend_override= or ",
+         "the HP-filter fallback instead.", call. = FALSE)
   } else {
     ## -- PATH C: HP filter (default) --------------------------
     message("  y_trend: using HP filter (lambda=200000)")
@@ -427,8 +377,8 @@
   dt[, y_ := g_ * S$gy + S$cy * c_ + S$iki * ik_ +
        S$ihi * ih_ + S$xy * x_ - S$my * m_]
   
-  dt[, dp_actual := pcpis / shift(pcpis) - 1]
-  dt[, dp_trend := p_trend / shift(p_trend) - 1]
+  dt[, dp_actual := pcpis / data.table::shift(pcpis) - 1]
+  dt[, dp_trend := p_trend / data.table::shift(p_trend) - 1]
   dt[, dp_ := dp_actual - dp_trend]
   
   dt[, pn_p_ := log(pn_rel / pn_rel_trend)]
@@ -456,10 +406,10 @@
   
   gaps <- dt[, c("date", gap_cols), with = FALSE]
   
-  if (!is.null(est_start)) gaps <- gaps[date >= as.IDate(est_start)]
+  if (!is.null(est_start)) gaps <- gaps[date >= data.table::as.IDate(est_start)]
   
   if (!is.null(est_end)) {
-    gaps <- gaps[date <= as.IDate(est_end)]
+    gaps <- gaps[date <= data.table::as.IDate(est_end)]
   } else {
     complete <- complete.cases(gaps[, -"date"])
     if (any(complete)) gaps <- gaps[1:max(which(complete))]
@@ -498,7 +448,8 @@
 ## ====================================================================
 
 .compare_gaps <- function(gaps, ref_path) {
-  ref    <- fread(ref_path)
+  .ensure_dt()
+  ref    <- data.table::fread(ref_path)
   n_ref  <- nrow(ref)
   message(sprintf("  Reference: %d rows, %d columns", n_ref, ncol(ref)))
   
@@ -534,7 +485,7 @@
     refs <- ref[[col]][1:n_comp]
     valid <- !is.na(ours) & !is.na(refs)
     if (sum(valid) < 10) {
-      results[[col]] <- data.table(
+      results[[col]] <- data.table::data.table(
         varobs = col, n = sum(valid), corr = NA_real_,
         sd_ours = NA_real_, sd_ref = NA_real_,
         sd_ratio = NA_real_, max_abs = NA_real_, mean_abs = NA_real_
@@ -542,7 +493,7 @@
       next
     }
     o <- ours[valid]; r <- refs[valid]
-    results[[col]] <- data.table(
+    results[[col]] <- data.table::data.table(
       varobs   = col,
       n        = sum(valid),
       corr     = cor(o, r),
@@ -554,7 +505,7 @@
     )
   }
   
-  summary_dt <- rbindlist(results)
+  summary_dt <- data.table::rbindlist(results)
   
   ## ---- Print summary ----
   message("\n  == Gap comparison summary ==")
@@ -664,7 +615,7 @@ dynhr_plot_comparison <- function(gaps, ncol = 4) {
   ## 1. Set lockdown periods to NA
   n_removed <- 0L
   for (lp in lockdown_periods) {
-    mask <- dates >= as.IDate(lp[1]) & dates <= as.IDate(lp[2]) & !is.na(x)
+    mask <- dates >= data.table::as.IDate(lp[1]) & dates <= data.table::as.IDate(lp[2]) & !is.na(x)
     n_removed <- n_removed + sum(mask)
     xs[mask] <- NA
   }
@@ -692,7 +643,7 @@ dynhr_plot_comparison <- function(gaps, ncol = 4) {
   ratio <- x / xs_interp
   
   ## Only apply from first lockdown start onwards
-  first_ld <- as.IDate(lockdown_periods[[1]][1])
+  first_ld <- data.table::as.IDate(lockdown_periods[[1]][1])
   pre_ld <- which(dates < first_ld)
   ratio[pre_ld] <- 1
   xs_interp[pre_ld] <- x[pre_ld]
@@ -712,6 +663,13 @@ dynhr_plot_comparison <- function(gaps, ncol = 4) {
 ##   - y_trend HP fallback uses smoothed GDP
 ##   - Removed stale cleanup of non-existent columns (L673 bug)
 ##   - Three-path y_trend (override / Kalman / HP) preserved
+##
+## NOTE: potential_params is NOT IMPLEMENTED. Passing a non-NULL value
+## selects the Kalman potential-output path (Path B below), which errors
+## immediately via stop() because its three builder functions (the
+## potential-obs constructor, its endpoint extender, and the state-space
+## spec builder) do not exist anywhere in the package. Use
+## potential_y_trend_override= or the HP-filter fallback instead.
 
 dynhr_transform <- function(est,
                             nzsim_ref_path = NULL,
@@ -724,8 +682,9 @@ dynhr_transform <- function(est,
                               c("2020-01-01", "2020-04-01"),
                               c("2021-07-01", "2022-01-01")
                             )) {
-  
-  full <- copy(attr(est, "full_data"))
+
+  .ensure_dt()
+  full <- data.table::copy(attr(est, "full_data"))
   dt <- full[order(date)]
   
   message("=== dynhr_transform v3: Building gap dataset ===")
@@ -834,71 +793,16 @@ dynhr_transform <- function(est,
     
   } else if (!is.null(potential_params)) {
     ## Path B: Kalman potential model pipeline
-    message("  y_trend: Path B (Kalman potential model)")
-    
-    ## 1. Build observation matrix from data
-    obs <- dynhr_build_potential_obs(dt,
-                                     alpha = potential_params$alpha %||% 2/3)
-    
-    ## 2. Extend endpoints for I1 states
-    if (potential_n_extend > 0) {
-      obs <- dynhr_extend_potential_obs(obs, potential_params,
-                                        n_extend = potential_n_extend)
-    }
-    
-    ## 3. Build state-space system matrices (no obs involved)
-    spec <- build_potential_spec(potential_params)
-    ss   <- build_state_space(spec, sigma_u_overrides = c(u_k = 0))
-    
-    ## 4. Construct Y matrix: rows = time, cols = obs_names
-    Y <- as.matrix(obs[, ss$obs_names, with = FALSE])
-    
-    ## 5. Run smoother -- unpack ss into individual args.
-    ##    NOTE: dynhr_kalman_smoother uses the CURRENT-STATE (Convention C) convention:
-    ##      y_t = H_mat x_{t|t-1}  where x_{t|t-1} = F_mat x_{t-1|t-1}.
-    ##    This is correct for GLS / potential-output state-spaces which are NOT
-    ##    DSGE decision-rule state-spaces.  dynhr_kalman_smoother also handles
-    ##    unit-root initialisation (GLS diffuse prior) needed here.
-    result <- dynhr_kalman_smoother(
-      Y       = Y,
-      F_mat   = ss$F_mat,
-      G_mat   = ss$G_mat,
-      H_mat   = ss$H_mat,
-      Q_mat   = ss$Q_mat,
-      R_mat   = ss$R_mat,
-      const   = ss$const,
-      d_const = ss$d_const,
-      x0      = ss$x0_unc,
-      P0      = ss$P0,
-      init_Q2 = ss$Q2
-    )
-    
-    ## 6. Extract y_trend from smoothed states
-    ##    "y" is a state identity (production function weighted sum)
-    y_idx <- match("y", ss$state_names)
-    if (is.na(y_idx)) {
-      ## Fallback: construct from components if y not in state_names
-      ## y = alpha * k + (1-alpha) * (n + h) + a  (Cobb-Douglas in logs)
-      alpha <- potential_params$alpha %||% 2/3
-      k_idx <- match("k", ss$state_names)
-      n_idx <- match("n", ss$state_names)
-      h_idx <- match("h", ss$state_names)
-      a_idx <- match("a", ss$state_names)
-      y_log <- alpha * result$smoothed_states[, k_idx] +
-        (1 - alpha) * (result$smoothed_states[, n_idx] +
-                         result$smoothed_states[, h_idx]) +
-        result$smoothed_states[, a_idx]
-    } else {
-      y_log <- result$smoothed_states[, y_idx]
-    }
-    
-    yt <- data.table(date = obs$date, y_trend = exp(y_log))
-    dt <- merge(dt, yt, by = "date", all.x = TRUE)
-    
-    ## HP fallback for dates outside potential model coverage
-    dt[is.na(y_trend), y_trend := .hp_trend_log(ngdpp_z_smooth, L$y)]
-    message(sprintf("  Kalman y_trend: %d obs, HP fallback for %d gaps",
-                    sum(!is.na(yt$y_trend)), sum(is.na(dt$y_trend))))
+    ## NOT IMPLEMENTED: this path used to call three builder functions (the
+    ## potential-obs constructor, its endpoint extender, and the state-space
+    ## spec builder), none of which are defined anywhere in the package.
+    ## Fail loud instead of letting a "could not find function" error
+    ## surface deep in the call stack. See
+    ## .claude/orchestration/track-p-hardening/brief-A2-pathb-failloud.md.
+    stop("dynhr_transform: the Kalman potential-output path ",
+         "(potential_params=) was never implemented (its builder ",
+         "functions do not exist). Use potential_y_trend_override= or ",
+         "the HP-filter fallback instead.", call. = FALSE)
   } else {
     ## Path C: HP filter on lockdown-smoothed GDP
     dt[, y_trend := .hp_trend_log(ngdpp_z_smooth, L$y)]
@@ -999,8 +903,8 @@ dynhr_transform <- function(est,
        S$ihi * ih_ + S$xy * x_ - S$my * m_]
   
   ## Inflation gap
-  dt[, dp_actual := pcpis / shift(pcpis) - 1]
-  dt[, dp_trend  := p_trend / shift(p_trend) - 1]
+  dt[, dp_actual := pcpis / data.table::shift(pcpis) - 1]
+  dt[, dp_trend  := p_trend / data.table::shift(p_trend) - 1]
   dt[, dp_ := dp_actual - dp_trend]
   
   ## Relative price gaps
@@ -1034,9 +938,9 @@ dynhr_transform <- function(est,
   
   gaps <- dt[, c("date", gap_cols), with = FALSE]
   
-  if (!is.null(est_start)) gaps <- gaps[date >= as.IDate(est_start)]
+  if (!is.null(est_start)) gaps <- gaps[date >= data.table::as.IDate(est_start)]
   if (!is.null(est_end)) {
-    gaps <- gaps[date <= as.IDate(est_end)]
+    gaps <- gaps[date <= data.table::as.IDate(est_end)]
   } else {
     complete <- complete.cases(gaps[, -"date"])
     if (any(complete)) gaps <- gaps[1:max(which(complete))]

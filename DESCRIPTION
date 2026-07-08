@@ -1,6 +1,6 @@
 Package: dynhr
 Title: DSGE Modelling Toolkit (Parsing, Solving, Estimating, Diagnosing)
-Version: 0.8.1
+Version: 0.9.0
 Authors@R: c(
     person("Chris", "Ball", role = c("aut", "cre"),
            email = "chrispball1@gmail.com"))
@@ -12,8 +12,8 @@ Description: Parses Dynare .mod files, solves the resulting models by
     scale DSGE models, with a parity test suite against Dynare and
     Dynare.jl.
 License: MIT + file LICENSE
-URL: https://github.com/chrispball1/dynhr
-BugReports: https://github.com/chrispball1/dynhr/issues
+URL: https://github.com/Ball-Christopher/dynhr
+BugReports: https://github.com/Ball-Christopher/dynhr/issues
 Encoding: UTF-8
 Depends:
     R (>= 4.2.0)
@@ -57,13 +57,15 @@ Suggests:
     jsonlite,
     bench,
     quarto,
-    JuliaCall,
     knitr,
-    rmarkdown
-VignetteBuilder: knitr
-SystemRequirements: Julia (>= 1.9, optional, for the Dynare.jl interop
-    via JuliaCall)
+    rmarkdown,
+    JuliaCall
+SystemRequirements: Julia (>= 1.9, optional, for parity test fixture
+    regeneration); Dynare (>= 5.0, optional, for parity test fixture
+    regeneration)
+Config/Needs/website: pkgdown
 RoxygenNote: 8.0.0
+VignetteBuilder: knitr
 Roxygen: list(markdown = FALSE)
 LazyData: false
 Collate:
@@ -93,6 +95,7 @@ Collate:
     'solve-extract-system.R'
     'solve-qz.R'
     'solve-perturbation.R'
+    'bk-distance.R'
     'solve-perturbation-order2.R'
     'solve-perturbation-order3-sigma-helpers.R'
     'solve-perturbation-order3-sigma.R'
@@ -103,9 +106,13 @@ Collate:
     'solve-perturbation-sylvester.R'
     'gradient-primitive-deriv.R'
     'gradient-solution-deriv.R'
+    'gradient-solution-adjoint.R'
     'gradient-solution-deriv-2.R'
     'gradient-solution-deriv-order2.R'
+    'gradient-solution-adjoint-order2.R'
+    'gradient-solution-adjoint-order2-param.R'
     'cumulant-cumulant-deriv.R'
+    'cumulant-c2222.R'
     'solve-perturbation-order5.R'
     'solve-perturbation-order4-5-sigma.R'
     'solve-perturbation-sigma-analytic.R'
@@ -118,6 +125,7 @@ Collate:
     'backend-monolith.R'
     'kalman-filter.R'
     'kalman-filter-student.R'
+    'kf-innovation-diagnostics.R'
     'ms-spec.R'
     'ms-solve.R'
     'ms-filter.R'
@@ -154,7 +162,10 @@ Collate:
     'mode-nmkb.R'
     'mode-jade.R'
     'mode-hessian.R'
+    'fd-safe-hessian.R'
+    'mode-trust-region.R'
     'mode-orchestrate.R'
+    'profile-ci.R'
     'parallel-cluster.R'
     'parallel-mirai.R'
     'sampler-rwmh.R'
@@ -170,7 +181,12 @@ Collate:
     'sampler-mala.R'
     'sampler-dime.R'
     'sampler-diagnostics.R'
+    'chain-diagnostics.R'
     'pruned-state-space.R'
+    'pruned-state-space-order3.R'
+    'pruned-kf-adjoint.R'
+    'pruned-grad-chain.R'
+    'pruned-grad-chain-order3.R'
     'parallel-sbc.R'
     'validate-sbc.R'
     'estimate-runner.R'
@@ -187,6 +203,7 @@ Collate:
     'diag-deep-d36-calibration.R'
     'diag-deep-passport.R'
     'estimation-passport.R'
+    'passport-run.R'
     'diag-pre-d0-equation-rank.R'
     'diag-pre-d1-identification.R'
     'diag-pre-d2-spectral.R'
@@ -233,6 +250,7 @@ Collate:
     'diag-orchestrate.R'
     'diag-report-llm.R'
     'obc-boehl.R'
+    'obc-regime-path.R'
     'obc-lcp.R'
     'obc-sep.R'
     'obc-spec.R'
@@ -256,6 +274,7 @@ Collate:
     'mcp-irf.R'
     'mcp-obc.R'
     'model-registry.R'
+    'dynare-modefile.R'
     'ramsey-policy.R'
     'ramsey-augment-mod.R'
     'ramsey-steady.R'
@@ -281,6 +300,30 @@ Collate:
     'dynamic-perturbation-quadrature.R'
     'dynamic-perturbation-path.R'
     'sequence-jacobian.R'
+    'hank-income.R'
+    'hank-grids.R'
+    'hank-egm.R'
+    'hank-distribution.R'
+    'hank-het-block.R'
+    'hank-jacobian.R'
+    'hank-ge.R'
+    'hank-model.R'
+    'hank-nk.R'
+    'hank-survey.R'
+    'hank-reweighting.R'
+    'hank-truncation.R'
+    'hank-finite.R'
+    'hank-finite-ramsey-ss.R'
+    'hank-welfare.R'
+    'hank-welfare-transition.R'
+    'hank-welfare-posterior.R'
+    'hank-mixture-estimation.R'
+    'hank-mixture-emulator.R'
+    'hank-partial-id.R'
+    'hank-estimation.R'
+    'hank-kalman.R'
+    'hank-panel.R'
+    'hank-diagnostics.R'
     'csminwel.R'
     'var-irf.R'
     'run-mode-finding.R'

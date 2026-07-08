@@ -4,17 +4,13 @@
 ## --------------------------------------------------------------------------
 
 .onAttach <- function(libname, pkgname) {
+  ## Keep this banner minimal: a hardcoded feature list drifts out of sync
+  ## with the namespace and reads as noise in downstream (e.g. paper) sessions.
   n_exports <- length(getNamespaceExports(pkgname))
   ver <- tryCatch(as.character(utils::packageVersion(pkgname)),
                   error = function(e) "")
   packageStartupMessage(
-    "dynhr ", ver, " (", n_exports, " exported functions)\n",
-    "  - Solver: parse_mod, compile_model, solve_steady, solve_perturbation,\n",
-    "    stoch_simul, compute_irfs, compute_moments, simulate_model\n",
-    "  - Filtering: kalman_filter, kalman_smoother, build_dsge_state_space,\n",
-    "    historical_decomposition\n",
-    "  - Optimal policy: ramsey_model, ramsey_nn1, osr, discretionary_policy\n",
-    "  - Diagnostics: run_diagnostics, diag_expectations, write_report"
+    "dynhr ", ver, " (", n_exports, " exported functions)"
   )
 }
 

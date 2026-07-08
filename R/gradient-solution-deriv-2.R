@@ -422,5 +422,11 @@ solution_derivatives_2 <- function(model, compiled, dr, params, param_names,
     }
   }
 
-  list(first = first, d2 = d2, param_names = param_names)
+  list(first = first, d2 = d2, param_names = param_names,
+       ## Which second-primitive path produced d2f: "analytic" (param_deriv =
+       ## "second" codegen, Tier 11 #3) or "fd" (the stencil fallback). Both
+       ## are certified to agree on regular models (nk_small: identical eigen
+       ## spectra); callers surface this so a Hessian consumer can tell which
+       ## path it got without re-deriving the compile-time gating.
+       second_primitives = if (analytic_ok) "analytic" else "fd")
 }

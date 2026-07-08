@@ -221,6 +221,7 @@ new_dynhr_mod <- function(...) {
     ,planner_objective  = list(text = "", ast = NULL)
     ,varobs             = character(0)
     ,varobs_names       = character(0)
+    ,obs_vars           = character(0)
     ,ramsey_instruments = character(0)
     ,metadata           = list()
     ,mcp_constraints    = NULL
@@ -638,8 +639,8 @@ parse_mod <- function(file_or_text, verbose = FALSE) {
   if (!is.na(source_file)) {
     .ss_dir  <- dirname(source_file)
     .ss_stem <- sub("\\.(mod|dyn)$", "", basename(source_file), ignore.case = TRUE)
-    # Review/harness copies are often suffixed (e.g. my_model_pp.mod) while the
-    # external SS file keeps the original stem (my_model_steadystate.m). Try the
+    # Review/harness copies are often suffixed (e.g. GK_2011_pp.mod) while the
+    # external SS file keeps the original stem (GK_2011_steadystate.m). Try the
     # exact stem first, then the stem with trailing review suffixes stripped.
     .ss_stems <- unique(c(
       .ss_stem,
@@ -1073,6 +1074,10 @@ parse_mod <- function(file_or_text, verbose = FALSE) {
     n_mixed              = vc$n_mixed,
     varobs               = varobs_names,
     varobs_names         = varobs_names,
+    ## alias: estimation entry points take an `obs_vars` argument — populate
+    ## the same-named model field from the .mod's varobs line so callers can
+    ## omit it (pathological-DSGE paper gap #4, 2026-07)
+    obs_vars             = varobs_names,
     ramsey_instruments   = ramsey_instruments,
     metadata             = metadata
   )

@@ -553,7 +553,8 @@ solve_perturbation_fast <- function(model, compiled, ss, params,
          inherits = FALSE, mode = "function")
 }
 
-.solve_from_system <- function(sys, model, compiled, ss, params, verbose) {
+.solve_from_system <- function(sys, model, compiled, ss, params, verbose,
+                               pencil_only = FALSE) {
   sys <- .reconcile_endo_exo(sys, model)
   n     <- sys$n_endo
   n_exo <- sys$n_exo
@@ -804,6 +805,16 @@ solve_perturbation_fast <- function(model, compiled, ss, params,
   if (verbose) {
     cat("Pencil dimensions:", p, "x", p, "\n")
     cat("Solving generalized eigenvalue problem...\n")
+  }
+
+  ## Early exit for callers that only need the reduced companion-form pencil
+  ## (e.g. bk_distance()'s finite-difference pencil derivatives, which must
+  ## not pay for -- or depend on the eigenvalue ordering of -- a QZ solve).
+  ## The generalized eigenvalues lambda solve E_mat x = lambda * D_mat x
+  ## (companion dynamics z_t = D_mat^{-1} E_mat z_{t-1}); these are the same
+  ## lambda reported in dr$eigenvalues, and |lambda| = 1 is the BK wall.
+  if (isTRUE(pencil_only)) {
+    return(list(D = D_mat, E = E_mat, n_minus = n_minus, p = p))
   }
 
   # ------------------------------------------------------------------

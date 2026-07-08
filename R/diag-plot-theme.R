@@ -8,13 +8,14 @@
 ##   conceptual order.  Diverging plots use Paul Tol "sunset"; sequential use
 ##   cividis (viridis option "E").
 ##
-## The visual style is a clean minimal panel (bottom legend, horizontal x-axis
-## line, no y axis line, dotted horizontal gridlines) with Source Sans 3 /
-## Source Serif Pro fonts and the Tol palettes above.
+## The visual style follows the RBNZ v3 ggplot tools (clean minimal panels,
+## bottom legend, horizontal x-axis line, no y axis line, dotted horizontal
+## gridlines) but with Source Sans 3 / Source Serif Pro fonts and the Tol
+## palettes above.
 ##
-## Convenience names: dynhr_palette, theme_dynhr_diagnostic(),
-## scale_colour_dynhr(), scale_fill_dynhr() are exported and resolve to the
-## vibrant/light scales and theme.
+## Backwards compatibility: the old names dynhr_palette,
+## theme_dynhr_diagnostic(), scale_colour_dynhr(), scale_fill_dynhr() remain
+## exported and resolve to the new vibrant/light scales and theme.
 ## --------------------------------------------------------------------------
 
 
@@ -211,7 +212,7 @@ dynhr_palette <- c(
 # Theme
 # ============================================================================
 
-#' dynhr ggplot2 theme (Tol-coloured, Source-Sans fonts)
+#' dynhr ggplot2 theme (clean minimal panels, Tol-coloured, Source-Sans fonts)
 #'
 #' Clean minimal panel with horizontal y gridlines, x axis line and ticks
 #' only, bottom legend, and large readable Source Sans 3 typography.

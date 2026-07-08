@@ -33,7 +33,10 @@
 #' @param obs_vars    Character vector of observed variable names
 #' @param compiled    dynhr_compiled
 #' @param specs       OBC spec list (from obc_parse_tags), or NULL to parse
-#' @param me_variance Measurement error variance (default 1e-8)
+#' @param me_variance Measurement error variance (default 1e-8). Guarded
+#'   (warn-only, once per closure) against a near-degenerate slack-regime
+#'   innovation covariance via \code{getOption("dynhr.me_floor_check", TRUE)};
+#'   see \code{.obc_warn_me_floor_lock()} in R/obc-regime.R.
 #' @return Function(theta) -> list(logpost, loglik, logprior)
 #' @noRd
 make_log_posterior_obc <- function(model, data, prior_spec, obs_vars,
@@ -63,6 +66,10 @@ make_log_posterior_obc <- function(model, data, prior_spec, obs_vars,
   if (is.data.frame(data)) data <- as.matrix(data)
   Y <- if (nrow(data) == length(obs_vars)) data else t(data)
 
+  ## me-floor hazard guard (see R/obc-regime.R .obc_warn_me_floor_lock() and
+  ## R/pruned-state-space.R): warn at most once per closure, not once per draw.
+  .me_floor_checked <- FALSE
+
   # ---- Closure: evaluated at each MCMC draw --------------------------------
   function(theta) {
     lp <- log_prior(theta, prior_spec)
@@ -91,6 +98,12 @@ make_log_posterior_obc <- function(model, data, prior_spec, obs_vars,
     )$values))
     if (max_eig >= 1)
       return(list(logpost = -Inf, loglik = -Inf, logprior = lp))
+
+    .obc_warn_me_floor_lock(
+      dr_slack, model, params, obs_vars, obs_idx, me_variance,
+      check = !.me_floor_checked &&
+        isTRUE(getOption("dynhr.me_floor_check", TRUE)))
+    .me_floor_checked <<- TRUE   # guard once per closure, not per MCMC draw
 
     # OccBin regime path + lazy per-regime policy cache
     gv <- obc_guess_verify(
@@ -134,7 +147,10 @@ make_log_posterior_obc <- function(model, data, prior_spec, obs_vars,
 #' @param obs_vars    Character vector of observed variable names
 #' @param compiled    dynhr_compiled
 #' @param specs       OBC spec list (from obc_parse_tags), or NULL to parse
-#' @param me_variance Measurement error variance (default 1e-8)
+#' @param me_variance Measurement error variance (default 1e-8). Guarded
+#'   (warn-only, once per closure) against a near-degenerate slack-regime
+#'   innovation covariance via \code{getOption("dynhr.me_floor_check", TRUE)};
+#'   see \code{.obc_warn_me_floor_lock()} in R/obc-regime.R.
 #' @param max_inner   Max inner iterations per period (default 10)
 #' @return Function(theta) -> list(logpost, loglik, logprior, regime_path)
 #' @export
@@ -166,6 +182,10 @@ make_log_posterior_obc_pkf <- function(model, data, prior_spec, obs_vars,
   if (is.data.frame(data)) data <- as.matrix(data)
   Y <- if (nrow(data) == length(obs_vars)) data else t(data)
 
+  ## me-floor hazard guard (see R/obc-regime.R .obc_warn_me_floor_lock() and
+  ## R/pruned-state-space.R): warn at most once per closure, not once per draw.
+  .me_floor_checked <- FALSE
+
   function(theta) {
     lp <- log_prior(theta, prior_spec)
     if (!is.finite(lp))
@@ -196,6 +216,12 @@ make_log_posterior_obc_pkf <- function(model, data, prior_spec, obs_vars,
     if (max_eig >= 1)
       return(list(logpost = -Inf, loglik = -Inf, logprior = lp,
                   regime_path = NULL))
+
+    .obc_warn_me_floor_lock(
+      dr_slack, model, params, obs_vars, obs_idx, me_variance,
+      check = !.me_floor_checked &&
+        isTRUE(getOption("dynhr.me_floor_check", TRUE)))
+    .me_floor_checked <<- TRUE   # guard once per closure, not per MCMC draw
 
     # Seed the regime cache with the slack policy
     regime_cache <- new.env(parent = emptyenv(), hash = TRUE)

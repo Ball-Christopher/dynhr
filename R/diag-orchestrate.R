@@ -627,6 +627,35 @@ run_all_diagnostics <- function(model            = NULL,
     }
   }
 
+  # --- D41: KF innovation whiteness (per-observable var/acf1 z-stats) ---
+  # Needs a decision rule + params + the filtered data. Skipped gracefully
+  # (INFO, not ERROR) when the model's stationary P0 is not valid for this
+  # dr/params combination (near-unit-root TT), mirroring kalman_filter's own
+  # lik_init = "auto" eigenvalue guard (R/kalman-filter.R ~L845), since the
+  # thin diagnostic filter in kf_innovation_diagnostics() only supports
+  # lik_init = "stationary" (no exact-diffuse phase implemented there).
+  if (!is.null(dr) && !is.null(model) && !is.null(params) && !is.null(data) &&
+      !is.null(obs_names)) {
+    state_idx_d41 <- dr$state_idx
+    tt_d41 <- tryCatch(dr$ghx[state_idx_d41, , drop = FALSE], error = function(e) NULL)
+    tt_evals_d41 <- if (!is.null(tt_d41) && nrow(tt_d41) > 0)
+      tryCatch(eigen(tt_d41, symmetric = FALSE, only.values = TRUE)$values,
+               error = function(e) NULL)
+    else NULL
+    near_unit_root_d41 <- is.null(tt_evals_d41) || any(Mod(tt_evals_d41) > 1 - 1e-6)
+
+    if (!near_unit_root_d41) {
+      .msg("D41: KF innovation whiteness...")
+      results$d41 <- .safe_diag("D41", function()
+        d41_innovation_whiteness(data, dr = dr, model = model, params = params,
+                                 obs_vars = obs_names, meta = meta))
+    } else {
+      .msg("D41: Skipped (near-unit-root state transition; stationary P0 not valid)")
+    }
+  } else {
+    .msg("D41: Skipped (dr, model, params, data, or obs_names not provided)")
+  }
+
   # --- D36: calibration deepness (is each *fixed* deep param data-consistent?) ---
   # Needs a full-vector log-likelihood; feeds the Passport's calibrated axis.
   if (!is.null(loglik_full_fn) && !is.null(params)) {
@@ -703,6 +732,82 @@ run_all_diagnostics <- function(model            = NULL,
   }
 
   results
+}
+
+
+# ---------------------------------------------------------------------------
+#' D41. Kalman-filter innovation whiteness
+#'
+#' Thin orchestrator wrapper around \code{\link{kf_innovation_diagnostics}}:
+#' runs the per-observable standardized-innovation whiteness check on
+#' \code{data} at \code{(dr, params)} and reports per-observable sample
+#' variance / lag-1 acf z-stats, flagging \code{|z| > 4} (see
+#' \code{kf_innovation_diagnostics}'s own conservative multiple-comparisons
+#' threshold) as a warning-level (FAIL badge) finding.
+#'
+#' @param data      Observation matrix (\code{T x n_obs} or \code{n_obs x T};
+#'   orientation is resolved against \code{obs_vars} the same way
+#'   \code{\link{kf_innovation_diagnostics}} does).
+#' @param dr        Decision rule (output of \code{\link{solve_perturbation}}).
+#' @param model     Compiled/parsed model object.
+#' @param params    Named numeric parameter vector.
+#' @param obs_vars  Character vector of observed variable names.
+#' @param me_variance Scalar measurement-error jitter (default 0), forwarded
+#'   to \code{\link{kf_innovation_diagnostics}}.
+#' @param meta      Optional \code{\link{diag_meta}} provenance descriptor.
+#' @return A \code{dynhr_diagnostic}; \code{$result} is the raw
+#'   \code{kf_innovation_diagnostics} object.
+#' @noRd
+d41_innovation_whiteness <- function(data, dr, model, params, obs_vars,
+                                     me_variance = 0, meta = NULL) {
+  tryCatch({
+    ## data may be T x n_obs (the orchestrator's convention) or n_obs x T
+    ## (kf_innovation_diagnostics's convention); match against obs_vars
+    ## dimnames when available, else fall back on the n_obs x T assumption
+    ## that kf_innovation_diagnostics itself uses internally.
+    Y <- as.matrix(data)
+    n_obs <- length(obs_vars)
+    if (nrow(Y) != n_obs && ncol(Y) == n_obs) Y <- t(Y)
+
+    diag_obj <- kf_innovation_diagnostics(Y, dr = dr, model = model,
+                                          params = params, obs_vars = obs_vars,
+                                          lik_init = "stationary",
+                                          me_variance = me_variance)
+
+    by_obs <- diag_obj$by_obs
+    flagged <- by_obs$obs_var[which(abs(by_obs$z_var) > 4 | abs(by_obs$z_acf1) > 4)]
+    pass <- length(flagged) == 0
+
+    summary_txt <- sprintf(
+      "D41 KF innovation whiteness: %d observable(s), max |z| = %.2f, %d flagged (|z| > 4)%s.",
+      nrow(by_obs), diag_obj$joint$max_abs_z, diag_obj$joint$n_flagged,
+      if (length(flagged)) paste0(" [", paste(flagged, collapse = ", "), "]") else "")
+
+    badge <- if (pass) "PASS" else "FAIL"
+    llm <- paste(c(
+      sprintf("D41 | KF Innovation Whiteness | %s", badge),
+      sprintf("  n_obs=%d max_abs_z=%.3f n_flagged=%d",
+              nrow(by_obs), diag_obj$joint$max_abs_z, diag_obj$joint$n_flagged),
+      sprintf("  per_obs: %s",
+              paste(sprintf("%s var_z=%.3f(z=%.2f) acf1=%.3f(z=%.2f)",
+                            by_obs$obs_var, by_obs$var_z, by_obs$z_var,
+                            by_obs$acf1, by_obs$z_acf1), collapse = "; ")),
+      if (length(flagged))
+        sprintf("  flagged(|z|>4): %s", paste(flagged, collapse = ", ")),
+      sprintf("  action: %s",
+              if (pass)
+                "Standardized innovations are consistent with white noise; no evidence of a likelihood-evaluation bug from this oracle."
+              else "Innovations deviate from white noise (variance != 1 or nonzero lag-1 acf); check Sigma_e, ZZ/DD routing, steady state, and per-period tunes (me_extra/shock_scale) at this evaluation point.")
+    ), collapse = "\n")
+
+    .make_result(
+      result = diag_obj, pass = pass, plots = list(),
+      summary = summary_txt, llm_summary = llm)
+  }, error = function(e) {
+    .make_result(pass = NA, errored = TRUE,
+                 summary = paste("D41 KF innovation whiteness: ERROR --",
+                                 conditionMessage(e)))
+  })
 }
 
 

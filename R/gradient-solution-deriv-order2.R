@@ -186,15 +186,41 @@
 
 ## ---------------------------------------------------------------------------
 ## Helper: d(Sigma_x)/dθ_j via a Lyapunov solve.
-##   hx dX hx' - dX = -(dhx * Sx * hx' + hx * Sx * dhx' + dhu * Se * hu' + hu * Se * dhu')
+##   hx dX hx' - dX = -(dhx*Sx*hx' + hx*Sx*dhx' + dhu*Se*hu' + hu*Se*dhu' + hu*dSe*hu')
+## The dSigma_e term is the shock-covariance channel (C1/C5): for a param
+## that moves Sigma_e (an estimated shock std wired via stderr_expr) but
+## leaves hx/hu unchanged (dhx = dhu = 0), Sigma_x still moves through the
+## hu*dSigma_e*hu' innovation-covariance term -- omitting it silently zeros
+## out d(Sigma_x)/dtheta for exactly those parameters. dSigma_e defaults to
+## a zero matrix so callers that do not pass it get the OLD (pre-C5)
+## behavior byte-identically (guarded by a regression test).
 ## ---------------------------------------------------------------------------
-.o2sd_dSigma_x <- function(hx, hu, dhx, dhu, Sigma_x, Sigma_e) {
+.o2sd_dSigma_x <- function(hx, hu, dhx, dhu, Sigma_x, Sigma_e, dSigma_e = NULL) {
+  if (is.null(dSigma_e)) dSigma_e <- matrix(0, nrow(Sigma_e), ncol(Sigma_e))
   dB <- dhx %*% Sigma_x %*% t(hx) +
         hx  %*% Sigma_x %*% t(dhx) +
         dhu %*% Sigma_e %*% t(hu)  +
-        hu  %*% Sigma_e %*% t(dhu)
+        hu  %*% Sigma_e %*% t(dhu) +
+        hu  %*% dSigma_e %*% t(hu)
   ## solve hx X hx' - X = -dB  =>  X = solve_lyapunov(hx, dB)
   solve_lyapunov(hx, dB)
+}
+
+
+## ---------------------------------------------------------------------------
+## Helper: d(Sigma_e)/dθ_j via central FD of .get_shock_cov (same convention
+## as .dSigma_e_fd in R/analytic-gradient.R and .pruned_d_ghss_sigma_channel's
+## caller in R/pruned-grad-chain.R). Returns a zero matrix for parameters
+## that are not model params / exo shock names (i.e. that .get_shock_cov
+## cannot possibly react to), avoiding a wasted FD pair.
+## ---------------------------------------------------------------------------
+.o2sd_dSigma_e <- function(model, params, pnm, h, n_u) {
+  exo <- model$varexo_names
+  pp <- params; pp[[pnm]] <- params[[pnm]] + h
+  pm <- params; pm[[pnm]] <- params[[pnm]] - h
+  Sp <- .get_shock_cov(model, exo, pp)
+  Sm <- .get_shock_cov(model, exo, pm)
+  (Sp - Sm) / (2 * h)
 }
 
 
@@ -627,27 +653,46 @@ solution_derivatives_order2 <- function(model, compiled, dr2, params, param_name
                dA_L %*% ghuu
     d_ghuu <- qr.solve(AL_qr, rhs_uu)
 
+    ## ---- d(Sigma_e)_j ----  (C5: the shock-covariance channel)
+    ## Central FD of .get_shock_cov, same convention as .dSigma_e_fd
+    ## (R/analytic-gradient.R) and the caller of
+    ## .pruned_d_ghss_sigma_channel (R/pruned-grad-chain.R). Zero for
+    ## parameters that do not enter Sigma_e (structural/persistence params),
+    ## in which case every term added below vanishes and this branch is a
+    ## no-op (verified against the pre-C5 output on a literal-stderr model).
+    dSigma_e <- .o2sd_dSigma_e(model, params, pnm, h, n_u)
+
     ## ---- d(ghss)_j ----
     ## ghss solves: (A_L + fp) ghss = RHS_ss
     ##   RHS_ss = -(fp * ghuu * vec(Sigma_e) + H2(T_up, T_up) * vec(Sigma_e))
     ## Differentiating: (A_L + fp) d(ghss) = dRHS_ss - d(A_L + fp) * ghss
     ##   d(A_L + fp) = dA_L + dfp
-    ##   dRHS_ss = -(dfp * ghuu * vSe + fp * d_ghuu * vSe
-    ##               + d(.bilinear_h2(H_base, T_up, T_up)) * vSe)
-    ## The third term requires d(H2(T_up, T_up))/dθ which involves dH_mat and dT_up.
+    ##   dRHS_ss = -(dfp * ghuu * vSe + fp * d_ghuu * vSe + fp * ghuu * dvSe
+    ##               + d(.bilinear_h2(H_base, T_up, T_up)) * vSe
+    ##               + .bilinear_h2(H_base, T_up, T_up) * dvSe)
+    ## The bilinear-H2 term needs d(H2(T_up, T_up))/dθ, which involves dH_mat
+    ## and dT_up (the decision-rule channel, held Sigma_e-independent) PLUS a
+    ## separate direct Sigma_e channel (ghss is exactly linear in vec(Sigma_e)
+    ## given fixed A_L/fp/ghuu/T_up/H2 -- see .solve_ghss(),
+    ## R/solve-perturbation-order3-sigma.R:477-484 -- so its vSe-derivative
+    ## contributes fp*ghuu*dvSe + H2(T_up,T_up)*dvSe, the SAME matrix used to
+    ## solve for the base ghss, just applied to dvSe instead of vSe).
     ## T_up is the "jumper" block — its derivative through ghu is analogous to dT_u.
     ## We build dT_up similarly to dT_u for the current-period ghu response.
     dT_up <- .o2sd_dT_up(compiled$dynamic, dH, ghu, endo_names,
                           exo_names, has_lead)
 
-    vSe <- as.numeric(Sigma_e)
-    ## d(fp * ghuu * vSe)/dθ = dfp * ghuu * vSe + fp * d_ghuu * vSe
-    term1 <- dfp %*% ghuu %*% vSe + fp %*% d_ghuu %*% vSe
+    vSe  <- as.numeric(Sigma_e)
+    dvSe <- as.numeric(dSigma_e)
+    ## d(fp * ghuu * vSe)/dθ = dfp * ghuu * vSe + fp * d_ghuu * vSe + fp * ghuu * dvSe
+    term1 <- dfp %*% ghuu %*% vSe + fp %*% d_ghuu %*% vSe + fp %*% ghuu %*% dvSe
 
     ## d(.bilinear_h2(H_base, T_up, T_up) * vSe)/dθ
     ## = .bilinear_h2(dH_mat, T_up, T_up) * vSe + 2 * .bilinear_h2(H_base, dT_up, T_up) * vSe
+    ##   + .bilinear_h2(H_base, T_up, T_up) * dvSe
     term2 <- (.bilinear_h2(dH_mat, T_up, T_up)  +
-              2 * .bilinear_h2(H_base, dT_up, T_up)) %*% vSe
+              2 * .bilinear_h2(H_base, dT_up, T_up)) %*% vSe +
+             .bilinear_h2(H_base, T_up, T_up) %*% dvSe
 
     dRHS_ss <- -(term1 + term2)
 
@@ -656,7 +701,7 @@ solution_derivatives_order2 <- function(model, compiled, dr2, params, param_name
     d_ghss <- as.numeric(d_ghss_vec)
 
     ## ---- d(Sigma_x)_j ----
-    d_Sigma_x <- .o2sd_dSigma_x(hx, hu, dhx, dhu, Sigma_x, Sigma_e)
+    d_Sigma_x <- .o2sd_dSigma_x(hx, hu, dhx, dhu, Sigma_x, Sigma_e, dSigma_e)
 
     ## Name the outputs consistently with dr2 conventions
     names(d_ghss) <- endo_names
@@ -670,6 +715,7 @@ solution_derivatives_order2 <- function(model, compiled, dr2, params, param_name
       d_ghuu    = d_ghuu,
       d_ghss    = d_ghss,
       d_Sigma_x = d_Sigma_x,
+      d_Sigma_e = dSigma_e,
       ok        = TRUE
     )
   }

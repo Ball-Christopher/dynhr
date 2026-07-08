@@ -1022,11 +1022,25 @@ compute_third_cumulant <- function(dr, model, params = NULL) {
 #' @param dr    DecisionRules2 (or higher)
 #' @param model dynhr_mod
 #' @param params Named numeric parameter vector
+#' @param method Either \code{"window"} (default; the innovation-history
+#'   truncated-window trace, \code{.fourth_cumulant_qform_marginal}) or
+#'   \code{"closed_form"} (opt-in; delegates to
+#'   \code{.fourth_cumulant_closed_form()} in \code{R/cumulant-c2222.R}, which
+#'   removes the O(n_lag) window sum entirely but is a PARTIAL closed form:
+#'   the chain term is exact, the trace term is contemporaneous-only and
+#'   omits the x2-self / x2-cross trace corrections -- see that file's header
+#'   for the full accounting of which necklace terms are dropped and why. Not
+#'   validated near the unit root; prefer \code{"window"} there.
 #' @return List:
 #'   \item{kurtosis_obs}{Named numeric vector of marginal excess kurtosis γ_2}
 #'   \item{c4_obs}{n_obs × n_obs^3 matrix: fourth cumulant of observables}
 #' @export
-compute_fourth_cumulant <- function(dr, model, params = NULL) {
+compute_fourth_cumulant <- function(dr, model, params = NULL,
+                                    method = c("window", "closed_form")) {
+  method <- match.arg(method)
+  if (identical(method, "closed_form"))
+    return(.fourth_cumulant_closed_form(dr, model, params))
+
   endo      <- dr$endo_names
   exo       <- dr$exo_names
   state_idx <- dr$state_idx

@@ -38,7 +38,7 @@ If \code{R.matlab} is not available, export the \code{.mat} parameters to
 JSON from Octave/MATLAB:
 \preformatted{
 ## In Octave:
-load("params.mat");
+load("grids.mat");
 fields = fieldnames(vars);
 out = struct();
 for i = 1:numel(fields)
@@ -53,7 +53,7 @@ pars <- unlist(jsonlite::fromJSON("grids.json"))
 
 \examples{
 \dontrun{
-pars <- read_mat_params("params.mat")
+pars <- read_mat_params("economicParameters.mat")
 m    <- inject_params(m, pars)
 }
 }

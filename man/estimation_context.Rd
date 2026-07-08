@@ -21,7 +21,8 @@ estimation_context(
   sample_start = NULL,
   ms_spec = NULL,
   ms_struct_spec = NULL,
-  student_df = NULL
+  student_df = NULL,
+  pruned_order = 2L
 )
 }
 \arguments{
@@ -113,6 +114,12 @@ regime-specific decision rules, then evaluates the likelihood via
 \item{student_df}{Positive finite scalar; degrees of freedom for the
 multivariate Student-t per-period log-likelihood.  Required when
 \code{likelihood = "student_t"}, ignored otherwise.}
+
+\item{pruned_order}{Integer, \code{2L} (default) or \code{3L}.  Selects
+the AFVRR pruned state-space order used by \code{make_log_posterior}
+when \code{likelihood = "pruned"} (order-2 vs order-3 augmented state).
+Only meaningful when \code{likelihood = "pruned"}; setting
+\code{pruned_order = 3L} with any other likelihood is an error.}
 }
 \value{
 An object of class \code{"dynhr_estimation_context"}.

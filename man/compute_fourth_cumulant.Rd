@@ -4,7 +4,12 @@
 \alias{compute_fourth_cumulant}
 \title{Compute the unconditional fourth cumulant (excess kurtosis) of observables}
 \usage{
-compute_fourth_cumulant(dr, model, params = NULL)
+compute_fourth_cumulant(
+  dr,
+  model,
+  params = NULL,
+  method = c("window", "closed_form")
+)
 }
 \arguments{
 \item{dr}{DecisionRules2 (or higher)}
@@ -12,6 +17,16 @@ compute_fourth_cumulant(dr, model, params = NULL)
 \item{model}{dynhr_mod}
 
 \item{params}{Named numeric parameter vector}
+
+\item{method}{Either \code{"window"} (default; the innovation-history
+truncated-window trace, \code{.fourth_cumulant_qform_marginal}) or
+\code{"closed_form"} (opt-in; delegates to
+\code{.fourth_cumulant_closed_form()} in \code{R/cumulant-c2222.R}, which
+removes the O(n_lag) window sum entirely but is a PARTIAL closed form:
+the chain term is exact, the trace term is contemporaneous-only and
+omits the x2-self / x2-cross trace corrections -- see that file's header
+for the full accounting of which necklace terms are dropped and why. Not
+validated near the unit root; prefer \code{"window"} there.}
 }
 \value{
 List:

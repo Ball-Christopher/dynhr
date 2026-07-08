@@ -13,14 +13,15 @@ make_posterior_grad(
   me_variance = 0,
   theta_ref = NULL,
   verbose = FALSE,
-  grad_method = c("hybrid", "implicit", "adjoint"),
+  grad_method = c("hybrid", "implicit", "adjoint", "adjoint_solution"),
   me_extra = NULL,
   shock_scale = NULL,
   likelihood = "gaussian",
   freq_band = c(0, pi),
   cumulant_orders = 1:4,
   cumulant_weight = "identity",
-  debias = TRUE
+  debias = TRUE,
+  pruned_order = 2L
 )
 }
 \arguments{
@@ -32,8 +33,8 @@ equivalence classification (default: prior means).}
 
 \item{verbose}{print the analytic/numerical parameter split.}
 
-\item{grad_method}{\code{"hybrid"} (default), \code{"implicit"}, or
-  \code{"adjoint"}.
+\item{grad_method}{\code{"hybrid"} (default), \code{"implicit"},
+  \code{"adjoint"}, or \code{"adjoint_solution"}.
   \code{"hybrid"} is the behaviour described above: an analytic Kalman
   score for the shock-std (sigma) parameters and a relative-step central
   difference for the rest.
@@ -61,7 +62,25 @@ equivalence classification (default: prior means).}
   (\code{.kf_loglik_adjoint}): one forward pass storing per-step filter
   quantities and one backward sweep, so the filter-side cost is O(1) in
   the number of parameters instead of O(n_par). The two agree to ~1e-12;
-  prefer \code{"adjoint"} for models with many estimated parameters.}
+  prefer \code{"adjoint"} for models with many estimated parameters.
+
+  \code{"adjoint_solution"} (Tier 18 A2) extends \code{"adjoint"} with
+  reverse mode through the perturbation solve as well: the adjoint Kalman
+  filter exports its bar matrices wrt (TT, RR, ZZ, DD, d), and
+  \code{.solution_adjoint()} turns them into the structural-parameter
+  gradient with TWO transposed solves total plus one Frobenius contraction
+  per parameter -- no per-parameter generalized-Sylvester solve at all
+  (\code{"implicit"}/\code{"adjoint"} pay one backsolve + RHS assembly per
+  structural parameter via \code{solution_derivatives}). The Sigma_e
+  channel (estimated shock stds, stderr expressions) is still routed
+  through the filter adjoint's \code{G_Sig}. Agrees with \code{"adjoint"}
+  to ~1e-10. Draws needing the missing-data or exact-diffuse kernels (which
+  do not export bars) fall back to the \code{"adjoint"} construction for
+  that draw; whittle/cumulant/pruned likelihoods treat it as
+  \code{"implicit"}. Benchmark before preferring it as a default: on
+  small/medium models the forward layer's shared factorization is already
+  cheap and the savings may not clear the R-level overhead (see the
+  E-wave lesson in the NZSIM records).}
 
 \item{me_extra}{Optional n_obs x T matrix of per-period additive
 measurement-error variances (filter_tunes); the gradient is of the same
@@ -86,6 +105,9 @@ the debiased Whittle loglik (expected-periodogram form, Sykulski et al.
 2019 — the default of the estimation entry points). Must match the
 \code{debias} setting of the posterior being sampled. Ignored for the
 Gaussian likelihood.}
+
+\item{pruned_order}{Integer perturbation order for the pruned state-space
+likelihood path (default \code{2L}); currently \code{2L} or \code{3L}.}
 }
 \value{
 \code{function(theta)} returning the gradient vector, suitable for the

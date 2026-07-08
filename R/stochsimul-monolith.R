@@ -1374,7 +1374,12 @@ compute_moments_order2 <- function(dr, model, n_ar = 5L, params = NULL) {
   mu_xi <- as.numeric(solve(diag(sys$d) - sys$Tlin, sys$cc + sys$c_u))
   mean_dev <- as.numeric(sys$Dxi %*% mu_xi) + 0.5 * sys$ghss + sys$c_v
   list(var_cov = var_cov, mean = sys$ys + mean_dev, Sigma_x = Sigma_x,
-       Var_x2 = Sxi[sys$ix2, sys$ix2, drop = FALSE], mean_x2 = mu_xi[sys$ix2])
+       Var_x2 = Sxi[sys$ix2, sys$ix2, drop = FALSE], mean_x2 = mu_xi[sys$ix2],
+       ## Cov(x2_t, x1_t (x) x1_t): exact order-2 cross block (n_s x n_s^2),
+       ## x1(x)x1 column (d,e) with e fastest.  Needed by the order-3 pruned-SS
+       ## Cr0 to build the j5(=eps(x)x2) cross-category blocks correctly (the
+       ## connected non-Gaussian moment E[x2c x1 x1]); see .order3_cov_r.
+       Cov_x2_x11 = Sxi[sys$ix2, sys$ik, drop = FALSE])
 }
 
 ## Transient s0-conditional order-2 output moments (levels), t = 1..n_periods.

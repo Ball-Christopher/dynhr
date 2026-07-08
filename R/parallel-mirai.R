@@ -426,10 +426,10 @@
 #'   \code{logpost_trace} are returned in theta-space, as on the serial path.
 #' @param adapt_cov Opt-in (default \code{FALSE}); forwarded to each chain's
 #'   \code{rwmh()} call -- Haario et al. (2001) adaptive proposal covariance
-#'   (see \code{\link{rwmh}}'s `adapt_cov`).
+#'   (see \code{rwmh}'s `adapt_cov`).
 #' @param n_blocks Opt-in (default \code{1L}); forwarded to each chain's
 #'   \code{rwmh()} call -- randomized parameter blocking (see
-#'   \code{\link{rwmh}}'s `n_blocks`).
+#'   \code{rwmh}'s `n_blocks`).
 #' @return list(chains, chain_stats, wall_time, n_cores) -- matches
 #'   run_mcmc_parallel().
 #' @noRd

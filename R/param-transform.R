@@ -366,3 +366,38 @@ make_transformed_grad <- function(grad_fn, tr) {
   dimnames(Sigma_eta) <- dimnames(Sigma_theta)
   Sigma_eta
 }
+
+#' Delta-method conversion of a theta-space PRECISION/metric to eta-space
+#'
+#' Unlike a covariance, a precision-like object (Fisher information, Hessian
+#' of neg-log-posterior) transforms with the JACOBIAN, not its inverse:
+#'
+#'   eta = g(theta)  =>  G_eta = J^{-T} G_theta J^{-1},  J = diag(deta/dtheta)
+#'                             = diag(dtheta/deta) G_theta diag(dtheta/deta)
+#'                             = D G_theta D,  D = diag(dtheta_deta(eta_at))
+#'
+#' i.e. G_eta = D^T G_theta D (D is diagonal so D^T = D). This is the inverse
+#' rule of \code{.cov_theta_to_eta()}: consistent, since for a positive-definite
+#' G_theta, \code{solve(.fim_theta_to_eta(G_theta, ...))} recovers
+#' \code{.cov_theta_to_eta(solve(G_theta), ...)} exactly (see
+#' test-nuts-whittle-metric.R). Same floor-guard on \code{dtheta_deta} as
+#' \code{.cov_theta_to_eta()}, to avoid blow-up near a transform's asymptote.
+#'
+#' @param G_theta  Theta-space precision/metric matrix, or NULL.
+#' @param tr       A "dynhr_param_transform" (from build_param_transform()).
+#' @param theta_at Theta-space point at which to evaluate the Jacobian
+#'   (typically the mode).
+#' @return Eta-space precision/metric matrix with the same dimnames as
+#'   \code{G_theta}, or NULL if \code{G_theta} is NULL / not a matrix.
+#' @noRd
+.fim_theta_to_eta <- function(G_theta, tr, theta_at) {
+  if (is.null(G_theta) || !is.matrix(G_theta)) return(NULL)
+  eta_at <- tr$to_unconstrained(theta_at)
+  d_vec  <- tr$dtheta_deta(eta_at)
+  d_vec[abs(d_vec) < 1e-12] <- sign(d_vec[abs(d_vec) < 1e-12]) * 1e-12
+  d_vec[d_vec == 0] <- 1e-12
+  D <- diag(d_vec, nrow = length(d_vec))
+  G_eta <- D %*% G_theta %*% D
+  dimnames(G_eta) <- dimnames(G_theta)
+  G_eta
+}

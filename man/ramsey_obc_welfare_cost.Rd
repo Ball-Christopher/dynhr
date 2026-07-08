@@ -20,7 +20,14 @@ ramsey_obc_welfare_cost(
 
 \item{obc_specs}{OBC specs (or NULL to parse from model).}
 
-\item{shock_std}{Shock standard deviation for IRF (default 1.0).}
+\item{shock_std}{Standard deviation of the one-time impulse applied
+to the first exogenous shock at period 1 of the perfect-foresight path
+used to compute the OBC-constrained welfare (default 1.0). Larger values
+trace out a larger occasionally-binding episode and a larger welfare gap.
+NOTE the comparison is steady-state unconstrained welfare vs the
+shocked-path OBC welfare, so the reported gap bundles the shock's own
+transition cost together with the OBC distortion (an unconstrained
+path-welfare leg under the same shock is not currently available).}
 
 \item{params}{Parameter vector.}
 

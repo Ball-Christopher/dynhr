@@ -248,8 +248,8 @@
 #' @param theta_ref reference parameter vector for the one-time certainty-
 #'   equivalence classification (default: prior means).
 #' @param verbose print the analytic/numerical parameter split.
-#' @param grad_method \code{"hybrid"} (default), \code{"implicit"}, or
-#'   \code{"adjoint"}.
+#' @param grad_method \code{"hybrid"} (default), \code{"implicit"},
+#'   \code{"adjoint"}, or \code{"adjoint_solution"}.
 #'   \code{"hybrid"} is the behaviour described above: an analytic Kalman
 #'   score for the shock-std (sigma) parameters and a relative-step central
 #'   difference for the rest.
@@ -278,6 +278,24 @@
 #'   quantities and one backward sweep, so the filter-side cost is O(1) in
 #'   the number of parameters instead of O(n_par). The two agree to ~1e-12;
 #'   prefer \code{"adjoint"} for models with many estimated parameters.
+#'
+#'   \code{"adjoint_solution"} (Tier 18 A2) extends \code{"adjoint"} with
+#'   reverse mode through the perturbation solve as well: the adjoint Kalman
+#'   filter exports its bar matrices wrt (TT, RR, ZZ, DD, d), and
+#'   \code{.solution_adjoint()} turns them into the structural-parameter
+#'   gradient with TWO transposed solves total plus one Frobenius contraction
+#'   per parameter -- no per-parameter generalized-Sylvester solve at all
+#'   (\code{"implicit"}/\code{"adjoint"} pay one backsolve + RHS assembly per
+#'   structural parameter via \code{solution_derivatives}). The Sigma_e
+#'   channel (estimated shock stds, stderr expressions) is still routed
+#'   through the filter adjoint's \code{G_Sig}. Agrees with \code{"adjoint"}
+#'   to ~1e-10. Draws needing the missing-data or exact-diffuse kernels (which
+#'   do not export bars) fall back to the \code{"adjoint"} construction for
+#'   that draw; whittle/cumulant/pruned likelihoods treat it as
+#'   \code{"implicit"}. Benchmark before preferring it as a default: on
+#'   small/medium models the forward layer's shared factorization is already
+#'   cheap and the savings may not clear the R-level overhead (see the
+#'   E-wave lesson in the NZSIM records).
 #' @param me_extra Optional n_obs x T matrix of per-period additive
 #'   measurement-error variances (filter_tunes); the gradient is of the same
 #'   tuned likelihood \code{make_log_posterior} evaluates.
@@ -296,6 +314,8 @@
 #'   2019 — the default of the estimation entry points). Must match the
 #'   \code{debias} setting of the posterior being sampled. Ignored for the
 #'   Gaussian likelihood.
+#' @param pruned_order Integer perturbation order for the pruned state-space
+#'   likelihood path (default \code{2L}); currently \code{2L} or \code{3L}.
 #' @return \code{function(theta)} returning the gradient vector, suitable for the
 #'   \code{grad_fn} argument of \code{\link{nuts}}.
 #'
@@ -327,13 +347,15 @@ make_posterior_grad <- function(model, data, prior_spec, obs_vars, compiled,
                                 me_variance = 0, theta_ref = NULL,
                                 verbose = FALSE,
                                 grad_method = c("hybrid", "implicit",
-                                                "adjoint"),
+                                                "adjoint",
+                                                "adjoint_solution"),
                                 me_extra = NULL, shock_scale = NULL,
                                 likelihood = "gaussian",
                                 freq_band = c(0, pi),
                                 cumulant_orders = 1:4,
                                 cumulant_weight = "identity",
-                                debias = TRUE) {
+                                debias = TRUE,
+                                pruned_order = 2L) {
   grad_method <- match.arg(grad_method)
   sys_cache <- cache_system_structure(compiled)
   exo       <- model$varexo_names
@@ -342,6 +364,14 @@ make_posterior_grad <- function(model, data, prior_spec, obs_vars, compiled,
   use_whittle  <- identical(likelihood, "whittle")
   use_cumulant <- identical(likelihood, "cumulant")
   use_pruned   <- identical(likelihood, "pruned")
+  ## Fail loud on likelihoods with no gradient path, rather than silently
+  ## returning a Gaussian gradient for them (pskf/student_t/tpf/ppf/copf have
+  ## no analytic/FD gradient here; the sampler gate .ctx_allows_analytic_gradient
+  ## already excludes them, so this only guards direct/user calls and typos).
+  if (!likelihood %in% c("gaussian", "whittle", "cumulant", "pruned"))
+    stop("make_posterior_grad(): no gradient path for likelihood '", likelihood,
+         "'. Supported: gaussian, whittle, cumulant, pruned. ",
+         "(pskf/student_t/tpf/ppf/copf have no gradient path.)")
   lp_fn <- if (use_whittle) {
     make_log_posterior_whittle(model, data, prior_spec, obs_vars, compiled,
                                me_variance = me_variance,
@@ -353,10 +383,20 @@ make_posterior_grad <- function(model, data, prior_spec, obs_vars, compiled,
                                 cumulant_orders = cumulant_orders,
                                 cumulant_weight = cumulant_weight)
   } else if (use_pruned) {
-    ## Pruned-SS Gaussian KF: analytic gradient NOT available.
-    ## make_posterior_grad falls back to numerical FD for all parameters.
-    make_log_posterior_pruned(model, data, prior_spec, obs_vars, compiled,
-                              me_variance = me_variance)
+    ## Pruned-SS Gaussian KF on the AFVRR augmented state. Order 2: analytic
+    ## adjoint-chain gradient (R/pruned-grad-chain.R), FD fallback per
+    ## parameter for anything the chain does not cover. Order 3: the fold
+    ## chain needs a derivative-Lyapunov pass through the order-3 pruned
+    ## system (R/pruned-state-space-order3.R) that is OUT OF SCOPE here
+    ## (deferred); make_posterior_grad falls back to numerical FD for ALL
+    ## parameters at order 3, same as before this change.
+    if (identical(pruned_order, 3L) || identical(pruned_order, 3)) {
+      make_log_posterior_pruned3(model, data, prior_spec, obs_vars, compiled,
+                                 me_variance = me_variance)
+    } else {
+      make_log_posterior_pruned(model, data, prior_spec, obs_vars, compiled,
+                                me_variance = me_variance)
+    }
   } else {
     make_log_posterior(model, data, prior_spec, obs_vars, compiled,
                        me_variance = me_variance,
@@ -436,13 +476,15 @@ make_posterior_grad <- function(model, data, prior_spec, obs_vars, compiled,
 
   ## --- "cumulant" gradient closure ------------------------------------------
   ## The cumulant likelihood is differentiated by cumulant_loglik_grad(), which
-  ## needs the SAME order-2 decision rule the forward make_log_posterior_cumulant
-  ## solves (orders 3-4 read ghxx/ghss). We mirror that solve exactly (order-1
-  ## core -> stationarity guard -> solve_perturbation_order2), then take the
-  ## implicit (analytic, tensor-Lyapunov) gradient. Validated against numDeriv of
-  ## make_log_posterior_cumulant's logpost to ~1e-11 (test-cumulant-gradient-
-  ## wired.R). Any non-finite analytic entry takes the exact FD-of-forward
-  ## fallback, so the gradient is always consistent with lp_fn.
+  ## needs the SAME decision rule the forward make_log_posterior_cumulant solves.
+  ## The forward solves order 2 ONLY when an order-3/4 cumulant is requested
+  ## (ghxx/ghss feed skewness/kurtosis); otherwise the bare first-order rule.
+  ## We mirror that solve-order choice exactly below (order-1 core -> stationarity
+  ## guard -> conditional order-2 solve), then take the implicit (analytic,
+  ## tensor-Lyapunov) gradient. Validated against numDeriv of the forward logpost
+  ## for BOTH order-1:2 and order-1:4 (test-gradient-exactness-audit.R). Any
+  ## non-finite analytic entry takes the exact FD-of-forward fallback, so the
+  ## gradient is always consistent with lp_fn.
   if (use_cumulant) {
     cumulant_grad_fn <- function(theta) {
       names(theta) <- par_names
@@ -456,17 +498,52 @@ make_posterior_grad <- function(model, data, prior_spec, obs_vars, compiled,
       if (is.null(d1) || !isTRUE(d1$bk_satisfied)) return(g)
       ghx_state <- d1$ghx[d1$state_idx, , drop = FALSE]
       if (max(Mod(eigen(ghx_state, symmetric = FALSE, only.values = TRUE)$values)) >= 1) return(g)
-      Sigma_e <- .get_shock_cov(model, exo, params)
-      dr_use <- tryCatch(
-        solve_perturbation_order2(model, compiled, ss$ss, params, dr1 = d1,
-                                  Sigma_e = Sigma_e, h = 1e-4, verbose = FALSE),
-        error = function(e) NULL)
-      if (is.null(dr_use)) dr_use <- d1   # order-2 failed: orders 3-4 drop out
-      gll <- tryCatch(
-        cumulant_loglik_grad(model, compiled, dr_use, params, par_names,
-                             obs_vars, data, orders = cumulant_orders,
-                             me_variance = me_variance, deriv = "implicit"),
-        error = function(e) setNames(rep(NA_real_, np), par_names))
+      ## Mirror make_log_posterior_cumulant's solve-order choice EXACTLY: it
+      ## solves order 2 only when an order-3/4 cumulant is requested (ghxx/ghss
+      ## feed the skewness/kurtosis terms), else the bare first-order rule. The
+      ## gradient must differentiate the SAME function the forward evaluates;
+      ## unconditionally solving order 2 here made the order-1:2 gradient the
+      ## derivative of the order-2 posterior (wrong sign on some params).
+      solve_order <- if (any(cumulant_orders >= 3L)) 2L else 1L
+      if (solve_order >= 2L) {
+        Sigma_e <- .get_shock_cov(model, exo, params)
+        dr_use <- tryCatch(
+          solve_perturbation_order2(model, compiled, ss$ss, params, dr1 = d1,
+                                    Sigma_e = Sigma_e, h = 1e-4, verbose = FALSE),
+          error = function(e) NULL)
+        if (is.null(dr_use)) dr_use <- d1   # order-2 failed: orders 3-4 drop out
+      } else {
+        dr_use <- d1                        # first-order: matches the forward
+      }
+      ## grad_method == "adjoint_solution": reverse-mode (O(1) in P) path for
+      ## orders 1-3 via .cumulant_loglik_grad_adjoint; any NA entry (e.g. order
+      ## 4 requested, or a not-ok adjoint block) FD-fallbacks below, so the
+      ## returned gradient stays exactly consistent with lp_fn. All other
+      ## grad_method values keep the (unchanged) implicit path.
+      gll <- if (grad_method == "adjoint_solution") {
+        g_adj <- tryCatch(
+          .cumulant_loglik_grad_adjoint(model, compiled, dr_use, params,
+                                        par_names, obs_vars, data,
+                                        orders = cumulant_orders,
+                                        me_variance = me_variance),
+          error = function(e) setNames(rep(NA_real_, np), par_names))
+        ## If the reverse path declined wholesale (all NA — e.g. order 4 or a
+        ## non-DecisionRules2), fall back to the implicit path rather than a
+        ## full per-param FD, matching the accuracy of the other methods.
+        if (all(is.na(g_adj))) {
+          tryCatch(
+            cumulant_loglik_grad(model, compiled, dr_use, params, par_names,
+                                 obs_vars, data, orders = cumulant_orders,
+                                 me_variance = me_variance, deriv = "implicit"),
+            error = function(e) setNames(rep(NA_real_, np), par_names))
+        } else g_adj
+      } else {
+        tryCatch(
+          cumulant_loglik_grad(model, compiled, dr_use, params, par_names,
+                               obs_vars, data, orders = cumulant_orders,
+                               me_variance = me_variance, deriv = "implicit"),
+          error = function(e) setNames(rep(NA_real_, np), par_names))
+      }
       base_ll <- NULL
       for (nm in par_names) {
         gj <- gll[[nm]]
@@ -481,6 +558,143 @@ make_posterior_grad <- function(model, data, prior_spec, obs_vars, compiled,
       g
     }
     return(cumulant_grad_fn)
+  }
+
+  ## --- "pruned" gradient closure ---------------------------------------------
+  ## Order 2: analytic adjoint-chain gradient (phase a: R/pruned-kf-adjoint.R,
+  ## phase b: R/pruned-grad-chain.R). One order-2 solve +
+  ## solution_derivatives_order2() call covers ALL structural parameters via a
+  ## shared factorization (Childers et al. efficiency point, same as the
+  ## Gaussian "implicit" path); each parameter also needs a dSigma_e (central
+  ## FD of .get_shock_cov, same convention as the Gaussian hybrid path's
+  ## .dSigma_e_fd). Any parameter whose solution_derivatives_order2() block
+  ## comes back not-ok, or whose chained gradient is non-finite, falls back to
+  ## .fd_loglik_grad1() against lp_fn -- so the returned gradient is always a
+  ## mix of "exact chain" and "exact FD-of-forward", never silently wrong.
+  ##
+  ## Order 3: the FULL fold-chain derivative (analytic d(ghxxx)/dtheta etc.
+  ## plus a derivative-Lyapunov pass through the order-3 augmented system) is
+  ## OUT OF SCOPE (see R/pruned-grad-chain-order3.R's file header / the D1
+  ## completion report's scope section). D1 instead implements a
+  ## SEMI-ANALYTIC middle path (R/pruned-grad-chain-order3.R,
+  ## .pgo3_grad_chain): ONE .pruned_kf_correlated_adjoint() filter pass
+  ## supplies d(loglik)/d(9 SSM inputs), and central FD of the ASSEMBLY ONLY
+  ## (order-3 solve + fold + stationary moments, NO filter pass) supplies
+  ## d(inputs)/dtheta_j; the two are contracted via a Frobenius inner
+  ## product per parameter. This is exact up to the assembly-FD truncation
+  ## error (validated against FD-of-forward to 1e-4 relative, see
+  ## test-pruned-grad-order3.R), and is cheaper than FD-of-forward whenever
+  ## the filter's O(T) loop dominates the (fixed-cost) assembly. Any
+  ## parameter whose base assembly or per-parameter assembly-FD fails falls
+  ## back to exact FD-of-forward via lp_fn, so the returned gradient is
+  ## always a mix of "semi-analytic" and "exact FD-of-forward", never
+  ## silently wrong.
+  if (use_pruned) {
+    is_pruned3 <- identical(pruned_order, 3L) || identical(pruned_order, 3)
+    pruned_grad_fn <- function(theta) {
+      names(theta) <- par_names
+      g <- .dlog_prior(theta, prior_spec)        # analytic prior score (all params)
+
+      if (is_pruned3) {
+        Y3 <- if (is.null(dim(data))) matrix(data, nrow = length(obs_vars)) else data
+        if (nrow(Y3) != length(obs_vars)) Y3 <- t(Y3)
+
+        chain_res3 <- tryCatch(
+          .pgo3_grad_chain(theta, model, compiled, par_names, Y3, obs_vars,
+                           me_variance = me_variance),
+          error = function(e) NULL)
+
+        base_ll <- if (!is.null(chain_res3)) chain_res3$loglik else
+          tryCatch(lp_fn(theta)$loglik, error = function(e) -Inf)
+        if (!is.finite(base_ll)) return(g)
+
+        fd_names3 <- character(0)
+        for (nm in par_names) {
+          gj <- if (!is.null(chain_res3)) chain_res3$grad[[nm]] else NA_real_
+          if (!is.null(gj) && is.finite(gj)) {
+            g[nm] <- g[nm] + gj
+          } else {
+            fd_names3 <- c(fd_names3, nm)
+          }
+        }
+        for (nm in fd_names3) {
+          d1 <- .fd_loglik_grad1(theta, nm, base_ll)
+          if (is.finite(d1)) g[nm] <- g[nm] + d1
+        }
+        return(g)
+      }
+
+      params <- .apply_theta_to_params(model, theta)
+      ss_result <- tryCatch(
+        solve_steady_state(model, compiled, params, verbose = FALSE),
+        error = function(e) NULL)
+      if (is.null(ss_result) || !isTRUE(ss_result$converged)) return(g)
+      params <- ss_result$params %||% params
+
+      sys <- extract_system_matrices_fast(sys_cache, ss_result$ss, params)
+      dr1 <- tryCatch(.solve_from_system(sys, model, compiled, ss_result$ss,
+                                         params, FALSE), error = function(e) NULL)
+      if (is.null(dr1) || !isTRUE(dr1$bk_satisfied)) return(g)
+
+      dr2 <- tryCatch(
+        solve_perturbation_order2(model, compiled, ss_result$ss, params, dr1,
+                                  verbose = FALSE),
+        error = function(e) NULL)
+      if (is.null(dr2)) return(g)
+
+      pss <- tryCatch(pruned_state_space(dr2, model, params), error = function(e) NULL)
+      if (is.null(pss)) return(g)
+
+      Y <- if (is.null(dim(data))) matrix(data, nrow = length(obs_vars)) else data
+      if (nrow(Y) != length(obs_vars)) Y <- t(Y)
+
+      sd2 <- tryCatch(
+        solution_derivatives_order2(model, compiled, dr2, params, par_names),
+        error = function(e) NULL)
+      if (is.null(sd2)) {
+        base_ll <- tryCatch(pruned_ss_loglik(pss, Y, obs_vars, me_variance = me_variance),
+                            error = function(e) -Inf)
+        if (!is.finite(base_ll)) return(g)
+        for (nm in par_names) {
+          d1 <- .fd_loglik_grad1(theta, nm, base_ll)
+          if (is.finite(d1)) g[nm] <- g[nm] + d1
+        }
+        return(g)
+      }
+
+      dSigma_e_list <- setNames(vector("list", length(par_names)), par_names)
+      for (nm in par_names) dSigma_e_list[[nm]] <- .dSigma_e_fd(theta, params, nm)
+
+      chain_res <- tryCatch(
+        .pruned_ss_loglik_grad_chain(pss, Y, obs_vars, sd2, dSigma_e_list,
+                                     me_variance = me_variance,
+                                     model = model, compiled = compiled,
+                                     ss = ss_result$ss, dr1 = dr1, params = params),
+        error = function(e) NULL)
+
+      base_ll <- if (!is.null(chain_res)) chain_res$loglik else
+        tryCatch(pruned_ss_loglik(pss, Y, obs_vars, me_variance = me_variance),
+                 error = function(e) -Inf)
+      if (!is.finite(base_ll)) return(g)
+
+      fd_names <- character(0)
+      for (nm in par_names) {
+        gj <- if (!is.null(chain_res)) chain_res$grad[[nm]] else NA_real_
+        if (!is.null(gj) && is.finite(gj)) {
+          g[nm] <- g[nm] + gj
+        } else {
+          fd_names <- c(fd_names, nm)
+        }
+      }
+      if (length(fd_names) > 0) {
+        for (nm in fd_names) {
+          d1 <- .fd_loglik_grad1(theta, nm, base_ll)
+          if (is.finite(d1)) g[nm] <- g[nm] + d1
+        }
+      }
+      g
+    }
+    return(pruned_grad_fn)
   }
 
   ## --- "hybrid" gradient closure (existing behaviour, bit-identical) -------
@@ -806,8 +1020,19 @@ make_posterior_grad <- function(model, data, prior_spec, obs_vars, compiled,
     ss$TT <- ss$T_mat; ss$RR <- ss$R_mat
     ss$ZZ <- ss$Z_mat; ss$DD <- ss$D_mat
 
+    ## Full reverse mode ("adjoint_solution"): the dense adjoint kernel exports
+    ## its bar matrices and .solution_adjoint() replaces the per-parameter
+    ## forward Sylvester solves. The uni/diffuse special-case kernels do not
+    ## export bars, so those draws use the "adjoint" construction instead.
+    use_sol_adjoint <- grad_method == "adjoint_solution" &&
+      !use_uni_adjoint && !use_diffuse_adjoint
+
     ## Build d_ss_list: sigma params get dSigma_e only; all other params get
-    ## solution_derivatives() blocks (one shared call/factorization).
+    ## solution_derivatives() blocks (one shared call/factorization). Under
+    ## use_sol_adjoint the structural blocks are NOT built -- num_names carry
+    ## only their dSigma_e channel (stderr-expression coupling; exact-zero for
+    ## parameters absent from the shocks block) and the structural gradient
+    ## comes from .solution_adjoint() below.
     d_ss_list <- vector("list", np)
     names(d_ss_list) <- par_names
 
@@ -815,7 +1040,10 @@ make_posterior_grad <- function(model, data, prior_spec, obs_vars, compiled,
       d_ss_list[[nm]] <- list(dSigma_e = .dSigma_e_fd(theta, params, nm))
 
     sd_res <- NULL
-    if (length(num_names) > 0) {
+    if (use_sol_adjoint) {
+      for (nm in num_names)
+        d_ss_list[[nm]] <- list(dSigma_e = .dSigma_e_fd(theta, params, nm))
+    } else if (length(num_names) > 0) {
       sd_res <- tryCatch(
         solution_derivatives(model, compiled, dr, params,
                               param_names = num_names, obs_vars = obs_vars),
@@ -866,7 +1094,13 @@ make_posterior_grad <- function(model, data, prior_spec, obs_vars, compiled,
       ## subsetting; stationary Lyapunov P0 (P0 = NULL). me_variance is scalar.
       tang <- .kf_loglik_adjoint_uni(Y, ss, d_ss_list, me_variance = me_variance,
                                      P0 = NULL)
-    } else if (grad_method == "adjoint") {
+    } else if (use_sol_adjoint) {
+      ## Dense stationary adjoint WITH bar export (the _ss long-T variant does
+      ## not export bars; the O(T) n^2 storage is accepted here).
+      tang <- .kf_loglik_adjoint(Y, ss, d_ss_list, me_variance = me_variance,
+                                 me_extra = me_extra, shock_scale = shock_scale,
+                                 return_bars = TRUE)
+    } else if (grad_method == "adjoint" || grad_method == "adjoint_solution") {
       ## Stationary dense adjoint. For LONG samples the steady-state-aware
       ## variant (.kf_loglik_adjoint_ss) cuts n^2-matrix storage from O(T) to
       ## O(t_conv) once the Riccati recursion converges; it is identical to the
@@ -888,7 +1122,28 @@ make_posterior_grad <- function(model, data, prior_spec, obs_vars, compiled,
     base_ll <- tang$loglik
 
     fd_names <- character(0)
-    if (length(num_names) > 0) {
+    if (use_sol_adjoint && length(num_names) > 0) {
+      ## Reverse mode through the solve: contract the exported bars against
+      ## the analytic primitive derivatives. tang$grad[nm] holds ONLY the
+      ## Sigma_e channel for these parameters (their d_ss_list entries carry
+      ## just dSigma_e); the structural piece comes from .solution_adjoint.
+      sol_adj <- if (!is.null(tang$bars)) tryCatch(
+        .solution_adjoint(model, compiled, dr, params,
+                          param_names = num_names, obs_vars = obs_vars,
+                          bars = tang$bars),
+        error = function(e) NULL
+      ) else NULL
+      for (nm in num_names) {
+        gj_sig <- tang$grad[[match(nm, par_names)]]
+        gj_str <- if (!is.null(sol_adj) && isTRUE(sol_adj$ok[[nm]]))
+          sol_adj$grad[[nm]] else NA_real_
+        if (is.finite(gj_sig) && is.finite(gj_str)) {
+          g[nm] <- g[nm] + gj_sig + gj_str
+        } else {
+          fd_names <- c(fd_names, nm)
+        }
+      }
+    } else if (length(num_names) > 0) {
       for (nm in num_names) {
         d <- if (!is.null(sd_res)) sd_res$derivs[[nm]] else NULL
         ok <- !is.null(d) && isTRUE(d$ok)

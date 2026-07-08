@@ -157,10 +157,13 @@
 #'     full model-moment vector.  Robust; works for all cumulant orders.}
 #'   \item{\code{"implicit"}}{Implicit differentiation of the order-2 Kronecker
 #'     and linear systems.  K_xx and A_L are factorized once and reused for all
-#'     parameters.  Orders 1-2 (mean + variance) differentiated via
+#'     parameters.  Orders 1-2 (mean + variance) differentiated analytically via
 #'     \code{solution_derivatives_order2()}.  Orders 3-4 (third/fourth cumulant)
-#'     differentiated analytically via tensor-Lyapunov sensitivity in
-#'     \code{cumulant_moment_derivs_3_4()} — see R/cumulant-cumulant-deriv.R.}
+#'     are differentiated by CENTRAL FINITE DIFFERENCES of the forward cumulant
+#'     functions along the analytic order-1/2 solution-derivative direction
+#'     (a deliberate choice — a closed-form tensor-Lyapunov sensitivity of the
+#'     chain term is not implemented; see the history note in
+#'     R/cumulant-cumulant-deriv.R).}
 #' }
 #'
 #' @param model     dynhr_mod from \code{parse_mod()}.
@@ -308,6 +311,225 @@ cumulant_loglik_grad <- function(model, compiled, dr, params, param_names,
 
 
 # ============================================================================
+# Reverse-mode (adjoint_solution) gradient — Consumer 1, O(1) in P
+# ============================================================================
+
+#' Reverse-mode ("adjoint_solution") gradient of the cumulant log-likelihood.
+#'
+#' Orders 1-3 are differentiated by a single reverse pass: the moment-vector
+#' cotangent is back-propagated to cotangents on the solution blocks (ghx, ghu,
+#' ghxx, ghxu, ghuu, ghss, Sigma_e) — through the observable projection and the
+#' third-cumulant tensor-Lyapunov (via .solve_third_cross_cumulant_adjoint) —
+#' then ONE .solution_adjoint (first-order ghx/ghu/ys channel) + ONE
+#' .solution_adjoint_order2 (the four order-2 blocks) + a per-parameter
+#' d(Sigma_e) contraction turn them into the structural-parameter gradient.
+#' This is O(1) in P in the number of factorizations/solution-solves (both
+#' adjoint kernels share their factorizations across parameters).
+#'
+#' Order 4 (kurtosis) is NOT reversed in closed form (its symbolic reverse is a
+#' large, error-prone build; see R/cumulant-cumulant-deriv.R STATUS). When
+#' \code{4 \%in\% orders}, the order-4 block's gradient contribution is returned
+#' as \code{NA} for every parameter, so the caller falls back to exact
+#' FD-of-forward for the WHOLE parameter (keeping the gradient consistent with
+#' the forward loglik). Orders 1-3 always go through the reverse path.
+#'
+#' @return Named numeric vector (length param_names). \code{NA} for a parameter
+#'   whose reverse contribution could not be formed (e.g. order 4 requested, or
+#'   an adjoint kernel returned not-ok).
+#' @noRd
+.cumulant_loglik_grad_adjoint <- function(model, compiled, dr, params,
+                                          param_names, obs_vars, data,
+                                          orders = 1:4, me_variance = 0,
+                                          h_rel = 1e-4) {
+
+  np <- length(param_names)
+  na_out <- setNames(rep(NA_real_, np), param_names)
+
+  if (!inherits(dr, "DecisionRules2")) return(na_out)
+
+  n_obs   <- length(obs_vars)
+  T_obs   <- nrow(data)
+  endo    <- dr$endo_names
+  exo     <- dr$exo_names
+  n_endo  <- length(endo)
+  n_exo   <- length(exo)
+  state_idx <- dr$state_idx
+  n_s     <- length(state_idx)
+  obs_idx <- match(obs_vars, endo)
+  if (any(is.na(obs_idx))) return(na_out)
+
+  ## Order 4: the reverse chain does not cover kurtosis. If it is requested and
+  ## actually active (order-2 DR), decline entirely so the caller FD-fallbacks.
+  dr_order <- .dr_perturbation_order(dr)
+  if (4L %in% orders && dr_order >= 2L) return(na_out)
+
+  ## ---- 1. Sample cumulants + base moment vector + delta -------------------
+  max_ord <- max(orders)
+  sc <- sample_cumulants(data, max_order = max_ord)
+  m_base <- suppressWarnings(
+    .build_moment_vector(dr, model, params, obs_vars, orders, me_variance))
+  if (is.null(m_base)) return(na_out)
+
+  m_emp <- numeric(0)
+  if (1L %in% orders) m_emp <- c(m_emp, sc$mean[obs_vars])
+  if (2L %in% orders)
+    m_emp <- c(m_emp, as.numeric(sc$var_cov[obs_vars, obs_vars, drop = FALSE]))
+  c3_active <- 3L %in% orders && dr_order >= 2L
+  if (c3_active && !is.null(sc$c3)) m_emp <- c(m_emp, as.numeric(sc$c3))
+  n_moments <- length(m_base)
+  m_emp_matched <- rep_len(m_emp, n_moments)
+  delta_base <- m_emp_matched - m_base
+
+  ## dL/dm_model = delta_base * T / n_moments  (loglik = -0.5 sum(delta^2)/n * T)
+  bar_m <- delta_base * T_obs / n_moments
+
+  ## ---- 2. Split bar_m into per-order blocks -------------------------------
+  ghx <- dr$ghx; ghu <- dr$ghu; ghss <- dr$ghss
+  Sigma_e <- diag(.get_shock_stderr(model, exo, params)^2, n_exo)
+  hx <- ghx[state_idx, , drop = FALSE]
+  hu <- ghu[state_idx, , drop = FALSE]
+  Sigma_state <- .state_covariance(hx, hu, Sigma_e)   # n_s x n_s
+
+  ## Block cotangents on the solution matrices (full endo-row layout).
+  bar_ghx  <- matrix(0, n_endo, ncol(ghx))
+  bar_ghu  <- matrix(0, n_endo, n_exo)
+  bar_ghss <- numeric(n_endo)
+  bar_ys   <- setNames(numeric(n_endo), endo)
+  bar_ghxx <- matrix(0, n_endo, ncol(dr$ghxx))
+  bar_ghxu <- if (!is.null(dr$ghxu)) matrix(0, n_endo, ncol(dr$ghxu)) else NULL
+  bar_ghuu <- if (!is.null(dr$ghuu)) matrix(0, n_endo, ncol(dr$ghuu)) else NULL
+  bar_Sigma_state <- matrix(0, n_s, n_s)
+  bar_Sigma_e     <- matrix(0, n_exo, n_exo)
+
+  idx <- 0L
+
+  ## ---- Order 1 (mean = ys[obs] + 0.5 ghss[obs]) ---------------------------
+  if (1L %in% orders) {
+    bm <- bar_m[seq_len(n_obs) + idx]
+    bar_ys[obs_vars] <- bar_ys[obs_vars] + bm
+    if (!is.null(ghss)) bar_ghss[obs_idx] <- bar_ghss[obs_idx] + 0.5 * bm
+    idx <- idx + n_obs
+  }
+
+  ## ---- Order 2 (variance Sigma_y[obs,obs]) --------------------------------
+  ## Sigma_y = ghx Sigma_state ghx' + ghu Sigma_e ghu'  (me_variance adds to diag,
+  ## which is param-free so contributes nothing to the block cotangents).
+  if (2L %in% orders) {
+    bS_obs <- matrix(bar_m[seq_len(n_obs^2) + idx], n_obs, n_obs)
+    idx <- idx + n_obs^2
+    ## scatter obs-block cotangent into full n_endo x n_endo
+    bS <- matrix(0, n_endo, n_endo)
+    bS[obs_idx, obs_idx] <- bS_obs
+    ## reverse ghx Sigma_state ghx'
+    bar_ghx <- bar_ghx +
+      bS %*% ghx %*% t(Sigma_state) + t(bS) %*% ghx %*% Sigma_state
+    bar_Sigma_state <- bar_Sigma_state + t(ghx) %*% bS %*% ghx
+    ## reverse ghu Sigma_e ghu'
+    bar_ghu <- bar_ghu +
+      bS %*% ghu %*% t(Sigma_e) + t(bS) %*% ghu %*% Sigma_e
+    bar_Sigma_e <- bar_Sigma_e + t(ghu) %*% bS %*% ghu
+  }
+
+  ## ---- Order 3 (third cumulant) -------------------------------------------
+  if (c3_active) {
+    ## bar_m order-3 block is n_obs x n_obs^2 (dst-col layout of .cumulant_loglik).
+    n34 <- n_obs * n_obs * n_obs
+    b3_obs <- bar_m[seq_len(n34) + idx]
+    idx <- idx + n34
+    ## scatter into full c3_obs (n_endo x n_endo^2): forward mapping was
+    ##   c3_obs_only[a, (a-1)*n_obs+b] <- c3_obs[a_endo, (a_endo-1)*n_endo+b_endo]
+    ## with a_endo = obs_idx[a], b_endo = obs_idx[b]. Reverse (scatter).
+    bar_c3_obs <- matrix(0, n_endo, n_endo * n_endo)
+    b3_full <- matrix(b3_obs, n_obs, n_obs * n_obs)
+    for (a in seq_len(n_obs)) {
+      for (b in seq_len(n_obs)) {
+        src_col <- (obs_idx[a] - 1L) * n_endo + obs_idx[b]
+        dst_col <- (a - 1L) * n_obs + b
+        bar_c3_obs[obs_idx[a], src_col] <- b3_full[a, dst_col]
+      }
+    }
+    rev3 <- tryCatch(
+      .compute_third_cumulant_adjoint(dr, model, params, bar_c3_obs),
+      error = function(e) NULL)
+    if (is.null(rev3)) return(na_out)
+    bar_ghx  <- bar_ghx  + rev3$bar_ghx
+    bar_ghu  <- bar_ghu  + rev3$bar_ghu
+    bar_ghxx <- bar_ghxx + rev3$bar_ghxx
+    if (!is.null(bar_ghxu) && !is.null(rev3$bar_ghxu))
+      bar_ghxu <- bar_ghxu + rev3$bar_ghxu
+    if (!is.null(bar_ghuu) && !is.null(rev3$bar_ghuu))
+      bar_ghuu <- bar_ghuu + rev3$bar_ghuu
+    bar_Sigma_state <- bar_Sigma_state + rev3$bar_Sigma_x
+    bar_Sigma_e     <- bar_Sigma_e     + rev3$bar_Sigma_e
+  }
+
+  ## ---- 3. Fold bar_Sigma_state through the Lyapunov solve -----------------
+  ## Sigma_state = A Sigma_state A' + Q, A = hx, Q = hu Sigma_e hu'.
+  if (n_s > 0 && any(bar_Sigma_state != 0)) {
+    lyr <- .lyap_solve_adjoint(hx, Sigma_state, bar_Sigma_state)
+    bar_hx_ly <- lyr$bar_A                       # n_s x n_s
+    bar_Q     <- lyr$bar_Q                       # n_s x n_s
+    ## Q = hu Sigma_e hu'
+    bar_hu_ly <- bar_Q %*% hu %*% t(Sigma_e) + t(bar_Q) %*% hu %*% Sigma_e
+    bar_Sigma_e <- bar_Sigma_e + t(hu) %*% bar_Q %*% hu
+    ## fold hx/hu cotangents into full ghx/ghu state rows/cols
+    bar_ghx[state_idx, seq_len(n_s)] <-
+      bar_ghx[state_idx, seq_len(n_s)] + bar_hx_ly
+    bar_ghu[state_idx, ] <- bar_ghu[state_idx, , drop = FALSE] + bar_hu_ly
+  }
+
+  ## ---- 4. First-order channel: ghx/ghu/ys -> structural params ------------
+  ## .solution_adjoint reverses the whole first-order fixed point + ys. Its
+  ## block-extraction reverse is ADDITIVE: V_G[state_idx,] += G_TT and
+  ## V_G[obs_idx,] += G_ZZ. Using obs_vars = ALL endo makes G_ZZ/G_DD cover
+  ## every row, so we route the COMPLETE bar_ghx/bar_ghu through G_ZZ/G_DD and
+  ## set G_TT/G_RR = 0 to avoid double-counting the state rows.
+  fo <- tryCatch(
+    .solution_adjoint(
+      model, compiled, dr, params, param_names,
+      obs_vars = endo,
+      bars = list(
+        G_TT = matrix(0, n_s, n_s),
+        G_RR = matrix(0, n_s, n_exo),
+        G_ZZ = bar_ghx[, seq_len(n_s), drop = FALSE],
+        G_DD = bar_ghu,
+        g_d  = as.numeric(bar_ys))),
+    error = function(e) NULL)
+
+  ## ---- 5. Order-2 channel: ghxx/ghxu/ghuu/ghss -> structural params -------
+  o2 <- tryCatch(
+    .solution_adjoint_order2(
+      model, compiled, dr, params, param_names,
+      bars = list(bar_ghxx = bar_ghxx, bar_ghxu = bar_ghxu,
+                  bar_ghuu = bar_ghuu, bar_ghss = bar_ghss)),
+    error = function(e) NULL)
+
+  ## ---- 6. Sigma_e direct channel (per-parameter d(Sigma_e)) ---------------
+  ## The cumulant moments depend on Sigma_e directly (not only through the
+  ## solution). The order-2 adjoint accounts for the Sigma_e that flows THROUGH
+  ## the solution (its own dvSe); the DIRECT dependence (bar_Sigma_e above) is
+  ## contracted here with each parameter's central-FD d(Sigma_e) — one cheap 2x
+  ## FD of .get_shock_cov per parameter, no solution solve.
+  grad <- setNames(rep(NA_real_, np), param_names)
+  bar_vSe <- as.numeric(bar_Sigma_e)
+  for (pnm in param_names) {
+    g_fo <- if (!is.null(fo) && isTRUE(fo$ok[[pnm]])) fo$grad[[pnm]] else NA_real_
+    g_o2 <- if (!is.null(o2) && isTRUE(o2$ok[[pnm]])) o2$grad[[pnm]] else NA_real_
+    if (is.na(g_fo) || is.na(g_o2)) { grad[pnm] <- NA_real_; next }
+    gj <- g_fo + g_o2
+    if (any(bar_vSe != 0)) {
+      pval <- params[[pnm]]
+      h <- max(h_rel * abs(pval), 1e-7)
+      dSe <- .o2sd_dSigma_e(model, params, pnm, h, n_exo)
+      gj <- gj + sum(bar_vSe * as.numeric(dSe))
+    }
+    grad[pnm] <- gj
+  }
+  grad
+}
+
+
+# ============================================================================
 # Implicit-differentiation gradient (orders 1-2 analytic; 3-4 FD fallback)
 # ============================================================================
 
@@ -315,10 +537,11 @@ cumulant_loglik_grad <- function(model, compiled, dr, params, param_names,
 #'
 #' Uses \code{solution_derivatives_order2()} to obtain d(ghxx)/dθ, d(ghss)/dθ,
 #' d(Sigma_x)/dθ analytically, then chains through the moment formulas for
-#' orders 1 (mean), 2 (variance), 3 (third cumulant, fully analytic via
-#' tensor-Lyapunov sensitivity), and 4 (fourth cumulant, fully analytic via
-#' the approximate Lyapunov construction in compute_fourth_cumulant).
-#' See R/cumulant-cumulant-deriv.R and agent-F-tensor-lyapunov.md.
+#' orders 1 (mean) and 2 (variance) analytically; orders 3 (third cumulant) and
+#' 4 (fourth cumulant) are obtained by CENTRAL FINITE DIFFERENCES of the forward
+#' cumulant functions along that analytic solution-derivative direction (a
+#' closed-form tensor-Lyapunov sensitivity of the chain term is deliberately not
+#' implemented). See R/cumulant-cumulant-deriv.R.
 #' @noRd
 .cumulant_loglik_grad_implicit <- function(model, compiled, dr, params,
                                             param_names, obs_vars, data,
@@ -480,11 +703,19 @@ cumulant_loglik_grad <- function(model, compiled, dr, params, param_names,
 
       d_Sigma_x <- d2$d_Sigma_x   # n_s x n_s
       d_ghss    <- d2$d_ghss      # n
+      ## Sigma_e's OWN theta-dependence (estimated shock stds wired via
+      ## stderr_expr): without the ghu*dSigma_e*ghu' term below,
+      ## d(Sigma_y)/dtheta silently drops the shock-covariance channel (C5
+      ## sibling of the .o2sd_dSigma_x gap). Zero for params that do not
+      ## enter Sigma_e.
+      d_Sigma_e <- d2$d_Sigma_e
+      if (is.null(d_Sigma_e)) d_Sigma_e <- matrix(0, nrow(Sigma_e), ncol(Sigma_e))
 
       ## d(Sigma_y)[obs,obs]/dθ = dG[obs,] Σ_x G[obs,]' + G[obs,] dΣ_x G[obs,]' + ... + sym
       dSigma_y_full <- dG %*% Sigma_x %*% t(ghx) + ghx %*% d_Sigma_x %*% t(ghx) +
                        ghx %*% Sigma_x %*% t(dG) +
-                       dH %*% Sigma_e %*% t(ghu)  + ghu %*% Sigma_e %*% t(dH)
+                       dH %*% Sigma_e %*% t(ghu)  + ghu %*% Sigma_e %*% t(dH) +
+                       ghu %*% d_Sigma_e %*% t(ghu)
       dSigma_y_obs <- dSigma_y_full[obs_idx, obs_idx, drop = FALSE]
 
       if (1L %in% orders_12) {

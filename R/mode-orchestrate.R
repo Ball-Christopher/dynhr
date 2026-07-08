@@ -25,7 +25,16 @@
 #' @param gr         Optional analytic gradient of fn (for lbfgsb and newrat stages)
 #' @param newrat_H0_inv  Optional initial inverse-Hessian for the newrat stage
 #'   (n x n matrix). When NULL the newrat stage uses csminwel's default 1e-4*I.
-#' @return list(par, value, convergence, iterations, message)
+#' @param record_curvature  Opt-in (default \code{FALSE}): stash the final
+#'   BFGS inverse-Hessian returned by the newrat (csminwel) stage in the
+#'   result as \code{$H_bfgs} (\code{NULL} if no "newrat" stage ran). This is
+#'   the H0 seed after being updated by every (s_k, y_k) curvature pair
+#'   csminwel collected along its own optimisation trajectory -- free
+#'   (already computed internally by csminwel), just not normally propagated
+#'   upward. Off by default to keep the return shape unchanged for existing
+#'   callers.
+#' @return list(par, value, convergence, iterations, message), plus
+#'   \code{$H_bfgs} when \code{record_curvature = TRUE}.
 #' @noRd
 combined_optimize <- function(fn, par, lower = -Inf, upper = Inf,
                               max_iter = 10000,
@@ -33,7 +42,8 @@ combined_optimize <- function(fn, par, lower = -Inf, upper = Inf,
                               split = c(0.8, 0.2),
                               verbose = TRUE, progress = TRUE,
                               gr = NULL,
-                              newrat_H0_inv = NULL) {
+                              newrat_H0_inv = NULL,
+                              record_curvature = FALSE) {
   n <- length(par)
   par_names <- names(par)
   if (length(lower) == 1) lower <- rep(lower, n)
@@ -44,6 +54,7 @@ combined_optimize <- function(fn, par, lower = -Inf, upper = Inf,
 
   best_par <- par
   best_val <- fn(par)
+  H_bfgs_out <- NULL   # populated only by a "newrat" stage when recorded
 
   for (i in seq_along(stages)) {
     stage <- stages[i]
@@ -126,6 +137,7 @@ combined_optimize <- function(fn, par, lower = -Inf, upper = Inf,
         } else NULL
         optres <- csminwel(fn_cs, best_par, H0 = newrat_H0_inv,
                            grad = gr_cs, nit = iters, verbose = verbose)
+        if (isTRUE(record_curvature)) H_bfgs_out <- optres$H
         list(par = setNames(optres$xh, par_names),
              value = optres$fh,
              convergence = optres$convergence,
@@ -142,9 +154,11 @@ combined_optimize <- function(fn, par, lower = -Inf, upper = Inf,
     if (verbose) cat(sprintf("  -> logpost = %.4f (%s)\n", -best_val, res$message))
   }
 
-  list(par = best_par, value = best_val,
-       convergence = 0, iterations = sum(iter_alloc),
-       message = sprintf("combined(%s)", paste(stages, collapse = "->")))
+  out <- list(par = best_par, value = best_val,
+             convergence = 0, iterations = sum(iter_alloc),
+             message = sprintf("combined(%s)", paste(stages, collapse = "->")))
+  if (isTRUE(record_curvature)) out$H_bfgs <- H_bfgs_out
+  out
 }
 
 
@@ -179,14 +193,20 @@ combined_optimize <- function(fn, par, lower = -Inf, upper = Inf,
 #'   }
 #'   When NULL (default), behaviour is bit-identical to before.
 #' @param verbose      Print progress messages
-#' @return list(theta_mode, logpost, convergence, iterations, method)
+#' @param record_curvature  Opt-in (default \code{FALSE}); forwarded to
+#'   \code{\link{combined_optimize}} -- see there. When \code{TRUE} and a
+#'   "newrat" stage ran, the returned list carries \code{$H_bfgs} (the final
+#'   BFGS inverse-Hessian in WORKING space, i.e. eta-space when
+#'   \code{transform} is supplied).
+#' @return list(theta_mode, logpost, convergence, iterations, method[, H_bfgs])
 #' @noRd
 .run_mode_finding <- function(log_post_fn, theta_init, prior_spec,
                               nm_maxit = 10000, lbfgsb_maxit = NULL,
                               method = "newrat", transform = NULL,
                               grad_fn = NULL,
                               hessian_fn = NULL,
-                              verbose = TRUE) {
+                              verbose = TRUE,
+                              record_curvature = FALSE) {
 
   n <- length(theta_init)
   par_names <- names(theta_init)
@@ -307,17 +327,17 @@ combined_optimize <- function(fn, par, lower = -Inf, upper = Inf,
   hessian_fn_working <- NULL
   if (!is.null(hessian_fn)) {
     if (is.null(transform)) {
-      hessian_fn_working <- function(par) {
-        names(par) <- par_names
-        hessian_fn(par)
+      hessian_fn_working <- function(x) {
+        names(x) <- par_names
+        hessian_fn(x)
       }
     } else {
-      hessian_fn_working <- function(eta) {
-        names(eta)   <- par_names
-        theta        <- transform$to_constrained(eta)
+      hessian_fn_working <- function(x) {
+        names(x)     <- par_names
+        theta        <- transform$to_constrained(x)
         names(theta) <- par_names
         H_theta      <- hessian_fn(theta)
-        J <- transform$dtheta_deta(eta)   # diagonal: d(theta_j)/d(eta_j)
+        J <- transform$dtheta_deta(x)   # diagonal: d(theta_j)/d(eta_j)
         ## Sandwich: H_eta = diag(J) %*% H_theta %*% diag(J)
         J * H_theta * rep(J, each = length(J))  # outer product broadcasting
       }
@@ -396,7 +416,8 @@ combined_optimize <- function(fn, par, lower = -Inf, upper = Inf,
                                      stages = c("newrat"),
                                      split = c(1.0),
                                      verbose = verbose, gr = neg_gr,
-                                     newrat_H0_inv = newrat_H0_inv),
+                                     newrat_H0_inv = newrat_H0_inv,
+                                     record_curvature = record_curvature),
     ## cmaes_newrat: CMA-ES global search to escape poor starts, then newrat
     ## quasi-Newton polish. Best of both worlds for near-unit-root models.
     "cmaes_newrat" = combined_optimize(neg_lp, par_init, lower, upper,
@@ -404,12 +425,15 @@ combined_optimize <- function(fn, par, lower = -Inf, upper = Inf,
                                        stages = c("cmaes", "newrat"),
                                        split = c(0.7, 0.3),
                                        verbose = verbose, gr = neg_gr,
-                                       newrat_H0_inv = newrat_H0_inv),
+                                       newrat_H0_inv = newrat_H0_inv,
+                                       record_curvature = record_curvature),
     ## Unknown method: fail loud rather than silently running a different
     ## optimizer (cmaes+nmkb) than the one requested (e.g. a typo'd method).
     stop(".run_mode_finding: unknown mode-finding method \"", method, "\". ",
          "Valid: newrat, cmaes_newrat, cmaes, nmkb, jade, nelder, combined, ",
-         "cmaes_nmkb, cmaes_jade.", call. = FALSE)
+         "cmaes_nmkb, cmaes_jade. (L-BFGS-B is not a standalone method -- it ",
+         "runs as the polish stage inside \"combined\" and \"cmaes_jade\".)",
+         call. = FALSE)
   )
 
   ## Unname: csminwel (newrat) propagates the parameter-vector name onto the
@@ -432,11 +456,29 @@ combined_optimize <- function(fn, par, lower = -Inf, upper = Inf,
     cat(sprintf("    Iterations: %d  |  %s\n", res$iterations, res$message))
   }
 
-  list(
+  out <- list(
     theta_mode  = theta_mode,
     logpost     = mode_logpost,
     convergence = res$convergence,
     iterations  = res$iterations,
     method      = method
   )
+
+  ## Opt-in: propagate the newrat/csminwel final BFGS inverse-Hessian
+  ## (res$H_bfgs, working space) back to THETA-space so callers get a
+  ## covariance-like matrix directly comparable to the analytic/FD Hessian.
+  ## H_bfgs (working space) approximates the inverse of the working-space
+  ## neg-logpost Hessian, i.e. a covariance: Cov_theta = J %*% Cov_eta %*% J'
+  ## with J = diag(dtheta/deta) (separable transform -> elementwise scaling,
+  ## mirrors the H_theta -> H_eta sandwich used above for hessian_fn_working).
+  if (isTRUE(record_curvature) && !is.null(res$H_bfgs)) {
+    H_bfgs_theta <- res$H_bfgs
+    if (!is.null(transform)) {
+      J <- transform$dtheta_deta(res$par)   # diagonal dtheta/deta at the mode (eta-space)
+      H_bfgs_theta <- J * H_bfgs_theta * rep(J, each = length(J))
+    }
+    dimnames(H_bfgs_theta) <- list(par_names, par_names)
+    out$H_bfgs <- H_bfgs_theta
+  }
+  out
 }

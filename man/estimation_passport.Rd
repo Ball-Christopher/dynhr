@@ -52,5 +52,8 @@ experiments.
 }
 \seealso{
 \code{\link{deep_parameter_passport}},
-  \code{summary.dynhr_diagnostic_suite}
+  \code{summary.dynhr_diagnostic_suite}. For the complementary RUNNER that
+  computes the paper's seven pre-flight checks directly from
+  \code{(model, data)} instead of surfacing a pre-existing suite, see
+  \code{\link{run_estimation_passport}}.
 }

@@ -555,18 +555,27 @@
 #'   (default), \code{"stationary"}, \code{"diffuse"}, or \code{"kappa"}.
 #'   See Details.
 #' @param me_extra \code{n_obs x T} matrix of additional per-observable,
-#'   per-period measurement-error variances to add to the diagonal of the
-#'   innovation covariance \code{F_t} (default \code{NULL}, no extra
-#'   variance).  Intended for \code{filter_tunes} soft tunes: the expanded
+#'   per-period measurement-error variances (default \code{NULL}, no extra
+#'   variance).  Unlike the scalar \code{me_variance} regularizer,
+#'   \code{me_extra} is treated as TRUE per-period measurement noise on all
+#'   paths: it enters the innovation covariance \code{F_t} AND the
+#'   Joseph-form state-covariance update
+#'   (\code{P += K_t diag(me_extra[, t]) t(K_t)}), so the \code{"standard"},
+#'   \code{"dare"}/\code{"reference"}, and \code{"univariate"} methods agree
+#'   exactly under \code{me_extra} (at \code{me_variance = 0}).
+#'   Intended for \code{filter_tunes} soft tunes: the expanded
 #'   observable's column carries \code{stderr^2} at the tune periods and 0
 #'   elsewhere.  When \code{me_extra} is non-\code{NULL} and has any nonzero
 #'   entry the filter is forced onto the per-period R loop (\code{method =
-#'   "standard"} or \code{"univariate"} in R); the C++ standard fast path,
-#'   the Chandrasekhar recursion, and the steady-state lock are all bypassed
+#'   "standard"}, \code{"dare"}, or \code{"univariate"} in R); the C++
+#'   standard fast path, the Chandrasekhar recursion, and the steady-state
+#'   lock are all bypassed
 #'   because they bake a time-invariant \code{H} into the gain/covariance
 #'   update.  Concretely: \code{method = "auto"} routes to
 #'   \code{"standard"}; explicit \code{method = "chandrasekhar"} with
-#'   nonzero \code{me_extra} raises an error.  Note also that the
+#'   nonzero \code{me_extra} raises an error; the DARE drift diagnostic
+#'   (\code{dare_p_drift}) is skipped (\code{NA}) because \code{P} has no
+#'   time-invariant fixed point under per-period \code{F_t}.  Note also that the
 #'   exact-diffuse phase (\code{lik_init = "diffuse"}) does not support
 #'   missing observations and falls back to \code{"kappa"} whenever
 #'   \code{me_extra} introduces NA rows (see Landmine 2 in the
@@ -581,6 +590,14 @@
 #'   Incompatible with \code{method = "chandrasekhar"}, \code{"univariate"},
 #'   and \code{lik_init = "diffuse"}. \code{P0} always uses the baseline
 #'   (unscaled) \eqn{\\Sigma_e}.
+#' @param me_floor_check Logical: when \code{me_variance > 0}, compare it
+#'   against the smallest eigenvalue of the model-implied (ME-free) steady-
+#'   state innovation covariance \code{F} and warn if the floor is large
+#'   relative to that eigenvalue (near-collinear observables; see
+#'   \code{.pruned_me_floor_ratio}). Default
+#'   \code{getOption("dynhr.me_floor_check", TRUE)}. Only evaluated on the
+#'   stationary (non-\code{shock_scale}) baseline system; scoped to the
+#'   scalar \code{me_variance} floor, not \code{me_extra}.
 #'
 #' @details
 #' \strong{Measurement-error convention:}
@@ -668,7 +685,9 @@ kalman_filter <- function(Y, dr, model, params, obs_vars,
                           lik_init = c("auto", "stationary",
                                        "diffuse", "kappa"),
                           me_extra = NULL,
-                          shock_scale = NULL) {
+                          shock_scale = NULL,
+                          me_floor_check = getOption("dynhr.me_floor_check",
+                                                     TRUE)) {
 
   ## "reference" is an alias for "dare" -- both run the per-step textbook
   ## Kalman filter with no steady-state shortcut. "dare" is kept for
@@ -722,6 +741,23 @@ kalman_filter <- function(Y, dr, model, params, obs_vars,
   SS      <- RR %*% Sigma_e %*% t(DD)
   tZZ     <- t(ZZ)
   me_diag <- me_variance * diag(n_obs)
+
+  ## -- Measurement-error floor guard (near-degenerate-F hazard) ------------
+  ## Same detector as pruned_ss_loglik() (see R/pruned-state-space.R): a
+  ## "negligible" me_variance floor can still dwarf the smallest eigenvalue
+  ## of the model-implied (ME-free) steady-state innovation covariance when
+  ## some linear combination of observables is nearly perfectly predictable.
+  ## Reuses the stationary Lyapunov P0 as Sxi0 -- cheap relative to a KF
+  ## sweep, but still skipped unless a caller actually opts in (per-draw
+  ## callers latch this to TRUE only once per closure; see make_log_posterior).
+  if (me_variance > 0 && isTRUE(me_floor_check)) {
+    Sxi0_chk <- tryCatch(solve_lyapunov(TT, QQ), error = function(e) NULL)
+    if (!is.null(Sxi0_chk) && all(is.finite(Sxi0_chk))) {
+      .warn_me_floor_lock(
+        .pruned_me_floor_ratio(TT, ZZ, QQ, HH, SS, Sxi0_chk, me_variance),
+        obs_vars, me_variance)
+    }
+  }
 
   if (is.null(dim(Y))) Y <- matrix(Y, nrow = n_obs)
   if (nrow(Y) != n_obs) Y <- t(Y)
@@ -1092,7 +1128,12 @@ kalman_filter <- function(Y, dr, model, params, obs_vars,
   if (method == "dare") {
     P <- if (lik_init == "stationary") .solve_lyapunov_stationary() else init_P
 
-    dare <- if (lik_init == "stationary")
+    ## The DARE fixed point is a diagnostic for the TIME-INVARIANT system
+    ## only: with per-period me_extra (or shock_scale) F_t varies over t, P
+    ## has no steady state, and the drift check is meaningless -- skip it.
+    dare_diag_ok <- lik_init == "stationary" && !has_me_extra &&
+      !has_shock_scale
+    dare <- if (dare_diag_ok)
       tryCatch(.solve_dare(TT, ZZ, QQ, HH, SS, me_diag, tol = .DARE_TOL,
                            max_iter = 500),
                error = function(e)       # chol failure on singular F: the
@@ -1100,7 +1141,7 @@ kalman_filter <- function(Y, dr, model, params, obs_vars,
                       P = NULL, iterations = NA_integer_))
     else
       list(converged = FALSE, P = NULL, iterations = NA_integer_)
-    if (lik_init == "stationary" && !dare$converged)
+    if (dare_diag_ok && !dare$converged)
       warning("DARE solver did not converge; method=\"dare\" still proceeds ",
               "as exact textbook KF.")
 
@@ -1120,15 +1161,30 @@ kalman_filter <- function(Y, dr, model, params, obs_vars,
 
     for (t in t_start:n_T) {
       v    <- Y[, t] - as.numeric(ZZ %*% s) - d
-      if (has_shock_scale) {
+      ## me_extra active at this period? Per-period F diagonal + Joseph term
+      ## below -- previously the dare path silently IGNORED me_extra whenever
+      ## F was nonsingular (.kf_step closure-captures the time-invariant
+      ## me_diag), which also poisoned every return_ll_contrib caller (that
+      ## flag forces method = "dare").
+      me_x_t <- has_me_extra && any(me_extra[, t] != 0)
+      if (has_shock_scale || me_x_t) {
         ## Inline per-period step for dare path (cannot use .kf_step which
-        ## closure-captures the baseline HH/SS/Sigma_e -- Landmine 6).
-        sc_t  <- shock_scale[, t]
-        Se_t  <- Sigma_e * outer(sc_t, sc_t)
-        HH_t  <- tcrossprod(DD %*% Se_t, DD)
-        SS_t  <- RR %*% Se_t %*% t(DD)
+        ## closure-captures the baseline HH/SS/Sigma_e and the time-invariant
+        ## me_diag -- Landmine 6). Handles shock_scale, me_extra, or both.
+        if (has_shock_scale) {
+          sc_t  <- shock_scale[, t]
+          Se_t  <- Sigma_e * outer(sc_t, sc_t)
+          HH_t  <- tcrossprod(DD %*% Se_t, DD)
+          SS_t  <- RR %*% Se_t %*% t(DD)
+        } else {
+          Se_t  <- Sigma_e
+          HH_t  <- HH
+          SS_t  <- SS
+        }
+        me_diag_t <- if (me_x_t) me_diag + diag(me_extra[, t], nrow = n_obs)
+                     else me_diag
         PZ    <- P %*% t(ZZ)
-        Ft    <- ZZ %*% PZ + HH_t + me_diag
+        Ft    <- ZZ %*% PZ + HH_t + me_diag_t
         Ft    <- (Ft + t(Ft)) * 0.5
         Fc    <- tryCatch(chol(Ft), error = function(e) NULL)
         if (is.null(Fc)) return(.kf_fail("dare"))
@@ -1140,6 +1196,12 @@ kalman_filter <- function(Y, dr, model, params, obs_vars,
         s     <- as.numeric(TT %*% s) + drop(K_t %*% v)
         TmKZ  <- TT - K_t %*% ZZ; RmKD <- RR - K_t %*% DD
         P     <- tcrossprod(TmKZ %*% P, TmKZ) + tcrossprod(RmKD %*% Se_t, RmKD)
+        ## Joseph true-noise term for the me_extra part only:
+        ## P' += K_t diag(me_extra[, t]) K_t'. me_variance (the base me_diag)
+        ## stays on the documented F-only-regularizer convention (no term) --
+        ## mirrors the fixed "standard" branch, so dare == standard ==
+        ## univariate under me_extra.
+        if (me_x_t) P <- P + K_t %*% (me_extra[, t] * t(K_t))
         P     <- (P + t(P)) * 0.5
         loglik <- loglik + ll_t
         if (return_ll_contrib) ll_contrib[t] <- ll_t
@@ -1451,6 +1513,12 @@ kalman_filter <- function(Y, dr, model, params, obs_vars,
       s <- drop(TT %*% s) + drop(K %*% v)
       TmKZ <- TT - K %*% ZZ_t; RmKD <- RR - K %*% DD_t
       P <- tcrossprod(TmKZ %*% P, TmKZ) + tcrossprod(RmKD %*% Se_miss, RmKD)
+      ## Joseph true-noise term for the me_extra part (observed subset only):
+      ## y = Z s + D e + u with Var(u) = diag(me_extra[obs_ok, t]) requires
+      ## P' += K diag(me_extra[obs_ok, t]) K' for ANY gain K. me_variance
+      ## stays on the documented F-only-regularizer convention (no term).
+      if (has_me_extra && any(me_extra[obs_ok, t] != 0))
+        P <- P + K %*% (me_extra[obs_ok, t] * t(K))
       P <- (P + t(P)) * 0.5; ss_reached <- FALSE
       if (return_filtered) filtered[, t] <- s; next
     }
@@ -1482,6 +1550,11 @@ kalman_filter <- function(Y, dr, model, params, obs_vars,
         s     <- as.numeric(TT %*% s) + drop(K_t %*% v)
         TmKZ  <- TT - K_t %*% ZZ; RmKD <- RR - K_t %*% DD
         P     <- tcrossprod(TmKZ %*% P, TmKZ) + tcrossprod(RmKD %*% Se_t, RmKD)
+        ## Joseph true-noise term for the me_extra part of me_diag_t only:
+        ## P' += K diag(me_extra[, t]) K'. me_variance (the base me_diag)
+        ## stays on the documented F-only-regularizer convention (no term).
+        if (has_me_extra && any(me_extra[, t] != 0))
+          P <- P + K_t %*% (me_extra[, t] * t(K_t))
         P     <- (P + t(P)) * 0.5
         loglik <- loglik + ll_t
       ## When me_extra is active at this period (and no shock_scale), use a
@@ -1503,6 +1576,10 @@ kalman_filter <- function(Y, dr, model, params, obs_vars,
         s     <- as.numeric(TT %*% s) + drop(K_t %*% v)
         TmKZ  <- TT - K_t %*% ZZ; RmKD <- RR - K_t %*% DD
         P     <- tcrossprod(TmKZ %*% P, TmKZ) + tcrossprod(RmKD %*% Sigma_e, RmKD)
+        ## Joseph true-noise term for me_extra (this branch only runs when
+        ## me_extra[, t] has a nonzero entry): P' += K diag(me_extra[, t]) K'.
+        ## me_variance stays F-only (regularizer convention; no Joseph term).
+        P     <- P + K_t %*% (me_extra[, t] * t(K_t))
         P     <- (P + t(P)) * 0.5
         loglik <- loglik + ll_t
       } else {

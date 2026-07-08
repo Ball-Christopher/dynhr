@@ -67,6 +67,14 @@ Recognised options (non-exhaustive):
     proposal step on sharp / near-unit-root posteriors (it under-explored a
     tight direction to ~1\% of its variance in testing). It still warns when
     enabled; prefer \code{metric = "hessian"} (constant Laplace).}
+  \item{`allow_whittle_fim_metric`}{\code{FALSE} (default); the experimental
+    \code{metric = "whittle_fim"} NUTS option in
+    \code{run_posterior_estimation()} errors unless this is \code{TRUE}.
+    \code{"whittle_fim"} assembles a one-shot dense mass matrix from the
+    Whittle (frequency-domain) Fisher information at the mode (no periodic
+    recompute); it is unvalidated on the full estimation pipeline and costs
+    one extra evaluation that can be expensive on large models. Falls back
+    to the \code{"hessian"} metric on failure.}
   \item{`checkpoint_flush_every`}{\code{1000L} (default); the chunk size (in
     draws) at which checkpointed RWMH flushes its streaming buffer to disk and
     rewrites the restart state, when \code{run_posterior_estimation()} is

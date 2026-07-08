@@ -128,6 +128,11 @@
 ##   mu_eps    length-n_obs measurement noise mean.
 ##   Sigma_eps n_obs x n_obs measurement noise covariance.
 ##   cut_tol   Pruning tolerance passed to .pskf_filter (default 0.01).
+##   max_q     Skew-dimension rank cap passed to .pskf_filter (default 5).
+##             Since the pruning mean-compensation fix (2026-07), a cut
+##             shifts the Gaussian location -- pass cut_tol = 0, max_q = Inf
+##             when an exactly-Gaussian forward mean recursion is required
+##             (e.g. the method = "gaussian" backward-compat oracle).
 ##   method    "csn" (default) or "gaussian". See above.
 ##
 ## Returns: list(
@@ -148,7 +153,7 @@
 ## @noRd
 pskf_smoother <- function(Y, TT, ZZ, mu_eta, Sigma_eta, Gamma_eta, nu_eta,
                            Delta_eta, mu_eps, Sigma_eps, cut_tol = 0.01,
-                           method = c("csn", "gaussian")) {
+                           method = c("csn", "gaussian"), max_q = 5L) {
   method <- match.arg(method)
 
   ## Ensure Y is a matrix (n_obs x T)
@@ -170,6 +175,7 @@ pskf_smoother <- function(Y, TT, ZZ, mu_eta, Sigma_eta, Gamma_eta, nu_eta,
     mu_eps    = mu_eps,
     Sigma_eps = Sigma_eps,
     cut_tol   = cut_tol,
+    max_q     = max_q,
     store_path = TRUE
   )
 

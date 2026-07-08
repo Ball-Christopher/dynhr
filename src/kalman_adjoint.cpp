@@ -29,8 +29,12 @@
 //
 // Contract: kf_adjoint_cpp(Y, TT, RR, ZZ, DD, d, Sigma_e,
 //             dTT_cube, dRR_cube, dZZ_cube, dDD_cube, dd_mat, dSigma_cube,
-//             me_variance, ll_min, shock_scale_mat, me_extra_mat)
-//   -> list(ok, loglik, grad)
+//             me_variance, ll_min, shock_scale_mat, me_extra_mat, return_bars)
+//   -> list(ok, loglik, grad[, bars])
+// With return_bars = true the raw adjoint (bar) matrices wrt the state-space
+// system are appended as bars = list(G_TT, G_RR, G_ZZ, G_DD, g_d, G_Sig) --
+// the inputs .solution_adjoint() (Tier 18 A2) contracts against the analytic
+// primitive derivatives. Failure returns carry no bars (same as the R kernel).
 
 #include <RcppArmadillo.h>
 // [[Rcpp::depends(RcppArmadillo)]]
@@ -42,6 +46,32 @@ namespace {
 
 inline arma::mat sym(const arma::mat& X) {
   return 0.5 * (X + X.t());
+}
+
+// Doubling recovery for the two stationary Lyapunov solves below (X = A X A'
+// + B). The kron vec-solve's rcond gate fires on HIGHLY NON-NORMAL stable A
+// (e.g. Reiter-HANK transition matrices), where rcond(I - A (x) A) underflows
+// machine eps while the Lyapunov equation itself is well-posed. Doubling
+// (X_{k+1} = X_k + A_k X_k A_k', A_{k+1} = A_k^2) converges for any spectral
+// radius < 1 and any symmetric (possibly indefinite) B; for unit/explosive
+// roots A_k fails to decay and X overflows to non-finite, so it returns false
+// rather than a spurious solution -- the caller's fail contract is preserved.
+// Mirrors R solve_lyapunov()'s RELATIVE convergence tolerance (an absolute
+// tolerance never converges for near-unit-root systems whose X is huge).
+bool lyap_doubling(const arma::mat& A, const arma::mat& B, arma::mat& X) {
+  X = B;
+  arma::mat Apow = A;
+  for (int it = 0; it < 200; ++it) {
+    arma::mat Xn = X + Apow * X * Apow.t();
+    if (!Xn.is_finite()) return false;
+    const double diff  = arma::abs(Xn - X).max();
+    const double scale = std::max(1.0, arma::abs(Xn).max());
+    if (diff < 1e-14 * scale) { X = Xn; return true; }
+    Apow = Apow * Apow;
+    if (!Apow.is_finite()) return false;
+    X = Xn;
+  }
+  return false;
 }
 
 }  // namespace
@@ -63,7 +93,8 @@ List kf_adjoint_cpp(const arma::mat& Y,
                     double me_variance,
                     double ll_min,
                     const arma::mat& shock_scale_mat,
-                    const arma::mat& me_extra_mat) {
+                    const arma::mat& me_extra_mat,
+                    const bool return_bars = false) {
 
   const arma::uword n_state = TT.n_rows;
   const arma::uword n_obs   = ZZ.n_rows;
@@ -102,19 +133,18 @@ List kf_adjoint_cpp(const arma::mat& Y,
     const arma::uword n2 = n_state * n_state;
     arma::mat M = arma::eye(n2, n2) - arma::kron(TT, TT);
     double rc = arma::rcond(M);
-    if (!(rc >= std::numeric_limits<double>::epsilon())) {
-      lyap_ok = false;
-    } else {
+    bool kron_ok = (rc >= std::numeric_limits<double>::epsilon());
+    if (kron_ok) {
       arma::vec p0_vec;
-      bool ok1 = arma::solve(p0_vec, M, arma::vectorise(QQ),
-                             arma::solve_opts::no_approx);
-      if (!ok1) {
-        lyap_ok = false;
-      } else {
+      kron_ok = arma::solve(p0_vec, M, arma::vectorise(QQ),
+                            arma::solve_opts::no_approx);
+      if (kron_ok) {
         P0 = arma::reshape(p0_vec, n_state, n_state);
-        if (!P0.is_finite()) lyap_ok = false;
+        kron_ok = P0.is_finite();
       }
     }
+    // Non-normal-TT recovery: see lyap_doubling() above.
+    if (!kron_ok) lyap_ok = lyap_doubling(TT, QQ, P0) && P0.is_finite();
   }
 
   if (!lyap_ok) {
@@ -198,7 +228,13 @@ List kf_adjoint_cpp(const arma::mat& Y,
     B_store.slice(t)  = B;
 
     s = TT * s + K * v;
-    P = sym(A * P * A.t() + B * Se_t_f * B.t());
+    arma::mat P_raw = A * P * A.t() + B * Se_t_f * B.t();
+    // Joseph true-noise term for me_extra (mirrors kalman_filter's standard
+    // path): P' += K diag(me_extra[, t]) K'. me_variance stays F-only
+    // (regularizer convention; no Joseph term).
+    if (has_me_extra)
+      P_raw += (K * arma::diagmat(me_extra_mat.col(t))) * K.t();
+    P = sym(P_raw);
   }
 
   if (!ok) {
@@ -277,6 +313,13 @@ List kf_adjoint_cpp(const arma::mat& Y,
 
     // bar_K_from_s: += outer(bar_s, v)
     arma::mat bar_K = bar_s * v.t();                           // [n x q]
+
+    // Adjoint of the me_extra Joseph term in P_t (P_t += K me_x K', with
+    // me_x = diag(me_extra_mat.col(t)) being DATA, not differentiated):
+    // with bar_P symmetrized in Step 1, d tr(bar_P K me_x K') / dK
+    // = 2 bar_P K me_x. Mirrors R/gradient-adjoint-kf.R.
+    if (has_me_extra)
+      bar_K += 2.0 * bar_P * K * arma::diagmat(me_extra_mat.col(t));
 
     // bar_v_from_s: K' bar_s
     arma::vec bar_v = K.t() * bar_s;                           // [q]
@@ -402,22 +445,24 @@ List kf_adjoint_cpp(const arma::mat& Y,
     arma::mat M   = arma::eye(n2, n2) - arma::kron(tTT, tTT);
 
     double rc = arma::rcond(M);
-    if (!(rc >= std::numeric_limits<double>::epsilon())) {
+    bool kron_ok = (rc >= std::numeric_limits<double>::epsilon());
+    if (kron_ok) {
+      arma::vec bq_vec;
+      kron_ok = arma::solve(bq_vec, M, arma::vectorise(bar_P0),
+                            arma::solve_opts::no_approx);
+      if (kron_ok) {
+        bar_QQ = arma::reshape(bq_vec, n_state, n_state);
+        kron_ok = bar_QQ.is_finite();
+      }
+    }
+    // Non-normal-TT recovery: see lyap_doubling() above (doubling handles
+    // the indefinite symmetric bar_P0 RHS; spectral radius of TT' == TT).
+    if (!kron_ok &&
+        (!lyap_doubling(tTT, bar_P0, bar_QQ) || !bar_QQ.is_finite())) {
       return List::create(_["loglik"] = R_NegInf,
                           _["grad"]   = grad_na,
                           _["ok"]     = false);
     }
-
-    arma::vec bq_vec;
-    bool ok2 = arma::solve(bq_vec, M, arma::vectorise(bar_P0),
-                           arma::solve_opts::no_approx);
-    if (!ok2) {
-      return List::create(_["loglik"] = R_NegInf,
-                          _["grad"]   = grad_na,
-                          _["ok"]     = false);
-    }
-
-    bar_QQ = arma::reshape(bq_vec, n_state, n_state);
     if (!bar_QQ.is_finite()) {
       return List::create(_["loglik"] = R_NegInf,
                           _["grad"]   = grad_na,
@@ -453,6 +498,18 @@ List kf_adjoint_cpp(const arma::mat& Y,
     grad(j) = gj;
   }
 
+  if (return_bars) {
+    return List::create(_["loglik"] = loglik,
+                        _["grad"]   = grad,
+                        _["ok"]     = true,
+                        _["bars"]   = List::create(
+                            _["G_TT"]  = G_TT,
+                            _["G_RR"]  = G_RR,
+                            _["G_ZZ"]  = G_ZZ,
+                            _["G_DD"]  = G_DD,
+                            _["g_d"]   = g_d,
+                            _["G_Sig"] = G_Sig));
+  }
   return List::create(_["loglik"] = loglik,
                       _["grad"]   = grad,
                       _["ok"]     = true);

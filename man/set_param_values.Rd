@@ -35,7 +35,7 @@ Workflow for models with an external steady-state file:
 \examples{
 \dontrun{
 ## Gertler-Karadi (2011): 4 params computed by the external *_steadystate.m
-m <- parse_mod("my_model.mod")
+m <- parse_mod("GK_2011.mod")
 m <- set_param_values(m, c(chi = 0.5341, I_ss = 0.1817,
                             c1  = 0.0618, A    = 0.5040))
 solved <- solve_model(m, order = 1)

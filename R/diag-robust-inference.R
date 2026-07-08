@@ -198,6 +198,30 @@ robust_confidence_set <- function(theta_mode,
   if (is.null(params)) params <- names(theta_mode)
   if (is.null(params)) stop("robust_confidence_set: theta_mode must be named or params must be supplied.")
 
+  ## Fail-loud validation of the per-period loglik closure (pathological-DSGE
+  ## paper gap #1a: a NULL field access -- e.g. `$ll_contrib` instead of
+  ## kalman_filter()'s actual `$loglik_contrib` -- yields a length-0 vector
+  ## that previously flowed through silently and produced a degenerate
+  ## [-Inf, Inf] confidence set).
+  ll0 <- tryCatch(loglik_contrib_fn(theta_mode), error = function(e)
+    stop("robust_confidence_set: loglik_contrib_fn(theta_mode) errored: ",
+         conditionMessage(e), call. = FALSE))
+  if (!is.numeric(ll0) || length(ll0) < 2L)
+    stop("robust_confidence_set: loglik_contrib_fn(theta) must return the ",
+         "length-T numeric vector of PER-PERIOD log-likelihood contributions; ",
+         "got ", if (is.null(ll0)) "NULL" else paste0(class(ll0)[1L],
+         " of length ", length(ll0)), ". (Common footgun: the ",
+         "kalman_filter(return_ll_contrib = TRUE) field is `loglik_contrib` -- ",
+         "accessing a misspelled field like `ll_contrib` returns NULL.)",
+         call. = FALSE)
+  if (!any(is.finite(ll0)))
+    stop("robust_confidence_set: loglik_contrib_fn(theta_mode) returned no ",
+         "finite values.", call. = FALSE)
+  if (stats::sd(ll0[is.finite(ll0)]) == 0)
+    stop("robust_confidence_set: loglik_contrib_fn(theta_mode) returned an ",
+         "all-equal vector -- this is not a per-period contribution vector ",
+         "(a recycled scalar total?).", call. = FALSE)
+
   k    <- length(theta_mode)
   crit <- stats::qchisq(level, df = k)   # chi^2(k) critical value
 

@@ -23,11 +23,12 @@ run_posterior_estimation(
   transform_params = NULL,
   rwmh_adapt_cov = NULL,
   rwmh_n_blocks = NULL,
-  metric = c("diagonal", "hessian", "warmup_dense", "monge"),
+  metric = c("diagonal", "hessian", "warmup_dense", "monge", "whittle_fim"),
   monge_alpha = NULL,
   checkpoint_dir = NULL,
   resume = FALSE,
   verbose = TRUE,
+  seed = NULL,
   ...
 )
 }
@@ -121,9 +122,25 @@ set globally via \code{dynhr_set_options(rwmh_n_blocks = 2L)}.}
 
 \item{metric}{Metric for MALA and NUTS:
 \code{"diagonal"} (default, identity mass matrix),
-\code{"hessian"} (dense metric from \code{Sigma_prop}), or
+\code{"hessian"} (dense metric from \code{Sigma_prop}),
 \code{"monge"} (position-dependent Monge metric \eqn{G = I + \alpha^2 g g^T},
-Stage 3a; MALA only). \strong{The \code{"monge"} metric is experimental and
+Stage 3a; MALA only), or \code{"whittle_fim"} (one-shot dense metric from
+the Whittle (frequency-domain) Fisher information at the mode; NUTS only).
+\strong{The \code{"whittle_fim"} metric is experimental and disabled by
+default}: it costs one extra ~seconds-to-minutes-scale evaluation at the
+mode (no periodic recompute -- frozen through warmup and sampling, same
+as \code{"hessian"}) and is unvalidated on the full estimation pipeline.
+It therefore errors unless
+\code{dynhr_set_options(allow_whittle_fim_metric = TRUE)} is set. On
+failure (degenerate FIM, non-invertible result) it falls back to the
+\code{"hessian"} metric (Sigma_prop) with a message, mirroring the
+existing \code{"hessian"} branch's own not-PD fallback to diagonal.
+Measured result (2026-07-03, NZSIM 68 params): the NUTS warmup step
+size collapsed to ~1e-13 with divergences under this metric (the
+SoftAbs-floored FIM is badly scaled in weakly-identified directions),
+while the \code{"hessian"} metric warms up stably on the same
+posterior -- i.e. no measured win; prefer \code{"hessian"}.
+\strong{The \code{"monge"} metric is experimental and
 disabled by default}: \eqn{G} inflates along the gradient, so the proposal
 step collapses on sharp / near-unit-root posteriors -- in testing it
 under-explored a tight direction to ~1\% of its variance (ESS/draw ~0.002)
@@ -153,6 +170,21 @@ to a single longer run -- adding \code{ndraws} more retained draws. The
 saved model / prior / parameter configuration must match (it is enforced).}
 
 \item{verbose}{Print progress messages.}
+
+\item{seed}{Optional integer. When non-\code{NULL},
+\code{set.seed(seed)} is called once at the very top of this function,
+\strong{before any mode-finding multistart or sampler runs} -- it seeds
+the entire call (chain dispersal draws, RWMH/NUTS/MALA/HMC/ChEES/SMC/DIME
+RNG, and any multistart perturbations triggered downstream), not just one
+sampler. This makes the whole \code{run_posterior_estimation()} call
+reproducible without the caller needing to wrap it in their own
+\code{set.seed()}. Default \code{NULL}: the ambient RNG stream is left
+untouched, i.e. identical to wrapping the call in \code{set.seed()}
+yourself (old behaviour). \strong{Note}: previously a \code{seed =}
+argument passed by a caller was silently absorbed by \code{...} and
+forwarded to samplers that do not have a \code{seed} parameter, so it was
+dropped without warning or error -- this explicit argument closes that
+gap.}
 
 \item{...}{Additional arguments forwarded to each sampler
 (e.g. \code{target_accept = 0.25}, \code{adapt_every = 100}).}

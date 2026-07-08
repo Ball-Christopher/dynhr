@@ -13,8 +13,8 @@ eval_triplet_tape_cpp <- function(dy, params, ss, op, ia, da, expr_len) {
     .Call(`_dynhr_eval_triplet_tape_cpp`, dy, params, ss, op, ia, da, expr_len)
 }
 
-kf_adjoint_cpp <- function(Y, TT, RR, ZZ, DD, d, Sigma_e, dTT_cube, dRR_cube, dZZ_cube, dDD_cube, dd_mat, dSigma_cube, me_variance, ll_min, shock_scale_mat, me_extra_mat) {
-    .Call(`_dynhr_kf_adjoint_cpp`, Y, TT, RR, ZZ, DD, d, Sigma_e, dTT_cube, dRR_cube, dZZ_cube, dDD_cube, dd_mat, dSigma_cube, me_variance, ll_min, shock_scale_mat, me_extra_mat)
+kf_adjoint_cpp <- function(Y, TT, RR, ZZ, DD, d, Sigma_e, dTT_cube, dRR_cube, dZZ_cube, dDD_cube, dd_mat, dSigma_cube, me_variance, ll_min, shock_scale_mat, me_extra_mat, return_bars = FALSE) {
+    .Call(`_dynhr_kf_adjoint_cpp`, Y, TT, RR, ZZ, DD, d, Sigma_e, dTT_cube, dRR_cube, dZZ_cube, dDD_cube, dd_mat, dSigma_cube, me_variance, ll_min, shock_scale_mat, me_extra_mat, return_bars)
 }
 
 kf_adjoint_uni_cpp <- function(Y, TT, RR, ZZ, DD, d, Sigma_e, dTT_cube, dRR_cube, dZZ_cube, dDD_cube, dd_mat, dSigma_cube, me_variance, ll_min, P0_in, p0_supplied) {

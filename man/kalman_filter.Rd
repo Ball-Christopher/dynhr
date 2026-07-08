@@ -18,7 +18,8 @@ kalman_filter(
     "univariate_ss"),
   lik_init = c("auto", "stationary", "diffuse", "kappa"),
   me_extra = NULL,
-  shock_scale = NULL
+  shock_scale = NULL,
+  me_floor_check = getOption("dynhr.me_floor_check", TRUE)
 )
 }
 \arguments{
@@ -59,18 +60,27 @@ covariances and the exact-diffuse phase with singular \code{F_inf}).}
 See Details.}
 
 \item{me_extra}{\code{n_obs x T} matrix of additional per-observable,
-per-period measurement-error variances to add to the diagonal of the
-innovation covariance \code{F_t} (default \code{NULL}, no extra
-variance).  Intended for \code{filter_tunes} soft tunes: the expanded
+per-period measurement-error variances (default \code{NULL}, no extra
+variance).  Unlike the scalar \code{me_variance} regularizer,
+\code{me_extra} is treated as TRUE per-period measurement noise on all
+paths: it enters the innovation covariance \code{F_t} AND the
+Joseph-form state-covariance update
+(\code{P += K_t diag(me_extra[, t]) t(K_t)}), so the \code{"standard"},
+\code{"dare"}/\code{"reference"}, and \code{"univariate"} methods agree
+exactly under \code{me_extra} (at \code{me_variance = 0}).
+Intended for \code{filter_tunes} soft tunes: the expanded
 observable's column carries \code{stderr^2} at the tune periods and 0
 elsewhere.  When \code{me_extra} is non-\code{NULL} and has any nonzero
 entry the filter is forced onto the per-period R loop (\code{method =
-"standard"} or \code{"univariate"} in R); the C++ standard fast path,
-the Chandrasekhar recursion, and the steady-state lock are all bypassed
+"standard"}, \code{"dare"}, or \code{"univariate"} in R); the C++
+standard fast path, the Chandrasekhar recursion, and the steady-state
+lock are all bypassed
 because they bake a time-invariant \code{H} into the gain/covariance
 update.  Concretely: \code{method = "auto"} routes to
 \code{"standard"}; explicit \code{method = "chandrasekhar"} with
-nonzero \code{me_extra} raises an error.  Note also that the
+nonzero \code{me_extra} raises an error; the DARE drift diagnostic
+(\code{dare_p_drift}) is skipped (\code{NA}) because \code{P} has no
+time-invariant fixed point under per-period \code{F_t}.  Note also that the
 exact-diffuse phase (\code{lik_init = "diffuse"}) does not support
 missing observations and falls back to \code{"kappa"} whenever
 \code{me_extra} introduces NA rows (see Landmine 2 in the
@@ -86,6 +96,15 @@ where \eqn{s_t} is column \code{t} of \code{shock_scale}.
 Incompatible with \code{method = "chandrasekhar"}, \code{"univariate"},
 and \code{lik_init = "diffuse"}. \code{P0} always uses the baseline
 (unscaled) \eqn{\\Sigma_e}.}
+
+\item{me_floor_check}{Logical: when \code{me_variance > 0}, compare it
+against the smallest eigenvalue of the model-implied (ME-free) steady-
+state innovation covariance \code{F} and warn if the floor is large
+relative to that eigenvalue (near-collinear observables; see
+\code{.pruned_me_floor_ratio}). Default
+\code{getOption("dynhr.me_floor_check", TRUE)}. Only evaluated on the
+stationary (non-\code{shock_scale}) baseline system; scoped to the
+scalar \code{me_variance} floor, not \code{me_extra}.}
 }
 \description{
 Evaluates the log-likelihood of a DSGE model under the Gaussian state-space

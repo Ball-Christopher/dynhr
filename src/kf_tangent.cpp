@@ -232,7 +232,19 @@ List kf_tangent_cpp(const arma::mat& Y,
     arma::mat B = RR - K * DD;          // RR - K DD
 
     arma::vec s_n = TT * s + K * v;
-    arma::mat P_n = sym(A * P * A.t() + B * Se_t * B.t());
+    arma::mat P_n_raw = A * P * A.t() + B * Se_t * B.t();
+    // Joseph true-noise term for me_extra (mirrors kalman_filter's standard
+    // path): P' += K diag(me_extra[, t]) K'. me_variance stays F-only
+    // (regularizer convention; no Joseph term). Kme = K diag(me_x_t) is
+    // hoisted for the per-parameter tangent recursion below.
+    arma::vec me_x_t;
+    arma::mat Kme;
+    if (has_me_extra) {
+      me_x_t = me_extra_mat.col(t);
+      Kme    = K * arma::diagmat(me_x_t);
+      P_n_raw += Kme * K.t();
+    }
+    arma::mat P_n = sym(P_n_raw);
 
     // -- Hoisted parameter-independent pieces for the tangent recursion ----
     arma::mat TtP  = TT * P;
@@ -301,9 +313,14 @@ List kf_tangent_cpp(const arma::mat& Y,
       } else {
         dSig_eff = dSig;
       }
-      arma::mat dP_n = sym(dA * P * A.t() + A * dP * A.t() + AP * dA.t() +
+      arma::mat dP_n_raw = dA * P * A.t() + A * dP * A.t() + AP * dA.t() +
                            dB * Se_t * B.t() + B * dSig_eff * B.t() +
-                           BSig * dB.t());
+                           BSig * dB.t();
+      // Tangent of the me_extra Joseph term P' += K me_x K' (me_extra is
+      // data, not differentiated): dP' += dK me_x K' + K me_x dK'.
+      if (has_me_extra)
+        dP_n_raw += dK * arma::diagmat(me_x_t) * K.t() + Kme * dK.t();
+      arma::mat dP_n = sym(dP_n_raw);
 
       ds = ds_n;
       dP = dP_n;

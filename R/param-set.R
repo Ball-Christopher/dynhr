@@ -19,8 +19,8 @@
 ##   solved <- solve_model(m)
 ##
 ## HA-2 two-stage workflow (Winberry-class HANK models):
-##   m    <- parse_mod("my_model.mod")   # 949 params are NA after parse
-##   pars <- read_mat_params("params.mat")      # load .mat params (R.matlab)
+##   m    <- parse_mod("winberry_dynhr.mod")   # 949 params are NA after parse
+##   pars <- read_mat_params("grids.mat")      # load .mat params (R.matlab)
 ##   m    <- inject_params(m, pars)            # fills NAs; warns on extras
 ##   ss   <- solve_steady(compile_model(m), m$param_values, y0 = external_ss)
 ##
@@ -98,7 +98,7 @@ set_param_value <- function(model, name, value) {
 #' @examples
 #' \dontrun{
 #' ## Gertler-Karadi (2011): 4 params computed by the external *_steadystate.m
-#' m <- parse_mod("my_model.mod")
+#' m <- parse_mod("GK_2011.mod")
 #' m <- set_param_values(m, c(chi = 0.5341, I_ss = 0.1817,
 #'                             c1  = 0.0618, A    = 0.5040))
 #' solved <- solve_model(m, order = 1)
@@ -155,8 +155,8 @@ set_param_values <- function(model, params) {
 #' @examples
 #' \dontrun{
 #' ## Winberry (2018) HA model: parse -> inject external params -> steady(y0)
-#' m    <- parse_mod("my_model.mod")        # 949 params are NA
-#' pars <- read_mat_params("params.mat")           # load from .mat
+#' m    <- parse_mod("winberry_dynhr.mod")        # 949 params are NA
+#' pars <- read_mat_params("grids.mat")           # load from .mat
 #' m    <- inject_params(m, pars)                 # fills 25 grid params; warns on extras
 #' comp <- compile_model(m)
 #' ss   <- solve_steady(comp, m$param_values, y0 = external_ss_vector)
@@ -232,7 +232,7 @@ inject_params <- function(model, params, .quiet = FALSE) {
 #' JSON from Octave/MATLAB:
 #' \preformatted{
 #' ## In Octave:
-#' load("params.mat");
+#' load("grids.mat");
 #' fields = fieldnames(vars);
 #' out = struct();
 #' for i = 1:numel(fields)
@@ -256,7 +256,7 @@ inject_params <- function(model, params, .quiet = FALSE) {
 #'
 #' @examples
 #' \dontrun{
-#' pars <- read_mat_params("params.mat")
+#' pars <- read_mat_params("economicParameters.mat")
 #' m    <- inject_params(m, pars)
 #' }
 #' @export

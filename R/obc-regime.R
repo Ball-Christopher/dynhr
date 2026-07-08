@@ -8,6 +8,8 @@
 ##   obc_regime_flags()   -- integer regime index -> logical bind-flags
 ##   obc_ensure_policy()  -- lazily compute and cache per-regime policy matrices
 ##   obc_guess_verify()   -- OccBin iterative regime-path refinement
+##   .obc_warn_me_floor_lock() -- me-floor hazard guard using the slack regime
+##                                as the stationary-F proxy (see below)
 ##
 ## Regime encoding: integer bitfield where bit j (0-based) = 1 means spec j
 ## binds.  Regime 0 = all slack.  For k=1 this degenerates to the legacy 0/1
@@ -17,6 +19,65 @@
 ## stores pre-sliced state-space matrices {dr, c_state, c_obs, c_full, TT, RR,
 ## ZZ, DD} so the Kalman filter can look them up in O(1).
 ## --------------------------------------------------------------------------
+
+# =============================================================================
+# me-floor hazard guard (OBC family)
+# =============================================================================
+
+#' Warn-only me_variance-floor hazard guard for the OBC filter family
+#'
+#' The main Gaussian \code{kalman_filter()} guards its default \code{me_variance}
+#' floor against a near-degenerate model-implied innovation covariance (see
+#' \code{.pruned_me_floor_ratio()} / \code{.warn_me_floor_lock()} in
+#' R/pruned-state-space.R). The OBC filters (\code{kalman_filter_obc()},
+#' \code{kalman_filter_obc_pkf()}) are regime-switching, so there is no single
+#' stationary \code{F}; instead this uses the SLACK regime (no constraint
+#' binding) as the stationary-F proxy -- it is the reference regime whose
+#' \code{TT}/\code{ZZ}/\code{QQ}/\code{HH} matrices are exactly the plain
+#' first-order linear solution, so \code{.pruned_me_floor_ratio()} applies to
+#' it directly (same detector, same threshold, same message).
+#'
+#' Warn-only: never changes control flow or any numeric result. Guarded by
+#' \code{getOption("dynhr.me_floor_check", TRUE)} and the caller-supplied
+#' \code{check} flag (used for the once-per-closure latch in the OBC posterior
+#' factories, mirroring \code{make_log_posterior()}).
+#'
+#' @param dr_slack    Slack-regime DecisionRules (from \code{.solve_from_system}
+#'                    or \code{solve_perturbation}).
+#' @param model       dynhr_mod
+#' @param params      Named numeric parameter vector
+#' @param obs_vars    Character vector of observed variable names
+#' @param obs_idx     Integer vector: observable positions in endo vector
+#' @param me_variance Scalar measurement-error floor actually in force
+#' @param check       Logical: run the guard at all (already combines the
+#'                     caller's once-per-closure latch and the global option)
+#' @return \code{invisible(NULL)}; called for the warning side-effect only
+#' @noRd
+.obc_warn_me_floor_lock <- function(dr_slack, model, params, obs_vars, obs_idx,
+                                     me_variance, check) {
+  if (!isTRUE(check) || !is.finite(me_variance) || me_variance <= 0)
+    return(invisible(NULL))
+
+  si  <- dr_slack$state_idx
+  exo <- dr_slack$exo_names
+  TT  <- dr_slack$ghx[si,      , drop = FALSE]
+  RR  <- dr_slack$ghu[si,      , drop = FALSE]
+  ZZ  <- dr_slack$ghx[obs_idx, , drop = FALSE]
+  DD  <- dr_slack$ghu[obs_idx, , drop = FALSE]
+
+  Sigma_e <- .get_shock_cov(model, exo, params)
+  QQ <- tcrossprod(RR %*% Sigma_e, RR)
+  HH <- tcrossprod(DD %*% Sigma_e, DD)
+  SS <- RR %*% Sigma_e %*% t(DD)
+
+  Sxi0 <- tryCatch(solve_lyapunov(TT, QQ), error = function(e) NULL)
+  if (is.null(Sxi0) || !all(is.finite(Sxi0))) return(invisible(NULL))
+
+  .warn_me_floor_lock(
+    .pruned_me_floor_ratio(TT, ZZ, QQ, HH, SS, Sxi0, me_variance),
+    obs_vars, me_variance)
+  invisible(NULL)
+}
 
 
 # =============================================================================

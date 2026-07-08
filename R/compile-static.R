@@ -6,7 +6,7 @@
 ##
 ## Phase-1 split from jacobian-monolith.R (no logic changes). Phase-1d will
 ## extract a shared _build_residuals_asts() helper between static + dynamic
-## (internal).
+## (see REFACTOR_PLAN.md section 4.5).
 ## --------------------------------------------------------------------------
 
 ## Build a static-model closure from a list of ASTs using CSE.

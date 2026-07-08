@@ -6,7 +6,7 @@
 ## commented out (with a TODO marker) so this one wins. Once everything is
 ## split apart in phase 1+, this file becomes the only place `%||%` lives.
 ##
-## Internal utility consolidation.
+## See REFACTOR_PLAN.md section 4.8 (Internal utility consolidation).
 ## --------------------------------------------------------------------------
 
 #' Null-coalescing operator

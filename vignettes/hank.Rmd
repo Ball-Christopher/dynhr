@@ -1,0 +1,212 @@
+---
+title: "Heterogeneous-agent (HANK) models with dynhr"
+output: rmarkdown::html_vignette
+vignette: >
+  %\VignetteIndexEntry{Heterogeneous-agent (HANK) models with dynhr}
+  %\VignetteEngine{knitr::rmarkdown}
+  %\VignetteEncoding{UTF-8}
+---
+
+```{r setup, include = FALSE}
+knitr::opts_chunk$set(
+  collapse = TRUE,
+  comment  = "#>",
+  eval     = FALSE   # runnable, but skipped on build for speed
+)
+```
+
+## Overview
+
+dynhr solves, computes impulse responses for, and **Bayesian-estimates**
+heterogeneous-agent models using the sequence-space Jacobian (Auclert,
+Bardóczy, Rognlie & Straub 2021). Unlike the representative-agent workflow,
+a HANK household block is *not* written in a `.mod` file — it is specified on
+the R side from three ingredients:
+
+1. an idiosyncratic income process (a discretized AR(1)),
+2. an asset grid, and
+3. an EGM household solver + Young's-method distribution.
+
+The aggregate ("simple") blocks — a firm, market clearing — compose with the
+household block through the sequence-space Jacobian to close general
+equilibrium. This vignette walks through the canonical **Krusell-Smith** model.
+
+## 1. The household block
+
+```{r household}
+library(dynhr)
+
+## Idiosyncratic productivity: a 7-state Rouwenhorst chain, mean-normalised to 1.
+inc <- hank_income_rouwenhorst(rho = 0.966, sigma = 0.5, n = 7)
+
+## Asset grid: 500 points, clustered near the borrowing constraint at 0.
+a_grid <- hank_asset_grid(amax = 200, n = 500, amin = 0)
+
+## Solve the household problem (EGM) at fixed prices, then its distribution.
+hh  <- hank_egm_solve(a_grid, y = inc$e, r = 0.01, beta = 0.98,
+                      eis = 1, Pi = inc$Pi)
+Lam <- hank_forward_operator(hh$a, a_grid, inc$Pi)
+D   <- hank_stationary_dist(Lam)$d
+
+## Aggregate assets and consumption:
+A <- hank_aggregate(D, hh$a)
+C <- hank_aggregate(D, hh$c)
+```
+
+The Euler-equation residual (`hank_euler_residual(hh)`) and the exact
+aggregate-budget identity `C == r*A + Ybar` provide self-contained correctness
+checks.
+
+## 2. General equilibrium (Krusell-Smith)
+
+`hank_ks_steady()` closes the model with a Cobb-Douglas firm and asset-market
+clearing, solving for the interest rate at which household savings equal the
+firm's capital demand (the Aiyagari fixed point).
+
+```{r ge}
+ks <- hank_ks_steady(a_grid, inc$Pi, inc$e, beta = 0.98, eis = 1,
+                     alpha = 0.36, delta = 0.025)
+ks$r; ks$K            # equilibrium interest rate and capital
+
+## Linear GE impulse response to a persistent TFP shock:
+Th  <- 300
+dZ  <- 0.01 * 0.9^(0:(Th - 1))
+irf <- hank_ks_linear_irf(ks, dZ)
+hank_plot_irf(irf, vars = c("dY", "dK", "dC"))
+
+## Fully nonlinear transition (quasi-Newton in sequence space):
+nl <- hank_ks_nonlinear_irf(ks, Z_path = ks$Z * (1 + 0.05 * 0.9^(0:(Th - 1))))
+```
+
+## 3. Diagnostics
+
+```{r diag}
+## Sequence-space Jacobian of consumption to the interest rate, and its heatmap:
+J <- hank_het_jacobian(ks$block, Th, inputs = "r", outputs = "C")
+hank_plot_jacobian(J[["C"]][["r"]])
+
+## Marginal propensity to consume by wealth:
+m <- hank_mpc(ks$block)
+m$aggregate                       # distribution-weighted aggregate MPC
+plot(m$by_wealth$a, m$by_wealth$mpc, type = "l",
+     xlab = "assets", ylab = "MPC")
+```
+
+## 4. Estimation
+
+The linearized GE solution implies a moving-average representation of the
+aggregate observables in the structural innovations; the exact Gaussian
+likelihood follows from the implied autocovariance function (ABRS eq. 37) — no
+state-space or Kalman filter is required.
+
+```{r estimate}
+Theta <- hank_ma_coefficients(ks, rho_z = 0.9, T_h = 300, observables = "Y")
+
+## Simulate a sample and evaluate / profile the likelihood:
+set.seed(1)
+Y  <- hank_simulate_aggregate(Theta, sigma_eps = 0.01, T_data = 200)
+ll <- hank_loglik_aggregate(Y, Theta, sigma_eps = 0.01)
+
+## Profile over the shock standard deviation (recovers the true value):
+grid <- seq(0.006, 0.016, by = 0.0005)
+ll_prof <- sapply(grid, function(s) hank_loglik_aggregate(Y, Theta, sigma_eps = s))
+grid[which.max(ll_prof)]
+```
+
+With more observables than structural shocks the aggregate covariance is
+stochastically singular; supply a measurement-error variance (`me_var`) to keep
+the likelihood well-defined.
+
+## 5. A discount-heterogeneity mixture economy
+
+The flagship application in dynhr 0.9.0 is a **mixture of household types that
+differ in their discount factor** — the cstwMPC device for matching the
+empirical wealth distribution. Each type faces the same aggregate prices and
+interacts only through them, so the economy is a single Krusell-Smith GE with a
+population `omega`-weighted over types.
+
+```{r mixture-solve}
+## Two types: patient (beta = 0.985) and impatient (beta = 0.96), with
+## population weights omega. All types share the income process and asset grid.
+betas <- c(0.985, 0.96)
+omega <- c(0.6, 0.4)
+
+mks <- hank_mixture_ks_steady(a_grid, inc$Pi, inc$e,
+                              betas = betas, omega = omega, eis = 1,
+                              alpha = 0.36, delta = 0.025)
+mks$r; mks$K                     # shared equilibrium price and aggregate capital
+
+## Assemble the sequence-space GE model and its impulse response to a TFP shock:
+T_h   <- 300
+model <- hank_mixture_ks_model(mks, T_h)
+dZ    <- 0.01 * 0.9^(0:(T_h - 1))
+irf   <- hank_model_irf(model, dZ)
+hank_plot_irf(irf, vars = c("dY", "dK", "dC"))
+```
+
+## 6. Estimating the discount spread
+
+The headline identification result baked into these tools: the discount **spread**
+between types is pinned down by the stationary cross-sectional wealth **level**
+(à la cstwMPC), *not* by the aggregate response to a price shock, which is nearly
+inert in the spread. `hank_mixture_joint_logpost()` evaluates a joint posterior
+over up to three information channels — aggregate **macro** dynamics (through the
+Kalman filter), the cross-sectional wealth **level**, and the cross-sectional
+**response** to a shock:
+
+```{r mixture-post}
+## `config` bundles everything shared across every posterior evaluation
+## (asset grid, income process, GE horizon, observables, shock specs, me_var,
+##  and the fixed mixture coordinates). See ?hank_mixture_joint_logpost.
+config <- list(a_grid = a_grid, Pi = inc$Pi, e = inc$e, T_h = T_h,
+               observables = "Y", betas = betas, omega = omega,
+               shock_specs = list(Z = list(rho = 0.9)), me_var = 1e-4)
+
+## theta here is the estimated coordinate(s) — e.g. the discount-factor spread.
+lp <- function(theta)
+  hank_mixture_joint_logpost(theta, Y = Y, m_lev_hat = m_lev_hat,
+                             level_metric = level_metric, config = config)
+```
+
+**Choosing a posterior route.** The channels are strongly non-diagonal, and a
+diagonal-metric random-walk sampler fails on this posterior class. The
+recommended routes are the **exact grid** (cheap here because the mixture GE
+solve is data-independent and precomputable) or a **Laplace approximation** —
+never a diagonal RWM:
+
+```{r mixture-route}
+## (a) exact grid, with simulation-based-calibration certification:
+emu <- hank_mixture_emulator(config)          # D-agnostic surrogate over theta
+sbc <- hank_mixture_sbc(emu, n_rep = 200, sampler = "grid",
+                        channels = c("macro", "level", "response"))
+sbc$uniformity                                # per-channel SBC rank uniformity
+
+## (b) Laplace approximation: mode + Laplace-covariance proposal (NOT diagonal RWM):
+fit <- hank_mixture_laplace(theta0 = 0.02, config = config,
+                            Y = Y, m_lev_hat = m_lev_hat,
+                            level_metric = level_metric)
+fit$mode; fit$cov
+```
+
+## 7. Welfare
+
+`hank_welfare_posterior()` propagates posterior draws through a welfare
+functional (e.g. the consumption-equivalent gain of a policy) to get a posterior
+over welfare quantiles, distinguishing the interest-income and labour-income
+incidence channels across the wealth distribution:
+
+```{r mixture-welfare}
+draws <- fit$mode + as.numeric(chol(fit$cov)) * rnorm(1000)   # illustrative draws
+wp <- hank_welfare_posterior(draws,
+                             welfare_fn = function(theta)
+                               hank_cev(mks, dr = +0.001))     # CEV of +10bps r
+wp$quantiles
+```
+
+## References
+
+- Auclert, Bardóczy, Rognlie & Straub (2021), "Using the Sequence-Space
+  Jacobian to Solve and Estimate Heterogeneous-Agent Models," *Econometrica*
+  89(5), 2375–2408.
+- Carroll (2006), the endogenous gridpoints method.
+- Young (2010), non-stochastic simulation of the distribution.

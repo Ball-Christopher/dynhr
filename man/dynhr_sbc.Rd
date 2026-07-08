@@ -23,6 +23,7 @@ dynhr_sbc(
   likelihood = c("gaussian", "cumulant", "whittle", "tpf", "pskf", "student_t"),
   order = 1L,
   ctx = NULL,
+  innovation_check = FALSE,
   ...
 )
 }
@@ -96,6 +97,25 @@ approximation order.}
 individual \code{likelihood}, \code{me_variance}, and \code{lik_init}
 arguments and merges any \code{tpf_options} with \code{...}.}
 
+\item{innovation_check}{Logical (default \code{FALSE}): if \code{TRUE},
+run \code{\link{kf_innovation_diagnostics}} on each replication's
+simulated data \eqn{Y} at the DRAWN \eqn{\tilde\theta} (the replication's
+own DGP parameters -- the correctly-specified case, since \eqn{Y} was
+simulated from exactly this \code{dr}/\code{params}) as a cheap per-draw
+fast-fail sanity oracle: a whiteness failure here would mean the
+simulator and the thin diagnostic filter disagree about the model's own
+state-space form, which is a bug independent of anything SBC itself is
+testing. Only applies on the serial path (\code{n_cores = NULL}); ignored
+with a message when \code{n_cores} is set, since \code{run_sbc_mirai}
+is unaffected by this argument. Purely additive: when \code{FALSE}
+(default), \code{.sbc_one_replication()} takes an identical code path to
+before this argument existed, so \code{ranks}/\code{uniformity}/\code{plot}
+are bit-identical. When \code{TRUE}, adds
+\code{$innovation_diagnostics} (list of per-replication results, one per
+successful replication) and \code{$innovation_summary} (a data.frame with
+\code{n_flagged_replications} / \code{n_replications_checked}) to the
+returned \code{dynhr_sbc} object.}
+
 \item{...}{Additional arguments forwarded to
 \code{make_log_posterior} and the sampler
 (e.g. \code{n_particles} for \code{likelihood = "tpf"}).}
@@ -115,6 +135,14 @@ An object of class \code{"dynhr_sbc"}: a list with elements
     \item{plot}{A ggplot rank-histogram (see
       \code{sbc_uniformity_test}), or \code{NULL} if \pkg{ggplot2}
       is unavailable or there are no successful replications.}
+    \item{innovation_diagnostics}{Only present when
+      \code{innovation_check = TRUE}: list of per-replication
+      \code{kf_innovation_diagnostics} objects (successful replications
+      only, in replication order).}
+    \item{innovation_summary}{Only present when
+      \code{innovation_check = TRUE}: single-row data.frame with
+      \code{n_flagged_replications} (replications with at least one
+      \code{|z| > 4}) and \code{n_replications_checked}.}
   }
 }
 \description{

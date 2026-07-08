@@ -4,20 +4,45 @@
 \alias{pruned_ss_loglik}
 \title{Gaussian Kalman filter log-likelihood on the pruned augmented state}
 \usage{
-pruned_ss_loglik(pss, Y, obs_vars, me_variance = 0)
+pruned_ss_loglik(
+  pss,
+  Y,
+  obs_vars,
+  me_variance = 0,
+  me_floor_check = getOption("dynhr.me_floor_check", TRUE)
+)
 }
 \arguments{
 \item{pss}{A \code{pruned_ss} object from
 \code{\link{pruned_state_space}}.}
 
 \item{Y}{Observation matrix (\code{n_obs x T} or \code{T x n_obs};
-transposed automatically when \code{ncol(Y) == n_obs}).}
+transposed automatically when \code{ncol(Y) == n_obs}).  \code{NA}
+entries are handled with an exact PARTIAL measurement update: for each
+period only the non-\code{NA} observables enter the Kalman update (their
+rows/cols of \code{ZZ}/\code{HH}/\code{SS} and the corresponding
+log-density normalizing constant); a period with ALL observables missing
+falls back to a predict-only step (no update). Fully-observed and
+fully-missing periods are unaffected by this and match the previous
+behavior exactly.}
 
 \item{obs_vars}{Character vector of observed variable names (must be a
 subset of \code{pss$endo_names}).}
 
 \item{me_variance}{Scalar measurement-error jitter added to the diagonal
-of the innovation covariance (default 0).}
+of the innovation covariance (default 0). CAUTION: when the model
+implies a near-degenerate innovation covariance (some combination of
+observables is almost perfectly predictable one step ahead), even a
+tiny floor (1e-8) can dominate the smallest eigenvalue of F and bias
+likelihood comparisons on measurement-error-free data, theta-dependently.
+Match \code{me_variance} to what the data actually contain; the
+\code{me_floor_check} guard warns when the hazard is live.}
+
+\item{me_floor_check}{Logical: when \code{me_variance > 0}, compare
+\code{me_variance} against the smallest eigenvalue of the filter's
+steady-state innovation covariance at \code{me_variance = 0} and warn
+if the floor inflates that eigenvalue by more than 50\%. Default
+\code{getOption("dynhr.me_floor_check", TRUE)}.}
 }
 \value{
 Scalar log-likelihood (numeric).  Returns \code{-Inf} on
@@ -51,6 +76,46 @@ with \eqn{E[r_t r_t'] = Cr_0} (stationary), giving:
 The correlated-noise KF converts to the uncorrelated form via the standard
 substitution \eqn{\tilde{x}_{t+1} = \xi_{t+1} - S F^{-1} v_t} before each
 step.
+}
+\section{Mixed-frequency data}{
+
+The exact partial-NA update makes \code{Y} a natural home for
+mixed-frequency panels: give each observable its own row and set the
+periods where it is unobserved to \code{NA}.  For example, a "monthly"
+series observed every period alongside a "quarterly" series observed
+only every third period:
+\preformatted{
+  T_n <- 120L
+  Y <- rbind(monthly_series, quarterly_series)   # 2 x T_n, levels
+  Y[2, -seq(3L, T_n, by = 3L)] <- NA              # quarterly: keep every 3rd
+  ll <- pruned_ss_loglik(pss, Y, c("monthly_var", "quarterly_var"))
+}
+Each period's log-density uses only the observables that are non-\code{NA}
+that period; a period with every observable missing contributes no update
+(predict-only). See \code{Y} above for the exact partial-update semantics.
+}
+
+\examples{
+\donttest{
+mod_path <- system.file("extdata/models/rbc2shock.mod", package = "dynhr")
+m   <- dynhr:::parse_mod(mod_path)
+cm  <- dynhr:::compile_model(m, verbose = FALSE, max_order = 2L)
+ss  <- dynhr:::solve_steady(cm, m$param_values, verbose = FALSE)
+dr2 <- solve_perturbation(m, cm, ss$values, m$param_values,
+                           order = 2L, verbose = FALSE)
+pss <- pruned_state_space(dr2, m, m$param_values)
+
+## Simulate data, then observe "c" every period ("monthly") and "y" only
+## every 3rd period ("quarterly").
+T_n <- 120L
+sim <- simulate_model_order2(dr2, n_periods = T_n, burn_in = 1000L,
+                              model = m, pruning = TRUE)
+Y <- t(sim[, c("c", "y")]) + dr2$ys[c("c", "y")]
+Y[2, -seq(3L, T_n, by = 3L)] <- NA
+
+ll <- pruned_ss_loglik(pss, Y, c("c", "y"), me_variance = 1e-4)
+ll
+}
 }
 \seealso{
 \code{\link{pruned_state_space}}, \code{\link{pruned_ss_moments}}

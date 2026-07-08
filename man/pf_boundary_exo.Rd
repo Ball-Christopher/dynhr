@@ -40,7 +40,7 @@ exactly \code{model$varexo_names} with no dotted suffixes.
 
 \examples{
 \dontrun{
-m  <- parse_mod("my_growth_model_pp.mod", verbose = FALSE)
+m  <- parse_mod("Solow_nonstationary_pp.mod", verbose = FALSE)
 cm <- compile_model(m, verbose = FALSE)
 T  <- 100L
 exo_path <- cbind(A = (1 + m$param_values["g"])^(1:T),

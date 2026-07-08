@@ -7,11 +7,12 @@
 run_mode_finding(
   solved,
   data,
-  obs_vars,
+  obs_vars = NULL,
   n_iter = 10000L,
   method = "newrat",
   me_variance = 0,
-  likelihood = c("gaussian", "cumulant", "whittle"),
+  likelihood = c("gaussian", "cumulant", "whittle", "pruned", "pskf", "student_t"),
+  pruned_order = 2L,
   data_col_map = NULL,
   mode_options = list(),
   posterior_options = list(),
@@ -56,10 +57,29 @@ noise diagonal (default 0).  Use a small positive value for
 stochastically singular models.}
 
 \item{likelihood}{Likelihood type: \code{"gaussian"} (Kalman filter,
-default), \code{"cumulant"} (cumulant-matching, Mutschler 2015), or
-\code{"whittle"} (frequency-domain Whittle likelihood). The Whittle path
-requires a stationary, complete panel; use \code{freq_band} (via
-\code{posterior_options}) for band-restricted estimation.}
+default), \code{"cumulant"} (cumulant-matching, Mutschler 2015),
+\code{"whittle"} (frequency-domain Whittle likelihood),
+\code{"pruned"} (Gaussian KF on the AFVRR pruned state space; see
+\code{pruned_order}), \code{"pskf"} (Pruned Skewed Kalman Filter for
+skew-normal shocks; pass \code{cut_tol} via \code{...}), or
+\code{"student_t"} (Gaussian-KF recursions with a multivariate Student-t
+per-period density; requires \code{student_df} passed via \code{...}).
+The Whittle path requires a stationary, complete panel; use
+\code{freq_band} (via \code{posterior_options}) for band-restricted
+estimation. The pruned, pskf, and student_t paths are all deterministic
+(no stochastic-particle noise) but have no analytic gradient (FD
+fallback); pruned additionally runs the multi-start step via the
+closure-shipped parallel path. \code{"tpf"}/\code{"ppf"}/\code{"copf"}
+(particle-filter likelihoods with a noisy unbiased loglik estimate) are
+deliberately NOT accepted here -- their estimation noise breaks
+deterministic optimizers (Nelder-Mead/CMA-ES/newrat all assume a fixed
+objective at repeated evaluations of the same point); use
+\code{\link{run_full_estimation}} or particle MCMC (PMMH) via
+\code{\link{run_posterior_estimation}} instead.}
+
+\item{pruned_order}{Integer, \code{2L} (default) or \code{3L}: AFVRR
+pruned state-space order used when \code{likelihood = "pruned"}
+(ignored otherwise; \code{3L} with another likelihood is an error).}
 
 \item{data_col_map}{Optional named character vector mapping model observable
 names to CSV column names when they differ.}

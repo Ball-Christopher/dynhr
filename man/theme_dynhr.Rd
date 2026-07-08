@@ -2,7 +2,7 @@
 % Please edit documentation in R/diag-plot-theme.R
 \name{theme_dynhr}
 \alias{theme_dynhr}
-\title{dynhr ggplot2 theme (Tol-coloured, Source-Sans fonts)}
+\title{dynhr ggplot2 theme (clean minimal panels, Tol-coloured, Source-Sans fonts)}
 \usage{
 theme_dynhr(base_size = 14, base_family = "Source Sans 3")
 }

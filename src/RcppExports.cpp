@@ -65,8 +65,8 @@ BEGIN_RCPP
 END_RCPP
 }
 // kf_adjoint_cpp
-List kf_adjoint_cpp(const arma::mat& Y, const arma::mat& TT, const arma::mat& RR, const arma::mat& ZZ, const arma::mat& DD, const arma::vec& d, const arma::mat& Sigma_e, const arma::cube& dTT_cube, const arma::cube& dRR_cube, const arma::cube& dZZ_cube, const arma::cube& dDD_cube, const arma::mat& dd_mat, const arma::cube& dSigma_cube, double me_variance, double ll_min, const arma::mat& shock_scale_mat, const arma::mat& me_extra_mat);
-RcppExport SEXP _dynhr_kf_adjoint_cpp(SEXP YSEXP, SEXP TTSEXP, SEXP RRSEXP, SEXP ZZSEXP, SEXP DDSEXP, SEXP dSEXP, SEXP Sigma_eSEXP, SEXP dTT_cubeSEXP, SEXP dRR_cubeSEXP, SEXP dZZ_cubeSEXP, SEXP dDD_cubeSEXP, SEXP dd_matSEXP, SEXP dSigma_cubeSEXP, SEXP me_varianceSEXP, SEXP ll_minSEXP, SEXP shock_scale_matSEXP, SEXP me_extra_matSEXP) {
+List kf_adjoint_cpp(const arma::mat& Y, const arma::mat& TT, const arma::mat& RR, const arma::mat& ZZ, const arma::mat& DD, const arma::vec& d, const arma::mat& Sigma_e, const arma::cube& dTT_cube, const arma::cube& dRR_cube, const arma::cube& dZZ_cube, const arma::cube& dDD_cube, const arma::mat& dd_mat, const arma::cube& dSigma_cube, double me_variance, double ll_min, const arma::mat& shock_scale_mat, const arma::mat& me_extra_mat, const bool return_bars);
+RcppExport SEXP _dynhr_kf_adjoint_cpp(SEXP YSEXP, SEXP TTSEXP, SEXP RRSEXP, SEXP ZZSEXP, SEXP DDSEXP, SEXP dSEXP, SEXP Sigma_eSEXP, SEXP dTT_cubeSEXP, SEXP dRR_cubeSEXP, SEXP dZZ_cubeSEXP, SEXP dDD_cubeSEXP, SEXP dd_matSEXP, SEXP dSigma_cubeSEXP, SEXP me_varianceSEXP, SEXP ll_minSEXP, SEXP shock_scale_matSEXP, SEXP me_extra_matSEXP, SEXP return_barsSEXP) {
 BEGIN_RCPP
     Rcpp::RObject rcpp_result_gen;
     Rcpp::RNGScope rcpp_rngScope_gen;
@@ -87,7 +87,8 @@ BEGIN_RCPP
     Rcpp::traits::input_parameter< double >::type ll_min(ll_minSEXP);
     Rcpp::traits::input_parameter< const arma::mat& >::type shock_scale_mat(shock_scale_matSEXP);
     Rcpp::traits::input_parameter< const arma::mat& >::type me_extra_mat(me_extra_matSEXP);
-    rcpp_result_gen = Rcpp::wrap(kf_adjoint_cpp(Y, TT, RR, ZZ, DD, d, Sigma_e, dTT_cube, dRR_cube, dZZ_cube, dDD_cube, dd_mat, dSigma_cube, me_variance, ll_min, shock_scale_mat, me_extra_mat));
+    Rcpp::traits::input_parameter< const bool >::type return_bars(return_barsSEXP);
+    rcpp_result_gen = Rcpp::wrap(kf_adjoint_cpp(Y, TT, RR, ZZ, DD, d, Sigma_e, dTT_cube, dRR_cube, dZZ_cube, dDD_cube, dd_mat, dSigma_cube, me_variance, ll_min, shock_scale_mat, me_extra_mat, return_bars));
     return rcpp_result_gen;
 END_RCPP
 }
@@ -400,7 +401,7 @@ static const R_CallMethodDef CallEntries[] = {
     {"_dynhr_fdb_compose_folded_cpp", (DL_FUNC) &_dynhr_fdb_compose_folded_cpp, 5},
     {"_dynhr_eval_jac_tape_cpp", (DL_FUNC) &_dynhr_eval_jac_tape_cpp, 11},
     {"_dynhr_eval_triplet_tape_cpp", (DL_FUNC) &_dynhr_eval_triplet_tape_cpp, 7},
-    {"_dynhr_kf_adjoint_cpp", (DL_FUNC) &_dynhr_kf_adjoint_cpp, 17},
+    {"_dynhr_kf_adjoint_cpp", (DL_FUNC) &_dynhr_kf_adjoint_cpp, 18},
     {"_dynhr_kf_adjoint_uni_cpp", (DL_FUNC) &_dynhr_kf_adjoint_uni_cpp, 17},
     {"_dynhr_kalman_ss_loop_cpp", (DL_FUNC) &_dynhr_kalman_ss_loop_cpp, 10},
     {"_dynhr_kalman_standard_loop_cpp", (DL_FUNC) &_dynhr_kalman_standard_loop_cpp, 13},

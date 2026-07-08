@@ -511,7 +511,14 @@ print.dynhr_ramsey_obc_pwl <- function(x, ...) {
 #' @param model             dynhr_mod object.
 #' @param planner_objective Planner objective expression.
 #' @param obc_specs         OBC specs (or NULL to parse from model).
-#' @param shock_std         Shock standard deviation for IRF (default 1.0).
+#' @param shock_std         Standard deviation of the one-time impulse applied
+#'   to the first exogenous shock at period 1 of the perfect-foresight path
+#'   used to compute the OBC-constrained welfare (default 1.0). Larger values
+#'   trace out a larger occasionally-binding episode and a larger welfare gap.
+#'   NOTE the comparison is steady-state unconstrained welfare vs the
+#'   shocked-path OBC welfare, so the reported gap bundles the shock's own
+#'   transition cost together with the OBC distortion (an unconstrained
+#'   path-welfare leg under the same shock is not currently available).
 #' @param params            Parameter vector.
 #' @param verbose           Print progress.
 #' @return List with welfare comparison and both result objects.
@@ -533,13 +540,25 @@ ramsey_obc_welfare_cost <- function(model,
     planner_objective = obj_text, order = 1L, verbose = verbose)
 
   # OBC-constrained Ramsey (perfect-foresight)
+  # Build shock path: one std-dev impulse to the first exogenous shock at
+  # period 1, matching the convention used by ramsey_obc_pwlinear() (see
+  # `shock_seq[1, 1] <- shock_std` above).
   if (verbose) cat("[ramsey_obc_welfare_cost] Solving OBC-constrained Ramsey (PF)...\n")
+  T_horizon <- 40L
+  shock_path <- matrix(0, nrow = T_horizon, ncol = length(model$varexo_names))
+  colnames(shock_path) <- model$varexo_names
+  if (ncol(shock_path) >= 1) {
+    shock_path[1, 1] <- shock_std
+  }
   ramsey_obc <- ramsey_obc_pf(model,
     planner_objective = obj_text, obc_specs = obc_specs,
+    shock_path = shock_path, T_horizon = T_horizon,
     params = params, verbose = verbose)
 
   welfare_uncon <- .extract_welfare(ramsey_uncon, "steady")
-  welfare_obc   <- ramsey_obc$welfare$steady_value
+  # Use the shock-path welfare (not steady_value, which is shock-independent
+  # by construction) so that the comparison is sensitive to shock_std.
+  welfare_obc   <- ramsey_obc$welfare$path_value
 
   consumption_equiv <- if (is.finite(welfare_uncon - welfare_obc) &&
                            abs(welfare_uncon) > 1e-12) {

@@ -99,7 +99,7 @@ This function fills the gap left by \code{\link{pf_newton_solve}} (which
 requires \code{n_eq == n_endo} and a steady state) and
 \code{\link{mcp_solve_path}} (which targets MCP-constrained problems).
 It handles the "pure" perfect-foresight case used by models like
-\code{my_growth_model} and \code{my_growth_model}.
+\code{Ramsey_Cass_Koopmans} and \code{Solow_nonstationary}.
 
 **Boundary conditions:**
 - \code{y0}: values at t=0 (from Dynare's \code{initval} block)
@@ -116,7 +116,7 @@ It handles the "pure" perfect-foresight case used by models like
 }
 \examples{
 \dontrun{
-model <- parse_mod("my_growth_model.mod")
+model <- parse_mod("Ramsey_Cass_Koopmans.mod")
 compiled <- compile_model(model)
 # From initval block:
 y0 <- c(K = 12.3, C = 1.5, ...)

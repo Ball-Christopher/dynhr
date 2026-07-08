@@ -103,6 +103,11 @@
 #' @param student_df  Positive finite scalar; degrees of freedom for the
 #'   multivariate Student-t per-period log-likelihood.  Required when
 #'   \code{likelihood = "student_t"}, ignored otherwise.
+#' @param pruned_order  Integer, \code{2L} (default) or \code{3L}.  Selects
+#'   the AFVRR pruned state-space order used by \code{make_log_posterior}
+#'   when \code{likelihood = "pruned"} (order-2 vs order-3 augmented state).
+#'   Only meaningful when \code{likelihood = "pruned"}; setting
+#'   \code{pruned_order = 3L} with any other likelihood is an error.
 #' @return An object of class \code{"dynhr_estimation_context"}.
 #' @seealso \code{\link{validate_context}}, \code{ctx_from_mode_result}
 #' @export
@@ -123,7 +128,8 @@ estimation_context <- function(
     sample_start    = NULL,
     ms_spec         = NULL,
     ms_struct_spec  = NULL,
-    student_df      = NULL
+    student_df      = NULL,
+    pruned_order    = 2L
 ) {
   likelihood      <- match.arg(likelihood)
   gradient_policy <- match.arg(gradient_policy)
@@ -175,6 +181,20 @@ estimation_context <- function(
         !is.finite(student_df) || student_df <= 0)
       stop("estimation_context: student_df must be a positive finite scalar.",
            call. = FALSE)
+  }
+
+  ## Validation: pruned_order must be 2 or 3, and is only meaningful when
+  ## likelihood == "pruned" (fail loud rather than silently ignoring it).
+  if (!is.numeric(pruned_order) || length(pruned_order) != 1L ||
+      !is.finite(pruned_order) || pruned_order != as.integer(pruned_order) ||
+      !(as.integer(pruned_order) %in% c(2L, 3L))) {
+    stop("estimation_context: pruned_order must be 2 or 3.", call. = FALSE)
+  }
+  pruned_order <- as.integer(pruned_order)
+  if (pruned_order == 3L && !identical(likelihood, "pruned")) {
+    stop("estimation_context: pruned_order = 3L is only meaningful when ",
+         "likelihood = \"pruned\" (got likelihood = \"", likelihood, "\").",
+         call. = FALSE)
   }
 
   ## Validation: tpf requires me_variance > 0
@@ -263,7 +283,8 @@ estimation_context <- function(
       plan            = stored_plan,
       ms_spec         = ms_spec,
       ms_struct_spec  = ms_struct_spec,
-      student_df      = student_df
+      student_df      = student_df,
+      pruned_order    = pruned_order
     ),
     class = c("dynhr_estimation_context", "list")
   )
@@ -307,6 +328,8 @@ print.dynhr_estimation_context <- function(x, ...) {
               else sprintf("<ms_struct_spec> %d regimes (structural)", x$ms_struct_spec$n_regimes)))
   if (!is.null(x$student_df))
     cat(sprintf("  student_df    : %g\n", x$student_df))
+  if (identical(x$likelihood, "pruned"))
+    cat(sprintf("  pruned_order  : %d\n", x$pruned_order %||% 2L))
   invisible(x)
 }
 

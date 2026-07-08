@@ -255,6 +255,146 @@ whittle_fim <- function(TT, RR, ZZ, DD, Sigma_e,
 }
 
 
+#' Assemble a dss_list (per-parameter SSM derivatives) at a point (internal)
+#'
+#' Builds the \code{dss_list} argument expected by \code{whittle_fim()}:
+#' a named list, one entry per estimated parameter, each holding
+#' \code{dTT}/\code{dRR}/\code{dZZ}/\code{dDD}/\code{dSigma_e} -- the
+#' derivatives of the solved state-space matrices w.r.t. that parameter,
+#' evaluated at \code{theta}.
+#'
+#' @details
+#' Reuses the existing solution-derivative machinery
+#' (\code{solution_derivatives()}, Tier 11/12 implicit-differentiation path)
+#' for parameters that move the decision rule, exactly as the "implicit"
+#' branch of \code{make_posterior_grad()} does (see
+#' R/analytic-gradient.R around the \code{d_ss_list} construction). Any
+#' parameter whose solution-derivative block is unusable
+#' (\code{solution_derivatives()} failed or returned \code{ok = FALSE}) falls
+#' back to a central finite difference on the solved SSM matrices directly
+#' (central FD is acceptable here: this assembler runs once at the mode).
+#' \code{dSigma_e} is always obtained by central FD of \code{.get_shock_cov()}
+#' (cheap, and exact-zero for parameters absent from the shocks block),
+#' mirroring \code{.dSigma_e_fd()} in \code{make_posterior_grad()}.
+#'
+#' @param model    dynhr_mod.
+#' @param compiled dynhr_compiled.
+#' @param theta    Named numeric parameter vector (typically the mode).
+#' @param obs_vars Character vector of observed variable names.
+#' @return list(dss_list = <named list>, TT=, RR=, ZZ=, DD=, Sigma_e=,
+#'   ok = <logical, TRUE iff the base solve succeeded>).
+#' @noRd
+.assemble_dss_list_at_mode <- function(model, compiled, theta, obs_vars) {
+  par_names <- names(theta)
+  np        <- length(par_names)
+  exo       <- model$varexo_names
+  sys_cache <- cache_system_structure(compiled)
+
+  .solve_dr <- function(th) {
+    params <- .apply_theta_to_params(model, th)
+    ss <- solve_steady_state(model, compiled, params, verbose = FALSE)
+    if (is.null(ss) || !isTRUE(ss$converged)) return(NULL)
+    params <- ss$params %||% params
+    sys <- extract_system_matrices_fast(sys_cache, ss$ss, params)
+    dr  <- .solve_from_system(sys, model, compiled, ss$ss, params, FALSE)
+    if (is.null(dr) || !isTRUE(dr$bk_satisfied)) return(NULL)
+    list(dr = dr, params = params)
+  }
+
+  base <- .solve_dr(theta)
+  if (is.null(base))
+    return(list(dss_list = NULL, ok = FALSE))
+
+  dr      <- base$dr
+  params  <- base$params
+  si      <- dr$state_idx
+  oi      <- match(obs_vars, dr$endo_names)
+  TT      <- dr$ghx[si, , drop = FALSE]
+  RR      <- dr$ghu[si, , drop = FALSE]
+  ZZ      <- dr$ghx[oi, , drop = FALSE]
+  DD      <- dr$ghu[oi, , drop = FALSE]
+  Sigma_e <- .get_shock_cov(model, exo, params)
+
+  ## dSigma_e/dtheta_nm by central FD of .get_shock_cov (mirrors
+  ## .dSigma_e_fd() in make_posterior_grad(); exact-zero for parameters
+  ## absent from the shocks block).
+  .dSigma_e_fd1 <- function(nm) {
+    h  <- 1e-6 * max(abs(theta[[nm]]), 1e-3)
+    tp <- theta; tm <- theta
+    tp[nm] <- tp[nm] + h; tm[nm] <- tm[nm] - h
+    pp <- .apply_theta_to_params(model, tp, params)
+    pm <- .apply_theta_to_params(model, tm, params)
+    (.get_shock_cov(model, exo, pp) - .get_shock_cov(model, exo, pm)) / (2 * h)
+  }
+
+  ## Central FD on the solved SSM matrices directly (fallback path; also the
+  ## sole path when solution_derivatives() is unavailable/fails for a param).
+  .ssm_fd1 <- function(nm) {
+    h  <- 1e-5 * max(abs(theta[[nm]]), 1e-3)
+    tp <- theta; tm <- theta
+    tp[nm] <- tp[nm] + h; tm[nm] <- tm[nm] - h
+    dp <- .solve_dr(tp); dm <- .solve_dr(tm)
+    if (is.null(dp) || is.null(dm)) return(NULL)
+    list(
+      dTT = (dp$dr$ghx[si, , drop = FALSE] - dm$dr$ghx[si, , drop = FALSE]) / (2 * h),
+      dRR = (dp$dr$ghu[si, , drop = FALSE] - dm$dr$ghu[si, , drop = FALSE]) / (2 * h),
+      dZZ = (dp$dr$ghx[oi, , drop = FALSE] - dm$dr$ghx[oi, , drop = FALSE]) / (2 * h),
+      dDD = (dp$dr$ghu[oi, , drop = FALSE] - dm$dr$ghu[oi, , drop = FALSE]) / (2 * h)
+    )
+  }
+
+  ## Classify parameters exactly as make_posterior_grad(): "sigma-like" params
+  ## leave the decision rule unchanged (pure certainty-equivalence movers).
+  is_sigma <- rep(FALSE, np); names(is_sigma) <- par_names
+  g0 <- list(ghx = dr$ghx, ghu = dr$ghu)
+  for (k in seq_len(np)) {
+    th <- theta; h <- 1e-5 * max(abs(th[k]), 1e-3)
+    th[k] <- th[k] + h
+    d2 <- .solve_dr(th)
+    if (!is.null(d2)) {
+      dchg <- max(abs(d2$dr$ghx - g0$ghx), abs(d2$dr$ghu - g0$ghu))
+      is_sigma[k] <- dchg < 1e-10
+    }
+  }
+  sig_names <- par_names[is_sigma]
+  num_names <- par_names[!is_sigma]
+
+  dss_list <- vector("list", np)
+  names(dss_list) <- par_names
+
+  for (nm in sig_names)
+    dss_list[[nm]] <- list(dSigma_e = .dSigma_e_fd1(nm))
+
+  sd_res <- NULL
+  if (length(num_names) > 0) {
+    sd_res <- tryCatch(
+      solution_derivatives(model, compiled, dr, params,
+                            param_names = num_names, obs_vars = obs_vars),
+      error = function(e) NULL
+    )
+    for (nm in num_names) {
+      d <- if (!is.null(sd_res)) sd_res$derivs[[nm]] else NULL
+      if (!is.null(d) && isTRUE(d$ok)) {
+        dss_list[[nm]] <- list(dTT = d$dTT, dRR = d$dRR, dZZ = d$dZZ,
+                                dDD = d$dDD,
+                                dSigma_e = .dSigma_e_fd1(nm))
+      } else {
+        ## Fall back to direct central FD on the solved SSM matrices.
+        fd <- .ssm_fd1(nm)
+        dss_list[[nm]] <- if (!is.null(fd)) {
+          c(fd, list(dSigma_e = .dSigma_e_fd1(nm)))
+        } else {
+          list(dSigma_e = .dSigma_e_fd1(nm))   ## last resort: zero solution-block
+        }
+      }
+    }
+  }
+
+  list(dss_list = dss_list, TT = TT, RR = RR, ZZ = ZZ, DD = DD,
+       Sigma_e = Sigma_e, ok = TRUE)
+}
+
+
 ## Helper: return a fallback metric when the Whittle FIM is degenerate.
 ## Priority: supplied fallback_metric -> prior Hessian floor -> identity.
 #' @noRd

@@ -194,14 +194,27 @@ sbc_draws_from_dime <- function(dime_result, L_target) {
 ## LAYER 1: uniformity test
 ## ===========================================================================
 
-#' Chi-squared goodness-of-fit test for SBC rank uniformity
+#' Chi-squared goodness-of-fit test for SBC rank uniformity, plus
+#' shift/tail-asymmetry/saturation diagnostics
 #'
 #' For each parameter (column of \code{ranks_mat}), bins the ranks into
-#' \code{n_bins} equal-probability bins via
-#' \code{floor(rank * n_bins / (L' + 1))} (so each rank in
-#' \code{0:L'} maps to a bin in \code{0:(n_bins - 1)}), and runs a
-#' chi-squared goodness-of-fit test against the discrete uniform
-#' distribution on those bins.
+#' \code{n_bins} bins via \code{floor(rank * n_bins / (L' + 1))} (so each
+#' rank in \code{0:L'} maps to a bin in \code{0:(n_bins - 1)}), and runs a
+#' chi-squared goodness-of-fit test against the (exact, generally unequal --
+#' see "Bin-count exactness" below) expected counts under uniformity.
+#'
+#' \strong{Motivation (2026-07-02 P2c incident;
+#' \code{ORDER3_PRUNED_SS_FOLLOWUP.md} "FINAL VERDICT").} The bare chi-squared
+#' verdict both FALSE-ALARMED (a batch with p = 0.011 driven partly by rank
+#' noise) and UNDER-DETECTED (a "calibrated" batch with a one-sided top-bin
+#' excess that replicated across reruns). The decisive signal in both cases
+#' was structural -- an elevated MEAN rank (shifted posterior) and a
+#' ONE-SIDED tail excess -- neither of which the omnibus chi-squared
+#' statistic is powerful against (it sees only squared deviations, blind to
+#' sign and to a whole-distribution shift's location vs. spread). This
+#' function therefore adds two targeted diagnostics (\code{mean_rank_z},
+#' \code{tail_asym_z}) computed per parameter alongside the existing
+#' chi-squared table, and folds them into the verdict logic (see below).
 #'
 #' \strong{Caveat} (Talts et al. 2018, sec 4.1; Sailynoja et al. 2022): the
 #' chi-squared test on SBC rank bins is an approximate, omnibus check. It can
@@ -215,30 +228,93 @@ sbc_draws_from_dime <- function(dime_result, L_target) {
 #' the chi-squared test, applied per-parameter, can miss when looking only at
 #' p-values.
 #'
+#' \strong{Bin-count exactness.} Ranks live on \code{0:L'} (\code{L' + 1}
+#' distinct integer values); when \code{L' + 1} is not divisible by
+#' \code{n_bins}, the \code{floor(rank * n_bins / (L' + 1))} binning gives
+#' bins unequal *integer* coverage (e.g. \code{L' = 160}, \code{n_bins = 9}
+#' gives 8 bins of width 18 and one of width 17). The expected per-bin count
+#' under uniformity is computed EXACTLY from this integer partition
+#' (\code{n_repl * (bin width) / (L' + 1)}), not the naive \code{n_repl /
+#' n_bins}.
+#'
+#' \strong{Diagnostics (per parameter).}
+#' \describe{
+#'   \item{\code{mean_rank_z}}{\code{z = (mean(rank)/L' - 0.5) *
+#'     sqrt(12 * n_repl)}. Under uniformity, \code{rank/L'} has mean 0.5 and
+#'     variance \code{1/12}, so this is (asymptotically) a standard normal
+#'     statistic sensitive to a SHIFTED posterior (elevated or depressed mean
+#'     rank) -- a signature the chi-squared statistic, which only sees
+#'     squared per-bin deviations, is not targeted at.}
+#'   \item{\code{tail_asym_z}}{With \code{n_top} / \code{n_bottom} the counts
+#'     in the last/first bin, \code{z = (n_top - n_bottom) /
+#'     sqrt(n_top + n_bottom)} (0 if \code{n_top + n_bottom == 0}). Large
+#'     \code{|z|} indicates a ONE-SIDED tail excess (consistent with a shift);
+#'     a symmetric U-shape (both tails inflated) gives \code{z ~ 0} even
+#'     though the chi-squared statistic flags it.}
+#'   \item{\code{extreme_frac}}{Fraction of ranks exactly equal to 0 or
+#'     \code{L'} -- saturated ranks, a symptom of chain ESS much smaller than
+#'     \code{L'} (ESS << L collapses the rank distribution onto the
+#'     endpoints).}
+#' }
+#'
+#' \strong{Verdict logic (composite).} \code{"miscalibrated"} if EITHER the
+#' chi-squared p-value is Bonferroni-significant for any parameter, OR
+#' \code{|mean_rank_z| > 3}, OR \code{|tail_asym_z| > 3} for any parameter.
+#' \code{"suspect"} (new) if none of those trip but any of
+#' \code{|mean_rank_z|}, \code{|tail_asym_z|} lies in \code{[2, 3]} for some
+#' parameter. Else \code{"calibrated"}. This composite catches shift/tail
+#' patterns the chi-squared alone can miss at moderate \code{n_repl} (see the
+#' P2c motivation above), while still flagging anything the chi-squared alone
+#' would have caught. \code{"insufficient"} (new) if the input carries no
+#' usable rank-uniformity signal: either every observed rank is identical
+#' (\code{L' == 0}, e.g. a single posterior draw or too few replications to
+#' see any spread) or every parameter's chi-squared test degenerated to
+#' \code{NA} (e.g. \code{n_bins} finer than the number of distinct integer
+#' ranks). This never crashes -- it degrades gracefully instead of leaking
+#' an \code{NA} into the verdict comparison. Zero replications (\code{nrow(
+#' ranks_mat) == 0}) is instead treated as caller error and raises directly.
+#'
 #' @param ranks_mat \code{n_repl x d} integer matrix of SBC ranks (one row
 #'   per replication, one column per parameter), each entry in
 #'   \code{0:L'}. Column names are taken as parameter names.
 #' @param n_bins    Number of histogram bins. Default: a divisor-friendly
 #'   choice, \code{min(20, floor(n_repl / 5))}, with a floor of 2.
+#' @param draws     Optional: a list of per-replication chain matrices (or a
+#'   single representative \code{n_draws x d} chain matrix) used ONLY to
+#'   estimate per-parameter chain ESS via \code{.effective_sample_size()}
+#'   (initial-positive-sequence estimator). When supplied, \code{$ess} is
+#'   populated and the print method warns if \code{ess < 5 * L'} ("ranks are
+#'   noise-dominated"). Default \code{NULL} (no ESS diagnostic).
 #' @return A list with class \code{"dynhr_sbc_uniformity"}:
 #'   \describe{
-#'     \item{table}{\code{data.frame(parameter, chisq, df, p_value)}.}
+#'     \item{table}{\code{data.frame(parameter, chisq, df, p_value,
+#'       mean_rank_z, tail_asym_z, extreme_frac)}.}
 #'     \item{n_bins}{Number of bins used.}
 #'     \item{alpha}{Nominal family-wise significance level (0.05).}
 #'     \item{alpha_bonferroni}{Bonferroni-adjusted per-test threshold,
 #'       \code{alpha / d}.}
 #'     \item{alpha_sidak}{Sidak-adjusted per-test threshold,
 #'       \code{1 - (1 - alpha)^(1/d)}.}
-#'     \item{verdict}{\code{"calibrated"} if all p-values exceed
-#'       \code{alpha_bonferroni}, else \code{"miscalibrated"}.}
+#'     \item{verdict}{\code{"calibrated"}, \code{"suspect"},
+#'       \code{"miscalibrated"}, or \code{"insufficient"} -- see "Verdict
+#'       logic" above.}
+#'     \item{ess}{Named numeric vector of per-parameter chain ESS, or
+#'       \code{NULL} if \code{draws} was not supplied.}
 #'   }
 #' @noRd
-sbc_uniformity_test <- function(ranks_mat, n_bins = NULL) {
+sbc_uniformity_test <- function(ranks_mat, n_bins = NULL, draws = NULL) {
   if (is.null(dim(ranks_mat))) ranks_mat <- matrix(ranks_mat, ncol = 1)
   n_repl <- nrow(ranks_mat)
   d      <- ncol(ranks_mat)
   par_names <- colnames(ranks_mat)
   if (is.null(par_names)) par_names <- paste0("theta", seq_len(d))
+
+  ## Fail loud on truly unusable input (garbage in, not a graceful verdict):
+  ## no replications means there is nothing to test.
+  if (n_repl < 1L) {
+    stop("sbc_uniformity_test: ranks_mat has 0 rows -- need at least 1 ",
+         "SBC replication to test.")
+  }
 
   if (is.null(n_bins)) {
     n_bins <- max(2L, min(20L, floor(n_repl / 5)))
@@ -247,25 +323,132 @@ sbc_uniformity_test <- function(ranks_mat, n_bins = NULL) {
   if (n_bins < 2L) stop("sbc_uniformity_test: n_bins must be >= 2.")
 
   L_plus1 <- max(ranks_mat, na.rm = TRUE) + 1L  ## L' + 1
+  L_eff   <- L_plus1 - 1L                       ## L'
+
+  ## Degenerate case: every observed rank is identical (e.g. L' == 0, or a
+  ## tiny n_repl that happened to land on one bucket) -- the exact-binning
+  ## scheme below then produces expected_exact == 0 for some bin with
+  ## counts == 0 there too, i.e. a 0/0 chisq contribution (NaN), which would
+  ## otherwise leak an NA into the verdict if()-chain. There is no usable
+  ## rank *distribution* to test against uniformity in this case, so report
+  ## an "insufficient" verdict rather than crash or silently mis-flag.
+  if (L_eff < 1L) {
+    tab <- data.frame(parameter = par_names, chisq = NA_real_, df = NA_integer_,
+                       p_value = NA_real_, mean_rank_z = NA_real_,
+                       tail_asym_z = NA_real_, extreme_frac = NA_real_,
+                       stringsAsFactors = FALSE)
+    return(structure(
+      list(
+        table            = tab,
+        n_bins           = n_bins,
+        alpha            = 0.05,
+        alpha_bonferroni = NA_real_,
+        alpha_sidak      = NA_real_,
+        verdict          = "insufficient",
+        ess              = NULL,
+        L_effective      = L_eff
+      ),
+      class = "dynhr_sbc_uniformity"
+    ))
+  }
+
+  ## Exact expected bin counts: partition the L'+1 integer ranks 0:L' by the
+  ## SAME binning rule used for the data, then expected count for bin b is
+  ## n_repl * (# integer ranks mapping to b) / (L' + 1). This differs from
+  ## n_repl / n_bins whenever (L' + 1) is not divisible by n_bins.
+  all_ranks_bins <- floor((0:L_eff) * n_bins / L_plus1)
+  all_ranks_bins <- pmin(all_ranks_bins, n_bins - 1L)
+  bin_widths     <- tabulate(all_ranks_bins + 1L, nbins = n_bins)  ## integer counts per bin, sums to L'+1
+  expected_exact <- n_repl * bin_widths / L_plus1
 
   rows <- lapply(seq_len(d), function(j) {
     ranks_j <- ranks_mat[, j]
     bins <- floor(ranks_j * n_bins / L_plus1)
     bins <- pmin(bins, n_bins - 1L)  ## guard rank == L' edge case
     counts <- tabulate(bins + 1L, nbins = n_bins)
-    expected <- rep(n_repl / n_bins, n_bins)
-    chisq_val <- sum((counts - expected)^2 / expected)
-    df <- n_bins - 1L
-    p_val <- stats::pchisq(chisq_val, df = df, lower.tail = FALSE)
+    ## Guard 0/0: a bin with expected_exact == 0 (n_bins finer than the
+    ## number of distinct integer ranks, L' + 1) necessarily also has
+    ## counts == 0 there (no integer rank maps to it), so its GOF
+    ## contribution is a no-information 0, not NaN -- without this guard,
+    ## an NaN chisq_val propagates to p_value = NA and then leaks into the
+    ## verdict if()-chain below (missing value where TRUE/FALSE needed).
+    zero_exp <- expected_exact == 0
+    chisq_val <- sum(((counts - expected_exact)^2 / expected_exact)[!zero_exp])
+    df <- sum(!zero_exp) - 1L
+    ## df < 1 (<= 1 bin with any expected mass) leaves no GOF test to run --
+    ## NA out the chisq/p_value rather than call pchisq() with a degenerate
+    ## df (which itself can return NaN and leak into the verdict below).
+    p_val <- if (df < 1L) NA_real_ else
+      stats::pchisq(chisq_val, df = df, lower.tail = FALSE)
+
+    ## mean_rank_z: detects a SHIFTED posterior (elevated/depressed mean rank).
+    ## rank/L' ~ Uniform[0,1] under calibration => mean 0.5, sd 1/sqrt(12).
+    mean_rank_z <- (mean(ranks_j) / L_eff - 0.5) * sqrt(12 * n_repl)
+
+    ## tail_asym_z: one-sided tail excess (large |z|) vs. a symmetric
+    ## U-shape (z ~ 0, caught by chisq instead).
+    n_bottom <- counts[1L]
+    n_top    <- counts[n_bins]
+    tail_asym_z <- if ((n_top + n_bottom) == 0) 0 else
+      (n_top - n_bottom) / sqrt(n_top + n_bottom)
+
+    ## extreme_frac: saturated ranks (rank == 0 or L'), symptom of ESS << L'.
+    extreme_frac <- mean(ranks_j == 0L | ranks_j == L_eff)
+
     data.frame(parameter = par_names[j], chisq = chisq_val, df = df,
-               p_value = p_val, stringsAsFactors = FALSE)
+               p_value = p_val, mean_rank_z = mean_rank_z,
+               tail_asym_z = tail_asym_z, extreme_frac = extreme_frac,
+               stringsAsFactors = FALSE)
   })
   tab <- do.call(rbind, rows)
 
   alpha <- 0.05
   alpha_bonf  <- alpha / d
   alpha_sidak <- 1 - (1 - alpha)^(1 / d)
-  verdict <- if (all(tab$p_value > alpha_bonf)) "calibrated" else "miscalibrated"
+
+  ## NA-safe backstop: a per-parameter p_value can still be NA here (e.g.
+  ## df < 1 for a pathologically bin-starved parameter column, guarded
+  ## above) even when the overall L_eff >= 1 gate passed. Treat NA flags as
+  ## FALSE (no evidence, not a miscalibration signal) rather than let them
+  ## propagate into any(...) -- any(NA) is NA and would crash the if()
+  ## below (the original bug report's exact symptom).
+  chisq_flag <- isTRUE_vec(tab$p_value <= alpha_bonf)
+  shift_flag <- isTRUE_vec(abs(tab$mean_rank_z) > 3 | abs(tab$tail_asym_z) > 3)
+  suspect_flag <- !(chisq_flag | shift_flag) &
+    isTRUE_vec(abs(tab$mean_rank_z) >= 2 | abs(tab$tail_asym_z) >= 2)
+
+  ## If EVERY parameter's chisq test was unusable (all p_value NA), there is
+  ## no uniformity evidence at all -- report "insufficient" rather than the
+  ## misleadingly confident "calibrated" a naive all-FALSE flag vector would
+  ## otherwise produce.
+  verdict <- if (all(is.na(tab$p_value))) {
+    "insufficient"
+  } else if (any(chisq_flag | shift_flag)) {
+    "miscalibrated"
+  } else if (any(suspect_flag)) {
+    "suspect"
+  } else {
+    "calibrated"
+  }
+
+  ## Optional ESS diagnostic. `draws` can be a single n_draws x d chain
+  ## matrix (representative chain) or a list of such matrices (one per
+  ## replication, e.g. for a spot-check subset) -- in the list case, ESS is
+  ## computed per-chain per-parameter and averaged.
+  ess <- NULL
+  if (!is.null(draws)) {
+    draws_list <- if (is.list(draws) && !is.matrix(draws)) draws else list(draws)
+    ess_mat <- vapply(draws_list, function(ch) {
+      ch <- as.matrix(ch)
+      cn <- colnames(ch)
+      vapply(seq_len(d), function(j) {
+        col <- if (!is.null(cn) && par_names[j] %in% cn) ch[, par_names[j]] else ch[, j]
+        .effective_sample_size(as.numeric(col))
+      }, numeric(1))
+    }, numeric(d))
+    ess <- if (is.matrix(ess_mat)) rowMeans(ess_mat) else mean(ess_mat)
+    names(ess) <- par_names
+  }
 
   structure(
     list(
@@ -274,10 +457,54 @@ sbc_uniformity_test <- function(ranks_mat, n_bins = NULL) {
       alpha            = alpha,
       alpha_bonferroni = alpha_bonf,
       alpha_sidak      = alpha_sidak,
-      verdict          = verdict
+      verdict          = verdict,
+      ess              = ess,
+      L_effective      = L_eff
     ),
     class = "dynhr_sbc_uniformity"
   )
+}
+
+
+#' @exportS3Method
+#' @noRd
+print.dynhr_sbc_uniformity <- function(x, ...) {
+  cat("SBC rank uniformity test\n")
+  cat(strrep("-", 60), "\n")
+  cat(sprintf("Bins: %d\n\n", x$n_bins))
+
+  tab <- x$table
+  tab$chisq       <- round(tab$chisq, 3)
+  tab$p_value     <- signif(tab$p_value, 4)
+  tab$mean_rank_z <- round(tab$mean_rank_z, 3)
+  tab$tail_asym_z <- round(tab$tail_asym_z, 3)
+  tab$extreme_frac <- signif(tab$extreme_frac, 3)
+  print(tab, row.names = FALSE)
+
+  cat(sprintf("\nBonferroni-adjusted alpha: %.5f (Sidak: %.5f)\n",
+              x$alpha_bonferroni, x$alpha_sidak))
+  cat(sprintf("Verdict: %s\n", x$verdict))
+  cat("(miscalibrated: Bonferroni-significant chisq OR |mean_rank_z| > 3 OR\n")
+  cat(" |tail_asym_z| > 3; suspect: none of those, but one lies in [2, 3];\n")
+  cat(" insufficient: no usable rank spread/GOF signal -- more replications\n")
+  cat(" needed, not a calibration finding)\n")
+
+  if (!is.null(x$ess)) {
+    l_floor <- 5 * x$L_effective
+    low_ess <- x$ess[x$ess < l_floor]
+    if (length(low_ess) > 0) {
+      cat(sprintf(
+        "\nWARNING: chain ESS < 5 * L' (%.0f) for: %s -- ranks are\n",
+        l_floor, paste(names(low_ess), sprintf("(ESS=%.0f)", low_ess), collapse = ", ")))
+      cat("noise-dominated; lengthen/thin chains or use exact-quadrature PITs.\n")
+    }
+  }
+
+  cat("\nNote: chi-squared p-values on SBC ranks are an approximate, omnibus\n")
+  cat("check. Always inspect the rank histograms for systematic departures\n")
+  cat("from uniformity.\n")
+
+  invisible(x)
 }
 
 
@@ -402,6 +629,7 @@ sbc_uniformity_test <- function(ranks_mat, n_bins = NULL) {
                                   likelihood = "gaussian",
                                   order = 1L,
                                   seed, verbose,
+                                  innovation_check = FALSE,
                                   ...) {
 
   set.seed(seed)
@@ -585,6 +813,23 @@ sbc_uniformity_test <- function(ranks_mat, n_bins = NULL) {
     }
   }
 
+  ## ---- Step 3b (optional): per-draw KF innovation whiteness fast-fail ----
+  ## Y was simulated from exactly this (dr, params) state-space -- this is
+  ## the correctly-specified case for kf_innovation_diagnostics(), and the
+  ## unit-root guard above (is_unit_root) already establishes lik_init =
+  ## "stationary" is valid, so no further routing check is needed here.
+  ## Failures caught internally (never propagated as a replication failure):
+  ## this is a diagnostic add-on, not a gate on SBC itself.
+  innovation_diagnostics <- NULL
+  if (isTRUE(innovation_check)) {
+    innovation_diagnostics <- tryCatch(
+      kf_innovation_diagnostics(Y, dr = dr, model = model, params = params,
+                                obs_vars = obs_vars, lik_init = "stationary",
+                                me_variance = me_variance),
+      error = function(e) NULL
+    )
+  }
+
   ## ---- Step 4: posterior --------------------------------------------------
   ## Additional args (e.g. n_particles for TPF) are forwarded via ...
   log_post_fn <- make_log_posterior(model, Y, prior_spec, obs_vars,
@@ -748,7 +993,8 @@ sbc_uniformity_test <- function(ranks_mat, n_bins = NULL) {
     stop(".sbc_one_replication: unknown sampler '", sampler, "'")
   }
 
-  list(ok = TRUE, ranks = ranks, L_effective = L_effective)
+  list(ok = TRUE, ranks = ranks, L_effective = L_effective,
+       innovation_diagnostics = innovation_diagnostics)
 }
 
 
@@ -846,6 +1092,24 @@ sbc_uniformity_test <- function(ranks_mat, n_bins = NULL) {
 #'   (from \code{\link{estimation_context}}).  When supplied it overrides the
 #'   individual \code{likelihood}, \code{me_variance}, and \code{lik_init}
 #'   arguments and merges any \code{tpf_options} with \code{...}.
+#' @param innovation_check Logical (default \code{FALSE}): if \code{TRUE},
+#'   run \code{\link{kf_innovation_diagnostics}} on each replication's
+#'   simulated data \eqn{Y} at the DRAWN \eqn{\tilde\theta} (the replication's
+#'   own DGP parameters -- the correctly-specified case, since \eqn{Y} was
+#'   simulated from exactly this \code{dr}/\code{params}) as a cheap per-draw
+#'   fast-fail sanity oracle: a whiteness failure here would mean the
+#'   simulator and the thin diagnostic filter disagree about the model's own
+#'   state-space form, which is a bug independent of anything SBC itself is
+#'   testing. Only applies on the serial path (\code{n_cores = NULL}); ignored
+#'   with a message when \code{n_cores} is set, since \code{run_sbc_mirai}
+#'   is unaffected by this argument. Purely additive: when \code{FALSE}
+#'   (default), \code{.sbc_one_replication()} takes an identical code path to
+#'   before this argument existed, so \code{ranks}/\code{uniformity}/\code{plot}
+#'   are bit-identical. When \code{TRUE}, adds
+#'   \code{$innovation_diagnostics} (list of per-replication results, one per
+#'   successful replication) and \code{$innovation_summary} (a data.frame with
+#'   \code{n_flagged_replications} / \code{n_replications_checked}) to the
+#'   returned \code{dynhr_sbc} object.
 #' @param verbose          Print progress messages (default \code{TRUE}).
 #' @param ...              Additional arguments forwarded to
 #'   \code{make_log_posterior} and the sampler
@@ -864,6 +1128,14 @@ sbc_uniformity_test <- function(ranks_mat, n_bins = NULL) {
 #'     \item{plot}{A ggplot rank-histogram (see
 #'       \code{sbc_uniformity_test}), or \code{NULL} if \pkg{ggplot2}
 #'       is unavailable or there are no successful replications.}
+#'     \item{innovation_diagnostics}{Only present when
+#'       \code{innovation_check = TRUE}: list of per-replication
+#'       \code{kf_innovation_diagnostics} objects (successful replications
+#'       only, in replication order).}
+#'     \item{innovation_summary}{Only present when
+#'       \code{innovation_check = TRUE}: single-row data.frame with
+#'       \code{n_flagged_replications} (replications with at least one
+#'       \code{|z| > 4}) and \code{n_replications_checked}.}
 #'   }
 #' @references
 #' Talts, S., Betancourt, M., Simpson, D., Vehtari, A., & Gelman, A. (2018).
@@ -886,6 +1158,7 @@ dynhr_sbc <- function(model, obs_vars, T_obs = 100L, n_replications = 50L,
                                      "pskf", "student_t"),
                       order = 1L,
                       ctx = NULL,
+                      innovation_check = FALSE,
                       ...) {
   ## Unpack ctx when provided -- overrides individual args.
   ## tpf_options from ctx are merged into ... for the .sbc_one_replication call.
@@ -939,6 +1212,9 @@ dynhr_sbc <- function(model, obs_vars, T_obs = 100L, n_replications = 50L,
 
   ## -- parallel path -------------------------------------------------------
   if (!is.null(n_cores)) {
+    if (isTRUE(innovation_check) && verbose)
+      cat("Note: innovation_check is only supported on the serial path ",
+          "(n_cores = NULL); ignored for this parallel run.\n", sep = "")
     raw_list <- run_sbc_mirai(
       model            = model,
       prior_spec       = prior_spec,
@@ -984,6 +1260,7 @@ dynhr_sbc <- function(model, obs_vars, T_obs = 100L, n_replications = 50L,
     ranks_list  <- vector("list", n_replications)
     n_failed    <- 0L
     L_effective <- NULL
+    innov_list  <- if (isTRUE(innovation_check)) vector("list", n_replications) else NULL
 
     ## Merge ctx$tpf_options (if set) into the dots for .sbc_one_replication.
     .sbc_extra_args <- if (exists(".ctx_tpf_extra", inherits = FALSE)) {
@@ -1002,7 +1279,8 @@ dynhr_sbc <- function(model, obs_vars, T_obs = 100L, n_replications = 50L,
           sampler = sampler, me_variance = me_variance, lik_init = lik_init,
           transform_params = transform_params, adapt_cov = adapt_cov,
           likelihood = likelihood, order = order,
-          seed = rep_seed, verbose = verbose
+          seed = rep_seed, verbose = verbose,
+          innovation_check = isTRUE(innovation_check)
         ),
         .sbc_extra_args
       ))
@@ -1010,6 +1288,7 @@ dynhr_sbc <- function(model, obs_vars, T_obs = 100L, n_replications = 50L,
       if (isTRUE(res$ok)) {
         ranks_list[[i]] <- res$ranks
         if (is.null(L_effective)) L_effective <- res$L_effective
+        if (isTRUE(innovation_check)) innov_list[[i]] <- res$innovation_diagnostics
         if (verbose)
           cat(sprintf("  [%d/%d] ok\n", i, n_replications))
       } else {
@@ -1041,21 +1320,35 @@ dynhr_sbc <- function(model, obs_vars, T_obs = 100L, n_replications = 50L,
     n_draws = n_draws, n_burn = n_burn, thin = thin, sampler = sampler,
     me_variance = me_variance, lik_init = lik_init,
     transform_params = transform_params, adapt_cov = adapt_cov,
-    seed = seed, presample = presample
+    seed = seed, presample = presample, innovation_check = isTRUE(innovation_check)
   )
 
-  structure(
-    list(
-      ranks          = ranks,
-      n_failed       = n_failed,
-      n_replications = n_replications,
-      L_effective    = L_effective %||% NA_integer_,
-      uniformity     = uniformity,
-      settings       = settings,
-      plot           = plot_obj
-    ),
-    class = "dynhr_sbc"
+  out <- list(
+    ranks          = ranks,
+    n_failed       = n_failed,
+    n_replications = n_replications,
+    L_effective    = L_effective %||% NA_integer_,
+    uniformity     = uniformity,
+    settings       = settings,
+    plot           = plot_obj
   )
+
+  ## Additive only: these two fields exist ONLY when innovation_check = TRUE,
+  ## so a default (FALSE) call's result list has the exact same names/values
+  ## as before this argument was added.
+  if (isTRUE(innovation_check) && exists("innov_list", inherits = FALSE)) {
+    innov_ok  <- Filter(Negate(is.null), innov_list)
+    n_flagged <- sum(vapply(innov_ok, function(d) isTRUE(d$joint$n_flagged > 0),
+                            logical(1)))
+    out$innovation_diagnostics <- innov_ok
+    out$innovation_summary <- data.frame(
+      n_flagged_replications  = n_flagged,
+      n_replications_checked  = length(innov_ok),
+      stringsAsFactors = FALSE
+    )
+  }
+
+  structure(out, class = "dynhr_sbc")
 }
 
 
@@ -1228,18 +1521,8 @@ print.dynhr_sbc <- function(x, ...) {
     return(invisible(x))
   }
 
-  cat(sprintf("Bins: %d\n\n", x$uniformity$n_bins))
-  tab <- x$uniformity$table
-  tab$chisq   <- round(tab$chisq, 3)
-  tab$p_value <- signif(tab$p_value, 4)
-  print(tab, row.names = FALSE)
-
-  cat(sprintf("\nBonferroni-adjusted alpha: %.5f (Sidak: %.5f)\n",
-              x$uniformity$alpha_bonferroni, x$uniformity$alpha_sidak))
-  cat(sprintf("Verdict: %s\n", x$uniformity$verdict))
-  cat("\nNote: chi-squared p-values on SBC ranks are an approximate, omnibus\n")
-  cat("check. Always inspect the rank histograms (x$plot) for systematic\n")
-  cat("departures from uniformity.\n")
+  print(x$uniformity)
+  cat("(see x$plot for the rank histograms)\n")
 
   invisible(x)
 }

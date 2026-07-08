@@ -91,9 +91,25 @@
 #'   set globally via \code{dynhr_set_options(rwmh_n_blocks = 2L)}.
 #' @param metric       Metric for MALA and NUTS:
 #'   \code{"diagonal"} (default, identity mass matrix),
-#'   \code{"hessian"} (dense metric from \code{Sigma_prop}), or
+#'   \code{"hessian"} (dense metric from \code{Sigma_prop}),
 #'   \code{"monge"} (position-dependent Monge metric \eqn{G = I + \alpha^2 g g^T},
-#'   Stage 3a; MALA only). \strong{The \code{"monge"} metric is experimental and
+#'   Stage 3a; MALA only), or \code{"whittle_fim"} (one-shot dense metric from
+#'   the Whittle (frequency-domain) Fisher information at the mode; NUTS only).
+#'   \strong{The \code{"whittle_fim"} metric is experimental and disabled by
+#'   default}: it costs one extra ~seconds-to-minutes-scale evaluation at the
+#'   mode (no periodic recompute -- frozen through warmup and sampling, same
+#'   as \code{"hessian"}) and is unvalidated on the full estimation pipeline.
+#'   It therefore errors unless
+#'   \code{dynhr_set_options(allow_whittle_fim_metric = TRUE)} is set. On
+#'   failure (degenerate FIM, non-invertible result) it falls back to the
+#'   \code{"hessian"} metric (Sigma_prop) with a message, mirroring the
+#'   existing \code{"hessian"} branch's own not-PD fallback to diagonal.
+#'   Measured result (2026-07-03, NZSIM 68 params): the NUTS warmup step
+#'   size collapsed to ~1e-13 with divergences under this metric (the
+#'   SoftAbs-floored FIM is badly scaled in weakly-identified directions),
+#'   while the \code{"hessian"} metric warms up stably on the same
+#'   posterior -- i.e. no measured win; prefer \code{"hessian"}.
+#'   \strong{The \code{"monge"} metric is experimental and
 #'   disabled by default}: \eqn{G} inflates along the gradient, so the proposal
 #'   step collapses on sharp / near-unit-root posteriors -- in testing it
 #'   under-explored a tight direction to ~1\% of its variance (ESS/draw ~0.002)
@@ -119,6 +135,20 @@
 #'   to a single longer run -- adding \code{ndraws} more retained draws. The
 #'   saved model / prior / parameter configuration must match (it is enforced).
 #' @param verbose      Print progress messages.
+#' @param seed         Optional integer. When non-\code{NULL},
+#'   \code{set.seed(seed)} is called once at the very top of this function,
+#'   \strong{before any mode-finding multistart or sampler runs} -- it seeds
+#'   the entire call (chain dispersal draws, RWMH/NUTS/MALA/HMC/ChEES/SMC/DIME
+#'   RNG, and any multistart perturbations triggered downstream), not just one
+#'   sampler. This makes the whole \code{run_posterior_estimation()} call
+#'   reproducible without the caller needing to wrap it in their own
+#'   \code{set.seed()}. Default \code{NULL}: the ambient RNG stream is left
+#'   untouched, i.e. identical to wrapping the call in \code{set.seed()}
+#'   yourself (old behaviour). \strong{Note}: previously a \code{seed =}
+#'   argument passed by a caller was silently absorbed by \code{...} and
+#'   forwarded to samplers that do not have a \code{seed} parameter, so it was
+#'   dropped without warning or error -- this explicit argument closes that
+#'   gap.
 #' @param ...          Additional arguments forwarded to each sampler
 #'   (e.g. \code{target_accept = 0.25}, \code{adapt_every = 100}).
 #'
@@ -171,12 +201,20 @@ run_posterior_estimation <- function(mode_result,
                                      transform_params      = NULL,
                                      rwmh_adapt_cov        = NULL,
                                      rwmh_n_blocks         = NULL,
-                                     metric                = c("diagonal", "hessian", "warmup_dense", "monge"),
+                                     metric                = c("diagonal", "hessian", "warmup_dense", "monge", "whittle_fim"),
                                      monge_alpha           = NULL,
                                      checkpoint_dir        = NULL,
                                      resume                = FALSE,
                                      verbose               = TRUE,
+                                     seed                  = NULL,
                                      ...) {
+
+  # Seed the WHOLE run (mode-finding multistarts already happened upstream in
+  # run_mode_finding(); this seeds chain-dispersal draws and every sampler's
+  # RNG below) before anything else touches the RNG stream. Plain set.seed()
+  # is used deliberately: withr is Suggests-only and not used anywhere else in
+  # R/ (test-only), so we don't add a new runtime dependency for this.
+  if (!is.null(seed)) set.seed(seed)
 
   .vcat <- function(...) if (verbose) cat(...)
 
@@ -709,6 +747,87 @@ run_posterior_estimation <- function(mode_result,
             }
           } else {
             .vcat("  [NUTS] metric='hessian': Sigma_prop not invertible -- falling back to diagonal.\n")
+          }
+        }
+
+        # --- One-shot dense metric from the Whittle FIM (metric = "whittle_fim") ---
+        # Opt-in (mirrors the Monge gate exactly): errors unless
+        # allow_whittle_fim_metric = TRUE. Assembled ONCE at the mode (current_theta),
+        # then frozen through warmup and sampling -- same contract as "hessian".
+        # On any failure (non-standard model, degenerate FIM, non-invertible
+        # result) falls back to the "hessian" dense metric with a message,
+        # rather than erroring the whole run.
+        if (identical(metric, "whittle_fim")) {
+          if (!isTRUE(.dynhr_opt("allow_whittle_fim_metric", default = FALSE))) {
+            stop("metric = \"whittle_fim\" is experimental and disabled by default: ",
+                 "it assembles a one-shot dense mass matrix from the Whittle ",
+                 "(frequency-domain) Fisher information at the mode, which costs one ",
+                 "extra evaluation that can be expensive on large models and is ",
+                 "unvalidated on the full estimation pipeline. To use it anyway, call ",
+                 "dynhr_set_options(allow_whittle_fim_metric = TRUE).",
+                 call. = FALSE)
+          }
+          if (!par_standard) {
+            .vcat("  [NUTS] metric='whittle_fim' requires a standard Gaussian model -- ",
+                  "falling back to 'hessian'.\n")
+          } else {
+            T_obs_wf <- ncol(par_data)
+            omega_grid_wf <- 2 * pi * seq_len(floor(T_obs_wf / 2)) / T_obs_wf
+            asm <- tryCatch(
+              .assemble_dss_list_at_mode(model, compiled, current_theta, par_obs_vars),
+              error = function(e) NULL
+            )
+            if (is.null(asm) || !isTRUE(asm$ok)) {
+              .vcat("  [NUTS] metric='whittle_fim': dss_list assembly failed -- falling back to 'hessian'.\n")
+            } else {
+              fallback_hess <- if (!is.null(nuts_M_inv)) {
+                list(G = tryCatch(solve(nuts_M_inv), error = function(e) NULL),
+                     G_inv = nuts_M_inv, L = nuts_chol_M, logdet = NA_real_)
+              } else NULL
+              fim <- tryCatch(
+                whittle_fim(TT = asm$TT, RR = asm$RR, ZZ = asm$ZZ, DD = asm$DD,
+                           Sigma_e = asm$Sigma_e, dss_list = asm$dss_list,
+                           omega_grid = omega_grid_wf, T_obs = T_obs_wf,
+                           prior_hess = NULL, fallback_metric = fallback_hess,
+                           me_variance = par_me_var %||% 0),
+                error = function(e) NULL
+              )
+              if (is.null(fim) || !is.matrix(fim$G_inv)) {
+                .vcat("  [NUTS] metric='whittle_fim': whittle_fim() failed -- falling back to 'hessian'.\n")
+              } else {
+                ## fim$G is the theta-space precision (metric); the dense NUTS
+                ## mass matrix M IS the metric G (M_inv = G^{-1}), matching how
+                ## the "hessian" branch feeds nuts_M_inv/nuts_chol_M (there
+                ## Sigma_prop plays the role of M_inv directly).
+                ##
+                ## Transform to eta-space ANALYTICALLY from the factors
+                ## whittle_fim() already returns (G_inv, L = chol(G), both
+                ## SoftAbs-stabilised): with D = diag(dtheta_deta) > 0,
+                ##   M      = G_eta        = D G D
+                ##   M^{-1} = G_eta^{-1}   = D^{-1} G^{-1} D^{-1}
+                ##   chol(G_eta)           = L D   (upper-tri x diagonal stays
+                ##                                  upper-tri; diag > 0 for d > 0)
+                ## Numerically re-solving/chol-ing G_eta instead is NOT viable
+                ## on stiff posteriors: cond(G) ~ 1e11 on NZSIM-class models and
+                ## the D^2 spread pushes cond(G_eta) past double precision --
+                ## exactly the failure the 2026-07-03 NZSIM shootout hit.
+                d_wf <- rep(1, nrow(fim$G))
+                if (transform_params && !is.null(param_transform)) {
+                  eta_wf <- param_transform$to_unconstrained(current_theta)
+                  d_wf   <- param_transform$dtheta_deta(eta_wf)
+                }
+                if (all(is.finite(d_wf)) && all(d_wf > 0) &&
+                    is.matrix(fim$G_inv) && is.matrix(fim$L)) {
+                  nuts_M_inv  <- fim$G_inv * tcrossprod(1 / d_wf)   # D^-1 G^-1 D^-1
+                  nuts_chol_M <- fim$L %*% diag(d_wf, nrow = length(d_wf))
+                  dimnames(nuts_M_inv)  <- dimnames(fim$G)
+                  nuts_mass   <- NULL
+                  .vcat("  [NUTS] using dense mass matrix from the Whittle FIM (one-shot at the mode).\n")
+                } else {
+                  .vcat("  [NUTS] metric='whittle_fim': non-positive/non-finite transform Jacobian or missing FIM factors -- falling back to 'hessian'.\n")
+                }
+              }
+            }
           }
         }
 

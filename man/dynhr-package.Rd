@@ -21,8 +21,8 @@ accessible via `dynhr:::fn`.
 \seealso{
 Useful links:
 \itemize{
-  \item \url{https://github.com/chrispball1/dynhr}
-  \item Report bugs at \url{https://github.com/chrispball1/dynhr/issues}
+  \item \url{https://github.com/Ball-Christopher/dynhr}
+  \item Report bugs at \url{https://github.com/Ball-Christopher/dynhr/issues}
 }
 
 }

@@ -40,10 +40,28 @@
 #'   noise diagonal (default 0).  Use a small positive value for
 #'   stochastically singular models.
 #' @param likelihood  Likelihood type: \code{"gaussian"} (Kalman filter,
-#'   default), \code{"cumulant"} (cumulant-matching, Mutschler 2015), or
-#'   \code{"whittle"} (frequency-domain Whittle likelihood). The Whittle path
-#'   requires a stationary, complete panel; use \code{freq_band} (via
-#'   \code{posterior_options}) for band-restricted estimation.
+#'   default), \code{"cumulant"} (cumulant-matching, Mutschler 2015),
+#'   \code{"whittle"} (frequency-domain Whittle likelihood),
+#'   \code{"pruned"} (Gaussian KF on the AFVRR pruned state space; see
+#'   \code{pruned_order}), \code{"pskf"} (Pruned Skewed Kalman Filter for
+#'   skew-normal shocks; pass \code{cut_tol} via \code{...}), or
+#'   \code{"student_t"} (Gaussian-KF recursions with a multivariate Student-t
+#'   per-period density; requires \code{student_df} passed via \code{...}).
+#'   The Whittle path requires a stationary, complete panel; use
+#'   \code{freq_band} (via \code{posterior_options}) for band-restricted
+#'   estimation. The pruned, pskf, and student_t paths are all deterministic
+#'   (no stochastic-particle noise) but have no analytic gradient (FD
+#'   fallback); pruned additionally runs the multi-start step via the
+#'   closure-shipped parallel path. \code{"tpf"}/\code{"ppf"}/\code{"copf"}
+#'   (particle-filter likelihoods with a noisy unbiased loglik estimate) are
+#'   deliberately NOT accepted here -- their estimation noise breaks
+#'   deterministic optimizers (Nelder-Mead/CMA-ES/newrat all assume a fixed
+#'   objective at repeated evaluations of the same point); use
+#'   \code{\link{run_full_estimation}} or particle MCMC (PMMH) via
+#'   \code{\link{run_posterior_estimation}} instead.
+#' @param pruned_order Integer, \code{2L} (default) or \code{3L}: AFVRR
+#'   pruned state-space order used when \code{likelihood = "pruned"}
+#'   (ignored otherwise; \code{3L} with another likelihood is an error).
 #' @param data_col_map Optional named character vector mapping model observable
 #'   names to CSV column names when they differ.
 #' @param mode_options  List of additional options for mode-finding,
@@ -165,11 +183,13 @@
 #' @export
 run_mode_finding <- function(solved,
                              data,
-                             obs_vars,
+                             obs_vars = NULL,
                              n_iter           = 10000L,
                              method           = "newrat",
                              me_variance      = 0,
-                             likelihood       = c("gaussian", "cumulant", "whittle"),
+                             likelihood       = c("gaussian", "cumulant", "whittle",
+                                                  "pruned", "pskf", "student_t"),
+                             pruned_order     = 2L,
                              data_col_map     = NULL,
                              mode_options     = list(),
                              posterior_options = list(),
@@ -185,6 +205,11 @@ run_mode_finding <- function(solved,
                              verbose          = TRUE,
                              ...) {
 
+  ## Capture BEFORE match.arg() collapses the default vector to its first
+  ## element: this is the only reliable "did the caller pass likelihood=
+  ## explicitly?" signal (mirrors the missing()/sentinel convention used
+  ## elsewhere in this codebase for optional args with non-NULL defaults).
+  likelihood_explicit <- !missing(likelihood)
   likelihood <- match.arg(likelihood)
   ## For the Whittle path, freq_band can be passed via posterior_options.
   ## Extract it here so it is threaded into make_log_posterior().
@@ -211,6 +236,16 @@ run_mode_finding <- function(solved,
 
   model    <- solved$model
   compiled <- solved$compiled
+
+  ## Default obs_vars from the model's varobs declaration (same rule as
+  ## make_log_posterior) — pathological-DSGE paper gap #4.
+  if (is.null(obs_vars) || length(obs_vars) == 0L) {
+    obs_vars <- model$obs_vars %||% model$varobs_names
+    if (is.null(obs_vars) || length(obs_vars) == 0L)
+      stop("run_mode_finding: `obs_vars` not supplied and the model ",
+           "declares no `varobs`; pass obs_vars= or add a varobs line to ",
+           "the .mod.", call. = FALSE)
+  }
 
   ## Apply unified plan= if supplied.  Error if both plan and individual args.
   ## Tier 8 item 10: plan adaptation now routes through estimation_context()
@@ -295,7 +330,36 @@ run_mode_finding <- function(solved,
 
   obc_specs <- NULL
   if (use_obc) {
+    ## OBC models can only be evaluated through the OBC/PKF (or PPF/COPF,
+    ## chosen later via posterior_options$obc_filter) log-posterior -- the
+    ## standard Gaussian/cumulant/whittle/pruned closures do not model the
+    ## occasionally-binding constraint. If the caller left `likelihood` at
+    ## its default, silently switching to PKF is a reasonable convenience,
+    ## but it must be ANNOUNCED (not silent) per this package's fail-loud-on
+    ## -fidelity-downgrade convention. If the caller EXPLICITLY asked for an
+    ## incompatible likelihood, that is very likely a mistake (they think
+    ## they are estimating e.g. "cumulant" but PKF is silently substituted
+    ## instead) -- stop() with an actionable message rather than overriding
+    ## their choice without telling them.
+    if (likelihood_explicit) {
+      stop(sprintf(paste0(
+        "run_mode_finding: model has OBC (mcp=) tagged equations, which are ",
+        "only supported by the OBC/PKF log-posterior -- but likelihood = ",
+        "\"%s\" was explicitly requested. These are incompatible: OBC models ",
+        "must be estimated via the occasionally-binding-constraint filter ",
+        "(PKF by default; PPF/COPF via posterior_options$obc_filter). Either ",
+        "drop the `likelihood` argument (default) to use PKF automatically, ",
+        "or remove the mcp= tags from the model if you intend to estimate it ",
+        "as a standard linear model."),
+        likelihood), call. = FALSE)
+    }
     .vcat("  OBC model detected -- using PKF log-posterior\n")
+    message("run_mode_finding: model has OBC (mcp=) tagged equations; ",
+            "auto-switching likelihood from the default \"", likelihood,
+            "\" to the OBC/PKF log-posterior (standard Kalman-filter ",
+            "likelihoods cannot represent occasionally-binding constraints). ",
+            "Pass posterior_options = list(obc_filter = \"ppf\"|\"copf\") to ",
+            "use a particle filter instead.")
     obc_specs   <- obc_parse_tags(model)
     max_inner   <- posterior_options$max_inner %||% 10L
     log_post_fn <- make_log_posterior_obc_pkf(
@@ -309,6 +373,7 @@ run_mode_finding <- function(solved,
       model, data, priors, obs_vars, compiled,
       me_variance        = me_variance,
       likelihood         = likelihood,
+      pruned_order       = pruned_order,
       lik_init           = posterior_options$lik_init %||% "auto",
       me_extra           = me_extra,
       shock_scale        = shock_scale_mat,
@@ -338,13 +403,20 @@ run_mode_finding <- function(solved,
   mo <- modifyList(list(), mode_options)
 
   ## Build a temporary ctx to use .ctx_is_standard_gaussian (avoids duplication).
+  ## student_t needs student_df threaded through here too (estimation_context()
+  ## validates it at construction) -- pulled from `...` the same way as the
+  ## final mode_ctx below.
+  .tmp_dots <- list(...)
   .tmp_mode_ctx <- estimation_context(
-    me_variance = me_variance,
-    likelihood  = likelihood,
-    me_extra    = me_extra,
-    shock_scale = shock_scale_mat,
-    freq_band   = freq_band
+    me_variance  = me_variance,
+    likelihood   = likelihood,
+    me_extra     = me_extra,
+    shock_scale  = shock_scale_mat,
+    freq_band    = freq_band,
+    pruned_order = pruned_order,
+    student_df   = .tmp_dots$student_df %||% NULL
   )
+  rm(.tmp_dots)
   par_standard <- .ctx_is_standard_gaussian(.tmp_mode_ctx, use_obc = use_obc)
   rm(.tmp_mode_ctx)
   ## Decouple the parallel MULTI-START (Step 5) from the parallel HESSIAN
@@ -577,11 +649,17 @@ run_mode_finding <- function(solved,
             ## posterior_hessian returns the Hessian of log-posterior (negative
             ## curvature matrix); negate it to get neg-logpost Hessian (pos-def
             ## at mode) for .make_pd and csminwel's H0_inv.
+            ## check_mode = FALSE: this seeds newrat's INITIAL H0 at whatever
+            ## theta the optimizer is at (typically prior means) -- by
+            ## construction not a critical point, so the mode-criticality
+            ## guard would always warn spuriously here. The at-mode Hessian
+            ## call below (use_exact_hessian) keeps the auto-guard.
             H_logpost <- posterior_hessian(
               .model, .compiled, dr_h, pm2,
               names(theta), .obs_vars, t(.data),
               me_variance  = .me_var,
-              include_prior = TRUE, prior_spec = .priors)
+              include_prior = TRUE, prior_spec = .priors,
+              check_mode = FALSE)
             ## Convert logpost Hessian -> neg-logpost Hessian (flip sign).
             -H_logpost
           }
@@ -595,16 +673,32 @@ run_mode_finding <- function(solved,
         .vcat("  Will build newrat initial H0 from analytic posterior Hessian\n")
     }
 
-    mode_res <- .run_mode_finding(
-      log_post_fn, theta_init, priors,
-      nm_maxit    = n_iter,
-      method      = method,
-      transform   = mode_transform,
-      grad_fn     = grad_fn,
-      hessian_fn  = hessian_fn,
-      verbose     = verbose,
-      ...
-    )
+    ## `...` is dual-purposed: log-posterior-constructor extras (e.g.
+    ## student_df for likelihood="student_t", cut_tol for "pskf") were already
+    ## consumed above by make_log_posterior(); strip them here so they don't
+    ## also leak into .run_mode_finding()'s optimizer-args `...` (which has no
+    ## such formals and errors on an unused argument).
+    dots_optim <- list(...)
+    dots_optim[c("student_df", "cut_tol")] <- NULL
+    ## Opt-in (default FALSE, off by default): stash the newrat/csminwel final
+    ## BFGS inverse-Hessian (H0 seed updated by every curvature pair collected
+    ## along the optimiser trajectory) in mode_res$H_bfgs, THETA-space. Purely
+    ## a measurement/diagnostic hook -- see .run_mode_finding's
+    ## `record_curvature` param; no effect on mode-finding itself. Set via
+    ## mode_options$record_curvature = TRUE.
+    mode_res <- do.call(.run_mode_finding, c(
+      list(
+        log_post_fn, theta_init, priors,
+        nm_maxit    = n_iter,
+        method      = method,
+        transform   = mode_transform,
+        grad_fn     = grad_fn,
+        hessian_fn  = hessian_fn,
+        verbose     = verbose,
+        record_curvature = isTRUE(mo$record_curvature %||% FALSE)
+      ),
+      dots_optim
+    ))
   }
 
   if (is.null(mode_res) || !is.finite(mode_res$logpost))
@@ -707,6 +801,10 @@ run_mode_finding <- function(solved,
     ft <- posterior_options$obc_filter %||% "pkf"
     match.arg(as.character(ft), c("pkf", "ppf", "copf"))
   } else likelihood
+  ## student_t needs student_df threaded through to estimation_context() too
+  ## (it validates student_df at construction); it is passed to
+  ## make_log_posterior() above via `...`, picked back up here the same way.
+  dots_ <- list(...)
   mode_ctx <- estimation_context(
     me_variance   = me_variance,
     likelihood    = mode_ctx_likelihood,
@@ -716,7 +814,11 @@ run_mode_finding <- function(solved,
     freq_band     = freq_band,
     system_priors = posterior_options$system_priors %||% NULL,
     tpf_options   = posterior_options$tpf_options %||% list(),
-    obc_specs     = obc_specs
+    obc_specs     = obc_specs,
+    student_df    = dots_$student_df %||% NULL,
+    ## pruned_order=3 is only valid with likelihood="pruned"; the OBC branch
+    ## rewrites the ctx likelihood, so fall back to the default there.
+    pruned_order  = if (identical(mode_ctx_likelihood, "pruned")) pruned_order else 2L
   )
   if (!is.null(plan)) mode_ctx$plan <- plan
 

@@ -374,6 +374,114 @@ proposal_cov <- function(lp_fn, theta_mode, prior_spec,
 }
 
 
+#' Sanity-check an FD Hessian's condition number against a reference Hessian
+#'
+#' The pathological-DSGE paper's central finding is that
+#' \code{numDeriv::hessian}'s DEFAULT step overshoots near-unit-root /
+#' determinacy boundaries and inflates the reported posterior-Hessian
+#' condition number by 5-7 orders of magnitude relative to an analytic or
+#' BFGS-curvature reference (examples from that paper: nk_small FD 1.1e11 vs
+#' analytic 3.6e5; sw2007-stress FD 2e16 vs analytic 2.4e8). This helper
+#' compares the two condition numbers and warns when the FD one is
+#' implausibly larger, so the trap is caught instead of silently poisoning a
+#' proposal covariance or a Laplace marginal-likelihood calculation.
+#'
+#' Both matrices are symmetrised (\code{(H + t(H)) / 2}) before their
+#' condition numbers are computed, since finite-difference Hessians are only
+#' numerically (not exactly) symmetric. The condition number is the ratio of
+#' the largest to the smallest eigenvalue magnitude, \code{|lambda_max| /
+#' |lambda_min|}; a zero or non-finite denominator returns \code{Inf}
+#' (documented, not an error -- a singular/degenerate Hessian is itself
+#' informative and should not abort the check).
+#'
+#' @param H_fd   Finite-difference Hessian (e.g. from \code{numDeriv::hessian}
+#'   or \code{num_hessian}/\code{num_hessian_mirai}); square numeric matrix.
+#' @param H_ref  Reference Hessian to compare against -- typically an
+#'   analytic Hessian (e.g. \code{posterior_hessian}) or a BFGS/quasi-Newton
+#'   curvature estimate (e.g. \code{mode_res$H_bfgs}, appropriately inverted/
+#'   signed); square numeric matrix, same dimension as \code{H_fd}.
+#' @param ratio_tol  Warn when \code{kappa_fd / kappa_ref > ratio_tol}
+#'   (default 1e3; the paper's examples show ratios of 1e5-1e8, so 1e3 is a
+#'   conservative trigger well below the pathological cases while still
+#'   quiet on ordinary numerical noise).
+#' @param label_fd,label_ref  Labels used in the warning message to identify
+#'   which matrix is which (default \code{"FD"} / \code{"reference"}).
+#'
+#' @return Invisibly, a list with elements \code{kappa_fd}, \code{kappa_ref},
+#'   \code{ratio} (\code{kappa_fd / kappa_ref}), and \code{flagged} (logical,
+#'   \code{TRUE} when \code{ratio > ratio_tol}).
+#'
+#' @export
+check_hessian_conditioning <- function(H_fd, H_ref, ratio_tol = 1e3,
+                                        label_fd = "FD",
+                                        label_ref = "reference") {
+  .check_square_numeric <- function(H, argname) {
+    if (!is.matrix(H) || !is.numeric(H))
+      stop(sprintf("check_hessian_conditioning: '%s' must be a numeric matrix.", argname))
+    if (nrow(H) != ncol(H))
+      stop(sprintf("check_hessian_conditioning: '%s' must be square.", argname))
+  }
+  .check_square_numeric(H_fd, "H_fd")
+  .check_square_numeric(H_ref, "H_ref")
+
+  if (nrow(H_fd) != nrow(H_ref))
+    stop("check_hessian_conditioning: 'H_fd' and 'H_ref' must have the same dimension.")
+
+  if (any(!is.finite(H_fd)))
+    stop("check_hessian_conditioning: 'H_fd' contains non-finite entries.")
+  if (any(!is.finite(H_ref)))
+    stop("check_hessian_conditioning: 'H_ref' contains non-finite entries.")
+
+  .kappa <- function(H) {
+    Hs  <- (H + t(H)) / 2
+    ev  <- eigen(Hs, symmetric = TRUE, only.values = TRUE)$values
+    mag <- abs(ev)
+    lam_max <- max(mag)
+    lam_min <- min(mag)
+    if (!is.finite(lam_max) || !is.finite(lam_min) || lam_min <= 0) return(Inf)
+    lam_max / lam_min
+  }
+
+  kappa_fd  <- .kappa(H_fd)
+  kappa_ref <- .kappa(H_ref)
+
+  ratio <- if (is.finite(kappa_fd) && is.finite(kappa_ref) && kappa_ref > 0) {
+    kappa_fd / kappa_ref
+  } else if (is.finite(kappa_ref) && !is.finite(kappa_fd)) {
+    Inf
+  } else {
+    NA_real_
+  }
+
+  flagged <- isTRUE(is.finite(ratio) && ratio > ratio_tol) ||
+    isTRUE(!is.finite(kappa_fd) && is.finite(kappa_ref))
+
+  if (flagged) {
+    warning(sprintf(
+      paste0(
+        "check_hessian_conditioning: %s condition number (%.3e) vastly exceeds ",
+        "the %s condition number (%.3e), ratio %.3e > ratio_tol %.3e. This usually ",
+        "means the finite-difference step overshot a near-unit-root or determinacy ",
+        "boundary, not that the posterior is genuinely that ill-conditioned. ",
+        "Recommend: (1) use the analytic posterior_hessian() instead of numDeriv's ",
+        "default-step FD Hessian; (2) if FD is unavoidable, use a smaller, ",
+        "feasibility-aware step size; default numDeriv steps were found to inflate ",
+        "kappa by 5-7 orders of magnitude on the pathological-DSGE paper's models ",
+        "(nk_small: FD 1.1e11 vs analytic 3.6e5; sw2007-stress: 2e16 vs 2.4e8)."
+      ),
+      label_fd, kappa_fd, label_ref, kappa_ref, ratio, ratio_tol
+    ))
+  }
+
+  invisible(list(
+    kappa_fd  = kappa_fd,
+    kappa_ref = kappa_ref,
+    ratio     = ratio,
+    flagged   = flagged
+  ))
+}
+
+
 #' Plain central-difference Hessian of the negative log-posterior
 #'
 #' Fallback for \code{.proposal_cov_full} when numDeriv is unavailable.

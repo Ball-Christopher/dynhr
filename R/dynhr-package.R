@@ -93,14 +93,14 @@ utils::globalVariables(c(
   "log_posterior_old",
   ## diagnostic-plot / summary-table NSE columns, data.table helpers, mirai
   ## worker <<- bindings, and transform-monolith intermediates:
-  "..obs_cols", ".parse_estimated_params", ".worker_Y", ".worker_cm",
+  "..obs_cols", ".worker_Y", ".worker_cm",
   "Band", "Binding", "Calibrated", "Contribution", "Diff", "Difference",
   "Distribution", "ElemLabel", "Equation", "Estimated", "Frequency",
   "Identified", "KL", "Lag_coef", "MeanAbsStrength", "Measure", "Median",
   "Observable", "Parameter", "Period", "Perturbation", "Posterior_Prob",
   "Sample", "Scenario", "Share", "Shock", "Strength", "Welfare", "abs_s",
-  "abs_s_plot", "build_potential_spec", "colour", "delta_i_list",
-  "dominant_shock", "dynhr_build_potential_obs", "dynhr_extend_potential_obs",
+  "abs_s_plot", "colour", "delta_i_list",
+  "dominant_shock",
   "fragile_label", "globally_identified", "high_prec", "ho_gain",
   "ho_important", "identified", "informative", "kl_divergence", "ll_vec",
   "lockdown_ratio", "lp_vec", "min_kl_plot", "moment", "mu_star_plot",

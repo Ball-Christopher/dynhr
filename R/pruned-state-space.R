@@ -227,6 +227,68 @@ pruned_ss_moments <- function(pss, n_ar = 5L) {
 # Gaussian Kalman likelihood on the augmented state
 # ============================================================================
 
+## ---------------------------------------------------------------------------
+## Measurement-error floor guard (the near-degenerate-F hazard).
+##
+## When the model implies a NEAR-DEGENERATE one-step innovation covariance
+## -- some linear combination of observables is almost perfectly predictable
+## (smallest eigenvalue of the steady-state F orders of magnitude below its
+## diagonal; e.g. a static rate that is nearly a combination of the other
+## observables conditional on the past) -- even a "negligible" me_variance
+## floor is LARGE relative to that eigenvalue. The floor then reshapes
+## F^{-1} exactly in the direction where the likelihood's parameter
+## discrimination is concentrated, producing a theta-dependent bias on data
+## that do not carry that measurement error (2026-07-03: this artifact
+## fully accounted for the P2d "misspecification bias" on rbc2shock, where
+## min-eig(F) ~ 6e-9 vs the 1e-8 floor -- 158% -- while the floor was only
+## 0.16% of the smallest F DIAGONAL, so no per-observable diagnostic can
+## catch it; see ORDER3_PRUNED_SS_FOLLOWUP.md, MAJOR CORRECTION).
+##
+## Detector: iterate the correlated-noise Riccati to (near) steady state
+## with HH_model (no floor) and compare me_variance against the smallest
+## eigenvalue of the resulting F. Returns list(ratio = eigmin(F_0 + me I)/
+## eigmin(F_0) = 1 + me/eigmin, loadings = |eigenvector|), or NULL when the
+## me=0 recursion is not evaluable.
+## ---------------------------------------------------------------------------
+.pruned_me_floor_ratio <- function(Tlin, ZZ, QQ, HH_model, SS, Sxi0,
+                                   me_variance, n_iter = 150L) {
+  P <- Sxi0
+  for (k in seq_len(n_iter)) {
+    Fm <- ZZ %*% P %*% t(ZZ) + HH_model
+    Fi <- tryCatch(solve(Fm), error = function(e) NULL)
+    if (is.null(Fi)) return(NULL)
+    M <- Tlin %*% P %*% t(ZZ) + SS
+    P <- Tlin %*% P %*% t(Tlin) + QQ - M %*% Fi %*% t(M)
+    P <- (P + t(P)) * 0.5
+  }
+  F0 <- ZZ %*% P %*% t(ZZ) + HH_model
+  eg <- eigen((F0 + t(F0)) * 0.5, symmetric = TRUE)
+  emin <- min(eg$values)
+  if (!is.finite(emin) || emin <= 0) return(NULL)
+  list(ratio    = 1 + me_variance / emin,
+       loadings = abs(eg$vectors[, which.min(eg$values)]))
+}
+
+.warn_me_floor_lock <- function(chk, obs_vars, me_variance, threshold = 1.5) {
+  if (is.null(chk) || !is.finite(chk$ratio) || chk$ratio <= threshold)
+    return(invisible(FALSE))
+  main <- obs_vars[chk$loadings > 0.3]
+  if (!length(main)) main <- obs_vars[which.max(chk$loadings)]
+  warning(sprintf(paste0(
+    "me_variance = %g is large relative to the smallest eigenvalue of the ",
+    "model-implied one-step innovation covariance (inflates it by factor ",
+    "%.2f): a linear combination of the observables (loading mainly on %s) ",
+    "is nearly perfectly predictable, and the floor reshapes the likelihood ",
+    "exactly in that direction. If your DATA genuinely carry measurement ",
+    "error of this size, ignore this warning. If the data are simulated ",
+    "withOUT measurement error, this floor biases the likelihood ",
+    "(theta-dependently) -- set me_variance = 0. Disable this check with ",
+    "options(dynhr.me_floor_check = FALSE)."),
+    me_variance, chk$ratio, paste(main, collapse = ", ")),
+    call. = FALSE)
+  invisible(TRUE)
+}
+
 #' Gaussian Kalman filter log-likelihood on the pruned augmented state
 #'
 #' Runs a standard Kalman filter on the order-2 AFVRR augmented state
@@ -259,16 +321,74 @@ pruned_ss_moments <- function(pss, n_ar = 5L) {
 #' @param pss      A \code{pruned_ss} object from
 #'   \code{\link{pruned_state_space}}.
 #' @param Y        Observation matrix (\code{n_obs x T} or \code{T x n_obs};
-#'   transposed automatically when \code{ncol(Y) == n_obs}).
+#'   transposed automatically when \code{ncol(Y) == n_obs}).  \code{NA}
+#'   entries are handled with an exact PARTIAL measurement update: for each
+#'   period only the non-\code{NA} observables enter the Kalman update (their
+#'   rows/cols of \code{ZZ}/\code{HH}/\code{SS} and the corresponding
+#'   log-density normalizing constant); a period with ALL observables missing
+#'   falls back to a predict-only step (no update). Fully-observed and
+#'   fully-missing periods are unaffected by this and match the previous
+#'   behavior exactly.
 #' @param obs_vars Character vector of observed variable names (must be a
 #'   subset of \code{pss$endo_names}).
 #' @param me_variance  Scalar measurement-error jitter added to the diagonal
-#'   of the innovation covariance (default 0).
+#'   of the innovation covariance (default 0). CAUTION: when the model
+#'   implies a near-degenerate innovation covariance (some combination of
+#'   observables is almost perfectly predictable one step ahead), even a
+#'   tiny floor (1e-8) can dominate the smallest eigenvalue of F and bias
+#'   likelihood comparisons on measurement-error-free data, theta-dependently.
+#'   Match \code{me_variance} to what the data actually contain; the
+#'   \code{me_floor_check} guard warns when the hazard is live.
+#' @param me_floor_check Logical: when \code{me_variance > 0}, compare
+#'   \code{me_variance} against the smallest eigenvalue of the filter's
+#'   steady-state innovation covariance at \code{me_variance = 0} and warn
+#'   if the floor inflates that eigenvalue by more than 50\%. Default
+#'   \code{getOption("dynhr.me_floor_check", TRUE)}.
 #' @return Scalar log-likelihood (numeric).  Returns \code{-Inf} on
 #'   non-finite innovation covariance or other filter failure.
+#'
+#' @section Mixed-frequency data:
+#' The exact partial-NA update makes \code{Y} a natural home for
+#' mixed-frequency panels: give each observable its own row and set the
+#' periods where it is unobserved to \code{NA}.  For example, a "monthly"
+#' series observed every period alongside a "quarterly" series observed
+#' only every third period:
+#' \preformatted{
+#'   T_n <- 120L
+#'   Y <- rbind(monthly_series, quarterly_series)   # 2 x T_n, levels
+#'   Y[2, -seq(3L, T_n, by = 3L)] <- NA              # quarterly: keep every 3rd
+#'   ll <- pruned_ss_loglik(pss, Y, c("monthly_var", "quarterly_var"))
+#' }
+#' Each period's log-density uses only the observables that are non-\code{NA}
+#' that period; a period with every observable missing contributes no update
+#' (predict-only). See \code{Y} above for the exact partial-update semantics.
+#'
+#' @examples
+#' \donttest{
+#' mod_path <- system.file("extdata/models/rbc2shock.mod", package = "dynhr")
+#' m   <- dynhr:::parse_mod(mod_path)
+#' cm  <- dynhr:::compile_model(m, verbose = FALSE, max_order = 2L)
+#' ss  <- dynhr:::solve_steady(cm, m$param_values, verbose = FALSE)
+#' dr2 <- solve_perturbation(m, cm, ss$values, m$param_values,
+#'                            order = 2L, verbose = FALSE)
+#' pss <- pruned_state_space(dr2, m, m$param_values)
+#'
+#' ## Simulate data, then observe "c" every period ("monthly") and "y" only
+#' ## every 3rd period ("quarterly").
+#' T_n <- 120L
+#' sim <- simulate_model_order2(dr2, n_periods = T_n, burn_in = 1000L,
+#'                               model = m, pruning = TRUE)
+#' Y <- t(sim[, c("c", "y")]) + dr2$ys[c("c", "y")]
+#' Y[2, -seq(3L, T_n, by = 3L)] <- NA
+#'
+#' ll <- pruned_ss_loglik(pss, Y, c("c", "y"), me_variance = 1e-4)
+#' ll
+#' }
 #' @seealso \code{\link{pruned_state_space}}, \code{\link{pruned_ss_moments}}
 #' @export
-pruned_ss_loglik <- function(pss, Y, obs_vars, me_variance = 0) {
+pruned_ss_loglik <- function(pss, Y, obs_vars, me_variance = 0,
+                             me_floor_check = getOption("dynhr.me_floor_check",
+                                                        TRUE)) {
   stopifnot(inherits(pss, "pruned_ss"))
   sys <- pss$sys
 
@@ -318,6 +438,7 @@ pruned_ss_loglik <- function(pss, Y, obs_vars, me_variance = 0) {
   ## Observation noise covariance
   HH  <- Gv %*% Cr0 %*% t(Gv)          # n_obs x n_obs
   HH  <- (HH + t(HH)) * 0.5
+  HH_model <- HH                        # model-implied part, pre-floor
   if (me_variance > 0) HH <- HH + me_variance * diag(n_obs)
   ## Cross-covariance state/observation noise
   SS  <- G  %*% Cr0 %*% t(Gv)          # d x n_obs
@@ -329,6 +450,12 @@ pruned_ss_loglik <- function(pss, Y, obs_vars, me_variance = 0) {
   ## Stationary augmented-state covariance (Lyapunov fixed point)
   Sxi0 <- solve_lyapunov(Tlin, QQ)
   Sxi0 <- (Sxi0 + t(Sxi0)) * 0.5
+
+  ## -- Measurement-error floor guard ------------------------------------------
+  if (me_variance > 0 && isTRUE(me_floor_check))
+    .warn_me_floor_lock(
+      .pruned_me_floor_ratio(Tlin, ZZ, QQ, HH_model, SS, Sxi0, me_variance),
+      obs_vars, me_variance)
 
   ## -- Kalman filter (correlated noise, constant-gain) ------------------------
   ##
@@ -481,7 +608,6 @@ pruned_ss_loglik <- function(pss, Y, obs_vars, me_variance = 0) {
   n_obs <- nrow(ZZ)
   n_T   <- ncol(Y)
   d_dim <- nrow(Tlin)
-  ll_const <- -0.5 * n_obs * log(2 * pi)
 
   xi <- mu0          # d-vector: current filtered state
   P  <- Sxi0         # d x d: current filtered covariance
@@ -491,21 +617,34 @@ pruned_ss_loglik <- function(pss, Y, obs_vars, me_variance = 0) {
   for (t in seq_len(n_T)) {
     y_t <- Y[, t]
 
-    ## xi, P are carried as the one-step PREDICTION xi_{t|t-1}, P_{t|t-1}.
-    ## Do NOT re-apply the predict step here: mu0/Sxi0 already equal xi_{1|0}/
-    ## P_{1|0}, and the bottom of the loop produces xi_{t+1|t}/P_{t+1|t}.
-    ## Predicting again would push xi/P through Tlin twice per period.
-    v  <- y_t - d_y - as.numeric(ZZ %*% xi)
-    F  <- ZZ %*% P %*% t(ZZ) + HH
-    F  <- (F + t(F)) * 0.5
+    ## Partial-NA measurement update: only the OBSERVED components of y_t
+    ## enter the update; missing components are simply dropped (not treated
+    ## as an all-or-nothing period). `o` indexes the observed observables.
+    o <- which(!is.na(y_t))
 
-    ## Missing observations: no measurement update; predict one step forward.
-    if (anyNA(v)) {
+    ## Fully-missing period: no measurement update at all; predict forward.
+    if (length(o) == 0L) {
       xi <- as.numeric(Tlin %*% xi + c_drift)
       P  <- Tlin %*% P %*% t(Tlin) + QQ
       P  <- (P + t(P)) * 0.5
       next
     }
+
+    n_t <- length(o)
+    ll_const_t <- -0.5 * n_t * log(2 * pi)
+
+    ZZ_o <- ZZ[o, , drop = FALSE]
+    d_y_o <- d_y[o]
+    HH_o <- HH[o, o, drop = FALSE]
+    SS_o <- SS[, o, drop = FALSE]
+
+    ## xi, P are carried as the one-step PREDICTION xi_{t|t-1}, P_{t|t-1}.
+    ## Do NOT re-apply the predict step here: mu0/Sxi0 already equal xi_{1|0}/
+    ## P_{1|0}, and the bottom of the loop produces xi_{t+1|t}/P_{t+1|t}.
+    ## Predicting again would push xi/P through Tlin twice per period.
+    v  <- y_t[o] - d_y_o - as.numeric(ZZ_o %*% xi)
+    F  <- ZZ_o %*% P %*% t(ZZ_o) + HH_o
+    F  <- (F + t(F)) * 0.5
 
     ## Log-det of F
     F_chol <- tryCatch(chol(F), error = function(e) NULL)
@@ -514,17 +653,17 @@ pruned_ss_loglik <- function(pss, Y, obs_vars, me_variance = 0) {
     F_inv <- chol2inv(F_chol)
 
     ## Log-likelihood contribution
-    ll_t <- ll_const - 0.5 * log_det_F - 0.5 * sum(v * (F_inv %*% v))
+    ll_t <- ll_const_t - 0.5 * log_det_F - 0.5 * sum(v * (F_inv %*% v))
     if (!is.finite(ll_t)) return(-Inf)
     loglik <- loglik + ll_t
 
     ## One-step-ahead update (Harvey 1990 eq 3.2.3a, correlated noise):
-    ##   M = Tlin * P_{t|t-1} * ZZ' + SS   (d x n_obs)
-    ##   K = M * F_inv                     (d x n_obs)  modified gain
+    ##   M = Tlin * P_{t|t-1} * ZZ_o' + SS_o   (d x n_t)
+    ##   K = M * F_inv                          (d x n_t)  modified gain
     ##   xi_{t+1|t} = Tlin*xi_{t|t-1} + c_drift + K * v
     ##   P_{t+1|t}  = Tlin*P_{t|t-1}*Tlin' + QQ - K * M'
-    M <- Tlin %*% P %*% t(ZZ) + SS         # d x n_obs
-    K <- M %*% F_inv                        # d x n_obs
+    M <- Tlin %*% P %*% t(ZZ_o) + SS_o      # d x n_t
+    K <- M %*% F_inv                        # d x n_t
     xi <- as.numeric(Tlin %*% xi + c_drift + K %*% v)
     P  <- Tlin %*% P %*% t(Tlin) + QQ - K %*% t(M)
     P  <- (P + t(P)) * 0.5
@@ -562,6 +701,7 @@ make_log_posterior_pruned <- function(model, data, prior_spec, obs_vars,
                                        system_priors = NULL) {
   sys_cache <- cache_system_structure(compiled)
   ss_warm   <- NULL
+  .me_floor_checked <- FALSE
 
   ## Data: ensure n_obs x T
   n_obs <- length(obs_vars)
@@ -604,9 +744,12 @@ make_log_posterior_pruned <- function(model, data, prior_spec, obs_vars,
       return(list(logpost = -Inf, loglik = -Inf, logprior = lp))
 
     loglik <- tryCatch(
-      pruned_ss_loglik(pss, Y, obs_vars, me_variance = me_variance),
+      pruned_ss_loglik(pss, Y, obs_vars, me_variance = me_variance,
+                       me_floor_check = !.me_floor_checked &&
+                         isTRUE(getOption("dynhr.me_floor_check", TRUE))),
       error = function(e) -Inf
     )
+    .me_floor_checked <<- TRUE   # guard once per closure, not per MCMC draw
     if (!is.finite(loglik))
       return(list(logpost = -Inf, loglik = -Inf, logprior = lp))
 

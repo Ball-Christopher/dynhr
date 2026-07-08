@@ -41,8 +41,8 @@ Differences from \code{set_param_values}:
 \examples{
 \dontrun{
 ## Winberry (2018) HA model: parse -> inject external params -> steady(y0)
-m    <- parse_mod("my_model.mod")        # 949 params are NA
-pars <- read_mat_params("params.mat")           # load from .mat
+m    <- parse_mod("winberry_dynhr.mod")        # 949 params are NA
+pars <- read_mat_params("grids.mat")           # load from .mat
 m    <- inject_params(m, pars)                 # fills 25 grid params; warns on extras
 comp <- compile_model(m)
 ss   <- solve_steady(comp, m$param_values, y0 = external_ss_vector)

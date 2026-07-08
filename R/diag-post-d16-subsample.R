@@ -122,8 +122,8 @@ d16_subsample_stability <- function(results_full,
                            ggplot2::aes(x = Median, y = Sample,
                                colour = Sample, shape = Sample)) +
       ggplot2::geom_point(size = 2) +
-      ggplot2::geom_errorbarh(ggplot2::aes(xmin = Lo, xmax = Hi),
-                     height = 0.35, linewidth = 0.5) +
+      ggplot2::geom_errorbar(ggplot2::aes(xmin = Lo, xmax = Hi),
+                     orientation = "y", width = 0.35, linewidth = 0.5) +
       ggplot2::facet_wrap(~ Parameter, scales = "free_x",
                           ncol = min(4L, ceiling(sqrt(n_par)))) +
       ggplot2::scale_colour_manual(values = pal) +
