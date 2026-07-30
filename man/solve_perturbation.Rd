@@ -32,7 +32,7 @@ solve_perturbation(
 \item{order}{Perturbation order: 1 (default), 2, 3, 4, or 5
 
 \strong{Dynare name mapping (order >= 2):} the field \code{dr$ghss} holds
-the order-2 uncertainty-correction vector (the σ² correction to the
+the order-2 uncertainty-correction vector (the sigma^2 correction to the
 stochastic steady state).  In Dynare this is \code{oo_.dr.ghs2}; dynhr
 uses \code{ghss} to follow standard mathematical notation (\eqn{g_{\sigma\sigma}}).
 There is no \code{ghs2} field in dynhr.}

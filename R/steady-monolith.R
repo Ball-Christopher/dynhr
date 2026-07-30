@@ -267,6 +267,67 @@ solve_ss_homotopy <- function(compiled, params_start, params_end,
 # 6. MAIN STEADY STATE INTERFACE
 # ============================================================================
 
+#' Solve a model's deterministic steady state
+#'
+#' Finds the vector of endogenous values at which every static equation
+#' residual is zero, given a parameter vector. This is the input the
+#' perturbation and state-space routines expect, so it is the usual first step
+#' when rebuilding a solution at a posterior mode or at a swept parameter.
+#'
+#' By default the solver runs a CASCADE, taking the first method that
+#' converges: an analytical solve (using the model's own steady-state block if
+#' it has one), then Newton, then \code{nleqslv}, then \code{optim}. Setting
+#' \code{method} to one of those names pins it to that method and fails rather
+#' than falling through, which is what you want in a replication script where a
+#' silent change of method between runs would be a change in the numbers.
+#'
+#' A model declared \code{model(linear)} is a special case handled up front: it
+#' is expressed in deviations, so its steady state is zero BY CONVENTION and
+#' the static residual there is the linearisation point rather than an error.
+#'
+#' @param model A parsed model (see \code{\link{parse_mod}}).
+#' @param compiled Optional compiled model from \code{\link{compile_model}}.
+#'   \code{NULL} (default) compiles one internally; pass an existing object to
+#'   avoid recompiling in a loop over parameters.
+#' @param params Named numeric parameter vector. \code{NULL} (default) uses
+#'   \code{model$param_values}. Errors if neither supplies values.
+#' @param y0 Optional named numeric starting guess for the endogenous
+#'   variables. \code{NULL} (default) uses the model's \code{initval} block
+#'   where present, filling the remainder with 0.5 (or 1 when there is no
+#'   \code{initval} block at all).
+#' @param method One of \code{"auto"} (default; the cascade described above),
+#'   \code{"analytical"}, \code{"Newton"}, \code{"nleqslv"} or \code{"optim"}.
+#'   Anything other than \code{"auto"} pins the solver to that method.
+#' @param exo_init Optional starting values for the EXOGENOUS variables,
+#'   defaulting to all zero. A NAMED vector is matched by name; an UNNAMED one
+#'   is matched in declaration order.
+#' @param max_iter Maximum iterations for the iterative methods.
+#' @param tol Convergence tolerance on the static residuals.
+#' @param verbose Logical: print the method cascade's progress.
+#' @param max_attempts Integer guard on how many times the whole cascade may be
+#'   retried; each attempt tries the remaining methods in order. Raising it does
+#'   not make a genuinely infeasible calibration solvable.
+#'
+#' @return An object of class \code{dynhr_steady} (a list) with the named
+#'   steady-state vector in BOTH \code{ss} and \code{values} (the same object
+#'   under two names, kept for back-compatibility), the static \code{residuals},
+#'   \code{converged}, \code{max_residual}, and \code{method_used} recording
+#'   which method actually succeeded. **Check \code{converged} before using the
+#'   result**: a non-converged solve is returned rather than raised, so that
+#'   callers sweeping a parameter can inspect the failure instead of aborting
+#'   the sweep.
+#'
+#' @seealso \code{\link{compile_model}}, \code{\link{solve_perturbation}}
+#' @examples
+#' \donttest{
+#' mod <- system.file("extdata", "models", "rbc", "rbc.mod", package = "dynhr")
+#' if (nzchar(mod)) {
+#'   m  <- parse_mod(mod)
+#'   ss <- solve_steady_state(m)
+#'   ss$converged
+#' }
+#' }
+#' @export
 solve_steady_state <- function(model, compiled = NULL, params = NULL,
                                y0 = NULL, method = "auto",
                                exo_init = NULL,

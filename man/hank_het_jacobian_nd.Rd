@@ -17,7 +17,11 @@ hank_het_jacobian_nd(
 
 \item{T_h}{Integer horizon.}
 
-\item{inputs}{Character subset of \code{c("r", "w")}.}
+\item{inputs}{Character subset of \code{c("r", "w", "Tr", "r_minus")} plus,
+for a block
+built with \code{Pi_fn}/\code{Pi_inputs}, the block's named
+transition-probability inputs (\code{names(block$Pi_inputs)}, e.g.
+\code{"f"}, \code{"s"} from \code{\link{hank_employment_income}}).}
 
 \item{outputs}{Character subset of \code{c("A", "C")}.}
 

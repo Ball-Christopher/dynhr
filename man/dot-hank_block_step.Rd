@@ -4,7 +4,7 @@
 \alias{.hank_block_step}
 \title{One nonlinear EGM backward step at given aggregate prices}
 \usage{
-.hank_block_step(block, Va_p, r, w)
+.hank_block_step(block, Va_p, r, w, Pi = NULL, Tr = NULL, r_minus = NULL)
 }
 \arguments{
 \item{block}{A \code{\link{hank_het_block}}.}
@@ -12,6 +12,11 @@
 \item{Va_p}{Next-period marginal value (\code{n_e x n_a}).}
 
 \item{r, w}{Aggregate return and wage this period.}
+
+\item{Pi}{Optional income transition matrix overriding the steady-state
+\code{block$Pi} for this period (time-varying transition probabilities;
+see the timing convention in the file header). Default \code{NULL} keeps
+the steady-state \code{Pi}, so existing calls are byte-identical.}
 }
 \value{
 List with \code{Va}, \code{a}, \code{c} (see \code{.hank_egm_step}).

@@ -31,6 +31,8 @@
 #' hank_mpc(blk)$aggregate
 #' @export
 hank_mpc <- function(block, dcash = 1e-4) {
+  .hank_reject_het2(block, "hank_mpc", use = NULL)
+  .hank_reject_wedge(block, "hank_mpc")
   a_grid <- block$a_grid; r <- block$r
   n_e <- block$n_e; n_a <- block$n_a
   mpc <- matrix(0, n_e, n_a)
@@ -110,6 +112,11 @@ hank_gini <- function(values, mass) {
 hank_distribution_stats <- function(block, top = c(0.1, 0.01),
                                     probs = c(0.5, 0.9, 0.99),
                                     constraint_tol = 1e-9) {
+  ## Especially important here: without this the (e, b, a) distribution reaches
+  ## .hank_vec_to_mat() and matrix() RECYCLES it with a warning rather than an
+  ## error, so the failure is one arithmetic coincidence away from returning a
+  ## plausible, wrong Gini.
+  .hank_reject_het2(block, "hank_distribution_stats", use = NULL)
   a_grid <- block$a_grid; n_e <- block$n_e; n_a <- block$n_a
   Dmat <- .hank_vec_to_mat(block$D, n_e, n_a)      # n_e x n_a
   a_mass <- colSums(Dmat)                          # marginal wealth distribution
@@ -214,24 +221,40 @@ hank_determinacy <- function(model, tol = 1e-10) {
 #' @export
 hank_impc <- function(block, T_h, delta_tr = 1e-5, delta_va = 1e-6,
                       delta_d = 1e-6) {
+  .hank_reject_het2(block, "hank_impc", use = NULL)
+  .hank_reject_wedge(block, "hank_impc")
   a_grid <- block$a_grid; Pi <- block$Pi; D_ss <- block$D
   Va_ss <- block$Va; a_ss <- block$a; Lam <- block$Lambda
-  y_ss <- block$w * block$e                      # steady-state income by state
-  step <- function(Va, dtr) .hank_egm_step(Va, a_grid, y = y_ss + dtr,
+  ## Steady-state income by state, INCLUDING any lump-sum transfer the block
+  ## was built with -- otherwise the iMPC of a Tr > 0 block would be
+  ## differenced around the wrong baseline.
+  ##
+  ## The notch is scaled by the block's incidence weight, so what this returns
+  ## is the iMPC out of a transfer distributed by THAT rule. That keeps it the
+  ## correct independent cross-oracle for the "Tr" column of
+  ## hank_het_jacobian() under any incidence, and it reduces to the uniform
+  ## iMPC (omega == 1) byte-for-byte.
+  omega <- .hank_block_omega(block)
+  y_ss <- block$w * block$e + .hank_block_tr(block) * omega
+  step <- function(Va, dtr) .hank_egm_step(Va, a_grid, y = y_ss + dtr * omega,
                                            r = block$r, beta = block$beta,
                                            eis = block$eis, Pi = Pi)
 
   ## Expectation vectors for the consumption outcome: E_s = Lambda^s c_ss.
   E <- vector("list", T_h)
   E[[1L]] <- .hank_mat_to_vec(block$c)
-  for (s in 2L:T_h) E[[s]] <- as.numeric(Lam %*% E[[s - 1L]])
+  ## s = 2 .. T_h, empty if T_h < 2
+  for (s in seq_len(T_h - 1L) + 1L) E[[s]] <- as.numeric(Lam %*% E[[s - 1L]])
 
-  curlyD_from_dA <- function(dA) {
-    Lp <- hank_forward_operator(a_ss + delta_d * dA, a_grid, Pi)
-    Lm <- hank_forward_operator(a_ss - delta_d * dA, a_grid, Pi)
-    (as.numeric(Matrix::t(Lp) %*% D_ss) -
-       as.numeric(Matrix::t(Lm) %*% D_ss)) / (2 * delta_d)
-  }
+  ## Matrix-free, and it must STAY matrix-free in lockstep with
+  ## .hank_curly_sweep: test-hank-transfer.R asserts J[C][Tr] equals this
+  ## iMPC matrix to 1e-12, which holds only because the two routes difference
+  ## the SAME steps around the SAME baseline. Round-off differences here are
+  ## amplified by the 1/(2*delta_d) division to ~1e-10, so a mismatched pair
+  ## of implementations breaks that cross-oracle (it did, exactly once).
+  curlyD_from_dA <- function(dA)
+    (.hank_forward_push(a_ss + delta_d * dA, a_grid, Pi, D_ss) -
+       .hank_forward_push(a_ss - delta_d * dA, a_grid, Pi, D_ss)) / (2 * delta_d)
 
   curlyY <- numeric(T_h)
   curlyD <- matrix(0, block$n_e * block$n_a, T_h)
@@ -246,7 +269,7 @@ hank_impc <- function(block, T_h, delta_tr = 1e-5, delta_va = 1e-6,
 
   ## s >= 2: anticipation of a future transfer, propagated via the value fn.
   dVa_prev <- dVa
-  for (s in 2L:T_h) {
+  for (s in seq_len(T_h - 1L) + 1L) {              # s = 2 .. T_h, empty if T_h < 2
     h  <- delta_va / max(1, max(abs(dVa_prev)))
     sp <- .hank_egm_step(Va_ss + h * dVa_prev, a_grid, y = y_ss, r = block$r,
                          beta = block$beta, eis = block$eis, Pi = Pi)
@@ -262,10 +285,13 @@ hank_impc <- function(block, T_h, delta_tr = 1e-5, delta_va = 1e-6,
 
   ## Fake-news matrix F then iMPC matrix M (diagonal cumulative sum).
   Fm <- matrix(0, T_h, T_h); Fm[1L, ] <- curlyY
-  for (tt in 2L:T_h) Fm[tt, ] <- as.numeric(crossprod(curlyD, E[[tt - 1L]]))
+  ## tt = 2 .. T_h, empty if T_h < 2
+  for (tt in seq_len(T_h - 1L) + 1L)
+    Fm[tt, ] <- as.numeric(crossprod(curlyD, E[[tt - 1L]]))
   M <- matrix(0, T_h, T_h); M[1L, ] <- Fm[1L, ]
-  for (tt in 2L:T_h) {
+  for (tt in seq_len(T_h - 1L) + 1L) {            # tt = 2 .. T_h, empty if T_h < 2
     M[tt, 1L] <- Fm[tt, 1L]
+    ## Body only runs when T_h >= 2, so the 2L:T_h slices are in range here.
     M[tt, 2L:T_h] <- M[tt - 1L, 1L:(T_h - 1L)] + Fm[tt, 2L:T_h]
   }
   M
@@ -292,15 +318,38 @@ hank_plot_jacobian <- function(Jblock, main = "Sequence-space Jacobian", ...) {
 
 #' Plot impulse-response paths from a linear GE IRF
 #'
+#' The two IRF producers in this package name their paths differently:
+#' \code{\link{hank_ks_linear_irf}} returns \code{d}-prefixed names
+#' (\code{dK}, \code{dC}, ...), while the general \code{\link{hank_model_irf}}
+#' returns the model's own bare variable names (\code{K}, \code{C}, ...). The
+#' default therefore takes the \code{d*} paths when there are any and every
+#' path otherwise, and a \code{vars} entry that is not in \code{irf} is an
+#' error naming what IS available -- previously it silently produced a list
+#' column and died inside \code{matplot} with "'list' object cannot be coerced
+#' to type 'double'".
+#'
 #' @param irf A list of named deviation paths (e.g. from
-#'   \code{\link{hank_ks_linear_irf}}).
-#' @param vars Character: which paths to plot (defaults to all \code{d*} paths).
+#'   \code{\link{hank_ks_linear_irf}} or \code{\link{hank_model_irf}}).
+#' @param vars Character: which paths to plot. Defaults to all \code{d*} paths
+#'   if the IRF has any, otherwise to every path of the right length.
 #' @param main Plot title.
 #' @return Invisibly, a matrix of the plotted paths (columns = variables).
 #' @export
 hank_plot_irf <- function(irf, vars = NULL,
                           main = "HANK GE impulse responses") {
-  if (is.null(vars)) vars <- grep("^d", names(irf), value = TRUE)
+  paths <- names(irf)[vapply(irf, function(v)
+    is.numeric(v) && length(v) > 1L, logical(1))]
+  if (is.null(vars)) {
+    vars <- grep("^d", paths, value = TRUE)
+    if (!length(vars)) vars <- paths
+  }
+  if (!length(vars))
+    stop("hank_plot_irf(): the IRF has no numeric deviation paths to plot.")
+  bad <- setdiff(vars, paths)
+  if (length(bad))
+    stop("hank_plot_irf(): no such path(s) in this IRF: ",
+         paste0("'", bad, "'", collapse = ", "), ". Available: ",
+         paste0("'", paths, "'", collapse = ", "), ".")
   M <- sapply(vars, function(v) irf[[v]])
   graphics::matplot(M, type = "l", lty = 1, xlab = "period",
                     ylab = "deviation", main = main)
@@ -308,4 +357,151 @@ hank_plot_irf <- function(irf, vars = NULL,
                    bty = "n")
   graphics::abline(h = 0, col = "grey70", lty = 3)
   invisible(M)
+}
+
+
+#' Preflight validation of a solved HANK household block
+#'
+#' One cheap, interpretable gate to run BEFORE spending a costly likelihood,
+#' Jacobian, or posterior evaluation on a \code{\link{hank_het_block}}
+#' (adversarial review 2026-07-13, extension #3). Reports -- rather than
+#' silently assumes -- the invariants every downstream consumer relies on:
+#' grid monotonicity, the Markov contract on \code{Pi}, forward-operator
+#' row-stochasticity, distribution mass/positivity/stationarity, policy
+#' feasibility against the block's own borrowing limit \code{amin},
+#' consumption positivity, the stored-aggregate identities
+#' \code{A == hank_aggregate(D, a)} / \code{C == hank_aggregate(D, c)}
+#' (catching hand-spliced blocks that edit policies without re-aggregating),
+#' and stationary-distribution convergence. Optionally re-solves the EGM on
+#' BOTH backends and reports their policy gap (\code{check_parity}).
+#'
+#' A LIST of blocks (e.g. \code{mks$blocks} from a mixture steady state) is
+#' validated per type, with a \code{type} column prepended.
+#'
+#' @param block A \code{\link{hank_het_block}}, or a list of them.
+#' @param check_parity Logical: additionally re-solve the household EGM under
+#'   both \code{backend = "R"} and \code{"cpp"} and report the max absolute
+#'   savings-policy gap (costs two EGM solves; default \code{FALSE}).
+#' @param tol Numerical tolerance for the residual checks (default
+#'   \code{1e-8}); the stationarity residual uses \code{max(tol, 1e-10)}.
+#'
+#' @return A data frame with one row per check: \code{check}, \code{value}
+#'   (the measured residual, or \code{NA} for boolean checks), \code{threshold},
+#'   \code{pass}. The attribute \code{"ok"} is \code{TRUE} iff every row
+#'   passes. All checks are evaluated even when earlier ones fail, so a
+#'   corrupted block yields the full damage report.
+#' @seealso \code{\link{hank_het_block}}, \code{\link{hank_theta_boundary_check}},
+#'   \code{\link{hank_mixture_ks_assemble}}
+#' @export
+validate_hank_block <- function(block, check_parity = FALSE, tol = 1e-8) {
+  if (!inherits(block, "hank_het_block") && is.list(block) &&
+      length(block) >= 1L &&
+      all(vapply(block, inherits, logical(1), "hank_het_block"))) {
+    per <- lapply(seq_along(block), function(k) {
+      r <- validate_hank_block(block[[k]], check_parity = check_parity,
+                               tol = tol)
+      cbind(data.frame(type = k), r)
+    })
+    out <- do.call(rbind, per)
+    rownames(out) <- NULL
+    attr(out, "ok") <- all(out$pass)
+    return(out)
+  }
+  if (inherits(block, "hank_het2_block"))
+    stop("validate_hank_block(): this is a two-asset block ",
+         "(hank_het2_block), whose policies are n_e x n_b x n_a arrays over a ",
+         "joint (e, b, a) cell space -- the checks here assume the one-asset ",
+         "n_e x n_a shape and its single borrowing limit, so they would be ",
+         "meaningless rather than merely wrong. No two-asset preflight exists ",
+         "yet; validate the block's own invariants directly (Lambda ",
+         "row-stochastic, D stationary, B/A/C/CHI vs hank_aggregate2).")
+  if (!inherits(block, "hank_het_block"))
+    stop("validate_hank_block(): 'block' must be a hank_het_block ",
+         "or a list of them.")
+
+  ag <- block$a_grid
+  rows <- list()
+  row <- function(check, value, threshold, pass)
+    data.frame(check = check, value = value, threshold = threshold,
+               pass = pass)
+
+  ## grid: finite, strictly increasing
+  grid_ok <- is.numeric(ag) && all(is.finite(ag)) &&
+    (length(ag) < 2L || all(diff(ag) > 0))
+  rows$grid <- row("grid_strictly_increasing", NA_real_, NA_real_, grid_ok)
+
+  ## Markov contract on Pi (same validator as the public boundaries)
+  pi_ok <- tryCatch({
+    .hank_check_markov(block$Pi, block$n_e, caller = "validate_hank_block",
+                       tol = tol)
+    TRUE
+  }, error = function(e) FALSE)
+  pi_res <- if (is.matrix(block$Pi) && is.numeric(block$Pi))
+    max(abs(rowSums(block$Pi) - 1), -min(block$Pi, 0)) else NA_real_
+  rows$markov <- row("Pi_markov_contract", pi_res, tol, pi_ok)
+
+  ## forward operator row-stochastic
+  lam_res <- max(abs(Matrix::rowSums(block$Lambda) - 1))
+  rows$lambda <- row("Lambda_row_stochastic", lam_res, tol, lam_res <= tol)
+
+  ## distribution: shape, positivity, unit mass, stationarity
+  n_cell <- block$n_e * block$n_a
+  d_shape <- length(block$D) == n_cell && all(is.finite(block$D))
+  rows$dshape <- row("D_length_and_finite", NA_real_, NA_real_, d_shape)
+  d_neg <- if (d_shape) max(0, -min(block$D)) else NA_real_
+  rows$dneg <- row("D_nonnegative", d_neg, tol,
+                   isTRUE(d_neg <= tol))
+  d_mass <- if (d_shape) abs(sum(block$D) - 1) else NA_real_
+  rows$dmass <- row("D_unit_mass", d_mass, tol, isTRUE(d_mass <= tol))
+  stat_tol <- max(tol, 1e-10)
+  d_stat <- if (d_shape)
+    max(abs(as.numeric(Matrix::t(block$Lambda) %*% block$D) - block$D))
+  else NA_real_
+  rows$dstat <- row("D_stationary_residual", d_stat, stat_tol,
+                    isTRUE(d_stat <= stat_tol))
+
+  ## policies: finite, feasible against the block's own amin, c > 0
+  amin <- if (!is.null(block$amin)) block$amin else ag[1L]
+  pol_fin <- all(is.finite(block$a)) && all(is.finite(block$c))
+  rows$pfin <- row("policies_finite", NA_real_, NA_real_, pol_fin)
+  a_feas <- if (pol_fin) max(0, amin - min(block$a)) else NA_real_
+  rows$afeas <- row("a_policy_respects_amin", a_feas, tol,
+                    isTRUE(a_feas <= tol))
+  c_min <- if (pol_fin) min(block$c) else NA_real_
+  rows$cpos <- row("c_policy_positive", c_min, 0,
+                   isTRUE(c_min > 0))
+
+  ## stored aggregates match distribution-weighted policies
+  agg_A <- tryCatch(abs(block$A - hank_aggregate(block$D, block$a)),
+                    error = function(e) NA_real_)
+  agg_C <- tryCatch(abs(block$C - hank_aggregate(block$D, block$c)),
+                    error = function(e) NA_real_)
+  rows$aggA <- row("A_matches_aggregated_policy", agg_A, tol,
+                   isTRUE(agg_A <= tol))
+  rows$aggC <- row("C_matches_aggregated_policy", agg_C, tol,
+                   isTRUE(agg_C <= tol))
+
+  ## stationary-distribution solver convergence flag
+  conv <- isTRUE(block$dist_converged)
+  rows$conv <- row("stationary_dist_converged", NA_real_, NA_real_, conv)
+
+  ## optional R/C++ backend parity on a fresh EGM re-solve
+  if (isTRUE(check_parity)) {
+    gap <- tryCatch({
+      hhR <- hank_egm_solve(ag, y = block$w * block$e, r = block$r,
+                            beta = block$beta, eis = block$eis,
+                            Pi = block$Pi, amin = amin, backend = "R")
+      hhC <- hank_egm_solve(ag, y = block$w * block$e, r = block$r,
+                            beta = block$beta, eis = block$eis,
+                            Pi = block$Pi, amin = amin, backend = "cpp")
+      max(abs(hhR$a - hhC$a))
+    }, error = function(e) NA_real_)
+    rows$parity <- row("egm_backend_parity", gap, 1e-9,
+                       isTRUE(gap <= 1e-9))
+  }
+
+  out <- do.call(rbind, rows)
+  rownames(out) <- NULL
+  attr(out, "ok") <- all(out$pass)
+  out
 }

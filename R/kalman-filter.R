@@ -126,7 +126,8 @@
                                   me_variance, kalman_tol, diffuse_tol,
                                   conv_tol, max_diffuse, ll_min,
                                   return_filtered, n_state,
-                                  me_extra = NULL) {
+                                  me_extra = NULL, shock_scale = NULL,
+                                  Sigma_e = NULL, e_idx = NULL) {
   n_obs <- nrow(Y_minus_d)
   n_T   <- ncol(Y_minus_d)
   log2pi <- log(2 * pi)
@@ -136,6 +137,14 @@
   ## F_star for observable i at period t; only the R loop supports this
   ## (C++ backend takes a scalar me_variance, not a matrix).
   has_me_extra_uni <- !is.null(me_extra) && any(me_extra != 0)
+
+  ## shock_scale (n_exo x T) holds per-period shock-stdev multipliers. The
+  ## augmented state x_t = [s_{t-1}; eps_t] means the process noise added by
+  ## the Tb-transition at the END of iteration t is Var(eps_{t+1}) -- so the
+  ## QQb block used for that transition must be rebuilt from shock_scale
+  ## column t+1, not column t. The caller (.kf_univariate_dispatch) already
+  ## bakes column 1 into the INITIAL Pb before this loop starts.
+  has_shock_scale_uni <- !is.null(shock_scale)
 
   loglik <- 0
   ok     <- TRUE
@@ -186,7 +195,13 @@
     ll_contrib[t] <- ll_t
 
     a <- drop(Tb %*% a)
-    P_star <- Tb %*% P_star %*% t(Tb) + QQb
+    QQb_t <- if (has_shock_scale_uni && t < n_T) {
+      sc_next <- shock_scale[, t + 1L]
+      QQb_next <- QQb
+      QQb_next[e_idx, e_idx] <- Sigma_e * outer(sc_next, sc_next)
+      QQb_next
+    } else QQb
+    P_star <- Tb %*% P_star %*% t(Tb) + QQb_t
     P_star <- (P_star + t(P_star)) * 0.5
     if (diffuse) {
       P_inf <- Tb %*% P_inf %*% t(Tb)
@@ -219,12 +234,14 @@
                                     conv_tol = 1e-8,
                                     max_diffuse = 100L,
                                     me_extra = NULL,
-                                    ss_lock = FALSE) {
+                                    ss_lock = FALSE,
+                                    shock_scale = NULL) {
   ## The steady-state lock assumes a constant present-observable pattern, so it
   ## is only valid on a complete panel. Disable it if any observation is missing
   ## (the filter then runs the exact full recursion). The R fallback ignores
   ## ss_lock (runs unlocked), so univariate_ss degrades gracefully without Rcpp.
-  ss_lock <- isTRUE(ss_lock) && !anyNA(Y_minus_d)
+  ## A time-varying shock_scale is likewise incompatible with a frozen gain.
+  ss_lock <- isTRUE(ss_lock) && !anyNA(Y_minus_d) && is.null(shock_scale)
   n_state <- nrow(TT)
   n_exo   <- ncol(RR)
   nb      <- n_state + n_exo
@@ -242,6 +259,14 @@
 
   a0 <- c(s0, numeric(n_exo))
   Pb <- QQb                                   # eps_1 block = Sigma_e
+  ## shock_scale active: eps_1 (the x_1 state's shock component) is scaled by
+  ## column 1, not the baseline Sigma_e (mirrors the QQb_t rebuild inside
+  ## .kf_univariate_loop_R for every later transition).
+  has_shock_scale_d <- !is.null(shock_scale)
+  if (has_shock_scale_d) {
+    sc1 <- shock_scale[, 1L]
+    Pb[e_idx, e_idx] <- Sigma_e * outer(sc1, sc1)
+  }
   Pb[s_idx, s_idx] <- P_state
   Pi <- matrix(0, nb, nb)
   if (!is.null(P_inf_state)) Pi[s_idx, s_idx] <- P_inf_state
@@ -249,10 +274,11 @@
   ## me_extra must be an n_obs x T matrix when non-NULL; expand to the
   ## augmented-state index (first n_obs rows of Zb correspond to original obs).
   ## The C++ backend takes only a scalar me_variance: force R when me_extra
-  ## has any nonzero entries.
+  ## has any nonzero entries. shock_scale likewise forces R: the C++ kernel
+  ## bakes a single time-invariant QQb and has no per-period rebuild hook.
   has_me_extra_d <- !is.null(me_extra) && any(me_extra != 0)
 
-  if (.HAS_RCPP_KALMAN_UNI() && !has_me_extra_d) {
+  if (.HAS_RCPP_KALMAN_UNI() && !has_me_extra_d && !has_shock_scale_d) {
     out <- kalman_univariate_loop_cpp(Y_minus_d, Zb, Tb, QQb, a0, Pb, Pi,
                                       me_variance, kalman_tol, diffuse_tol,
                                       conv_tol, as.integer(max_diffuse),
@@ -265,7 +291,9 @@
                           me_variance, kalman_tol, diffuse_tol,
                           conv_tol, max_diffuse, .KF_LL_MIN,
                           return_filtered, n_state,
-                          me_extra = me_extra)
+                          me_extra = me_extra,
+                          shock_scale = shock_scale,
+                          Sigma_e = Sigma_e, e_idx = e_idx)
   }
 }
 
@@ -868,6 +896,16 @@ kalman_filter <- function(Y, dr, model, params, obs_vars,
       lik_init <- "stationary"
     }
   }
+  ## has_shock_scale + diffuse is rejected above when the caller passes
+  ## lik_init = "diffuse" literally, but lik_init = "auto" (the default) can
+  ## also RESOLVE to "diffuse" here on a unit-root TT -- catch that case too,
+  ## since the diffuse phase (.kf_diffuse_phase) has no shock_scale awareness.
+  if (has_shock_scale && lik_init == "diffuse")
+    stop("kalman_filter: lik_init = \"auto\" resolved to the diffuse ",
+         "initialization (TT has unit-root eigenvalues), which is ",
+         "incompatible with shock_scale. Pass lik_init = \"kappa\" or ",
+         "\"stationary\" explicitly when using heteroskedastic shocks on a ",
+         "nonstationary model.", call. = FALSE)
   d_diffuse <- NA_integer_
 
   ## -- M23: warn about diffuse loglik convention on unit-root models ------
@@ -1010,10 +1048,17 @@ kalman_filter <- function(Y, dr, model, params, obs_vars,
     } else {
       P_state <- .solve_lyapunov_stationary()
     }
+    ## has_shock_scale is captured from the enclosing kalman_filter() call:
+    ## every .run_univariate() caller (method = "univariate" directly, the
+    ## .kf_fail() singularity fallback from "standard"/"dare", and the exact-
+    ## diffuse Case C restart) must honor shock_scale the same way the
+    ## multivariate paths do -- see .kf_univariate_dispatch / .kf_univariate_loop_R.
+    ss_arg <- if (has_shock_scale) shock_scale else NULL
     out <- .kf_univariate_dispatch(Y_minus_d, ZZ, TT, RR, DD, Sigma_e,
                                    numeric(n_state), P_state, P_inf_state,
                                    me_variance, return_filtered,
-                                   me_extra = me_extra, ss_lock = ss_lock)
+                                   me_extra = me_extra, ss_lock = ss_lock,
+                                   shock_scale = ss_arg)
     if (isTRUE(out$diffuse_failed)) {
       ## P_inf never decayed (unobserved unit root) or the sample ended
       ## inside the diffuse phase: same kappa fallback as the multivariate
@@ -1024,7 +1069,7 @@ kalman_filter <- function(Y, dr, model, params, obs_vars,
       out <- .kf_univariate_dispatch(Y_minus_d, ZZ, TT, RR, DD, Sigma_e,
                                      numeric(n_state), .build_P0(TT, QQ),
                                      NULL, me_variance, return_filtered,
-                                     me_extra = me_extra)
+                                     me_extra = me_extra, shock_scale = ss_arg)
     }
     if (!isTRUE(out$ok))
       return(list(loglik = -Inf, filtered_states = NULL,
@@ -1446,7 +1491,13 @@ kalman_filter <- function(Y, dr, model, params, obs_vars,
   ## A diffuse phase always uses the per-step R loop below (init_t_start > 1
   ## and/or non-Lyapunov P0) -- see use_diffuse_phase above. Bit-parity with
   ## the R loop is asserted by test-kalman-rcpp-parity.R.
-  if (!has_missing && lik_init == "stationary" && .HAS_RCPP_KALMAN()) {
+  ## has_shock_scale is excluded explicitly (belt-and-suspenders): it already
+  ## forces has_missing <- TRUE above (the C++ kernel bakes a single
+  ## time-invariant Sigma_e/HH/SS and cannot express a per-period scale), but
+  ## gate on it directly here too so this fast path can never silently ignore
+  ## shock_scale if that has_missing coupling is ever loosened.
+  if (!has_missing && !has_shock_scale && lik_init == "stationary" &&
+      .HAS_RCPP_KALMAN()) {
     out <- kalman_standard_loop_cpp(Y_minus_d, ZZ, TT, RR, DD, HH + me_diag,
                                     Sigma_e, SS, P, ll_const, ss_tol,
                                     .KF_LL_MIN, return_filtered)

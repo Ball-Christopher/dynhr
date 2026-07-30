@@ -170,7 +170,10 @@ List kf_adjoint_uni_cpp(const arma::mat& Y,
 
     arma::mat Fc;
     if (!arma::chol(Fc, Ft)) { ok = false; break; }
-    arma::mat Fi  = arma::inv_sympd(Ft);
+    // Non-throwing form: chol() success does not imply inv_sympd() success
+    // (see kalman_adjoint.cpp) -- degrade gracefully instead of throwing.
+    arma::mat Fi;
+    if (!arma::inv_sympd(Fi, Ft)) { ok = false; break; }
     double ldf    = 2.0 * arma::accu(arma::log(Fc.diag()));
 
     arma::vec yt  = arma::vec(Y.col(t));

@@ -23,8 +23,8 @@ List:
 \description{
 Full analytic third cumulant of the pruned order-2 state-space under
 Gaussian shocks. The pruned observable deviation from its mean is:
-  dy = Z*x1 + D*e + Z*x2_cent + (1/2)*Ghxx*(x1⊗x1 - vec(Σ_x))
-       + Ghxu*(e⊗x1) + (1/2)*Ghuu*(e⊗e - vec(Σ_e))
+  dy = Z*x1 + D*e + Z*x2_cent + (1/2)*Ghxx*(kron(x1,x1) - vec(Sigma_x))
+       + Ghxu*kron(e,x1) + (1/2)*Ghuu*(kron(e,e) - vec(Sigma_e))
 where (x1, x2_cent) are lagged states independent of the current shock e.
 }
 \details{

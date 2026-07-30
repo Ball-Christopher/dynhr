@@ -10,7 +10,11 @@ hank_model_dist_irf(model, dZ)
 \item{model}{A \code{\link{hank_model}}.}
 
 \item{dZ}{Named list of length-\code{T} exogenous shock paths (deviations),
-one per \code{model$exogenous} (missing entries treated as zero).}
+one per \code{model$exogenous} (missing entries treated as zero). For a
+model with exactly one exogenous a bare numeric vector is also accepted;
+with more than one it is an error, since the intent would be ambiguous.
+Note the contrast with \code{\link{hank_ks_linear_irf}}, which takes a
+bare vector and returns \code{d}-prefixed names.}
 }
 \value{
 A list with:

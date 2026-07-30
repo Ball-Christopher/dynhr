@@ -16,10 +16,14 @@ List with \code{curlyY} (named list over \code{outputs}, each a
   matrix, column \code{s}).
 }
 \description{
-Backward sweep shared by \code{hank_het_jacobian} and
-\code{hank_het_dist_jacobian}: curly-Y (per-output date-0 outcome response)
-and curly-D (induced one-period-ahead distribution change) to an anticipated
-shock to input \code{i} at horizon \code{s = 1 .. T_h} (s=1 is the direct
-current-period shock; s>=2 propagate via the value-function derivative).
+For a transition-probability input (\code{i} in
+\code{names(block$Pi_inputs)}), the s=1 term perturbs Pi in BOTH places it
+enters the shock date (see the file header): the backward step's
+expectation uses \code{Pi_fn(x +/- delta_in)}, and curly-D is the JOINT
+central difference of \eqn{t(\Lambda(a', \Pi))\,D_{ss}} along the direction
+(policy change \code{dA}, unit input change) -- the policy-only
+\code{curlyD_from_dA} would miss Pi's direct entry in the forward law of
+motion.  The s>=2 anticipation terms are unchanged: at dates before the
+shock both the step's Pi and Lambda's Pi sit at steady state.
 }
 \keyword{internal}

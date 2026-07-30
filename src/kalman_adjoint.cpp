@@ -207,7 +207,13 @@ List kf_adjoint_cpp(const arma::mat& Y,
 
     arma::mat Fc;
     if (!arma::chol(Fc, Ft)) { ok = false; break; }
-    arma::mat Fi  = arma::inv_sympd(Ft);
+    // chol() succeeding does not guarantee inv_sympd() will: they use
+    // different LAPACK factorisation paths (upper vs lower) that can
+    // disagree right at the PD boundary -- exactly where a sampler's
+    // step-size search likes to probe. Use the non-throwing form and
+    // degrade like any other numerical KF failure instead of crashing.
+    arma::mat Fi;
+    if (!arma::inv_sympd(Fi, Ft)) { ok = false; break; }
     double ldf    = 2.0 * arma::accu(arma::log(Fc.diag()));
 
     arma::vec v   = Y.col(t) - d - ZZ * s;

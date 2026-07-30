@@ -4,7 +4,7 @@
 \alias{hank_simple_block}
 \title{Define a simple (representative-agent) sequence-space block}
 \usage{
-hank_simple_block(name, inputs, outputs, fn, jac = NULL)
+hank_simple_block(name, inputs, outputs, fn, jac = NULL, djac_dtheta = NULL)
 }
 \arguments{
 \item{name}{Character block name.}
@@ -18,6 +18,18 @@ output paths.}
 Jacobian as a nested list \code{[[output]][[input]]} of \code{T x T}
 matrices.  If \code{NULL}, the Jacobian is computed by central finite
 differences around the steady state.}
+
+\item{djac_dtheta}{Optional named list of functions
+\code{function(ss, T_h)}, one per structural parameter this block's
+Jacobian depends on, each returning \eqn{\partial J/\partial\theta_k} in
+the same nested \code{[[output]][[input]]} shape as \code{jac} (omit an
+\code{[[output]][[input]]} entry that is identically zero).
+\code{\link{hank_model_dtheta}} propagates these through the DAG chain
+rule to \eqn{dH_U/d\theta_k}, \eqn{dH_Z/d\theta_k} and ultimately
+\eqn{d\Theta_z/d\theta_k} -- so a block only ever declares the derivative
+of its OWN small Jacobian, never a packed GE matrix. Used by the exact
+route of \code{\link{hank_loglik_ar_structural_grad}}; see
+\code{\link{hank_dtheta_fn}}.}
 }
 \value{
 An object of class \code{hank_block} (kind \code{"simple"}).

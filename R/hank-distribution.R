@@ -66,7 +66,15 @@
 #' @return A sparse \code{dgCMatrix} (\code{Matrix} package), row-stochastic.
 #' @export
 hank_forward_operator <- function(a_pol, a_grid, Pi) {
+  if (!is.matrix(a_pol) || !is.numeric(a_pol) || !all(is.finite(a_pol)))
+    stop("hank_forward_operator(): 'a_pol' must be a finite numeric ",
+         "n_e x n_a matrix.")
   n_e <- nrow(a_pol); n_a <- ncol(a_pol)
+  if (!is.numeric(a_grid) || length(a_grid) != n_a ||
+      !all(is.finite(a_grid)) || (n_a > 1L && any(diff(a_grid) <= 0)))
+    stop("hank_forward_operator(): 'a_grid' must be a finite, strictly ",
+         "increasing numeric vector of length ncol(a_pol) (", n_a, ").")
+  .hank_check_markov(Pi, n_e, caller = "hank_forward_operator")
   lot <- .hank_lottery(a_pol, a_grid)
 
   ## Build (from, to, value) triplets.  For each (e,a) and each e' with
@@ -113,14 +121,61 @@ hank_forward_operator <- function(a_pol, a_grid, Pi) {
 #'   uniform.
 #' @param tol Convergence tolerance on \code{max|d change|}.
 #' @param maxit Maximum iterations.
+#' @param backend Character: \code{"cpp"} (default) or \code{"R"}. \code{"cpp"}
+#'   runs the power iteration in a compiled kernel directly off \code{Lambda}'s
+#'   CSC slots (\code{d_next = t(Lambda) \%*\% d}, without ever forming the
+#'   transpose), for the same numerics as the R path. Defaults to
+#'   \code{getOption("dynhr.hank_backend", "cpp")}; the R reference path
+#'   remains available via \code{backend = "R"} or
+#'   \code{options(dynhr.hank_backend = "R")}.
 #'
 #' @return A list with \code{d} (stationary distribution vector, sums to 1),
 #'   \code{iterations}, and \code{converged}.
 #' @export
 hank_stationary_dist <- function(Lambda, d0 = NULL, tol = 1e-13,
-                                 maxit = 200000L) {
+                                 maxit = 200000L,
+                                 backend = getOption("dynhr.hank_backend", "cpp")) {
+  backend <- match.arg(backend, c("R", "cpp"))
+  ## Input contract (adversarial review 2026-07-13, P1): an unvalidated d0
+  ## previously reached the C++ kernel unchecked -- a zero-mass d0 became
+  ## NaN/NaN after normalization and the kernel's NaN-swallowing max-diff
+  ## test returned converged = TRUE on iteration 1; a short d0 indexed past
+  ## the end of a std::vector (undefined behavior). Both backends now reject
+  ## invalid inputs identically, before any normalization.
   n <- nrow(Lambda)
+  if (is.null(n) || n != ncol(Lambda))
+    stop("hank_stationary_dist(): 'Lambda' must be a square matrix.")
+  lam_vals <- tryCatch(
+    if (methods::is(Lambda, "sparseMatrix")) Lambda@x else
+      as.numeric(as.matrix(Lambda)),
+    error = function(e) NULL)
+  if (!is.null(lam_vals) && !all(is.finite(lam_vals)))
+    stop("hank_stationary_dist(): 'Lambda' has non-finite entries.")
+  if (!(is.numeric(tol) && length(tol) == 1L && is.finite(tol) && tol > 0))
+    stop("hank_stationary_dist(): 'tol' must be a finite positive scalar.")
+  if (!(is.numeric(maxit) && length(maxit) == 1L && is.finite(maxit) &&
+        maxit >= 1))
+    stop("hank_stationary_dist(): 'maxit' must be a finite positive count.")
+  if (!is.null(d0)) {
+    if (!is.numeric(d0) || length(d0) != n)
+      stop("hank_stationary_dist(): 'd0' must be a numeric vector of ",
+           "length nrow(Lambda) (", n, "), got length ", length(d0), ".")
+    if (!all(is.finite(d0)) || any(d0 < 0))
+      stop("hank_stationary_dist(): 'd0' must be finite and non-negative.")
+    if (sum(d0) <= 0)
+      stop("hank_stationary_dist(): 'd0' must have strictly positive total ",
+           "mass (sum = ", format(sum(d0)), ").")
+  }
   d <- if (is.null(d0)) rep(1 / n, n) else d0 / sum(d0)
+
+  if (backend == "cpp") {
+    Lc  <- methods::as(Lambda, "CsparseMatrix")
+    res <- hank_stationary_dist_lambda_cpp(Lc@p, Lc@i, Lc@x, n, d,
+                                           tol, as.integer(maxit))
+    return(list(d = res$d, iterations = as.integer(res$iterations),
+                converged = as.logical(res$converged)))
+  }
+
   Lt <- Matrix::t(Lambda)
   converged <- FALSE
   it <- 0L
@@ -150,8 +205,10 @@ hank_stationary_dist <- function(Lambda, d0 = NULL, tol = 1e-13,
 
   for (it in seq_len(maxit)) {
     d_new <- as.numeric(matvec(Lt, d))
-    if (max(abs(d_new - d)) < tol) { d <- d_new; converged <- TRUE; break }
+    md <- max(abs(d_new - d))
     d <- d_new
+    if (is.na(md)) break                     # NaN iterate: fail loudly, fast
+    if (md < tol) { converged <- TRUE; break }
   }
   d <- d / sum(d)
   list(d = d, iterations = it, converged = converged)
@@ -204,6 +261,51 @@ hank_stationary_dist <- function(Lambda, d0 = NULL, tol = 1e-13,
 .hank_vec_to_mat <- function(v, n_e, n_a) matrix(v, n_e, n_a, byrow = TRUE)
 
 
+## MATRIX-FREE FORWARD PUSH: t(Lambda(a_pol)) %*% D, without ever building
+## Lambda.
+##
+## WHY. The fake-news backward sweep (.hank_curly_sweep) needs the
+## distributional response to a perturbed savings policy, which it obtained by
+## calling hank_forward_operator() twice per date and multiplying each sparse
+## operator into D_ss. Measured (T_h = 200, n_a = 100, n_e = 3, installed -O2):
+## hank_forward_operator 0.253 ms vs 0.015 ms for the product it feeds, so
+## **86% of the sweep was assembling n_e*n_a x n_e*n_a sparse matrices for a
+## matvec that never needs one** -- and the sweep is 94% of a het-block
+## structural FD tap. This is the "lazy Lambda" follow-up flagged when the C++
+## EGM backend landed (0.9.0.0004) and never taken.
+##
+## The identity is the same one hank_forward_operator() encodes, contracted
+## rather than materialized: Lambda[(e,a), (e',a')] = Pi[e,e'] * lottery(a->a'),
+## so
+##   (t(Lambda) D)[(e',a')] = sum_e Pi[e,e'] * sum_a D[e,a] * lottery(a->a'),
+## i.e. an asset-lottery scatter WITHIN each income state, then one n_e x n_e
+## mixing matmul. Both factors are exactly what the triplet builder writes into
+## `val` (pr * pvec and pr * (1 - pvec)), so this is an algebraic
+## reassociation, not a different discretization: it agrees with the sparse
+## path to floating-point round-off (asserted at 1e-15 in
+## test-hank-forward-push.R), differing only in summation ORDER.
+##
+## Boundary/degenerate cases need no special handling here for the same reason
+## they need none there: .hank_lottery() clamps i to [1, n_a-1] and p to
+## [0, 1], so an off-grid policy puts its whole mass on one bracketing node and
+## the other node receives an exact zero.
+.hank_forward_push <- function(a_pol, a_grid, Pi, D) {
+  n_e <- nrow(a_pol); n_a <- ncol(a_pol)
+  Dm <- if (is.matrix(D)) D else .hank_vec_to_mat(D, n_e, n_a)
+  lot <- .hank_lottery(a_pol, a_grid)
+  off <- (seq_len(n_e) - 1L) * n_a                  # income-state block offset
+  key <- c(off + lot$i, off + lot$i + 1L)           # recycles down the columns
+  w   <- c(Dm * lot$p, Dm * (1 - lot$p))
+  ## Scatter-add: keys repeat (many source cells land on the same node), so
+  ## this cannot be an indexed assignment.
+  acc <- numeric(n_e * n_a)
+  s <- rowsum(w, key, reorder = FALSE)
+  acc[as.integer(rownames(s))] <- s[, 1L]
+  ## acc is indexed (e-1)*n_a + a', i.e. distribution order; mix over income.
+  .hank_mat_to_vec(crossprod(Pi, .hank_vec_to_mat(acc, n_e, n_a)))
+}
+
+
 #' Aggregate a per-agent quantity over the distribution
 #'
 #' Both arguments are coerced to distribution (row-major) order before the
@@ -212,11 +314,56 @@ hank_stationary_dist <- function(Lambda, d0 = NULL, tol = 1e-13,
 #'
 #' @param d Distribution: a length-\code{n_e*n_a} vector (distribution order) or
 #'   an \code{n_e x n_a} matrix.
-#' @param x Per-agent quantity, same shape as \code{d}.
+#' @param x Per-agent quantity, same shape as \code{d}. Mixing a distribution
+#'   VECTOR with a policy MATRIX (or vice versa) is allowed when the total
+#'   cell counts agree -- the standard package idiom
+#'   \code{hank_aggregate(block$D, block$a)} -- but incompatible sizes are an
+#'   error: R's silent recycling previously let an exactly-dividing mismatch
+#'   (e.g. \code{length(d) = 4}, \code{length(x) = 2}) return a plausible,
+#'   numerically wrong scalar.
 #' @return The scalar mass-weighted mean \code{sum(d * x)}.
 #' @export
 hank_aggregate <- function(d, x) {
+  if (is.matrix(d) && is.matrix(x) && !identical(dim(d), dim(x)))
+    stop("hank_aggregate(): 'd' (", nrow(d), " x ", ncol(d), ") and 'x' (",
+         nrow(x), " x ", ncol(x), ") must have identical dimensions.")
   dv <- if (is.matrix(d)) .hank_mat_to_vec(d) else as.numeric(d)
   xv <- if (is.matrix(x)) .hank_mat_to_vec(x) else as.numeric(x)
+  if (length(dv) != length(xv))
+    stop("hank_aggregate(): 'd' (", length(dv), " cells) and 'x' (",
+         length(xv), " cells) must cover the same number of cells -- ",
+         "refusing to recycle.")
   sum(dv * xv)
+}
+
+
+#' Validate a Markov transition matrix at a public HANK boundary
+#'
+#' Shared input contract (adversarial review 2026-07-13, P2): \code{Pi} must
+#' be a square numeric \code{n x n} matrix, finite, entrywise non-negative
+#' (within \code{tol}), with every row summing to 1 (within \code{tol}).
+#' Inner iteration loops stay validation-free; public constructors/solvers
+#' call this once at their entry boundary.
+#'
+#' @param Pi Candidate transition matrix.
+#' @param n Required dimension.
+#' @param caller Function name for the error message.
+#' @param tol Numerical tolerance for non-negativity and row sums.
+#' @keywords internal
+.hank_check_markov <- function(Pi, n, caller, tol = 1e-8) {
+  if (!is.matrix(Pi) || !is.numeric(Pi) || nrow(Pi) != n || ncol(Pi) != n)
+    stop(caller, "(): 'Pi' must be a numeric ", n, " x ", n,
+         " matrix (got ",
+         if (is.matrix(Pi)) paste0(nrow(Pi), " x ", ncol(Pi)) else
+           paste0("a ", class(Pi)[1L]), ").")
+  if (!all(is.finite(Pi)))
+    stop(caller, "(): 'Pi' has non-finite entries.")
+  if (any(Pi < -tol))
+    stop(caller, "(): 'Pi' has negative entries (min = ",
+         format(min(Pi)), ") -- not a transition matrix.")
+  rs <- rowSums(Pi)
+  if (any(abs(rs - 1) > tol))
+    stop(caller, "(): 'Pi' rows must sum to 1 (max |rowsum - 1| = ",
+         format(max(abs(rs - 1))), ") -- not row-stochastic.")
+  invisible(TRUE)
 }

@@ -208,6 +208,7 @@ new_dynhr_mod <- function(...) {
                                      value = numeric(0), stringsAsFactors = FALSE),
     filter_tunes        = list(tunes = data.frame()),
     heteroskedastic_shocks = list(scales = data.frame()),
+    stochastic_volatility = list(sv = data.frame()),
     estimated_params    = data.frame(),
     estimated_params_init = data.frame(),
     commands            = list(),
@@ -870,6 +871,20 @@ parse_mod <- function(file_or_text, verbose = FALSE) {
     list(scales = empty_hs)
   }
 
+  # ---- 8d. stochastic_volatility block ------------------------------------
+  sv_block <- extract_paired_block(txt, "stochastic_volatility")
+  stochastic_volatility_parsed <- if (sv_block$found) {
+    out_sv <- parse_stochastic_volatility_block(sv_block$body)
+    class(out_sv) <- "sv_spec"
+    out_sv
+  } else {
+    empty_sv <- data.frame(shock = character(0), stringsAsFactors = FALSE)
+    empty_sv$mu <- list(); empty_sv$rho <- list(); empty_sv$sigma_eta <- list()
+    out_sv <- list(sv = empty_sv)
+    class(out_sv) <- "sv_spec"
+    out_sv
+  }
+
   # ---- 9. Estimated params ---------------------------------------------
   ep_block <- extract_paired_block(txt, "estimated_params")
   estimated_params <- if (ep_block$found)
@@ -1061,6 +1076,7 @@ parse_mod <- function(file_or_text, verbose = FALSE) {
     det_shocks           = det_shocks,
     filter_tunes         = filter_tunes,
     heteroskedastic_shocks = heteroskedastic_shocks_parsed,
+    stochastic_volatility = stochastic_volatility_parsed,
     estimated_params     = estimated_params,
     estimated_params_init = ep_init,
     commands             = commands,

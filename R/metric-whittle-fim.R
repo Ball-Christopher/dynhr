@@ -170,8 +170,9 @@ whittle_fim <- function(TT, RR, ZZ, DD, Sigma_e,
     S_j <- H_j %*% Sigma_e %*% Conj(t(H_j))
     if (me_variance > 0) S_j <- S_j + me_variance * diag(n_obs)
 
-    ## Invert S_j (eigendecompose for robustness, same as .whittle_loglik)
-    ev_j <- tryCatch(eigen(S_j, symmetric = TRUE), error = function(e) NULL)
+    ## Invert S_j (eigendecompose for robustness, same as .whittle_loglik;
+    ## .eigen_hermitian_safe avoids the zheev segfault under vecLib BLAS)
+    ev_j <- tryCatch(.eigen_hermitian_safe(S_j), error = function(e) NULL)
     if (is.null(ev_j)) next
     ev_max_j <- max(ev_j$values)
     if (ev_max_j <= 0) next

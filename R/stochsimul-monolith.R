@@ -462,7 +462,8 @@ simulate_model <- function(dr, n_periods = 200L, shocks = NULL,
 ## 3. THEORETICAL MOMENTS (Lyapunov equation)
 ## ============================================================================
 
-#' Solve the discrete Lyapunov equation: X = A X A' + B
+#' Solve the discrete Lyapunov equation X = A X A' + B
+#'
 #' Uses the doubling algorithm for efficiency.
 #'
 #' @param A Square matrix
@@ -470,7 +471,7 @@ simulate_model <- function(dr, n_periods = 200L, shocks = NULL,
 #' @param max_iter Maximum iterations
 #' @param tol Convergence tolerance
 #' @return Solution matrix X
-#' @noRd
+#' @export
 solve_lyapunov <- function(A, B, max_iter = 500L, tol = 1e-14) {
   n <- nrow(A)
 

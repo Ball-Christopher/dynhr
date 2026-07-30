@@ -422,6 +422,12 @@ dynhr_nuts <- function(
   }
 
   # --- Gradient function ---
+  # kernel_stats (F5): make_posterior_grad()'s "implicit"/"adjoint"/
+  # "adjoint_solution" closures attach fallback-usage counters as
+  # attr(grad_fn, "kernel_stats") -- captured from the caller-supplied
+  # grad_fn BEFORE any transform-wrapping (which would drop the attribute)
+  # and surfaced in the returned diagnostics list below.
+  grad_fn_kernel_stats <- attr(grad_fn, "kernel_stats")
   if (is.null(grad_fn)) {
     .grad <- function(theta) .hmc_gradient(.lp_scalar, theta, method = grad_method)
   } else if (!is.null(transform)) {
@@ -938,7 +944,9 @@ dynhr_nuts <- function(
     n_grad_evals    = n_grad_evals,
     elapsed_secs    = elapsed,
     sampler         = "nuts",
-    checkpoint_dir  = if (ckpt) checkpoint$dir else NULL
+    checkpoint_dir  = if (ckpt) checkpoint$dir else NULL,
+    kernel_stats    = if (is.null(grad_fn_kernel_stats)) NULL
+                       else as.list(grad_fn_kernel_stats)
   )
 }
 

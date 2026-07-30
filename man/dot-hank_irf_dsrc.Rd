@@ -10,7 +10,8 @@
 \item{model}{A \code{\link{hank_model}}.}
 
 \item{dZ}{Named list of length-\code{T} exogenous shock paths (deviations),
-one per \code{model$exogenous} (missing entries treated as zero).}
+one per \code{model$exogenous} (missing entries treated as zero). A bare
+numeric vector is accepted only when the model has exactly one exogenous.}
 }
 \value{
 Named list \code{dsrc}: one length-\code{T_h} deviation path per

@@ -349,7 +349,7 @@
 #'   Bartels–Stewart solver `.solve_kron_compact_sparse`, which never
 #'   materialises the ns^3 × ns^3 Kronecker matrix and so breaks the dense
 #'   order-3 wall on high-dimensional-but-sparse state blocks (e.g. the
-#'   emitted finite HANK, n_s ≈ 32). `NULL` (auto) turns the sparse route on
+#'   emitted finite HANK, n_s approx. 32). `NULL` (auto) turns the sparse route on
 #'   automatically once `n_state^3` exceeds `sparse_threshold`. The sparse
 #'   route is bit-parity to the dense path on well-conditioned models and
 #'   residual-verified (with dense fallback) otherwise.

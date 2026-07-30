@@ -129,7 +129,59 @@ shock_cov <- function(model, params = NULL, exo_names = NULL) {
 ## @param theta  Named numeric draw (from prior_spec ordering).
 ## @param params Optional starting vector (default model$param_values).
 ## @return params with theta applied (structural params + injected shock stds).
-.apply_theta_to_params <- function(model, theta, params = NULL) {
+#' Apply an estimated parameter vector to a model's parameter values
+#'
+#' Merges a named vector of ESTIMATED quantities (a posterior draw, a
+#' posterior mode, a swept point) into a model's parameter vector, returning
+#' the result. This is the conversion that sits between an estimation result
+#' and the solver: the output is what you pass as
+#' \code{solve_steady_state(model, params = ...)}.
+#'
+#' It exists as a public route because
+#' \code{\link{set_param_values}} cannot do this job: that function ERRORS on
+#' any name outside \code{model$param_names}, whereas an estimated vector
+#' routinely also carries SHOCK STANDARD DEVIATIONS under Dynare's
+#' \code{stderr <shock>} convention. Those arrive named for the shock, not for
+#' a parameter, and are injected under the shock's own name so the downstream
+#' shock-covariance builder picks them up as that shock's standard deviation.
+#'
+#' @param model A parsed model (see \code{\link{parse_mod}}).
+#' @param theta Named numeric vector of estimated values. Names may be model
+#'   parameters, shock names (an estimated \code{stderr <shock>}), or
+#'   correlation entries such as \code{"corr e_a,e_b"}.
+#' @param params Optional named parameter vector to merge INTO. \code{NULL}
+#'   (default) starts from \code{model$param_values}. Pass an existing vector
+#'   to layer several updates without going back to the model each time.
+#'
+#' @return The merged named numeric parameter vector. \code{model} itself is
+#'   NOT modified.
+#'
+#' @section Names that are deliberately passed over:
+#' Entries of \code{theta} that are neither a model parameter nor a declared
+#' shock -- in practice \code{corr <a>,<b>} entries -- are left OUT of the
+#' returned vector by design: a correlation is not a parameter value and is
+#' consumed separately when the shock covariance is assembled. An entry that is
+#' none of the three is also passed over here rather than raised, because the
+#' builder-time guard in \code{\link{make_log_posterior}} is the layer that
+#' rejects an unusable prior target, and duplicating that check here would make
+#' the same mistake fail in two places with different messages. **If you are
+#' calling this directly, compare \code{names(theta)} against the returned
+#' names when you need to be sure nothing was dropped silently.**
+#'
+#' @seealso \code{\link{set_param_values}} (parameters only, strict),
+#'   \code{\link{solve_steady_state}}, \code{\link{make_log_posterior}}
+#' @examples
+#' \donttest{
+#' mod <- system.file("extdata", "models", "rbc", "rbc.mod", package = "dynhr")
+#' if (nzchar(mod)) {
+#'   m  <- parse_mod(mod)
+#'   p  <- apply_theta_to_params(m, c(alpha = 0.33))
+#'   ss <- solve_steady_state(m, params = p)
+#'   ss$converged
+#' }
+#' }
+#' @export
+apply_theta_to_params <- function(model, theta, params = NULL) {
   if (is.null(params)) params <- model$param_values
   exo <- model$varexo_names %||% character(0)
   for (nm in names(theta)) {
@@ -145,6 +197,12 @@ shock_cov <- function(model, params = NULL, exo_names = NULL) {
   }
   params
 }
+
+## Internal alias, retained so the many existing internal call sites keep
+## working. A direct binding, NOT a wrapper: this runs once per posterior
+## evaluation, so an extra frame would be pure overhead, and two
+## implementations could drift.
+.apply_theta_to_params <- apply_theta_to_params
 
 ## Validate that every estimated prior maps to something the likelihood uses.
 ## Fail loudly (rather than silently dropping) when a prior name is neither a
@@ -296,14 +354,51 @@ shock_cov <- function(model, params = NULL, exo_names = NULL) {
 #'   \code{cumulant_orders}, \code{cumulant_weight}), or to
 #'   \code{make_log_posterior_tpf} when \code{likelihood = "tpf"} (e.g.
 #'   \code{n_particles}, \code{ess_target}, \code{n_mh}, \code{seed}).
-#' @return function(theta) -> list(logpost, loglik, logprior)
-#' @noRd
+#' @param me_extra Optional \code{n_obs x T} matrix of ADDITIONAL per-period
+#'   measurement-error variance, added on top of \code{me_variance}. Rows are
+#'   observables in \code{obs_vars} order and columns are periods, so a row
+#'   swap is a different model -- see the multi-value testing note in
+#'   \code{CLAUDE.md}.
+#' @param shock_scale Optional \code{n_exo x T} matrix of KNOWN per-period
+#'   shock standard-deviation scale factors (the deterministic-volatility
+#'   path). Rows are shocks in declaration order.
+#' @param system_priors Optional \code{system_prior_spec} object placing priors
+#'   on model-implied quantities (moments, IRF features) rather than on
+#'   parameters directly; its log-density is added to the parameter prior.
+#' @param infeasible_penalty Optional soft penalty replacing the hard
+#'   \code{-Inf} returned where the model cannot be solved, which lets
+#'   gradient-based samplers see a slope out of an infeasible region instead of
+#'   a cliff. \code{NULL} (default) is OFF and byte-identical to the
+#'   unpenalised behaviour. A single number is taken as
+#'   \code{list(scale = x, floor = -1e6)}; a list must supply \code{scale} and
+#'   may supply \code{floor}.
+#' @param ctx Optional \code{\link{estimation_context}} bundling
+#'   \code{me_variance}, \code{likelihood}, \code{lik_init}, \code{me_extra},
+#'   \code{shock_scale}, \code{freq_band}, \code{system_priors},
+#'   \code{infeasible_penalty} and the Markov-switching specs. **When supplied,
+#'   its fields OVERRIDE the individual arguments silently**, so pass a context
+#'   or the individual arguments, not both.
+#' @param student_df Positive finite scalar: degrees of freedom for
+#'   \code{likelihood = "student_t"}. Ignored by the other likelihoods.
+#'
+#' @return A closure \code{function(theta)} returning
+#'   \code{list(logpost, loglik, logprior)}, where \code{theta} is the named
+#'   vector of ESTIMATED parameters described by \code{prior_spec}.
+#'
+#'   The closure captures a compiled model, so it holds external pointers and
+#'   **does not survive \code{saveRDS}/\code{readRDS} or transport to a worker
+#'   process**. Rebuild it in the target session by calling this function again
+#'   with the same arguments rather than serialising the closure.
+#'
+#' @seealso \code{\link{estimation_context}}, \code{\link{extract_prior_spec}},
+#'   \code{\link{log_prior}}
+#' @export
 make_log_posterior <- function(model, data, prior_spec, obs_vars = NULL,
                                compiled, me_variance = 0,
                                likelihood = c("gaussian", "cumulant",
                                               "whittle", "tpf", "pskf",
                                               "student_t", "pruned",
-                                              "ppf", "copf"),
+                                              "ppf", "copf", "sv_rbpf"),
                                lik_init = "auto",
                                me_extra = NULL,
                                shock_scale = NULL,
@@ -476,6 +571,32 @@ make_log_posterior <- function(model, data, prior_spec, obs_vars = NULL,
                           compiled, me_variance = me_variance,
                           system_priors = system_priors),
                      tpf_extra_args)))
+  }
+
+  if (likelihood == "sv_rbpf") {
+    ## Measurement-side stochastic volatility on the shocks: Rao-Blackwellized
+    ## particle filter over the latent AR(1) log-variance states, with the DSGE
+    ## states integrated analytically via kf_step (see R/sv-rbpf.R). The SV spec
+    ## already lives on `model$stochastic_volatility` (resolved by the runner);
+    ## the factory's default stochastic_volatility = NULL uses it.
+    if (!is.null(shock_scale))
+      stop("make_log_posterior: likelihood = \"sv_rbpf\" is incompatible with a ",
+           "deterministic shock_scale (heteroskedastic_shocks). The SV filter ",
+           "supplies the shock scale from the latent volatility path itself.",
+           call. = FALSE)
+    ## data must be n_obs x T (particle-filter convention) — transpose if needed.
+    data_sv <- if (ncol(data) == length(obs_vars)) t(data) else data
+    ## Forward ONLY the SV factory's own tuning args from ... (run_full_estimation
+    ## forwards its whole ... here, so a blind splat would pass unrelated args
+    ## like n_iter into the strict factory signature and error).
+    dots <- list(...)
+    sv_extra_args <- dots[intersect(names(dots),
+                                    c("n_particles", "seed", "stochastic_volatility"))]
+    return(do.call(make_log_posterior_sv_rbpf,
+                   c(list(model = model, data = data_sv, prior_spec = prior_spec,
+                          obs_vars = obs_vars, compiled = compiled,
+                          me_variance = me_variance, power = power),
+                     sv_extra_args)))
   }
 
   if (likelihood == "ppf" || likelihood == "copf") {

@@ -24,7 +24,7 @@ run_full_estimation(
   mode_method = "newrat",
   mode_n_starts = NULL,
   me_variance = 0,
-  likelihood = c("gaussian", "cumulant", "whittle", "tpf"),
+  likelihood = c("gaussian", "cumulant", "whittle", "tpf", "sv_rbpf"),
   lik_init = "auto",
   freq_band = c(0, pi),
   system_priors = NULL,
@@ -45,6 +45,7 @@ run_full_estimation(
   ramsey_burn_in = 100L,
   filter_tunes = NULL,
   heteroskedastic_shocks = NULL,
+  stochastic_volatility = NULL,
   tpf_options = list(),
   plan = NULL,
   ...
@@ -188,6 +189,11 @@ Pass \code{FALSE} to ignore the mod-file block.}
 \item{heteroskedastic_shocks}{Call-level heteroskedastic-shocks override.
 \code{NULL} (default) uses the \code{heteroskedastic_shocks} block from
 the \code{.mod} file if present.  Mutually exclusive with \code{plan}.}
+
+\item{stochastic_volatility}{Call-level stochastic-volatility override.
+\code{NULL} (default) uses the \code{stochastic_volatility} block from
+the \code{.mod} file if present; supply one to attach or replace the
+SV specification for this call only, leaving the model object untouched.}
 
 \item{tpf_options}{Named list of options forwarded to
 \code{make_log_posterior_tpf} when \code{likelihood = "tpf"}.

@@ -114,7 +114,7 @@
 estimation_context <- function(
     me_variance     = 0,
     likelihood      = c("gaussian", "cumulant", "whittle", "tpf", "pskf",
-                        "student_t", "pkf", "ppf", "copf", "pruned"),
+                        "student_t", "pkf", "ppf", "copf", "pruned", "sv_rbpf"),
     lik_init        = "auto",
     me_extra        = NULL,
     shock_scale     = NULL,
@@ -355,10 +355,18 @@ print.dynhr_estimation_context <- function(x, ...) {
   ## cumulant: make_posterior_grad(likelihood = "cumulant") mirrors the forward
   ## order-2 solve and dispatches to cumulant_loglik_grad (Tier 14 B2).
   ## pskf/tpf are excluded: those likelihoods have no analytic gradient path.
-  ## Note: "pruned" is NOT listed here -- analytic gradient is not yet
-  ## implemented for the pruned-SS KF (numerical FD fallback applies).
+  ## pruned: make_posterior_grad(likelihood = "pruned") IS implemented and
+  ## VALIDATED for BOTH pruned orders -- order 2 is the exact adjoint-chain
+  ## gradient (R/pruned-kf-adjoint.R + R/pruned-grad-chain.R); order 3 is the
+  ## semi-analytic fold/adjoint hybrid (R/pruned-grad-chain-order3.R). Both
+  ## match numDeriv FD of the pruned log-posterior to FD-limited tolerance
+  ## (max rel diff <= 8.6e-5 on caldara_rp SV order-2, <= 2.8e-8 elsewhere
+  ## across caldara_rp + rbc2shock at orders 2 and 3; the validation is the
+  ## anti-regression end-to-end assertion in test-pruned-gradient-gate.R).
+  ## Any per-parameter chain failure falls back to exact FD-of-forward, so the
+  ## returned gradient is never silently wrong.
   !identical(ctx$gradient_policy, "numerical") &&
-    ctx$likelihood %in% c("gaussian", "whittle", "cumulant")
+    ctx$likelihood %in% c("gaussian", "whittle", "cumulant", "pruned")
 }
 
 

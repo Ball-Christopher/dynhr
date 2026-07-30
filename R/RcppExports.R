@@ -5,6 +5,86 @@ fdb_compose_folded_cpp <- function(Nc, n_out, shapes, Glist, Hlist) {
     .Call(`_dynhr_fdb_compose_folded_cpp`, Nc, n_out, shapes, Glist, Hlist)
 }
 
+hank_ar_slab_adjoint_psi_cpp <- function(Bvec, Psi) {
+    .Call(`_dynhr_hank_ar_slab_adjoint_psi_cpp`, Bvec, Psi)
+}
+
+hank_ar_score_weights_cpp <- function(Sidx, Sinv, v, n_g) {
+    .Call(`_dynhr_hank_ar_score_weights_cpp`, Sidx, Sinv, v, n_g)
+}
+
+hank_egm_step_cpp <- function(Va_p_, a_grid_, y_, r, beta, eis, Pi_, amin) {
+    .Call(`_dynhr_hank_egm_step_cpp`, Va_p_, a_grid_, y_, r, beta, eis, Pi_, amin)
+}
+
+hank_egm_solve_cpp <- function(a_grid_, y_, r, beta, eis, Pi_, amin, tol, maxit, Va_init_ = NULL) {
+    .Call(`_dynhr_hank_egm_solve_cpp`, a_grid_, y_, r, beta, eis, Pi_, amin, tol, maxit, Va_init_)
+}
+
+hank_stationary_dist_cpp <- function(a_pol_, a_grid_, Pi_, tol, maxit) {
+    .Call(`_dynhr_hank_stationary_dist_cpp`, a_pol_, a_grid_, Pi_, tol, maxit)
+}
+
+hank_stationary_dist_lambda_cpp <- function(p, i, x, n, d0, tol, maxit) {
+    .Call(`_dynhr_hank_stationary_dist_lambda_cpp`, p, i, x, n, d0, tol, maxit)
+}
+
+hank_egm2_step_cpp <- function(Vb_p_, Va_p_, b_grid_, a_grid_, k_grid_, y_, rb, ra, beta, eis, chi0, chi1, chi2, Pi_, Psi1_grid_, threads = 1L) {
+    .Call(`_dynhr_hank_egm2_step_cpp`, Vb_p_, Va_p_, b_grid_, a_grid_, k_grid_, y_, rb, ra, beta, eis, chi0, chi1, chi2, Pi_, Psi1_grid_, threads)
+}
+
+hank_egm2_solve_cpp <- function(Vb_init, Va_init, b_grid_, a_grid_, k_grid_, y_, rb, ra, beta, eis, chi0, chi1, chi2, Pi_, Psi1_grid_, tol, maxit, threads = 1L) {
+    .Call(`_dynhr_hank_egm2_solve_cpp`, Vb_init, Va_init, b_grid_, a_grid_, k_grid_, y_, rb, ra, beta, eis, chi0, chi1, chi2, Pi_, Psi1_grid_, tol, maxit, threads)
+}
+
+hank_curly_sweep2_cpp <- function(Vb_ss_, Va_ss_, dVb0_, dVa0_, b_grid_, a_grid_, k_grid_, y_, rb, ra, beta, eis, chi0, chi1, chi2, Pi_, Psi1_grid_, delta_va, T_h, threads = 1L) {
+    .Call(`_dynhr_hank_curly_sweep2_cpp`, Vb_ss_, Va_ss_, dVb0_, dVa0_, b_grid_, a_grid_, k_grid_, y_, rb, ra, beta, eis, chi0, chi1, chi2, Pi_, Psi1_grid_, delta_va, T_h, threads)
+}
+
+hank_forward_apply3_cpp <- function(d_pol, f_pol, a_pol, d_grid, f_grid, a_grid, Pi, x, transpose = FALSE) {
+    .Call(`_dynhr_hank_forward_apply3_cpp`, d_pol, f_pol, a_pol, d_grid, f_grid, a_grid, Pi, x, transpose)
+}
+
+hank_forward_direction3_cpp <- function(d_pol, f_pol, a_pol, dd, df, da, d_grid, f_grid, a_grid, Pi, dist, delta, Pi_p = NULL, Pi_m = NULL) {
+    .Call(`_dynhr_hank_forward_direction3_cpp`, d_pol, f_pol, a_pol, dd, df, da, d_grid, f_grid, a_grid, Pi, dist, delta, Pi_p, Pi_m)
+}
+
+hank_forward_legs3_cpp <- function(d_plus, f_plus, a_plus, d_minus, f_minus, a_minus, d_grid, f_grid, a_grid, Pi_plus, Pi_minus, dist, step) {
+    .Call(`_dynhr_hank_forward_legs3_cpp`, d_plus, f_plus, a_plus, d_minus, f_minus, a_minus, d_grid, f_grid, a_grid, Pi_plus, Pi_minus, dist, step)
+}
+
+hank_egm3_step_cpp <- function(Vd_, Vf_, Va_, dg_, fg_, ag_, y_, Pi_, rd, rf, ra, beta, eis, chi0, chi1, chi2, phi0, phi1, phi2, px = 1.0, threads = 1L) {
+    .Call(`_dynhr_hank_egm3_step_cpp`, Vd_, Vf_, Va_, dg_, fg_, ag_, y_, Pi_, rd, rf, ra, beta, eis, chi0, chi1, chi2, phi0, phi1, phi2, px, threads)
+}
+
+hank_egm3_solve_cpp <- function(Vd, Vf, Va, dg, fg, ag, y, Pi, rd, rf, ra, beta, eis, chi0, chi1, chi2, phi0, phi1, phi2, tol, maxit, relax, px = 1.0, threads = 1L) {
+    .Call(`_dynhr_hank_egm3_solve_cpp`, Vd, Vf, Va, dg, fg, ag, y, Pi, rd, rf, ra, beta, eis, chi0, chi1, chi2, phi0, phi1, phi2, tol, maxit, relax, px, threads)
+}
+
+hank_fnv1a64_cpp <- function(x) {
+    .Call(`_dynhr_hank_fnv1a64_cpp`, x)
+}
+
+#' Compiled lotteries + bilinear scatter for the two-asset forward push
+#'
+#' Kernel behind \code{.hank_forward_push2(backend = "cpp")}.  Returns the
+#' scatter accumulator BEFORE the income mixing, i.e. the vector \code{acc}
+#' indexed \code{(e-1)*n_b*n_a + j} with \code{e} the SOURCE income state; the
+#' caller applies \code{crossprod(Pi, .)}.
+#'
+#' @param b_pol,a_pol Numeric length-\code{n_e*n_b*n_a} vectors: the liquid and
+#'   illiquid policies in R's column-major \code{c(n_e, n_b, n_a)} layout.
+#' @param b_grid,a_grid Numeric increasing grids of length \code{n_b} /
+#'   \code{n_a} (both must have length >= 2; the R wrapper enforces this).
+#' @param Dv Numeric length-\code{n_e*n_b*n_a} distribution in the package's
+#'   two-asset CELL order.
+#' @param n_e,n_b,n_a Integer dimensions.
+#' @return Numeric length-\code{n_e*n_b*n_a} accumulator in cell order.
+#' @keywords internal
+hank_forward_push2_scatter_cpp <- function(b_pol, a_pol, b_grid, a_grid, Dv, n_e, n_b, n_a) {
+    .Call(`_dynhr_hank_forward_push2_scatter_cpp`, b_pol, a_pol, b_grid, a_grid, Dv, n_e, n_b, n_a)
+}
+
 eval_jac_tape_cpp <- function(dy, params, ss, op, ia, da, expr_len, out_row, out_col, n_eq, total_cols) {
     .Call(`_dynhr_eval_jac_tape_cpp`, dy, params, ss, op, ia, da, expr_len, out_row, out_col, n_eq, total_cols)
 }
@@ -57,8 +137,37 @@ ordered_qz_cpp <- function(E, D, critmod = 1.0000010) {
     .Call(`_dynhr_ordered_qz_cpp`, E, D, critmod)
 }
 
+#' Peak resident set size of the current process, in bytes
+#'
+#' Reads the operating system's own peak-RSS counter for the calling R
+#' process. This is a PEAK-SINCE-PROCESS-START figure -- monotone
+#' non-decreasing across the whole R session -- not the memory consumed by
+#' this call or by any single solve. It exists to feed the three-asset run
+#' manifest's peak-memory column (see \code{\link{hank_het3_manifest}}).
+#'
+#' \strong{Platform coverage.} POSIX (macOS/Linux/BSD) uses
+#' \code{getrusage(RUSAGE_SELF, \&ru)} and reads \code{ru_maxrss}. The units
+#' of that field are NOT portable: macOS/Darwin reports bytes, Linux
+#' reports kilobytes, and this function corrects for that internally so its
+#' OWN return value is always bytes. Windows uses
+#' \code{GetProcessMemoryInfo()}'s \code{PeakWorkingSetSize}, which is
+#' already in bytes. On any platform where none of these APIs is available,
+#' the function returns \code{NA_real_} rather than guess.
+#'
+#' @return A single \code{double}: peak RSS in bytes, or \code{NA_real_}
+#'   where the platform cannot report it.
+#' @seealso \code{\link{hank_het3_manifest}}
+#' @keywords internal
+.hank_peak_rss <- function() {
+    .Call(`_dynhr_hank_peak_rss`)
+}
+
 qr_static_transform_cpp <- function(f_static, f_minus_r, f_zero_r, f_plus_r, f_exo_r) {
     .Call(`_dynhr_qr_static_transform_cpp`, f_static, f_minus_r, f_zero_r, f_plus_r, f_exo_r)
+}
+
+sv_rbpf_loglik_cpp <- function(Y, TT, ZZ, RR, DD, Sigma_e, d, P0, sv_idx1, mu, rho, seta, n_particles, me_diag) {
+    .Call(`_dynhr_sv_rbpf_loglik_cpp`, Y, TT, ZZ, RR, DD, Sigma_e, d, P0, sv_idx1, mu, rho, seta, n_particles, me_diag)
 }
 
 tpf_propagate_particles <- function(particles, shocks, hx, hu, hxx, hxu, huu, hss) {

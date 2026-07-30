@@ -14,7 +14,9 @@ hank_coarse_anchored(
   w,
   A_target,
   lx_bracket = c(-0.05, 0.005),
-  tol = 1e-12
+  tol = 1e-12,
+  Pi_fn = NULL,
+  Pi_inputs = NULL
 )
 }
 \arguments{
@@ -32,6 +34,12 @@ hank_coarse_anchored(
 automatically; the upper end is capped so \code{beta_eff * (1 + r) < 1}).}
 
 \item{tol}{Root-finding tolerance on \code{lx}.}
+
+\item{Pi_fn, Pi_inputs}{Optional transition-matrix constructor and its
+steady-state inputs (see \code{\link{hank_het_block}}), carried onto the
+anchored block so the HANK+SAM endogenous-Pi machinery
+(\code{\link{hank_het_jacobian}} transition-input columns,
+\code{\link{hank_sam_reiter_statespace}}) works on the coarse block.}
 }
 \value{
 A list with the anchored \code{block} (a

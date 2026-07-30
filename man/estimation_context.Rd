@@ -7,7 +7,7 @@
 estimation_context(
   me_variance = 0,
   likelihood = c("gaussian", "cumulant", "whittle", "tpf", "pskf", "student_t", "pkf",
-    "ppf", "copf", "pruned"),
+    "ppf", "copf", "pruned", "sv_rbpf"),
   lik_init = "auto",
   me_extra = NULL,
   shock_scale = NULL,

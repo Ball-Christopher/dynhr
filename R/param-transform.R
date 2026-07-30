@@ -110,7 +110,7 @@
 #'     \item `dlog_jacobian(eta)`: named vector d/deta_j log|J|
 #'     \item `dtheta_deta(eta)`: named vector d theta_j / d eta_j
 #'   }
-#' @noRd
+#' @export
 build_param_transform <- function(prior_spec, par_names) {
   n <- length(par_names)
   types <- setNames(character(n), par_names)
@@ -298,7 +298,7 @@ build_param_transform <- function(prior_spec, par_names) {
 #'   or list), with `logpost` (and the bare scalar) adjusted by the Jacobian.
 #'   If the underlying logpost is -Inf, -Inf is returned unchanged (no
 #'   Jacobian added).
-#' @noRd
+#' @export
 make_transformed_logpost <- function(log_post_fn, tr, include_jacobian = TRUE) {
   function(eta) {
     if (is.null(names(eta))) names(eta) <- tr$par_names
@@ -329,7 +329,7 @@ make_transformed_logpost <- function(log_post_fn, tr, include_jacobian = TRUE) {
 #' @param tr      A "dynhr_param_transform" (from build_param_transform())
 #' @return function(eta) -> named numeric vector, eta-space gradient of the
 #'   Jacobian-adjusted log-posterior.
-#' @noRd
+#' @export
 make_transformed_grad <- function(grad_fn, tr) {
   function(eta) {
     if (is.null(names(eta))) names(eta) <- tr$par_names

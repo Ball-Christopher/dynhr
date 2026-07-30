@@ -40,8 +40,15 @@ aggregate response is a \code{K}-type preference mixture (see
 \code{\link{hank_mixture_blocks}}): every type shares the asset grid and
 prices, and MAY differ in its income process (\code{Pi}, \code{e}) -- e.g.
 a per-type Rouwenhorst calibration for an income-risk heterogeneity axis --
-as well as in \code{beta}. Because types interact solely through the common
-aggregate prices \code{(r, w)}, the block's sequence-space Jacobian and
+as well as in \code{beta}, \code{eis}, and the borrowing constraint
+\code{amin} (the WEALTH heterogeneity axis: per-type \code{amin} on the
+shared \code{a_grid}; see \code{\link{hank_het_block}}). Because a
+per-type \code{amin} lives on the shared grid, it keeps the
+\code{(e, a)} cell space common across types -- so, unlike per-type
+\code{Pi}/\code{e}, it does NOT flip \code{same_income} and pooled
+distribution objects remain valid. Because types interact solely through
+the common aggregate prices \code{(r, w)}, the block's sequence-space
+Jacobian and
 nonlinear map for the SCALAR aggregates (A, C) are EXACT omega-weighted
 sums of the per-type objects (see \code{\link{hank_mixture_jacobian}},
 \code{\link{hank_mixture_dist_jacobian}}) -- no cross term between types --

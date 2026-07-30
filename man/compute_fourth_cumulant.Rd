@@ -30,7 +30,7 @@ validated near the unit root; prefer \code{"window"} there.}
 }
 \value{
 List:
-  \item{kurtosis_obs}{Named numeric vector of marginal excess kurtosis γ_2}
+  \item{kurtosis_obs}{Named numeric vector of marginal excess kurtosis gamma_2}
   \item{c4_obs}{n_obs × n_obs^3 matrix: fourth cumulant of observables}
 }
 \description{

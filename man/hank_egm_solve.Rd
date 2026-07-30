@@ -14,7 +14,8 @@ hank_egm_solve(
   tol = 1e-11,
   maxit = 5000L,
   Va_init = NULL,
-  amin = NULL
+  amin = NULL,
+  backend = getOption("dynhr.hank_backend", "cpp")
 )
 }
 \arguments{
@@ -44,11 +45,43 @@ resolves to \code{a_grid[1L]} (the historical hardcoded behavior, so
 existing calls are byte-identical). A tighter (higher) \code{amin}
 decouples the borrowing limit from the grid floor, letting different
 household types face different constraints on a shared grid.}
+
+\item{backend}{Character: \code{"cpp"} (default) or \code{"R"}. \code{"cpp"}
+dispatches the whole backward-iteration loop to a compiled
+(RcppArmadillo) kernel -- no per-iteration R boundary crossing -- for
+the SAME numerics (same tiny = 1e-12 floors, same interpolation rule).
+Defaults to \code{getOption("dynhr.hank_backend", "cpp")}, so the
+package default is the compiled path; the R reference implementation
+remains available by passing \code{backend = "R"} or setting
+\code{options(dynhr.hank_backend = "R")} globally. Input validation and
+the feasibility (\code{min_coh}) pre-check run in this R wrapper
+regardless of backend, so error messages are unaffected by the choice.}
 }
 \value{
 A list with converged \code{Va}, \code{a} (savings policy), \code{c}
-  (consumption policy), plus \code{iterations} and \code{converged}. The
-  resolved \code{amin} is carried on the return list.
+  (consumption policy), the calibration (\code{a_grid}, \code{y}, \code{r},
+  \code{beta}, \code{eis}, \code{Pi}, and the resolved \code{amin}), and the
+  run metadata \code{\link{hank_het_manifest}} reads:
+  \describe{
+    \item{\code{iterations}}{Number of backward iterations run.}
+    \item{\code{converged}}{Logical: whether \code{tol} was met.}
+    \item{\code{last_policy_gap}}{The final \eqn{\max|a'_k - a'_{k-1}|},
+      i.e. the convergence criterion's own value on the last iteration.
+      \code{NA_real_} on \code{backend = "cpp"}: the compiled kernel tests
+      the gap internally and does not return it, and re-deriving it in R
+      would mean re-running a step, so it is reported as unknown rather
+      than invented.}
+    \item{\code{last_value_gap}}{The final \eqn{\max|V_a^k - V_a^{k-1}|}.
+      \code{NA_real_} on \code{backend = "cpp"} for the same reason.}
+    \item{\code{backend}}{Character: the backend that actually ran.}
+    \item{\code{threads}}{Always \code{1L}. The one-asset kernel is
+      deliberately serial (a whole solve is milliseconds, with only
+      \code{n_e} parallel tasks -- a measured no-go), so \code{1} is the
+      worker count that genuinely ran, not a placeholder.}
+    \item{\code{elapsed}}{Wall-clock seconds
+      (\code{proc.time()[["elapsed"]]} difference) spent in the backward
+      iteration, excluding this wrapper's argument validation.}
+  }
 }
 \description{
 Iterates the EGM backward step at constant prices \code{(r, y)} until the

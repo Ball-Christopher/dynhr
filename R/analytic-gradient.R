@@ -89,6 +89,34 @@
   g
 }
 
+#' Validate every prior_spec distribution name at BUILD time (Item F3).
+#'
+#' \code{.dlog_prior_density1} is only invoked lazily, inside the per-draw
+#' gradient closure returned by \code{\link{make_posterior_grad}}; a typo or
+#' unsupported distribution name in \code{prior_spec} would otherwise not
+#' \code{stop()} until the first (or a later, chain-dependent) gradient
+#' evaluation, crashing an MCMC/NUTS chain mid-run instead of at closure
+#' construction. This calls the same dispatcher once per row (the numeric
+#' value passed does not matter -- the switch on \code{distribution} fires
+#' regardless) so an unsupported name fails loud at
+#' \code{make_posterior_grad()} time, naming the offending parameter.
+#' @noRd
+.validate_prior_spec_dist <- function(prior_spec) {
+  for (i in seq_len(nrow(prior_spec))) {
+    tryCatch(
+      .dlog_prior_density1(prior_spec$p1[i], prior_spec$distribution[i],
+                           prior_spec$p1[i], prior_spec$p2[i]),
+      error = function(e) {
+        stop("make_posterior_grad(): prior_spec entry \"", prior_spec$name[i],
+             "\" has an unsupported distribution \"", prior_spec$distribution[i],
+             "\" (caught at build time, not mid-chain). Supported: beta, gamma, ",
+             "normal, inv_gamma (= inv_gamma1), inv_gamma2, uniform.",
+             call. = FALSE)
+      })
+  }
+  invisible(TRUE)
+}
+
 
 # ============================================================================
 # Analytic Kalman score for the shock-std (sigma) parameters
@@ -181,8 +209,16 @@
   if (.HAS_RCPP_KF_SCORE()) {
     out <- kf_score_sigma_cpp(Yd, TT, RR, ZZ, DD, Sigma_e, HH, SS, me_diag, P,
                               dSigma_list, dH, dS, dPk)
+    ## On ok = FALSE the C++ loop breaks out mid-recursion and `score` holds
+    ## whatever partial (e.g. all-zero) accumulator it had at the failing
+    ## step, not a meaningful gradient. Report NA, matching every other KF
+    ## gradient kernel's failure contract (.kf_loglik_adjoint et al.), so
+    ## callers can't mistake a zero-by-construction score for a real one.
+    if (!isTRUE(out$ok)) {
+      return(list(loglik = -Inf, score = setNames(rep(NA_real_, K), knm)))
+    }
     sc <- as.numeric(out$score); names(sc) <- knm
-    return(list(loglik = if (isTRUE(out$ok)) out$loglik else -Inf, score = sc))
+    return(list(loglik = out$loglik, score = sc))
   }
 
   ## R fallback (bit-equivalent reference; see test-kf-score-parity).
@@ -191,7 +227,15 @@
     PZ  <- P %*% tZZ
     F   <- ZZ %*% PZ + HH + me_diag
     F   <- (F + t(F)) * 0.5
-    Fc  <- chol(F); Fi <- chol2inv(Fc)
+    ## Same failure contract as the compiled kernel (ok = FALSE): a non-PD
+    ## forecast covariance degrades to -Inf/NA instead of throwing from the
+    ## reference path (this chol() was the last unguarded call of the
+    ## b827f41 crash class).
+    Fc  <- tryCatch(chol(F), error = function(e) NULL)
+    if (is.null(Fc)) {
+      return(list(loglik = -Inf, score = setNames(rep(NA_real_, K), knm)))
+    }
+    Fi <- chol2inv(Fc)
     loglik <- loglik + ll_const - 0.5 * (2 * sum(log(diag(Fc))) + sum(v * (Fi %*% v)))
     Kg   <- (TT %*% PZ + SS) %*% Fi
     TmKZ <- TT - Kg %*% ZZ
@@ -357,6 +401,7 @@ make_posterior_grad <- function(model, data, prior_spec, obs_vars, compiled,
                                 debias = TRUE,
                                 pruned_order = 2L) {
   grad_method <- match.arg(grad_method)
+  .validate_prior_spec_dist(prior_spec)  # F3: fail loud at BUILD time, not mid-chain
   sys_cache <- cache_system_structure(compiled)
   exo       <- model$varexo_names
   par_names <- prior_spec$name
@@ -937,7 +982,25 @@ make_posterior_grad <- function(model, data, prior_spec, obs_vars, compiled,
   ## caught; missing data reached the dense adjoint, which errors on NA.)
   warned_special <- FALSE
 
-  function(theta) {
+  ## F5: lightweight fallback-usage counters, so a chain silently degrading
+  ## from the analytic Kalman-adjoint/tangent kernel to the FD-hybrid path
+  ## leaves a trace (fallback draws do NOT register as NUTS divergences and,
+  ## after the first warning(), the `warned_special` latch above goes silent
+  ## for every later occurrence in the chain). Attached to the returned
+  ## closure as attr(grad_fn, "kernel_stats") -- read with as.list(). A
+  ## healthy chain has every n_fallback_*/n_score_nonfinite count at 0 and
+  ## n_calls > 0. Uses env-slot assignment (kernel_stats$x <- ...), NOT
+  ## `<<-` -- test-function-uniqueness.R's allow-list caps `<<-` uses in
+  ## this file at 3 (the three `warned_special <<- TRUE` latches).
+  kernel_stats <- new.env(parent = emptyenv())
+  kernel_stats$n_calls                 <- 0L
+  kernel_stats$n_fallback_special_init <- 0L  # non-stationary init/missing-data combo no kernel covers
+  kernel_stats$n_fallback_diffuse      <- 0L  # exact-diffuse adjoint kernel unavailable for the draw
+  kernel_stats$n_fallback_nondiffuse   <- 0L  # tangent/adjoint (non-diffuse) kernel threw/failed
+  kernel_stats$n_score_nonfinite       <- 0L  # per-parameter non-finite analytic score -> FD fallback
+
+  .impl_adj_grad_fn <- function(theta) {
+    kernel_stats$n_calls <- kernel_stats$n_calls + 1L
     names(theta) <- par_names
     g <- .dlog_prior(theta, prior_spec)        # analytic prior score (all params)
 
@@ -983,17 +1046,21 @@ make_posterior_grad <- function(model, data, prior_spec, obs_vars, compiled,
     }
     ## Specialized kernels cover two of the special-init cases exactly:
     ##  * stationary + missing data            -> .kf_loglik_adjoint_uni
+    ##    (supports shock_scale since 0.9.0.0008 -- per-period Se_t in the R
+    ##    reference, sandwiched Sigma_e adjoint; validated vs numDeriv in
+    ##    test-gradient-shock-scale-wired.R. me_extra remains excluded.)
     ##  * unit-root (diffuse) + complete data  -> .kf_loglik_adjoint_diffuse
-    ## Neither supports me_extra/shock_scale; the diffuse kernel additionally
-    ## needs complete data through the diffuse phase. Any remaining special case
-    ## (unit-root + missing; or special-init + me_extra/shock_scale) takes the
-    ## exact FD-hybrid path, which differentiates the forward likelihood directly.
+    ##    (no me_extra/shock_scale; needs complete data through the diffuse phase)
+    ## Any remaining special case (unit-root + missing; special-init + me_extra;
+    ## diffuse + shock_scale) takes the exact FD-hybrid path, which
+    ## differentiates the forward likelihood directly.
     use_uni_adjoint <- has_missing && !has_unit_root &&
-      is.null(me_extra) && is.null(shock_scale)
+      is.null(me_extra)
     use_diffuse_adjoint <- has_unit_root && !has_missing &&
       is.null(me_extra) && is.null(shock_scale)
     if ((has_unit_root || has_missing) &&
         !use_uni_adjoint && !use_diffuse_adjoint) {
+      kernel_stats$n_fallback_special_init <- kernel_stats$n_fallback_special_init + 1L
       if (!warned_special) {
         warning("make_posterior_grad: ", grad_method, " gradient with a ",
                 "non-stationary init and/or (me_extra/shock_scale +) missing ",
@@ -1081,6 +1148,7 @@ make_posterior_grad <- function(model, data, prior_spec, obs_vars, compiled,
         error = function(e) NULL)
       if (is.null(tang) || !isTRUE(tang$stage1_ok) || !isTRUE(tang$stage2_ok) ||
           !is.finite(tang$loglik)) {
+        kernel_stats$n_fallback_diffuse <- kernel_stats$n_fallback_diffuse + 1L
         if (!warned_special) {
           warning("make_posterior_grad: exact-diffuse adjoint gradient ",
                   "unavailable for this draw; using the FD-hybrid fallback.",
@@ -1089,35 +1157,61 @@ make_posterior_grad <- function(model, data, prior_spec, obs_vars, compiled,
         }
         return(hybrid_grad_fn(theta))
       }
-    } else if (use_uni_adjoint) {
-      ## Missing-data multivariate adjoint with per-period observed-row
-      ## subsetting; stationary Lyapunov P0 (P0 = NULL). me_variance is scalar.
-      tang <- .kf_loglik_adjoint_uni(Y, ss, d_ss_list, me_variance = me_variance,
-                                     P0 = NULL)
-    } else if (use_sol_adjoint) {
-      ## Dense stationary adjoint WITH bar export (the _ss long-T variant does
-      ## not export bars; the O(T) n^2 storage is accepted here).
-      tang <- .kf_loglik_adjoint(Y, ss, d_ss_list, me_variance = me_variance,
-                                 me_extra = me_extra, shock_scale = shock_scale,
-                                 return_bars = TRUE)
-    } else if (grad_method == "adjoint" || grad_method == "adjoint_solution") {
-      ## Stationary dense adjoint. For LONG samples the steady-state-aware
-      ## variant (.kf_loglik_adjoint_ss) cuts n^2-matrix storage from O(T) to
-      ## O(t_conv) once the Riccati recursion converges; it is identical to the
-      ## dense kernel to <1e-9 (test-gradient-adjoint-ss.R) but does not support
-      ## me_extra/shock_scale. Use it only when it actually saves memory (T large)
-      ## and those features are off; the dense path stays the default otherwise.
-      use_ss_adjoint <- ncol(Y) >= 1000L &&
-        is.null(me_extra) && is.null(shock_scale)
-      tang <- if (use_ss_adjoint) {
-        .kf_loglik_adjoint_ss(Y, ss, d_ss_list, me_variance = me_variance)
-      } else {
-        .kf_loglik_adjoint(Y, ss, d_ss_list, me_variance = me_variance,
-                           me_extra = me_extra, shock_scale = shock_scale)
-      }
     } else {
-      tang <- .kf_loglik_tangent(Y, ss, d_ss_list, me_variance = me_variance,
-                                 me_extra = me_extra, shock_scale = shock_scale)
+      ## Non-diffuse adjoint/tangent kernels: the dense KF kernels already
+      ## degrade gracefully (ok = FALSE -> loglik = -Inf, grad = NA) for an
+      ## infeasible draw. But a sufficiently extreme theta (e.g. a NUTS
+      ## step-size search trial) can still throw from deeper in the C++
+      ## kernel (Sylvester/solution-derivative solves in .solution_adjoint /
+      ## solution_derivatives below, or an unanticipated numerical failure);
+      ## wrap the whole dispatch in tryCatch, mirroring use_diffuse_adjoint
+      ## above, so every grad_method degrades to the FD-hybrid fallback
+      ## instead of crashing the sampler.
+      tang <- tryCatch({
+        if (use_uni_adjoint) {
+          ## Missing-data multivariate adjoint with per-period observed-row
+          ## subsetting; stationary Lyapunov P0 (P0 = NULL). me_variance is scalar.
+          ## shock_scale (when present) routes to the kernel's R reference,
+          ## which substitutes Se_t per period (see gradient-adjoint-uni.R).
+          .kf_loglik_adjoint_uni(Y, ss, d_ss_list, me_variance = me_variance,
+                                 P0 = NULL, shock_scale = shock_scale)
+        } else if (use_sol_adjoint) {
+          ## Dense stationary adjoint WITH bar export (the _ss long-T variant does
+          ## not export bars; the O(T) n^2 storage is accepted here).
+          .kf_loglik_adjoint(Y, ss, d_ss_list, me_variance = me_variance,
+                             me_extra = me_extra, shock_scale = shock_scale,
+                             return_bars = TRUE)
+        } else if (grad_method == "adjoint" || grad_method == "adjoint_solution") {
+          ## Stationary dense adjoint. For LONG samples the steady-state-aware
+          ## variant (.kf_loglik_adjoint_ss) cuts n^2-matrix storage from O(T) to
+          ## O(t_conv) once the Riccati recursion converges; it is identical to the
+          ## dense kernel to <1e-9 (test-gradient-adjoint-ss.R) but does not support
+          ## me_extra/shock_scale. Use it only when it actually saves memory (T large)
+          ## and those features are off; the dense path stays the default otherwise.
+          use_ss_adjoint <- ncol(Y) >= 1000L &&
+            is.null(me_extra) && is.null(shock_scale)
+          if (use_ss_adjoint) {
+            .kf_loglik_adjoint_ss(Y, ss, d_ss_list, me_variance = me_variance)
+          } else {
+            .kf_loglik_adjoint(Y, ss, d_ss_list, me_variance = me_variance,
+                               me_extra = me_extra, shock_scale = shock_scale)
+          }
+        } else {
+          .kf_loglik_tangent(Y, ss, d_ss_list, me_variance = me_variance,
+                             me_extra = me_extra, shock_scale = shock_scale)
+        }
+      }, error = function(e) NULL)
+
+      if (is.null(tang)) {
+        kernel_stats$n_fallback_nondiffuse <- kernel_stats$n_fallback_nondiffuse + 1L
+        if (!warned_special) {
+          warning("make_posterior_grad: ", grad_method, " gradient kernel ",
+                  "failed for this draw (numerical KF failure); using the ",
+                  "FD-hybrid fallback.", call. = FALSE)
+          warned_special <<- TRUE
+        }
+        return(hybrid_grad_fn(theta))
+      }
     }
     base_ll <- tang$loglik
 
@@ -1169,6 +1263,7 @@ make_posterior_grad <- function(model, data, prior_spec, obs_vars, compiled,
 
     ## Per-parameter FD fallback (only for parameters that need it).
     if (length(fd_names) > 0) {
+      kernel_stats$n_score_nonfinite <- kernel_stats$n_score_nonfinite + length(fd_names)
       if (!is.finite(base_ll)) base_ll <- lp_fn(theta)$loglik
       for (nm in fd_names) {
         d1 <- .fd_loglik_grad1(theta, nm, base_ll)
@@ -1178,4 +1273,7 @@ make_posterior_grad <- function(model, data, prior_spec, obs_vars, compiled,
 
     g
   }
+
+  attr(.impl_adj_grad_fn, "kernel_stats") <- kernel_stats
+  .impl_adj_grad_fn
 }

@@ -178,31 +178,43 @@ hank_mixture_ks_steady <- function(a_grid, Pi, e, betas, omega, eis = 1,
 
 
 #' Krusell-Smith general-equilibrium steady state with a MIXTURE household
-#' differing in its INCOME PROCESS (income-risk heterogeneity axis)
+#' differing in its INCOME PROCESS and/or BORROWING CONSTRAINT
+#' (income-risk and wealth heterogeneity axes)
 #'
 #' Sibling of \code{\link{hank_mixture_ks_steady}} for a \code{K}-type mixture
 #' whose types differ in their income process (\code{Pi}, \code{e} -- e.g. a
-#' per-type Rouwenhorst calibration), not (only) in \code{beta}. Every type
-#' still shares the asset grid, EIS, and prices, and interacts with the rest
-#' of the economy only through the common \code{(r, w)}, so the household
-#' side of market clearing is again the EXACT omega-weighted sum of the
-#' per-type steady-state assets,
+#' per-type Rouwenhorst calibration), their borrowing constraint
+#' (\code{amin}, the WEALTH heterogeneity axis: per-type \code{amin} on the
+#' shared \code{a_grid}), and/or their EIS -- not (only) in \code{beta}.
+#' Every type still shares the asset grid and prices, and interacts with the
+#' rest of the economy only through the common \code{(r, w)}, so the
+#' household side of market clearing is again the EXACT omega-weighted sum
+#' of the per-type steady-state assets,
 #' \code{A_of_r(r) = Sum_k omega_k * hank_het_block(a_grid, Pi_k, e_k, beta =
-#' beta_k, r = r, w = w_of_r(r))$A}; the firm FOCs and the \code{uniroot}
-#' market-clearing solve are otherwise IDENTICAL to
-#' \code{\link{hank_mixture_ks_steady}} -- only the per-type block
-#' construction (each type gets its OWN \code{Pi_k}/\code{e_k} on the shared
-#' \code{a_grid}) changes.
+#' beta_k, eis = eis_k, amin = amin_k, r = r, w = w_of_r(r))$A}; the firm
+#' FOCs and the \code{uniroot} market-clearing solve are otherwise IDENTICAL
+#' to \code{\link{hank_mixture_ks_steady}} -- only the per-type block
+#' construction changes. This is the market-clearing sibling of the
+#' fixed-price \code{\link{hank_mixture_ks_assemble}} (same \code{types}
+#' schema).
 #'
 #' @param a_grid Numeric asset grid (see \code{\link{hank_asset_grid}}),
 #'   shared by every type.
 #' @param types List of length K, one entry per type, each a list with
 #'   elements \code{beta}, \code{Pi} (\code{n_e_k x n_e_k} income transition
-#'   matrix), and \code{e} (length-\code{n_e_k} income levels); \code{Pi}/\code{e}
-#'   may differ in size and value across types (that is the point of this
-#'   function), only \code{a_grid} is shared.
+#'   matrix), and \code{e} (length-\code{n_e_k} income levels), plus
+#'   optionally \code{eis} (falls back to the \code{eis} argument) and
+#'   \code{amin} (per-type borrowing constraint, falls back to
+#'   \code{a_grid[1]}; must satisfy \code{amin >= a_grid[1]} -- see
+#'   \code{\link{hank_het_block}}). \code{Pi}/\code{e} may differ in size and
+#'   value across types (that is the point of this function); only
+#'   \code{a_grid} is shared. Because a per-type \code{amin} lives on the
+#'   SHARED grid, a pure wealth-axis mixture (identical \code{Pi}/\code{e},
+#'   distinct \code{amin}) keeps a common cell space, so pooled
+#'   distribution objects downstream remain valid.
 #' @param omega Numeric length-K mixture weights, non-negative, summing to 1.
-#' @param eis Elasticity of intertemporal substitution, shared (scalar).
+#' @param eis Default elasticity of intertemporal substitution for types
+#'   that don't set their own.
 #' @param alpha,delta Capital share and depreciation.
 #' @param Z Steady-state TFP (default 1).
 #' @param r_bracket Optional length-2 search bracket for \eqn{r^*}; defaults
@@ -228,7 +240,7 @@ hank_mixture_ks_steady_hetinc <- function(a_grid, types, omega, eis = 1,
   if (!all(vapply(types, function(tt)
     is.list(tt) && all(c("beta", "Pi", "e") %in% names(tt)), logical(1))))
     stop("hank_mixture_ks_steady_hetinc(): every entry of 'types' must be a ",
-         "list with elements 'beta', 'Pi', 'e'.")
+         "list with elements 'beta', 'Pi', 'e' (optionally 'eis', 'amin').")
   betas <- vapply(types, function(tt) tt$beta, numeric(1))
   if (length(omega) != length(types))
     stop(sprintf(
@@ -243,15 +255,16 @@ hank_mixture_ks_steady_hetinc <- function(a_grid, types, omega, eis = 1,
 
   K_of_r <- function(r) ((r + delta) / (alpha * Z))^(1 / (alpha - 1))
   w_of_r <- function(r) (1 - alpha) * Z * K_of_r(r)^alpha
+  type_block <- function(tt, r, w)
+    hank_het_block(a_grid, tt$Pi, tt$e, beta = tt$beta,
+                   eis = if (!is.null(tt$eis)) tt$eis else eis,
+                   r = r, w = w,
+                   amin = if (!is.null(tt$amin)) tt$amin else a_grid[1L])
   A_of_r <- function(r) {
     w <- w_of_r(r)
     acc <- 0
-    for (k in seq_along(types)) {
-      tt  <- types[[k]]
-      blk <- hank_het_block(a_grid, tt$Pi, tt$e, beta = tt$beta, eis = eis,
-                            r = r, w = w)
-      acc <- acc + omega[k] * blk$A
-    }
+    for (k in seq_along(types))
+      acc <- acc + omega[k] * type_block(types[[k]], r, w)$A
     acc
   }
   ceil_r <- 1 / max(betas) - 1
@@ -290,10 +303,7 @@ hank_mixture_ks_steady_hetinc <- function(a_grid, types, omega, eis = 1,
         ceil_r, conditionMessage(e)))
     })
   r <- sol$root; w <- w_of_r(r); K <- K_of_r(r)
-  blocks <- lapply(seq_along(types), function(k) {
-    tt <- types[[k]]
-    hank_het_block(a_grid, tt$Pi, tt$e, beta = tt$beta, eis = eis, r = r, w = w)
-  })
+  blocks <- lapply(types, type_block, r = r, w = w)
   A_mix <- sum(vapply(seq_along(blocks), function(k) omega[k] * blocks[[k]]$A,
                        numeric(1)))
   structure(list(r = r, w = w, K = K, Z = Z, alpha = alpha, delta = delta,

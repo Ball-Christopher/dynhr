@@ -19,11 +19,16 @@ hank_het_jacobian(
 
 \item{T_h}{Integer horizon.}
 
-\item{inputs}{Character subset of \code{c("r", "w")}.}
+\item{inputs}{Character subset of \code{c("r", "w", "Tr", "r_minus")} plus,
+for a block
+built with \code{Pi_fn}/\code{Pi_inputs}, the block's named
+transition-probability inputs (\code{names(block$Pi_inputs)}, e.g.
+\code{"f"}, \code{"s"} from \code{\link{hank_employment_income}}).}
 
 \item{outputs}{Character subset of \code{c("A", "C")}.}
 
-\item{delta_in}{FD step for the input (r/w) perturbation in the s=0 term.}
+\item{delta_in}{FD step for the input (r/w/transition-probability)
+perturbation in the s=0 term.}
 
 \item{delta_va}{Relative FD step for the backward value-function propagation.}
 
@@ -35,5 +40,9 @@ Nested list \code{J[[output]][[input]]}, each a \code{T x T} matrix
   Jacobian row, \code{J[[o]][[i]][1, ]}.)
 }
 \description{
-Sequence-space Jacobian of a het block via the fake-news algorithm
+For a block built with \code{Pi_fn}/\code{Pi_inputs} (e.g. via
+\code{\link{hank_employment_income}}), the transition-probability inputs
+are perturbable alongside \code{(r, w)}: pass their names in \code{inputs}
+to get the Jacobian columns w.r.t. anticipated job-finding/separation-rate
+paths (see the file header for how the Pi perturbation enters the sweep).
 }

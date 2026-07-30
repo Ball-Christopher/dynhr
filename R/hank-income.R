@@ -153,6 +153,123 @@ hank_income_rouwenhorst <- function(rho, sigma, n = 7L,
 
 
 # =============================================================================
+# Public: employment-state extension (HANK+SAM household income process)
+# =============================================================================
+
+#' Employment-augmented idiosyncratic income process (HANK+SAM household)
+#'
+#' Extends a Rouwenhorst productivity chain with a two-point employment state
+#' \eqn{m \in \{E, U\}} (Ravn-Sterk / den Haan-Rendahl-Riegler HANK+SAM
+#' class): employed households earn \eqn{w e}, unemployed households earn
+#' replacement income \eqn{b_{ui} w e} (replacement-rate parameterization on
+#' the same productivity level). The employment transition is
+#' \deqn{P(U \to E) = f, \qquad P(E \to U) = s,}
+#' independent of the productivity transition, so the combined chain has the
+#' Kronecker structure \eqn{\Pi = \Pi_m(f, s) \otimes \Pi_e} on the
+#' \code{2 * n} combined states.
+#'
+#' STATE ORDERING: employment OUTER, productivity INNER -- combined state
+#' \code{(m, j)} has index \code{(m - 1) * n + j} with \code{m = 1} employed,
+#' \code{m = 2} unemployed. Rows \code{1..n} of a \code{(2n) x n_a} policy
+#' matrix are therefore the employed states; the stationary unemployment rate
+#' is the mass on rows \code{n+1..2n} and equals \eqn{s / (s + f)} exactly
+#' (independence of the two chains).
+#'
+#' NORMALIZATION: the productivity levels \code{e_prod} keep the
+#' \code{\link{hank_income_rouwenhorst}} convention (stationary mean 1), and
+#' the EFFECTIVE levels \code{e = c(e_prod, b_ui * e_prod)} are NOT
+#' re-normalized: their stationary mean is \eqn{(1 - u) + u\, b_{ui}} with
+#' \eqn{u = s/(s+f)}. This is deliberate -- \code{e} must stay FIXED when
+#' \eqn{(f_t, s_t)} move along a transition path (only \code{Pi} responds to
+#' the aggregate inputs), so no quantity may bake the steady-state
+#' \eqn{(f, s)} into the income levels.
+#'
+#' The returned \code{Pi_fn(f, s)} rebuilds the combined transition matrix at
+#' arbitrary transition-probability inputs; pass it (with
+#' \code{Pi_inputs = list(f = f, s = s)}) to \code{\link{hank_het_block}} to
+#' make \code{f} and \code{s} perturbable aggregate inputs of the household
+#' block (time-varying job-finding/separation risk driving the fake-news
+#' Jacobian columns; see \code{\link{hank_het_jacobian}}).
+#'
+#' @param f Numeric in (0, 1]: steady-state job-finding rate, \eqn{P(U \to E)}.
+#' @param s Numeric in (0, 1): steady-state separation rate, \eqn{P(E \to U)}.
+#' @param rho Numeric in (-1, 1): AR(1) persistence of log productivity.
+#' @param sigma Numeric > 0: UNCONDITIONAL standard deviation of log
+#'   productivity (same convention as \code{\link{hank_income_rouwenhorst}}).
+#' @param n Integer >= 2: number of productivity states (default 7).
+#' @param b_ui Numeric > 0: unemployment-insurance replacement rate (share of
+#'   the household's employed income received while unemployed; default 0.5).
+#'
+#' @return A list with:
+#'   \describe{
+#'     \item{\code{e}}{Numeric length-\code{2n}: EFFECTIVE income levels,
+#'       \code{c(e_prod, b_ui * e_prod)} (employed block first).}
+#'     \item{\code{Pi}}{\code{2n x 2n} row-stochastic combined transition
+#'       matrix, \code{kronecker(Pi_m(f, s), Pi_e)}.}
+#'     \item{\code{pi}}{Numeric length-\code{2n}: stationary distribution,
+#'       \code{kronecker(c(1 - u, u), pi_e)}.}
+#'     \item{\code{Pi_fn}}{Function \code{(f, s) -> 2n x 2n} combined
+#'       transition matrix (the object the transition-probability Jacobian
+#'       columns perturb).}
+#'     \item{\code{u}}{Stationary unemployment rate \code{s / (s + f)}.}
+#'     \item{\code{idx_E}, \code{idx_U}}{Integer index vectors of the
+#'       employed / unemployed combined states (rows \code{1..n} /
+#'       \code{n+1..2n}).}
+#'     \item{\code{e_prod}, \code{Pi_e}, \code{pi_e}}{The underlying
+#'       productivity chain (\code{\link{hank_income_rouwenhorst}} output).}
+#'     \item{\code{f}, \code{s}, \code{b_ui}, \code{rho}, \code{sigma},
+#'       \code{n}, \code{n_m}, \code{method}}{Echoed inputs / metadata
+#'       (\code{n_m = 2L}, \code{method = "rouwenhorst_employment"}).}
+#'   }
+#'
+#' @examples
+#' inc <- hank_employment_income(f = 0.7, s = 0.05, rho = 0.9, sigma = 0.6,
+#'                               n = 3, b_ui = 0.5)
+#' sum(inc$pi[inc$idx_U])         # unemployment rate = 0.05 / 0.75
+#' inc$u
+#' @export
+hank_employment_income <- function(f, s, rho, sigma, n = 7L, b_ui = 0.5) {
+  if (!is.finite(f) || f <= 0 || f > 1)
+    stop("f (job-finding rate) must be in (0, 1]")
+  if (!is.finite(s) || s <= 0 || s >= 1)
+    stop("s (separation rate) must be in (0, 1)")
+  if (!is.finite(b_ui) || b_ui <= 0)
+    stop("b_ui (replacement rate) must be > 0 (zero income at the borrowing ",
+         "constraint makes the household problem infeasible)")
+
+  prod <- hank_income_rouwenhorst(rho = rho, sigma = sigma, n = n)
+  n    <- prod$n
+  Pi_e <- prod$Pi
+  pi_e <- prod$pi
+
+  ## Combined transition at arbitrary (f, s): employment outer, productivity
+  ## inner. Closes over the FIXED productivity chain Pi_e -- only the
+  ## employment margin responds to the aggregate inputs.
+  Pi_fn <- function(f, s) {
+    if (!is.finite(f) || f <= 0 || f > 1)
+      stop("Pi_fn: f (job-finding rate) must be in (0, 1]")
+    if (!is.finite(s) || s <= 0 || s >= 1)
+      stop("Pi_fn: s (separation rate) must be in (0, 1)")
+    Pi_m <- matrix(c(1 - s, s,
+                     f, 1 - f), 2L, 2L, byrow = TRUE)
+    kronecker(Pi_m, Pi_e)
+  }
+
+  u  <- s / (s + f)
+  Pi <- Pi_fn(f, s)
+  pi <- as.numeric(kronecker(c(1 - u, u), pi_e))
+
+  list(e = c(prod$e, b_ui * prod$e), Pi = Pi, pi = pi,
+       Pi_fn = Pi_fn, u = u,
+       idx_E = seq_len(n), idx_U = n + seq_len(n),
+       e_prod = prod$e, Pi_e = Pi_e, pi_e = pi_e,
+       f = f, s = s, b_ui = b_ui,
+       rho = rho, sigma = sigma, n = n, n_m = 2L,
+       method = "rouwenhorst_employment")
+}
+
+
+# =============================================================================
 # Non-Gaussian innovation presets (analytic mean/var/skew/ex-kurt)
 # =============================================================================
 

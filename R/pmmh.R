@@ -119,12 +119,14 @@ pmmh <- function(mode_result, ...) {
   }
 
   lik <- tryCatch(mode_result$ctx$likelihood, error = function(e) NULL)
-  if (is.null(lik) || !lik %in% c("tpf", "ppf", "copf")) {
+  if (is.null(lik) || !lik %in% c("tpf", "ppf", "copf", "sv_rbpf")) {
     warning("pmmh(): mode_result$ctx$likelihood = ",
             if (is.null(lik)) "NULL" else sQuote(lik),
-            " is not an unbiased particle likelihood (\"tpf\"/\"ppf\"/\"copf\"). ",
+            " is not an unbiased particle likelihood ",
+            "(\"tpf\"/\"ppf\"/\"copf\"/\"sv_rbpf\"). ",
             "This will run ordinary exact-likelihood RWMH, NOT PMMH. Build the ",
-            "mode_result with likelihood = \"tpf\" (or \"ppf\"/\"copf\") for PMMH.",
+            "mode_result with likelihood = \"tpf\" (or \"ppf\"/\"copf\"/\"sv_rbpf\") ",
+            "for PMMH.",
             call. = FALSE)
   }
 

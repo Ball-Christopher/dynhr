@@ -1,3 +1,90 @@
+# dynhr 0.9.1
+
+A feature release. The headline additions since 0.9.0 are **multi-asset
+heterogeneous-agent households**, **stochastic volatility on shocks**, and a
+**cross-machine benchmark**. Everything in 0.9.0 is retained.
+
+## Multi-asset HANK households
+
+0.9.0 shipped the one-asset (Krusell-Smith) household. 0.9.1 adds two- and
+three-asset households with per-asset adjustment costs, each with the full
+sequence-space toolchain.
+
+- **Two-asset** (liquid / illiquid): `hank_het2_block()`, `hank_het2_jacobian()`,
+  `hank_td2_nonlinear()`, `hank_egm2_solve()`, `hank_forward_operator2()`, plus
+  a deposit variant (`hank_het2d_block()`, `hank_het2d_jacobian()`) and a
+  ready-made GE model (`hank_twoasset_model()`, `hank_twoasset_steady()`).
+- **Three-asset** (domestic / foreign / illiquid, with a foreign price `px`
+  entering both the purchase and payoff legs of the budget):
+  `hank_het3_block()`, `hank_het3_jacobian()`, `hank_td3_nonlinear()`,
+  `hank_egm3_solve()`. `hank_het3_jacobian_checkpoint()` and
+  `hank_het3_jacobian_spot()` support long-running builds on large grids.
+- **Numerical-differentiation oracles** ship alongside the analytic Jacobians
+  (`hank_het2_jacobian_nd()`, `hank_het3_jacobian_nd()`) rather than being
+  test-only, so a user can verify an analytic Jacobian on their own block.
+- **Reproducibility**: `hank_het_manifest()` / `hank_het2_manifest()` /
+  `hank_het3_manifest()` and the matching `*_fingerprint()` functions record and
+  hash the exact block a result came from.
+- Building blocks for richer environments: `hank_bond_block()`,
+  `hank_fisher_block()`, `hank_repricing_block()`, `hank_employment_income()`,
+  `hank_incidence_earnings()`, and a search-and-matching Reiter linearisation
+  (`hank_sam_reiter_statespace()`).
+
+## HANK estimation with an exact sequence-space score
+
+- `hank_loglik_ar()` and `hank_loglik_ar_grad()` give an exact-AR likelihood and
+  its analytic gradient through the structural block
+  (`hank_loglik_ar_structural_grad()`), with `make_posterior_grad_hank_ar()`
+  wiring it into the gradient samplers.
+- `hank_run_estimation()` / `hank_run_mode_finding()` drive the pipeline;
+  `hank_model_dtheta()` propagates parameter derivatives through the model DAG.
+
+## Stochastic volatility on shocks
+
+Declare independent AR(1) log-variance processes on any subset of a model's
+shocks with `stochastic_volatility()` / `sv_entry()`, and estimate them with a
+Rao-Blackwellised particle filter (`make_log_posterior_sv_rbpf()`). The
+degenerate-volatility limit reproduces the exact Kalman likelihood.
+`sv_rbpf_sbc()` provides simulation-based-calibration certification, and
+`kf_step()` / `kf_stationary_init()` expose the single-step filter primitives.
+
+## Benchmarking
+
+`dynhr_benchmark()` runs a fixed Smets & Wouters (2007) estimation workload --
+36 estimated parameters, 7 observables, 160 quarters, started at the published
+posterior mode -- through random-walk Metropolis at a sweep of core counts. It
+reports per-chain and aggregate throughputs, all normalised per draw or per
+second so runs with different draw counts stay comparable, together with a
+workload fingerprint. `dynhr_system_info()` records CPU, RAM, OS, R build and
+the BLAS/LAPACK actually linked; two results are only comparable if those agree.
+
+The Smets-Wouters model, data, published mode and mode Hessian ship in
+`inst/extdata/models` from the AEA replication deposit openicpsr-116269-V1
+(BSD-3-Clause for code, CC BY 4.0 for data); see `sw2007_SOURCE.md`.
+
+## Newly exported helpers
+
+Previously internal, exported on request from downstream users:
+`make_log_posterior()`, `extract_prior_spec()`, `log_prior()`,
+`solve_steady_state()`, `solve_lyapunov()`, `apply_theta_to_params()`,
+`build_param_transform()`, `make_transformed_logpost()`,
+`make_transformed_grad()`.
+
+## Other additions
+
+- `bk_wall_transform()` -- a reparameterisation that removes the divergences
+  gradient samplers suffer near the Blanchard-Kahn determinacy boundary.
+- `mdd_calibration()` -- marginal-data-density estimators calibrated against
+  analytic and quadrature ground truth.
+
+## Fixes
+
+- README: `theoretical_moments()` and `ramsey_regime_markov()` were named in the
+  0.9.0 capability map but do not exist; the functions are `compute_moments()`
+  and `ramsey_regime_independent()`.
+- Non-ASCII characters in roxygen documentation replaced with ASCII or `\eqn{}`
+  markup, so the PDF manual builds.
+
 # dynhr 0.9.0
 
 A feature release. The headline addition since 0.8.1 is a complete

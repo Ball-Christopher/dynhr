@@ -300,8 +300,8 @@
 #'
 #' Full analytic third cumulant of the pruned order-2 state-space under
 #' Gaussian shocks. The pruned observable deviation from its mean is:
-#'   dy = Z*x1 + D*e + Z*x2_cent + (1/2)*Ghxx*(x1⊗x1 - vec(Σ_x))
-#'        + Ghxu*(e⊗x1) + (1/2)*Ghuu*(e⊗e - vec(Σ_e))
+#'   dy = Z*x1 + D*e + Z*x2_cent + (1/2)*Ghxx*(kron(x1,x1) - vec(Sigma_x))
+#'        + Ghxu*kron(e,x1) + (1/2)*Ghuu*(kron(e,e) - vec(Sigma_e))
 #' where (x1, x2_cent) are lagged states independent of the current shock e.
 #'
 #' The fully symmetric third cumulant kappa_3(y_i, y_j, y_k) receives four
@@ -1032,7 +1032,7 @@ compute_third_cumulant <- function(dr, model, params = NULL) {
 #'   for the full accounting of which necklace terms are dropped and why. Not
 #'   validated near the unit root; prefer \code{"window"} there.
 #' @return List:
-#'   \item{kurtosis_obs}{Named numeric vector of marginal excess kurtosis γ_2}
+#'   \item{kurtosis_obs}{Named numeric vector of marginal excess kurtosis gamma_2}
 #'   \item{c4_obs}{n_obs × n_obs^3 matrix: fourth cumulant of observables}
 #' @export
 compute_fourth_cumulant <- function(dr, model, params = NULL,

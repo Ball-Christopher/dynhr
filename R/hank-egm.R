@@ -142,10 +142,41 @@
 #'   existing calls are byte-identical). A tighter (higher) \code{amin}
 #'   decouples the borrowing limit from the grid floor, letting different
 #'   household types face different constraints on a shared grid.
+#' @param backend Character: \code{"cpp"} (default) or \code{"R"}. \code{"cpp"}
+#'   dispatches the whole backward-iteration loop to a compiled
+#'   (RcppArmadillo) kernel -- no per-iteration R boundary crossing -- for
+#'   the SAME numerics (same tiny = 1e-12 floors, same interpolation rule).
+#'   Defaults to \code{getOption("dynhr.hank_backend", "cpp")}, so the
+#'   package default is the compiled path; the R reference implementation
+#'   remains available by passing \code{backend = "R"} or setting
+#'   \code{options(dynhr.hank_backend = "R")} globally. Input validation and
+#'   the feasibility (\code{min_coh}) pre-check run in this R wrapper
+#'   regardless of backend, so error messages are unaffected by the choice.
 #'
 #' @return A list with converged \code{Va}, \code{a} (savings policy), \code{c}
-#'   (consumption policy), plus \code{iterations} and \code{converged}. The
-#'   resolved \code{amin} is carried on the return list.
+#'   (consumption policy), the calibration (\code{a_grid}, \code{y}, \code{r},
+#'   \code{beta}, \code{eis}, \code{Pi}, and the resolved \code{amin}), and the
+#'   run metadata \code{\link{hank_het_manifest}} reads:
+#'   \describe{
+#'     \item{\code{iterations}}{Number of backward iterations run.}
+#'     \item{\code{converged}}{Logical: whether \code{tol} was met.}
+#'     \item{\code{last_policy_gap}}{The final \eqn{\max|a'_k - a'_{k-1}|},
+#'       i.e. the convergence criterion's own value on the last iteration.
+#'       \code{NA_real_} on \code{backend = "cpp"}: the compiled kernel tests
+#'       the gap internally and does not return it, and re-deriving it in R
+#'       would mean re-running a step, so it is reported as unknown rather
+#'       than invented.}
+#'     \item{\code{last_value_gap}}{The final \eqn{\max|V_a^k - V_a^{k-1}|}.
+#'       \code{NA_real_} on \code{backend = "cpp"} for the same reason.}
+#'     \item{\code{backend}}{Character: the backend that actually ran.}
+#'     \item{\code{threads}}{Always \code{1L}. The one-asset kernel is
+#'       deliberately serial (a whole solve is milliseconds, with only
+#'       \code{n_e} parallel tasks -- a measured no-go), so \code{1} is the
+#'       worker count that genuinely ran, not a placeholder.}
+#'     \item{\code{elapsed}}{Wall-clock seconds
+#'       (\code{proc.time()[["elapsed"]]} difference) spent in the backward
+#'       iteration, excluding this wrapper's argument validation.}
+#'   }
 #' @examples
 #' inc <- hank_income_rouwenhorst(0.9, 0.7, 5)
 #' a   <- hank_asset_grid(50, 100, 0)
@@ -155,13 +186,31 @@
 #' @export
 hank_egm_solve <- function(a_grid, y, r, beta, eis, Pi,
                            tol = 1e-11, maxit = 5000L, Va_init = NULL,
-                           amin = NULL) {
+                           amin = NULL,
+                           backend = getOption("dynhr.hank_backend", "cpp")) {
+  backend <- match.arg(backend, c("R", "cpp"))
   n_e <- length(y); n_a <- length(a_grid)
-  stopifnot(nrow(Pi) == n_e, ncol(Pi) == n_e)
+  ## Shared Markov contract (same validator as hank_forward_operator, so all
+  ## public HANK routes agree on what a transition matrix is).
+  .hank_check_markov(Pi, n_e, caller = "hank_egm_solve")
   if (is.null(amin)) amin <- a_grid[1L]
   if (amin < a_grid[1L])
     stop("hank_egm_solve: amin (", amin, ") is below the asset grid floor (",
          a_grid[1L], "); the grid cannot represent assets below its floor.")
+  ## Feasibility pre-check, hoisted from .hank_egm_step so it fires
+  ## IDENTICALLY for both backends before any compiled dispatch (the cpp
+  ## backend bypasses .hank_egm_step entirely, so this can't rely on the
+  ## per-iteration guard inside it). min_coh depends only on (a_grid, r, y),
+  ## not on the iterate, so hoisting it here is a no-op for the R backend
+  ## (same check, same message, just evaluated once up front instead of on
+  ## the first iteration) -- existing error-message tests are unaffected.
+  min_coh <- (1 + r) * a_grid[1L] + min(y)
+  if (amin > min_coh)
+    stop("hank_egm: amin (", format(amin), ") exceeds the lowest feasible ",
+         "cash-on-hand on the grid ((1+r)*a_grid[1] + min(y) = ",
+         format(min_coh), "); a household at the grid floor with the lowest ",
+         "income could not afford to save amin, forcing non-positive ",
+         "consumption. Reduce amin or raise the income/grid floor.")
 
   if (is.null(Va_init)) {
     coh0 <- (1 + r) * matrix(a_grid, n_e, n_a, byrow = TRUE) + y
@@ -176,17 +225,58 @@ hank_egm_solve <- function(a_grid, y, r, beta, eis, Pi,
     Va <- Va_init
   }
 
+  ## Timed from HERE, not from the top of the function: the manifest's
+  ## elapsed_solve is meant to be the cost of the backward iteration itself,
+  ## and argument validation is not backend-dependent (so including it would
+  ## make the two backends' timings non-comparable). Same convention as
+  ## hank_egm3_solve().
+  t0 <- proc.time()[["elapsed"]]
+
+  if (backend == "cpp") {
+    ## The whole backward-iteration loop runs inside this one .Call -- no
+    ## per-iteration R boundary crossing. Va (either the default guess just
+    ## computed above, or the caller's Va_init) is passed through explicitly
+    ## so the cpp path never needs its own default-Va formula to keep in
+    ## sync with the R one.
+    res <- hank_egm_solve_cpp(a_grid, y, r, beta, eis, Pi, amin, tol,
+                              as.integer(maxit), Va)
+    return(list(Va = res$Va, a = res$a, c = res$c,
+                iterations = as.integer(res$iterations),
+                converged = as.logical(res$converged),
+                ## The compiled kernel computes the policy gap only to TEST
+                ## it and returns Va/a/c alone, so neither gap survives the
+                ## .Call. Recovering one would mean running an extra backward
+                ## step, which is a DIFFERENT quantity (the gap of one further
+                ## iterate, not the gap between the last two) -- reported as
+                ## unknown instead of quietly substituted.
+                last_value_gap = NA_real_, last_policy_gap = NA_real_,
+                backend = backend, threads = 1L,
+                elapsed = proc.time()[["elapsed"]] - t0,
+                a_grid = a_grid, y = y, r = r, beta = beta, eis = eis, Pi = Pi,
+                amin = amin))
+  }
+
   a_old <- matrix(-Inf, n_e, n_a)
   converged <- FALSE
   it <- 0L
+  ## The R loop has both iterates in hand, so both gaps are MEASURED here.
+  ## policy_gap is exactly the quantity the convergence test reads, so the
+  ## recorded number and the accept/reject decision can never disagree.
+  policy_gap <- NA_real_; value_gap <- NA_real_
   for (it in seq_len(maxit)) {
+    Va_prev <- Va
     step <- .hank_egm_step(Va, a_grid, y, r, beta, eis, Pi, amin = amin)
     Va   <- step$Va
-    if (max(abs(step$a - a_old)) < tol) { converged <- TRUE; a_old <- step$a; break }
+    value_gap  <- max(abs(Va - Va_prev))
+    policy_gap <- max(abs(step$a - a_old))
+    if (policy_gap < tol) { converged <- TRUE; a_old <- step$a; break }
     a_old <- step$a
   }
   list(Va = Va, a = step$a, c = step$c,
        iterations = it, converged = converged,
+       last_value_gap = value_gap, last_policy_gap = policy_gap,
+       backend = backend, threads = 1L,
+       elapsed = proc.time()[["elapsed"]] - t0,
        a_grid = a_grid, y = y, r = r, beta = beta, eis = eis, Pi = Pi,
        amin = amin)
 }
@@ -211,6 +301,8 @@ hank_egm_solve <- function(a_grid, y, r, beta, eis, Pi,
 #'   \code{NA} at constrained points).
 #' @export
 hank_euler_residual <- function(hh, constraint_tol = 1e-8) {
+  .hank_reject_het2(hh, "hank_euler_residual", use = NULL)
+  .hank_reject_wedge(hh, "hank_euler_residual")
   a_grid <- hh$a_grid; Pi <- hh$Pi; r <- hh$r; beta <- hh$beta; eis <- hh$eis
   n_e <- length(hh$y); n_a <- length(a_grid)
   amin <- if (!is.null(hh$amin)) hh$amin else a_grid[1L]

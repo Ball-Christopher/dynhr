@@ -3,7 +3,8 @@
 \name{hank_mixture_ks_steady_hetinc}
 \alias{hank_mixture_ks_steady_hetinc}
 \title{Krusell-Smith general-equilibrium steady state with a MIXTURE household
-differing in its INCOME PROCESS (income-risk heterogeneity axis)}
+differing in its INCOME PROCESS and/or BORROWING CONSTRAINT
+(income-risk and wealth heterogeneity axes)}
 \usage{
 hank_mixture_ks_steady_hetinc(
   a_grid,
@@ -22,13 +23,21 @@ shared by every type.}
 
 \item{types}{List of length K, one entry per type, each a list with
 elements \code{beta}, \code{Pi} (\code{n_e_k x n_e_k} income transition
-matrix), and \code{e} (length-\code{n_e_k} income levels); \code{Pi}/\code{e}
-may differ in size and value across types (that is the point of this
-function), only \code{a_grid} is shared.}
+matrix), and \code{e} (length-\code{n_e_k} income levels), plus
+optionally \code{eis} (falls back to the \code{eis} argument) and
+\code{amin} (per-type borrowing constraint, falls back to
+\code{a_grid[1]}; must satisfy \code{amin >= a_grid[1]} -- see
+\code{\link{hank_het_block}}). \code{Pi}/\code{e} may differ in size and
+value across types (that is the point of this function); only
+\code{a_grid} is shared. Because a per-type \code{amin} lives on the
+SHARED grid, a pure wealth-axis mixture (identical \code{Pi}/\code{e},
+distinct \code{amin}) keeps a common cell space, so pooled
+distribution objects downstream remain valid.}
 
 \item{omega}{Numeric length-K mixture weights, non-negative, summing to 1.}
 
-\item{eis}{Elasticity of intertemporal substitution, shared (scalar).}
+\item{eis}{Default elasticity of intertemporal substitution for types
+that don't set their own.}
 
 \item{alpha, delta}{Capital share and depreciation.}
 
@@ -53,15 +62,18 @@ A list of class \code{hank_mixture_ks} (SAME shape as
 \description{
 Sibling of \code{\link{hank_mixture_ks_steady}} for a \code{K}-type mixture
 whose types differ in their income process (\code{Pi}, \code{e} -- e.g. a
-per-type Rouwenhorst calibration), not (only) in \code{beta}. Every type
-still shares the asset grid, EIS, and prices, and interacts with the rest
-of the economy only through the common \code{(r, w)}, so the household
-side of market clearing is again the EXACT omega-weighted sum of the
-per-type steady-state assets,
+per-type Rouwenhorst calibration), their borrowing constraint
+(\code{amin}, the WEALTH heterogeneity axis: per-type \code{amin} on the
+shared \code{a_grid}), and/or their EIS -- not (only) in \code{beta}.
+Every type still shares the asset grid and prices, and interacts with the
+rest of the economy only through the common \code{(r, w)}, so the
+household side of market clearing is again the EXACT omega-weighted sum
+of the per-type steady-state assets,
 \code{A_of_r(r) = Sum_k omega_k * hank_het_block(a_grid, Pi_k, e_k, beta =
-beta_k, r = r, w = w_of_r(r))$A}; the firm FOCs and the \code{uniroot}
-market-clearing solve are otherwise IDENTICAL to
-\code{\link{hank_mixture_ks_steady}} -- only the per-type block
-construction (each type gets its OWN \code{Pi_k}/\code{e_k} on the shared
-\code{a_grid}) changes.
+beta_k, eis = eis_k, amin = amin_k, r = r, w = w_of_r(r))$A}; the firm
+FOCs and the \code{uniroot} market-clearing solve are otherwise IDENTICAL
+to \code{\link{hank_mixture_ks_steady}} -- only the per-type block
+construction changes. This is the market-clearing sibling of the
+fixed-price \code{\link{hank_mixture_ks_assemble}} (same \code{types}
+schema).
 }

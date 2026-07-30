@@ -24,9 +24,9 @@ solve_sigma_order4(dr4, compiled, ss, params, Sigma_e = NULL, verbose = FALSE)
 }
 \description{
 Computes:
-  \code{ghxxss} (n × n_s²) — mixed 2nd state × σ² correction
-  \code{ghss2}  (n × 1)     — pure σ⁴ steady-state correction
+  \code{ghxxss} (n × n_s²) — mixed 2nd state × sigma^2 correction
+  \code{ghss2}  (n × 1)     — pure sigma^4 steady-state correction
 }
 \details{
-For Gaussian shocks the σ³ and σ¹ cross terms vanish.
+For Gaussian shocks the sigma^3 and sigma^1 cross terms vanish.
 }

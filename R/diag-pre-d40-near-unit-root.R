@@ -12,7 +12,7 @@
 #' Solves the model at a given parameter vector \code{theta} and reports:
 #' \describe{
 #'   \item{\code{spectral_radius}}{Modulus of the eigenvalue closest to the
-#'     unit circle from inside (max |λ| over stable roots, i.e. the spectral
+#'     unit circle from inside (max |lambda| over stable roots, i.e. the spectral
 #'     radius of \code{ghx}).}
 #'   \item{\code{distance_to_unit}}{1 - spectral_radius.  Near zero = near
 #'     unit root = highly persistent / close to determinacy boundary.}
@@ -35,7 +35,7 @@
 #'     \code{rho_max = max(Mod(eigen(ghx)))}.  The critical eigenvalue is the
 #'     one achieving this maximum.
 #'   \item For each parameter in \code{param_names}, compute
-#'     \eqn{d\rho_\max / d\theta_i} by central finite differences: re-solve
+#'     \eqn{d\rho_{\max} / d\theta_i} by central finite differences: re-solve
 #'     the model at \code{theta ± h}, recompute \code{rho_max}, difference.
 #'   \item (Best-effort) Attribute via the static Jacobian: the columns of
 #'     \code{f_zero} corresponding to the critical eigenvector's state

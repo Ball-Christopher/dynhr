@@ -26,6 +26,15 @@
 ## Shocks are packed as independent (Sigma_e diagonal in the AR-std
 ## parameterization used here); block-diagonal T/R and column-concatenated
 ## Z/D across shocks.
+##
+## NEAR-UNIT-ROOT CAVEAT: the truncation error of this companion form scales
+## as rho^(2q)/(1 - rho^2) PER SHOCK, which explodes as any rho approaches 1
+## (documented: -337 log-points at rho = 0.9992, q = 200).  For posteriors
+## that visit high persistences use the exact-AR(1) stacked-covariance
+## likelihood on the same object instead: hank_loglik_ar() in
+## R/hank-kalman-ar.R (and likelihood = "exact_ar" in
+## make_log_posterior_hank()), which keeps each shock's persistence tail in
+## closed form.
 ## --------------------------------------------------------------------------
 
 
@@ -53,8 +62,12 @@
 #'
 #' @return A lagged-timing \code{\link{new_dsge_ss}} object. Its
 #'   \code{shock_names} field records \code{model$exogenous} order and
-#'   \code{obs_names} records \code{observables}.
-#' @seealso \code{\link{hank_kalman_loglik}}, \code{\link{make_log_posterior_hank}}
+#'   \code{obs_names} records \code{observables}; \code{Theta_list},
+#'   \code{rho_vec} and \code{q} record the per-shock MA coefficients,
+#'   AR(1) persistences and truncation (consumed by
+#'   \code{\link{hank_loglik_ar}}).
+#' @seealso \code{\link{hank_kalman_loglik}}, \code{\link{hank_loglik_ar}},
+#'   \code{\link{make_log_posterior_hank}}
 #' @export
 hank_state_space <- function(model, shock_specs, observables, q = NULL) {
   if (!inherits(model, "hank_model"))
@@ -74,18 +87,7 @@ hank_state_space <- function(model, shock_specs, observables, q = NULL) {
   n_obs   <- length(observables)
   n_shock <- length(exo)
 
-  ## Per-shock MA coefficients Theta^z: T_h x n_obs, via a unit AR(1)
-  ## innovation path fed through the full GE solve (hank_model_irf already
-  ## accumulates through the whole block DAG to every variable in model$G).
-  Theta_list <- setNames(vector("list", n_shock), exo)
-  for (z in exo) {
-    rho_z <- shock_specs[[z]]$rho
-    dZ    <- setNames(list(rho_z^(seq_len(T_h) - 1L)), z)
-    irf   <- hank_model_irf(model, dZ)
-    Theta_list[[z]] <- sapply(observables, function(o) irf[[o]])
-    Theta_list[[z]] <- matrix(Theta_list[[z]], T_h, n_obs,
-                              dimnames = list(NULL, observables))
-  }
+  Theta_list <- .hank_theta_list(model, shock_specs, observables)
 
   ## Block-diagonal shift registers, one length-q block per shock.
   n_state <- q * n_shock
@@ -94,6 +96,7 @@ hank_state_space <- function(model, shock_specs, observables, q = NULL) {
   Z_lag <- matrix(0, n_obs, n_state)
   D_lag <- matrix(0, n_obs, n_shock)
   sigma_vec <- numeric(n_shock)
+  rho_vec   <- numeric(n_shock)
   state_names <- character(n_state)
 
   for (k in seq_along(exo)) {
@@ -105,6 +108,7 @@ hank_state_space <- function(model, shock_specs, observables, q = NULL) {
     if (q >= 2L) for (s in 1:(q - 1L)) Z_lag[, idx[s]] <- Theta[s + 1L, ]
     D_lag[, k] <- Theta[1L, ]
     sigma_vec[k] <- shock_specs[[z]]$sigma
+    rho_vec[k]   <- shock_specs[[z]]$rho
     state_names[idx] <- paste0(z, "_lag", seq_len(q) - 1L)
   }
 
@@ -112,7 +116,32 @@ hank_state_space <- function(model, shock_specs, observables, q = NULL) {
               Sigma_e = diag(sigma_vec^2, n_shock, n_shock),
               state_names = state_names, obs_names = observables,
               shock_names = exo, timing = "lagged",
-              Theta_list = Theta_list, q = q)
+              Theta_list = Theta_list, q = q,
+              rho_vec = setNames(rho_vec, exo))
+}
+
+
+## Per-shock MA coefficients Theta^z (T_h x n_obs, one matrix per exogenous
+## shock): a unit AR(1) innovation gives the deterministic driving path
+## dZ_t = rho_z^t, fed through the full GE solve (hank_model_irf already
+## accumulates through the whole block DAG to every variable in model$G).
+## Shared by hank_state_space() and the exact_ar branch of
+## make_log_posterior_hank() (which needs only Theta, not the companion-form
+## matrices).  No validation; callers validate model/shock_specs/observables.
+.hank_theta_list <- function(model, shock_specs, observables) {
+  T_h <- model$T_h
+  exo <- model$exogenous
+  n_obs <- length(observables)
+  Theta_list <- setNames(vector("list", length(exo)), exo)
+  for (z in exo) {
+    rho_z <- shock_specs[[z]]$rho
+    dZ    <- setNames(list(rho_z^(seq_len(T_h) - 1L)), z)
+    irf   <- hank_model_irf(model, dZ)
+    Theta_list[[z]] <- matrix(sapply(observables, function(o) irf[[o]]),
+                              T_h, n_obs,
+                              dimnames = list(NULL, observables))
+  }
+  Theta_list
 }
 
 
@@ -184,26 +213,72 @@ hank_kalman_loglik <- function(Y, ss, me_var = 0) {
 #' @param Y \code{T_data x n_obs} matrix of demeaned observations.
 #' @param observables Character vector of observable names (see
 #'   \code{\link{hank_state_space}}).
-#' @param q Optional truncation horizon passed to \code{\link{hank_state_space}}.
+#' @param q Optional truncation horizon passed to \code{\link{hank_state_space}}
+#'   (\code{likelihood = "kalman"}) or \code{\link{hank_loglik_ar}}
+#'   (\code{likelihood = "exact_ar"}).
 #' @param me_var Measurement-error variance (see \code{\link{hank_kalman_loglik}}).
+#' @param likelihood \code{"kalman"} (default) runs the Kalman filter on the
+#'   truncated-MA companion form (\code{\link{hank_kalman_loglik}});
+#'   \code{"exact_ar"} uses the exact-AR(1) stacked-covariance likelihood
+#'   (\code{\link{hank_loglik_ar}}), which keeps each shock's AR(1) variance
+#'   tail in closed form instead of truncating it with the MA lag polynomial
+#'   -- prefer it whenever the \code{rho} posterior may visit near-unit-root
+#'   values (see the representability bound in \code{\link{hank_loglik_ar}}:
+#'   \eqn{|\rho|^{T_h}} should stay small, so bound/cap the persistences).
+#'   A draw whose likelihood evaluation fails (e.g. a non-positive-definite
+#'   stacked covariance at extreme \code{rho}) is rejected with
+#'   \code{logpost = -Inf} rather than erroring the chain.
+#' @param me_sd Per-observable measurement-error standard deviation for
+#'   \code{likelihood = "exact_ar"} (scalar or length-\code{n_obs}); default
+#'   \code{sqrt(me_var)}, so the two likelihood options describe the same
+#'   measurement error unless overridden.
 #' @param prior_rho_mean,prior_rho_sd Named numeric vectors (by shock name) or
 #'   scalars (recycled) giving the Normal prior mean/sd for each shock's
 #'   \code{rho}. Defaults \code{mean = 0.5, sd = 0.3}.
 #' @param prior_sigma_sd Named numeric vector or scalar: half-Normal scale for
 #'   each shock's \code{sigma}. Default \code{0.05}.
+#' @param boundary Representability guard for \code{likelihood = "exact_ar"},
+#'   applied per DRAW (the likelihoods' own \code{check_boundary} warns per
+#'   call, which is unusable inside a sampler). \code{"warn"} (default) warns
+#'   ONCE per closure, naming the offending shocks and the implied \code{rho}
+#'   cap, and changes no posterior; \code{"reject"} makes
+#'   \eqn{|\rho|^{T_h} \le} \code{boundary_tol} part of the PRIOR SUPPORT and
+#'   returns \code{-Inf} outside it, exactly as the existing \eqn{|\rho| \ge 1}
+#'   guard does; \code{"ignore"} restores the previous silent behaviour.
+#'   Out here the sequence-space \code{Theta} is itself contaminated by the
+#'   solve's terminal boundary, so the likelihood is WRONG rather than
+#'   imprecise and no \code{q} repairs it -- see
+#'   \code{\link{hank_theta_boundary_check}}.
+#' @param boundary_tol Bound on \eqn{|\rho|^{T_h}}; default \code{1e-3}.
 #'
 #' @return A function \code{log_post_fn(theta)} where \code{theta} is a named
 #'   numeric vector with entries \code{rho_<shock>} and \code{sigma_<shock>}
 #'   for every \code{shock} in \code{model$exogenous}; returns
 #'   \code{list(logpost, loglik, logprior)}.
 #' @seealso \code{\link{hank_state_space}}, \code{\link{hank_kalman_loglik}},
-#'   \code{rwmh}
+#'   \code{\link{hank_loglik_ar}}, \code{rwmh}
 #' @export
 make_log_posterior_hank <- function(model, Y, observables, q = NULL,
                                     me_var = 0,
+                                    likelihood = c("kalman", "exact_ar"),
+                                    me_sd = NULL,
                                     prior_rho_mean = 0.5, prior_rho_sd = 0.3,
-                                    prior_sigma_sd = 0.05) {
+                                    prior_sigma_sd = 0.05,
+                                    boundary = c("warn", "reject", "ignore"),
+                                    boundary_tol = 1e-3) {
+  likelihood <- match.arg(likelihood)
+  boundary <- match.arg(boundary)
+  if (!(is.numeric(boundary_tol) && length(boundary_tol) == 1L &&
+        is.finite(boundary_tol) && boundary_tol > 0))
+    stop("make_log_posterior_hank: `boundary_tol` must be a finite positive ",
+         "scalar.")
+  boundary_state <- new.env(parent = emptyenv())
   exo <- model$exogenous
+  missing_obs <- setdiff(observables, names(model$G))
+  if (length(missing_obs))
+    stop("make_log_posterior_hank: observable(s) not produced by model: ",
+         paste(missing_obs, collapse = ", "))
+  if (is.null(me_sd)) me_sd <- sqrt(me_var)
   rep_named <- function(x, nm) {
     if (is.null(names(x))) setNames(rep(x, length.out = length(nm)), nm)
     else x[nm]
@@ -211,6 +286,12 @@ make_log_posterior_hank <- function(model, Y, observables, q = NULL,
   rho_mean <- rep_named(prior_rho_mean, exo)
   rho_sd   <- rep_named(prior_rho_sd, exo)
   sig_sd   <- rep_named(prior_sigma_sd, exo)
+  ## Per-closure exact-AR cache: per-shock autocovariance slabs + the stacked
+  ## gather index survive across draws (exactness-preserving; see the `cache`
+  ## argument of hank_loglik_ar). A rho move re-derives that shock's Theta
+  ## (different driving path) so its slab recomputes; a sigma-only move
+  ## reuses every slab.
+  ar_cache <- new.env(parent = emptyenv())
 
   function(theta) {
     rho_nm <- paste0("rho_", exo)
@@ -229,8 +310,26 @@ make_log_posterior_hank <- function(model, Y, observables, q = NULL,
 
     shock_specs <- setNames(
       lapply(exo, function(z) list(rho = rho[[z]], sigma = sigma[[z]])), exo)
-    ss <- hank_state_space(model, shock_specs, observables, q = q)
-    loglik <- hank_kalman_loglik(Y, ss, me_var = me_var)
+    if (likelihood == "kalman") {
+      ss <- hank_state_space(model, shock_specs, observables, q = q)
+      loglik <- hank_kalman_loglik(Y, ss, me_var = me_var)
+    } else {
+      ## Representability: reject/flag BEFORE spending a likelihood on a Theta
+      ## the sequence-space solve cannot represent at this persistence.
+      if (.hank_ar_boundary_gate(rho, model$T_h, boundary, boundary_tol,
+                                 "make_log_posterior_hank", boundary_state))
+        return(list(logpost = -Inf, loglik = NA_real_, logprior = logprior))
+      ## exact_ar needs only the MA coefficients, not the (potentially large)
+      ## q*n_shock-dimensional companion-form matrices.
+      Theta_list <- .hank_theta_list(model, shock_specs, observables)
+      loglik <- tryCatch(
+        hank_loglik_ar(Y, Theta_list, rho = rho, sigma = sigma,
+                       me_sd = me_sd, q = q, check_boundary = FALSE,
+                       cache = ar_cache),
+        error = function(e) -Inf)
+      if (!is.finite(loglik))
+        return(list(logpost = -Inf, loglik = loglik, logprior = logprior))
+    }
 
     list(logpost = loglik + logprior, loglik = loglik, logprior = logprior)
   }

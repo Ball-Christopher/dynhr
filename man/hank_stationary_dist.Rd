@@ -4,7 +4,13 @@
 \alias{hank_stationary_dist}
 \title{Stationary cross-sectional distribution}
 \usage{
-hank_stationary_dist(Lambda, d0 = NULL, tol = 1e-13, maxit = 200000L)
+hank_stationary_dist(
+  Lambda,
+  d0 = NULL,
+  tol = 1e-13,
+  maxit = 200000L,
+  backend = getOption("dynhr.hank_backend", "cpp")
+)
 }
 \arguments{
 \item{Lambda}{Sparse forward operator from \code{\link{hank_forward_operator}}.}
@@ -15,6 +21,14 @@ uniform.}
 \item{tol}{Convergence tolerance on \code{max|d change|}.}
 
 \item{maxit}{Maximum iterations.}
+
+\item{backend}{Character: \code{"cpp"} (default) or \code{"R"}. \code{"cpp"}
+runs the power iteration in a compiled kernel directly off \code{Lambda}'s
+CSC slots (\code{d_next = t(Lambda) \%*\% d}, without ever forming the
+transpose), for the same numerics as the R path. Defaults to
+\code{getOption("dynhr.hank_backend", "cpp")}; the R reference path
+remains available via \code{backend = "R"} or
+\code{options(dynhr.hank_backend = "R")}.}
 }
 \value{
 A list with \code{d} (stationary distribution vector, sums to 1),

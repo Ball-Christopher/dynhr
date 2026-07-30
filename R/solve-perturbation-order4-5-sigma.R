@@ -179,10 +179,10 @@
 #' Add fourth-order sigma-correction terms to a DecisionRules4 object
 #'
 #' Computes:
-#'   \code{ghxxss} (n × n_s²) — mixed 2nd state × σ² correction
-#'   \code{ghss2}  (n × 1)     — pure σ⁴ steady-state correction
+#'   \code{ghxxss} (n × n_s²) — mixed 2nd state × sigma^2 correction
+#'   \code{ghss2}  (n × 1)     — pure sigma^4 steady-state correction
 #'
-#' For Gaussian shocks the σ³ and σ¹ cross terms vanish.
+#' For Gaussian shocks the sigma^3 and sigma^1 cross terms vanish.
 #'
 #' @param dr4       DecisionRules4 from \code{solve_perturbation_order4()}
 #' @param compiled  dynhr_compiled
@@ -279,8 +279,8 @@ solve_sigma_order4 <- function(dr4, compiled, ss, params,
 #' Add fifth-order sigma-correction terms to a DecisionRules5 object
 #'
 #' Computes:
-#'   \code{ghxxxss} (n × n_s³) — mixed 3rd state × σ² correction
-#'   \code{ghxss2}  (n × n_s)   — mixed 1st state × σ⁴ correction
+#'   \code{ghxxxss} (n × n_s³) — mixed 3rd state × sigma^2 correction
+#'   \code{ghxss2}  (n × n_s)   — mixed 1st state × sigma^4 correction
 #'
 #' Requires order-4 sigma terms (\code{ghxxss}, \code{ghss2}) from
 #' \code{solve_sigma_order4()}.

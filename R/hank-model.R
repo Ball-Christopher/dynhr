@@ -37,12 +37,35 @@
 #'   Jacobian as a nested list \code{[[output]][[input]]} of \code{T x T}
 #'   matrices.  If \code{NULL}, the Jacobian is computed by central finite
 #'   differences around the steady state.
+#' @param djac_dtheta Optional named list of functions
+#'   \code{function(ss, T_h)}, one per structural parameter this block's
+#'   Jacobian depends on, each returning \eqn{\partial J/\partial\theta_k} in
+#'   the same nested \code{[[output]][[input]]} shape as \code{jac} (omit an
+#'   \code{[[output]][[input]]} entry that is identically zero).
+#'   \code{\link{hank_model_dtheta}} propagates these through the DAG chain
+#'   rule to \eqn{dH_U/d\theta_k}, \eqn{dH_Z/d\theta_k} and ultimately
+#'   \eqn{d\Theta_z/d\theta_k} -- so a block only ever declares the derivative
+#'   of its OWN small Jacobian, never a packed GE matrix. Used by the exact
+#'   route of \code{\link{hank_loglik_ar_structural_grad}}; see
+#'   \code{\link{hank_dtheta_fn}}.
 #'
 #' @return An object of class \code{hank_block} (kind \code{"simple"}).
 #' @export
-hank_simple_block <- function(name, inputs, outputs, fn, jac = NULL) {
+hank_simple_block <- function(name, inputs, outputs, fn, jac = NULL,
+                              djac_dtheta = NULL) {
+  if (!is.null(djac_dtheta)) {
+    if (!is.list(djac_dtheta) || is.null(names(djac_dtheta)) ||
+        any(!nzchar(names(djac_dtheta))))
+      stop("hank_simple_block(): `djac_dtheta` must be a NAMED list ",
+           "(one entry per structural parameter).")
+    if (!all(vapply(djac_dtheta, is.function, logical(1))))
+      stop("hank_simple_block(): every `djac_dtheta` entry must be a ",
+           "function(ss, T_h) returning the same nested ",
+           "[[output]][[input]] shape as `jac`.")
+  }
   structure(list(name = name, kind = "simple", inputs = inputs,
-                 outputs = outputs, fn = fn, jac = jac),
+                 outputs = outputs, fn = fn, jac = jac,
+                 djac_dtheta = djac_dtheta),
             class = "hank_block")
 }
 
@@ -52,13 +75,30 @@ hank_simple_block <- function(name, inputs, outputs, fn, jac = NULL) {
 #' @param name Character block name.
 #' @param block A \code{\link{hank_het_block}} solved at steady state.
 #' @param inputs,outputs Character vectors; must be supported by
-#'   \code{\link{hank_het_jacobian}} (inputs a subset of \code{c("r","w")},
-#'   outputs a subset of \code{c("A","C")}).
+#'   \code{\link{hank_het_jacobian}} (inputs a subset of \code{c("r","w","Tr")}
+#'   plus, for a block built with \code{Pi_fn}/\code{Pi_inputs}, the block's
+#'   named transition-probability inputs -- e.g. \code{c("r","w","f","s")}
+#'   for a \code{\link{hank_employment_income}} household whose job-finding
+#'   and separation rates are produced by an upstream matching block;
+#'   outputs a subset of \code{c("A","C")}). Validated here so a bad wiring
+#'   fails at spec time, not inside the Jacobian dispatch.
 #'
 #' @return An object of class \code{hank_block} (kind \code{"het"}).
 #' @export
 hank_het_block_spec <- function(name, block, inputs = c("r", "w"),
                                 outputs = c("A", "C")) {
+  ## A two-asset block would otherwise slip through: the only validation below
+  ## is on input NAMES, and a het2 block's defaults happen to satisfy it -- so
+  ## it would be tagged kind = "het" and its n_e x n_b x n_a policies fed to
+  ## the one-asset fake-news Jacobian, which reads them as n_e x n_a. Fail here
+  ## instead, at spec time.
+  if (inherits(block, "hank_het2_block"))
+    stop("hank_het_block_spec(): this is a two-asset block ",
+         "(hank_het2_block); use hank_het2_block_spec(), whose inputs are ",
+         "('rb', 'ra', 'w') and outputs ('B', 'A', 'C').")
+  if (!inherits(block, "hank_het_block"))
+    stop("hank_het_block_spec(): 'block' must be a hank_het_block.")
+  .hank_het_check_inputs(block, inputs)
   structure(list(name = name, kind = "het", inputs = inputs,
                  outputs = outputs, block = block),
             class = "hank_block")
@@ -72,8 +112,15 @@ hank_het_block_spec <- function(name, block, inputs = c("r", "w"),
 #' \code{\link{hank_mixture_blocks}}): every type shares the asset grid and
 #' prices, and MAY differ in its income process (\code{Pi}, \code{e}) -- e.g.
 #' a per-type Rouwenhorst calibration for an income-risk heterogeneity axis --
-#' as well as in \code{beta}. Because types interact solely through the common
-#' aggregate prices \code{(r, w)}, the block's sequence-space Jacobian and
+#' as well as in \code{beta}, \code{eis}, and the borrowing constraint
+#' \code{amin} (the WEALTH heterogeneity axis: per-type \code{amin} on the
+#' shared \code{a_grid}; see \code{\link{hank_het_block}}). Because a
+#' per-type \code{amin} lives on the shared grid, it keeps the
+#' \code{(e, a)} cell space common across types -- so, unlike per-type
+#' \code{Pi}/\code{e}, it does NOT flip \code{same_income} and pooled
+#' distribution objects remain valid. Because types interact solely through
+#' the common aggregate prices \code{(r, w)}, the block's sequence-space
+#' Jacobian and
 #' nonlinear map for the SCALAR aggregates (A, C) are EXACT omega-weighted
 #' sums of the per-type objects (see \code{\link{hank_mixture_jacobian}},
 #' \code{\link{hank_mixture_dist_jacobian}}) -- no cross term between types --
@@ -146,12 +193,130 @@ hank_mixture_block_spec <- function(name, blocks, omega, inputs = c("r", "w"),
 }
 
 
+## Package-private block-Jacobian cache, same contract as .hank_ge_factor's LU
+## cache: keyed by identical() on everything the Jacobian depends on, and a hit
+## returns the BIT-IDENTICAL object the uncached path would have built.
+##
+## WHY. .hank_block_jacobian() is called once per block per hank_model() call,
+## and for a het block that call IS the fake-news algorithm -- measured 0.465 s
+## of a 0.558 s model build at T_h = 400 (83%), 0.239 s of 0.275 s at T_h = 200.
+## Any workload that rebuilds the model at a new STRUCTURAL parameter pays it
+## again, even when the parameter cannot touch the household at all (a Taylor
+## rule coefficient, an NKPC slope): a frozen-Jacobian rebuild reproduces H_U
+## to max|diff| = 0, so that work was provably redundant. Skipping it makes
+## such a rebuild 16x cheaper at T_h = 400 (0.558 -> 0.035 s), which is what
+## makes both affinity detection and FD-based dH_U/dtheta affordable -- see
+## briefs/21-structural-score-api-scope.md.
+##
+## The key is list(blk, ss, T_h). Keying on the whole block is deliberate and
+## conservative: for a het kind the Jacobian is a function of the solved block
+## (its policies and Lambda), and for a simple kind of the closure in `fn`/`jac`
+## -- and a closure rebuilt with new captured parameters is a DIFFERENT object
+## to identical() (environments compare by reference), so a parameter change
+## that only a closure can see still misses. `ss` is in the key because simple
+## blocks difference around it. False misses cost a recomputation; there is no
+## key under which a stale Jacobian can be returned.
+##
+## Several entries are retained (unlike the GE cache's single slot) because the
+## caller pattern is a LOOP over blocks: one slot would thrash on every model
+## with more than one cached block.
+.hank_block_jac_cache <- new.env(parent = emptyenv())
+.hank_block_jac_cache$entries <- list()
+.hank_block_jac_cache$n_build <- 0L
+.hank_block_jac_cache$n_hit   <- 0L
+.hank_block_jac_max <- 16L
+
+#' Reset the block-Jacobian cache (testing / memory reclamation)
+#'
+#' A cached het-block Jacobian is \code{n_inputs * n_outputs} dense
+#' \code{T_h x T_h} matrices, so at production \code{T_h} the cache is large.
+#' Call this to drop it, or set \code{options(dynhr.block_jac_cache = FALSE)}
+#' to disable caching entirely.
+#'
+#' @return Invisibly, the telemetry counters as they stood before the reset.
+#' @keywords internal
+hank_block_jac_cache_reset <- function() {
+  old <- list(n_build = .hank_block_jac_cache$n_build,
+              n_hit   = .hank_block_jac_cache$n_hit,
+              n_entries = length(.hank_block_jac_cache$entries))
+  .hank_block_jac_cache$entries <- list()
+  .hank_block_jac_cache$n_build <- 0L
+  .hank_block_jac_cache$n_hit   <- 0L
+  invisible(old)
+}
+
+
 #' Block Jacobian dispatch (simple: analytic or FD; het: fake-news)
 #' @keywords internal
+## WALL-CLOCK MUST NOT REACH THE CACHE KEY.
+##
+## The key below is compared with identical() on the whole block, which is
+## deliberately conservative -- a false MISS costs a recomputation, and there
+## is no key under which a stale Jacobian can be returned. But that same
+## conservatism makes the key brittle to any run-VARYING field stored on the
+## block: when hank_het_block()/hank_het2_block() started recording
+## elapsed_solve/elapsed_dist (0.9.0.0035-36), two blocks built from an
+## IDENTICAL calibration stopped being identical(), so the cache stopped
+## hitting entirely -- silently, since a pure miss is still correct, just 16x
+## slower on the rebuild this cache exists to make cheap.
+## test-hank-block-jac-cache.R caught it.
+##
+## Only the timings are stripped. iterations/converged/gaps are deterministic
+## given the calibration, and backend/threads are left IN the key on purpose:
+## the R and compiled paths can differ at round-off, so keeping them cannot
+## return a cross-backend result under the wrong key. Strip the minimum that
+## restores the cache, not everything that looks like metadata.
+.hank_block_cache_key <- function(blk) {
+  drop <- c("elapsed_solve", "elapsed_dist", "elapsed")
+  strip <- function(x) {
+    if (!is.list(x)) return(x)
+    x[intersect(names(x), drop)] <- NULL
+    x
+  }
+  blk <- strip(blk)
+  if (is.list(blk) && !is.null(blk$block)) blk$block <- strip(blk$block)
+  blk
+}
+
+
 .hank_block_jacobian <- function(blk, ss, T_h) {
+  if (!isTRUE(getOption("dynhr.block_jac_cache", TRUE)))
+    return(.hank_block_jacobian_uncached(blk, ss, T_h))
+  key <- list(blk = .hank_block_cache_key(blk), ss = ss, T_h = T_h)
+  ents <- .hank_block_jac_cache$entries
+  for (i in seq_along(ents)) {
+    if (identical(ents[[i]]$key, key)) {
+      .hank_block_jac_cache$n_hit <- .hank_block_jac_cache$n_hit + 1L
+      ## move to front: the loop over blocks revisits the same few keys
+      .hank_block_jac_cache$entries <- c(ents[i], ents[-i])
+      return(ents[[i]]$J)
+    }
+  }
+  J <- .hank_block_jacobian_uncached(blk, ss, T_h)
+  .hank_block_jac_cache$n_build <- .hank_block_jac_cache$n_build + 1L
+  ents <- c(list(list(key = key, J = J)), ents)
+  if (length(ents) > .hank_block_jac_max)
+    ents <- ents[seq_len(.hank_block_jac_max)]
+  .hank_block_jac_cache$entries <- ents
+  J
+}
+
+
+#' Block Jacobian dispatch, uncached (the reference path)
+#' @keywords internal
+.hank_block_jacobian_uncached <- function(blk, ss, T_h) {
   if (blk$kind == "het")
     return(hank_het_jacobian(blk$block, T_h, inputs = blk$inputs,
                              outputs = blk$outputs))
+  if (blk$kind == "het2")
+    return(hank_het2_jacobian(blk$block, T_h, inputs = blk$inputs,
+                              outputs = blk$outputs))
+  if (blk$kind == "het2d")
+    return(hank_het2d_jacobian(blk$block, T_h, inputs = blk$inputs,
+                               outputs = blk$outputs))
+  if (blk$kind == "het3")
+    return(hank_het3_jacobian(blk$block, T_h, inputs = blk$inputs,
+                              outputs = blk$outputs))
   if (blk$kind == "het_mixture")
     return(hank_mixture_jacobian(blk$blocks, blk$omega, T_h,
                                  inputs = blk$inputs, outputs = blk$outputs))
@@ -270,10 +435,64 @@ hank_model <- function(blocks, unknowns, targets, exogenous, ss, T_h) {
     ins <- lapply(blk$inputs, function(i) vals[[i]]); names(ins) <- blk$inputs
     if (blk$kind == "het") {
       r_path <- ins[["r"]]; w_path <- ins[["w"]]
+      ## transition-probability inputs (HANK+SAM: e.g. f/s from an upstream
+      ## matching block) ride along by name; NULL when the block is (r, w)-only.
+      ## "Tr" is an AGGREGATE input (the lump-sum transfer), not a Pi input --
+      ## without this exclusion it would be misrouted into pi_input_paths and
+      ## die inside .hank_pi_path.
+      pi_nm <- setdiff(blk$inputs, c("r", "w", "Tr", "r_minus"))
+      pip   <- if (length(pi_nm)) ins[pi_nm] else NULL
       td <- hank_td_nonlinear(blk$block, r_path = r_path, w_path = w_path,
-                              T_h = T_h)
+                              T_h = T_h, pi_input_paths = pip,
+                              Tr_path = ins[["Tr"]],
+                              r_minus_path = ins[["r_minus"]])
+      for (o in blk$outputs) vals[[o]] <- td[[o]]
+    } else if (blk$kind == "het2") {
+      ## Two-asset household: three prices (rb, ra, w) rather than (r, w);
+      ## transition-probability inputs ride along by name exactly as above.
+      pi_nm <- setdiff(blk$inputs, c("rb", "ra", "w", "Tr", "theta_coll"))
+      pip   <- if (length(pi_nm)) ins[pi_nm] else NULL
+      td <- hank_td2_nonlinear(blk$block, rb_path = ins[["rb"]],
+                               ra_path = ins[["ra"]], w_path = ins[["w"]],
+                               T_h = T_h, pi_input_paths = pip,
+                               Tr_path = ins[["Tr"]],
+                               theta_path = ins[["theta_coll"]])
+      for (o in blk$outputs) vals[[o]] <- td[[o]]
+    } else if (blk$kind == "het3") {
+      ## Three-asset household: four prices (rd, rf, ra, w) plus the optional
+      ## foreign valuation px; transition-probability inputs ride along by
+      ## name exactly as in the one- and two-asset arms above. px is absent
+      ## from `ins` unless declared, and hank_td3_nonlinear reads NULL as
+      ## "hold the block's steady-state px" -- so an undeclared valuation
+      ## channel is held fixed rather than silently set to 1.
+      pi_nm <- setdiff(blk$inputs, c("rd", "rf", "ra", "w", "px"))
+      pip   <- if (length(pi_nm)) ins[pi_nm] else NULL
+      td <- hank_td3_nonlinear(blk$block, rd_path = ins[["rd"]],
+                               rf_path = ins[["rf"]], ra_path = ins[["ra"]],
+                               w_path = ins[["w"]], px_path = ins[["px"]],
+                               T_h = T_h, pi_input_paths = pip)
+      for (o in blk$outputs) vals[[o]] <- td[[o]]
+    } else if (blk$kind == "het2d") {
+      ## Transition-probability inputs ride along by name, as in every other
+      ## household arm.
+      pi_nm <- setdiff(blk$inputs, c("rb", "ra", "w", "Tr"))
+      pip   <- if (length(pi_nm)) ins[pi_nm] else NULL
+      td <- hank_td2d_nonlinear(blk$block, rb_path = ins[["rb"]],
+                                ra_path = ins[["ra"]], w_path = ins[["w"]],
+                                Tr_path = ins[["Tr"]], T_h = T_h,
+                                pi_input_paths = pip)
       for (o in blk$outputs) vals[[o]] <- td[[o]]
     } else if (blk$kind == "het_mixture") {
+      ## The mixture path forwards ONLY (r, w) to the per-type transitions.
+      ## Any other requested input (a Tr transfer, a Pi input) would be
+      ## silently dropped here -- worse than an error, so refuse loudly.
+      extra <- setdiff(blk$inputs, c("r", "w"))
+      if (length(extra))
+        stop("hank_model: mixture household block '", blk$name,
+             "' requests input(s) ", paste0("'", extra, "'", collapse = ", "),
+             ", but the nonlinear mixture transition forwards only ('r', ",
+             "'w') to its type blocks; the extra input(s) would be silently ",
+             "ignored. Use a single het block, or extend the mixture path.")
       r_path <- ins[["r"]]; w_path <- ins[["w"]]
       omega <- blk$omega
       td_k <- lapply(blk$blocks, function(bk)
@@ -301,8 +520,11 @@ hank_model <- function(blocks, unknowns, targets, exogenous, ss, T_h) {
 #' via \code{\link{hank_td_nonlinear}} (het) and the block functions (simple).
 #'
 #' @param model A \code{\link{hank_model}}.
-#' @param Z_paths Named list of exogenous LEVEL paths (length \code{T}), one per
-#'   \code{model$exogenous}.
+#' @param Z_paths Named list of exogenous LEVEL paths (length \code{T}) for a
+#'   SUBSET of \code{model$exogenous}; any exogenous not named stays at its
+#'   steady-state level for the whole horizon (the nonlinear analogue of
+#'   \code{\link{hank_model_irf}}'s missing-shock-is-zero-deviation
+#'   convention). Unknown names are an error.
 #' @param tol,maxit Newton tolerance (max abs target residual) and iteration cap.
 #'
 #' @return A list with level paths for every variable, plus \code{converged},
@@ -310,10 +532,31 @@ hank_model <- function(blocks, unknowns, targets, exogenous, ss, T_h) {
 #' @export
 hank_model_nonlinear_irf <- function(model, Z_paths, tol = 1e-9, maxit = 50L) {
   T_h <- model$T_h; ss <- model$ss
+  ## Validate and complete the exogenous paths. Previously an exogenous the
+  ## caller did not name silently had NO path at all, and the failure surfaced
+  ## as a cryptic length error deep inside a downstream block (latent until a
+  ## model with two exogenous was shocked in only one of them).
+  bad <- setdiff(names(Z_paths), model$exogenous)
+  if (length(bad))
+    stop("hank_model_nonlinear_irf: Z_paths name(s) ",
+         paste0("'", bad, "'", collapse = ", "),
+         " are not exogenous in this model (exogenous: ",
+         paste0("'", model$exogenous, "'", collapse = ", "), ").")
+  short <- names(Z_paths)[vapply(Z_paths, length, integer(1)) != T_h]
+  if (length(short))
+    stop("hank_model_nonlinear_irf: Z_paths entr", if (length(short) > 1L)
+         "ies " else "y ", paste0("'", short, "'", collapse = ", "),
+         " must have length T_h = ", T_h, ".")
+  for (z in setdiff(model$exogenous, names(Z_paths)))
+    Z_paths[[z]] <- rep(ss[[z]], T_h)
   ## unknown level paths, initialized at steady state
   U <- setNames(lapply(model$unknowns, function(u) rep(ss[[u]], T_h)),
                 model$unknowns)
   stack <- function(lst, nm) do.call(c, lst[nm])
+
+  ## Quasi-Newton with the FROZEN steady-state H_U: every iteration solves
+  ## against the same matrix, so one factorization serves the whole loop.
+  fac <- .hank_ge_factor(model$H_U)
 
   converged <- FALSE; it <- 0L; max_resid <- Inf
   for (it in seq_len(maxit)) {
@@ -322,7 +565,7 @@ hank_model_nonlinear_irf <- function(model, Z_paths, tol = 1e-9, maxit = 50L) {
     resid <- stack(vals, model$targets)          # targets must be 0
     max_resid <- max(abs(resid))
     if (max_resid < tol) { converged <- TRUE; break }
-    dU <- as.numeric(solve(model$H_U, resid))
+    dU <- as.numeric(.hank_ge_solve(fac, model$H_U, resid))
     U_stack <- stack(U, model$unknowns) - dU
     for (k in seq_along(model$unknowns))
       U[[model$unknowns[k]]] <- U_stack[((k - 1) * T_h + 1):(k * T_h)]
@@ -330,6 +573,149 @@ hank_model_nonlinear_irf <- function(model, Z_paths, tol = 1e-9, maxit = 50L) {
   vals <- .hank_model_eval(model, c(U, Z_paths))
   vals$converged <- converged; vals$iterations <- it; vals$max_resid <- max_resid
   vals
+}
+
+
+## Package-private GE factorization cache: the LU of H_U and its rcond, keyed
+## on H_U ITSELF via identical(). Every sequence-space consumer -- one IRF per
+## shock, one per finite-difference tap in the exact-AR gradient, one Newton
+## iteration per nonlinear transition -- re-solved against the SAME H_U, and
+## each of those calls paid a fresh O(n^3) LU *and* a fresh O(n^3) rcond.
+## Measured on a dense n = 800 system: rcond 0.0060s + solve 0.0067s per call,
+## against 0.0033s to factor once and 0.0003s per subsequent solve. Both
+## discarded costs are cubic, so the waste grows with T_h x n_unknowns (the
+## NZ HANK paper's production system is n = 8800).
+##
+## Exactness: reusing a dgetrf factorization through dgetrs is what base
+## solve() does internally (dgesv = dgetrf + dgetrs), so a cache hit returns
+## BIT-IDENTICAL floats, not merely close ones -- verified in
+## test-hank-ge-factor.R at two sizes, and the standard the package's other
+## caches already hold themselves to (see .hank_ar_autocov_slab).
+##
+## Keying on identical(H_U) rather than a fingerprint is deliberate: it cannot
+## collide, and it is what makes in-place mutation (`bad$H_U[, 1] <- 0`, which
+## the determinacy tests do) invalidate correctly, since R copies on modify.
+## Two alternating model copies thrash the single slot; that costs an O(n^2)
+## compare and a refactor, never a wrong answer.
+.hank_ge_cache <- new.env(parent = emptyenv())
+.hank_ge_cache$n_factor <- 0L    # telemetry: real factorizations performed
+.hank_ge_cache$n_hit    <- 0L
+
+#' Cached LU factorization and reciprocal condition number of \code{H_U}
+#'
+#' @param H_U The GE Jacobian of targets with respect to unknowns.
+#' @return A list with \code{lu} (a \code{Matrix} LU, or \code{NULL} if the
+#'   factorization failed and callers should fall back to \code{solve}) and
+#'   \code{rcond}.
+#' @keywords internal
+.hank_ge_factor <- function(H_U) {
+  if (!isTRUE(getOption("dynhr.hank_ge_cache", TRUE)))
+    return(list(lu = NULL, rcond = rcond(H_U)))
+
+  ent <- .hank_ge_cache$ent
+  if (!is.null(ent) && identical(ent$H_U, H_U)) {
+    .hank_ge_cache$n_hit <- .hank_ge_cache$n_hit + 1L
+    return(ent)
+  }
+  ## A singular or otherwise pathological H_U must not become a hard error
+  ## here: hank_model_irf() has always warned and carried on (returning
+  ## whatever solve() gives), and hank_determinacy() relies on that. Degrade
+  ## to the uncached path instead of propagating a factorization failure.
+  lu <- tryCatch(Matrix::lu(H_U), error = function(e) NULL,
+                 warning = function(w) NULL)
+  ent <- list(H_U = H_U, lu = lu, rcond = rcond(H_U))
+  .hank_ge_cache$ent      <- ent
+  .hank_ge_cache$n_factor <- .hank_ge_cache$n_factor + 1L
+  ent
+}
+
+#' Solve \code{H_U x = B} through the cached factorization
+#'
+#' @param fac A \code{\link{.hank_ge_factor}} entry.
+#' @param H_U The matrix \code{fac} was built from (used only on fallback).
+#' @param B Right-hand side.
+#' @return The solution, identical to \code{solve(H_U, B)}.
+#' @keywords internal
+.hank_ge_solve <- function(fac, H_U, B) {
+  if (is.null(fac$lu)) return(solve(H_U, B))
+  out <- tryCatch(as.matrix(Matrix::solve(fac$lu, B)), error = function(e) NULL)
+  if (is.null(out)) solve(H_U, B) else out
+}
+
+#' Reset the GE factorization cache (testing / memory reclamation)
+#'
+#' The cached LU roughly doubles the resident size of \code{H_U}, which
+#' matters at production \code{T_h}. Call this to drop it, or set
+#' \code{options(dynhr.hank_ge_cache = FALSE)} to disable caching entirely.
+#'
+#' @return Invisibly, the telemetry counters as they stood before the reset.
+#' @keywords internal
+.hank_ge_cache_clear <- function() {
+  old <- list(n_factor = .hank_ge_cache$n_factor,
+              n_hit    = .hank_ge_cache$n_hit)
+  rm(list = ls(.hank_ge_cache), envir = .hank_ge_cache)
+  .hank_ge_cache$n_factor <- 0L
+  .hank_ge_cache$n_hit    <- 0L
+  invisible(old)
+}
+
+
+#' Validate (and, for a single-exogenous model, coerce) a \code{dZ} argument
+#'
+#' Every sequence-space GE entry point takes the exogenous impulse as a NAMED
+#' list, one length-\code{T_h} path per \code{model$exogenous}. Handed a bare
+#' numeric vector, the old code reached \code{dZ[[z]]} with a character index
+#' and died with "subscript out of bounds" -- a message that names neither the
+#' argument nor the convention. That is not hypothetical: the package's own
+#' HANK vignette made exactly this call, and it was one of the vignette
+#' execution failures in every \code{R CMD check} log from 2026-07-15 on.
+#'
+#' The trap is real because two irf producers in this package disagree by
+#' design: \code{\link{hank_ks_linear_irf}} takes a BARE vector (its model has
+#' one shock and it returns \code{d}-prefixed names), while the general
+#' \code{\link{hank_model_irf}} takes a named list keyed on the model's own
+#' exogenous names and returns bare variable names.
+#'
+#' A bare numeric vector is therefore accepted when -- and only when -- the
+#' model has exactly one exogenous, where the intent is unambiguous. Every
+#' other malformed input gets a message that names the expected keys.
+#'
+#' @param model A \code{\link{hank_model}}.
+#' @param dZ The user's \code{dZ} argument.
+#'
+#' @return A named list of exogenous paths (a subset of \code{model$exogenous};
+#'   absent entries are treated as zero downstream).
+#' @keywords internal
+.hank_check_dZ <- function(model, dZ) {
+  exo <- model$exogenous
+  T_h <- model$T_h
+  if (is.null(dZ)) return(list())
+  if (is.numeric(dZ) && is.null(names(dZ))) {
+    if (length(exo) != 1L)
+      stop("dZ: a bare numeric vector is only accepted when the model has ",
+           "exactly one exogenous; this model has ", length(exo), " (",
+           paste0("'", exo, "'", collapse = ", "), "). Supply a named list, ",
+           "e.g. dZ = list(", exo[1L], " = <length-", T_h, " path>).")
+    dZ <- stats::setNames(list(as.numeric(dZ)), exo)
+  }
+  if (!is.list(dZ))
+    stop("dZ must be a named list of exogenous paths (one per: ",
+         paste0("'", exo, "'", collapse = ", "), "), or -- for a ",
+         "single-exogenous model -- a bare numeric vector. Got ", class(dZ)[1L], ".")
+  if (length(dZ) && is.null(names(dZ)))
+    stop("dZ is an unnamed list; name its entries after the model's ",
+         "exogenous (", paste0("'", exo, "'", collapse = ", "), ").")
+  bad <- setdiff(names(dZ), exo)
+  if (length(bad))
+    stop("dZ name(s) ", paste0("'", bad, "'", collapse = ", "),
+         " are not exogenous in this model (exogenous: ",
+         paste0("'", exo, "'", collapse = ", "), ").")
+  short <- names(dZ)[vapply(dZ, length, integer(1)) != T_h]
+  if (length(short))
+    stop("dZ entr", if (length(short) > 1L) "ies " else "y ",
+         paste0("'", short, "'", collapse = ", "),
+         " must have length T_h = ", T_h, ".")
+  dZ
 }
 
 
@@ -344,24 +730,31 @@ hank_model_nonlinear_irf <- function(model, Z_paths, tol = 1e-9, maxit = 50L) {
 #'
 #' @param model A \code{\link{hank_model}}.
 #' @param dZ Named list of length-\code{T} exogenous shock paths (deviations),
-#'   one per \code{model$exogenous} (missing entries treated as zero).
+#'   one per \code{model$exogenous} (missing entries treated as zero). A bare
+#'   numeric vector is accepted only when the model has exactly one exogenous.
 #'
 #' @return Named list \code{dsrc}: one length-\code{T_h} deviation path per
 #'   entry of \code{model$unknowns} and \code{model$exogenous}.
 #' @keywords internal
 .hank_irf_dsrc <- function(model, dZ) {
   T_h <- model$T_h
+  dZ <- .hank_check_dZ(model, dZ)
   z_stack <- do.call(c, lapply(model$exogenous, function(z) {
     v <- dZ[[z]]; if (is.null(v)) rep(0, T_h) else v
   }))
   ## Well-posedness guard: a near-singular H_U silently yields a garbage IRF.
-  rc <- rcond(model$H_U)
+  ## Both this rcond and the solve below come from one cached factorization
+  ## (see .hank_ge_factor) -- the same H_U is hit once per shock, once per
+  ## gradient tap, and once per Newton iteration.
+  fac <- .hank_ge_factor(model$H_U)
+  rc  <- fac$rcond
   if (!is.finite(rc) || rc < 1e-10)
     warning(sprintf(paste0("hank_model_irf(): H_U is ill-conditioned ",
                            "(rcond = %.2e); the GE solution may be unreliable ",
                            "(near-singular / indeterminate). See hank_determinacy()."),
                     rc))
-  dU_stack <- as.numeric(-solve(model$H_U, model$H_Z %*% z_stack))
+  dU_stack <- as.numeric(-.hank_ge_solve(fac, model$H_U,
+                                         model$H_Z %*% z_stack))
 
   ## per-source deviation paths
   dsrc <- list()
@@ -379,7 +772,11 @@ hank_model_nonlinear_irf <- function(model, Z_paths, tol = 1e-9, maxit = 50L) {
 #'
 #' @param model A \code{\link{hank_model}}.
 #' @param dZ Named list of length-\code{T} exogenous shock paths (deviations),
-#'   one per \code{model$exogenous} (missing entries treated as zero).
+#'   one per \code{model$exogenous} (missing entries treated as zero). For a
+#'   model with exactly one exogenous a bare numeric vector is also accepted;
+#'   with more than one it is an error, since the intent would be ambiguous.
+#'   Note the contrast with \code{\link{hank_ks_linear_irf}}, which takes a
+#'   bare vector and returns \code{d}-prefixed names.
 #'
 #' @return A named list of deviation paths: the unknowns, plus every produced
 #'   variable, plus the exogenous inputs. Also carries attribute
@@ -445,7 +842,11 @@ hank_model_irf <- function(model, dZ) {
 #'
 #' @param model A \code{\link{hank_model}}.
 #' @param dZ Named list of length-\code{T} exogenous shock paths (deviations),
-#'   one per \code{model$exogenous} (missing entries treated as zero).
+#'   one per \code{model$exogenous} (missing entries treated as zero). For a
+#'   model with exactly one exogenous a bare numeric vector is also accepted;
+#'   with more than one it is an error, since the intent would be ambiguous.
+#'   Note the contrast with \code{\link{hank_ks_linear_irf}}, which takes a
+#'   bare vector and returns \code{d}-prefixed names.
 #'
 #' @return A list with:
 #'   \item{dD}{Named list, one entry per \code{"het"}-kind block in

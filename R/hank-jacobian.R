@@ -20,10 +20,83 @@
 ## all three validate against the same brute-force numerical-differentiation
 ## reference, which is the mandatory oracle in test-hank-jacobian.R).
 ##
+## IF YOU ARE HERE TO MAKE THIS FASTER, OR TO MAKE IT EXACT, READ FIRST:
+## ROADMAP.md Tier 19.1 ("Exact het-block structural derivatives: the TANGENT
+## SWEEP"), with the measurements in briefs/21-structural-score-api-scope.md
+## sec. 11. Short version, so the wrong thing does not get built again:
+##   * the het STEADY STATE is 0.4% of a structural FD tap -- a differentiable
+##     EGM/steady-state adjoint buys nothing here; this sweep is 85-93% of it;
+##   * the directional / IRF-form route to an exact derivative is MEASURED-DEAD
+##     (it loses to a plain FD tap at any shock count >= 1);
+##   * the tangent sweep is the only live route to exactness and its ceiling is
+##     ~2x, because this sweep already central-differences the policy step, so
+##     a tangent in a structural parameter needs MIXED SECOND derivatives of
+##     .hank_block_step. Its prerequisite -- analytic within-step derivatives,
+##     as in the paragraph above -- is worth doing on its own and flips that
+##     cost accounting; Tier 19.1 lists the trigger conditions.
+## Since 0.9.0.0025 the distributional half of this sweep is matrix-free
+## (.hank_forward_push, R/hank-distribution.R); .hank_block_step is now the
+## largest single piece of an iteration (57%, was 12%).
+##
 ## Lambda_ss is the row-stochastic forward operator (hank_forward_operator), so
 ## E_s = Lambda_ss %*% E_{s-1} with NO transpose (E_s(x) = expected future
 ## outcome from state x), while distributions push forward as t(Lambda) %*% D.
+##
+## ENDOGENOUS TRANSITION PROBABILITIES (HANK+SAM): when the block carries a
+## Pi_fn/Pi_inputs pair (see hank_het_block / hank_employment_income), the
+## named transition-probability inputs (e.g. job-finding rate f, separation
+## rate s) are perturbable alongside (r, w).  A date-s perturbation of such an
+## input x_s moves Pi_s (applied between periods s and s+1) and therefore
+## enters the fake-news sweep in TWO places at the shock date:
+##   (a) the backward step -- date-s expectations use Pi_s
+##       (Wa = beta * Pi_s %*% Va_{s+1}), so policies react at all t <= s via
+##       the propagated value-function derivative exactly as for (r, w);
+##   (b) the distribution update -- Pi_s enters Lambda_s DIRECTLY, so curly-D
+##       at the shock date is the JOINT derivative of t(Lambda(a', Pi(x))) D_ss
+##       in (policy, Pi), not the policy-only derivative used for (r, w).
+## Steps 2-4 (expectation vectors, fake-news cumulation) are unchanged: they
+## are steady-state objects.
 ## --------------------------------------------------------------------------
+
+
+#' Validate requested het-block Jacobian inputs
+#'
+#' The admissible aggregate inputs are the prices \code{c("r", "w")} plus, for
+#' a block built with \code{Pi_fn}/\code{Pi_inputs}, the block's named
+#' transition-probability inputs (\code{names(block$Pi_inputs)}).
+#'
+#' @param block A \code{\link{hank_het_block}}.
+#' @param inputs Character vector of requested inputs.
+#' @return \code{inputs}, validated.
+#' @keywords internal
+.hank_het_check_inputs <- function(block, inputs) {
+  ## Shared by hank_het_jacobian, hank_het_jacobian_nd, hank_het_dist_jacobian
+  ## and hank_het_block_spec, so one call covers every one-asset Jacobian route.
+  .hank_reject_het2(block, "hank_het_jacobian", use = "hank_het2_jacobian")
+  allowed <- c("r", "w", "Tr", "r_minus", names(block$Pi_inputs))
+  bad <- setdiff(inputs, allowed)
+  if (length(bad))
+    stop("unsupported het-block input(s) ",
+         paste0("'", bad, "'", collapse = ", "),
+         "; this block supports ",
+         paste0("'", allowed, "'", collapse = ", "),
+         if (is.null(block$Pi_inputs))
+           " (build the block with Pi_fn/Pi_inputs to add transition-probability inputs)"
+         else "", ".")
+  inputs
+}
+
+
+#' Transition matrix at a perturbed transition-probability input
+#'
+#' Evaluates \code{block$Pi_fn} with input \code{i} displaced by \code{delta}
+#' from its steady-state value (all other transition inputs at steady state).
+#' @keywords internal
+.hank_pi_perturb <- function(block, i, delta) {
+  args <- block$Pi_inputs
+  args[[i]] <- args[[i]] + delta
+  do.call(block$Pi_fn, args)
+}
 
 
 #' Brute-force numerical-differentiation Jacobian of a het block
@@ -35,7 +108,11 @@
 #'
 #' @param block A \code{\link{hank_het_block}}.
 #' @param T_h Integer horizon.
-#' @param inputs Character subset of \code{c("r", "w")}.
+#' @param inputs Character subset of \code{c("r", "w", "Tr", "r_minus")} plus,
+#'   for a block
+#'   built with \code{Pi_fn}/\code{Pi_inputs}, the block's named
+#'   transition-probability inputs (\code{names(block$Pi_inputs)}, e.g.
+#'   \code{"f"}, \code{"s"} from \code{\link{hank_employment_income}}).
 #' @param outputs Character subset of \code{c("A", "C")}.
 #' @param delta Numeric FD step for the input perturbation.
 #'
@@ -46,7 +123,7 @@ hank_het_jacobian_nd <- function(block, T_h,
                                  inputs = c("r", "w"),
                                  outputs = c("A", "C"),
                                  delta = 1e-5) {
-  inputs  <- match.arg(inputs, several.ok = TRUE)
+  inputs  <- .hank_het_check_inputs(block, inputs)
   outputs <- match.arg(outputs, several.ok = TRUE)
   r0 <- rep(block$r, T_h); w0 <- rep(block$w, T_h)
 
@@ -56,10 +133,34 @@ hank_het_jacobian_nd <- function(block, T_h,
   for (i in inputs) {
     for (s in seq_len(T_h)) {
       rp <- r0; wp <- w0; rm <- r0; wm <- w0
-      if (i == "r") { rp[s] <- rp[s] + delta; rm[s] <- rm[s] - delta }
-      else          { wp[s] <- wp[s] + delta; wm[s] <- wm[s] - delta }
-      out_p <- hank_td_nonlinear(block, r_path = rp, w_path = wp, T_h = T_h)
-      out_m <- hank_td_nonlinear(block, r_path = rm, w_path = wm, T_h = T_h)
+      pip_p <- NULL; pip_m <- NULL
+      Trp <- NULL; Trm <- NULL; rmp <- NULL; rmm <- NULL
+      if (i == "r")      { rp[s] <- rp[s] + delta; rm[s] <- rm[s] - delta }
+      else if (i == "w") { wp[s] <- wp[s] + delta; wm[s] <- wm[s] - delta }
+      else if (i == "Tr") {
+        Tr0 <- rep(.hank_block_tr(block), T_h)
+        Trp <- Tr0; Trp[s] <- Trp[s] + delta
+        Trm <- Tr0; Trm[s] <- Trm[s] - delta
+      }
+      else if (i == "r_minus") {
+        rm_ss <- if (is.null(block$r_minus)) block$r else block$r_minus
+        rm0 <- rep(rm_ss, T_h)
+        rmp <- rm0; rmp[s] <- rmp[s] + delta
+        rmm <- rm0; rmm[s] <- rmm[s] - delta
+      }
+      else {
+        x0 <- rep(block$Pi_inputs[[i]], T_h)
+        xp <- x0; xp[s] <- xp[s] + delta
+        xm <- x0; xm[s] <- xm[s] - delta
+        pip_p <- setNames(list(xp), i)
+        pip_m <- setNames(list(xm), i)
+      }
+      out_p <- hank_td_nonlinear(block, r_path = rp, w_path = wp, T_h = T_h,
+                                 pi_input_paths = pip_p, Tr_path = Trp,
+                                 r_minus_path = rmp)
+      out_m <- hank_td_nonlinear(block, r_path = rm, w_path = wm, T_h = T_h,
+                                 pi_input_paths = pip_m, Tr_path = Trm,
+                                 r_minus_path = rmm)
       for (o in outputs)
         J[[o]][[i]][, s] <- (out_p[[o]] - out_m[[o]]) / (2 * delta)
     }
@@ -86,7 +187,7 @@ hank_het_jacobian_nd <- function(block, T_h,
 hank_het_dist_jacobian_nd <- function(block, T_h,
                                       inputs = c("r", "w"),
                                       delta = 1e-5) {
-  inputs <- match.arg(inputs, several.ok = TRUE)
+  inputs <- .hank_het_check_inputs(block, inputs)
   r0 <- rep(block$r, T_h); w0 <- rep(block$w, T_h)
   n_cell <- block$n_e * block$n_a
 
@@ -96,10 +197,34 @@ hank_het_dist_jacobian_nd <- function(block, T_h,
   for (i in inputs) {
     for (s in seq_len(T_h)) {
       rp <- r0; wp <- w0; rm <- r0; wm <- w0
-      if (i == "r") { rp[s] <- rp[s] + delta; rm[s] <- rm[s] - delta }
-      else          { wp[s] <- wp[s] + delta; wm[s] <- wm[s] - delta }
-      out_p <- hank_td_nonlinear(block, r_path = rp, w_path = wp, T_h = T_h)
-      out_m <- hank_td_nonlinear(block, r_path = rm, w_path = wm, T_h = T_h)
+      pip_p <- NULL; pip_m <- NULL
+      Trp <- NULL; Trm <- NULL; rmp <- NULL; rmm <- NULL
+      if (i == "r")      { rp[s] <- rp[s] + delta; rm[s] <- rm[s] - delta }
+      else if (i == "w") { wp[s] <- wp[s] + delta; wm[s] <- wm[s] - delta }
+      else if (i == "Tr") {
+        Tr0 <- rep(.hank_block_tr(block), T_h)
+        Trp <- Tr0; Trp[s] <- Trp[s] + delta
+        Trm <- Tr0; Trm[s] <- Trm[s] - delta
+      }
+      else if (i == "r_minus") {
+        rm_ss <- if (is.null(block$r_minus)) block$r else block$r_minus
+        rm0 <- rep(rm_ss, T_h)
+        rmp <- rm0; rmp[s] <- rmp[s] + delta
+        rmm <- rm0; rmm[s] <- rmm[s] - delta
+      }
+      else {
+        x0 <- rep(block$Pi_inputs[[i]], T_h)
+        xp <- x0; xp[s] <- xp[s] + delta
+        xm <- x0; xm[s] <- xm[s] - delta
+        pip_p <- setNames(list(xp), i)
+        pip_m <- setNames(list(xm), i)
+      }
+      out_p <- hank_td_nonlinear(block, r_path = rp, w_path = wp, T_h = T_h,
+                                 pi_input_paths = pip_p, Tr_path = Trp,
+                                 r_minus_path = rmp)
+      out_m <- hank_td_nonlinear(block, r_path = rm, w_path = wm, T_h = T_h,
+                                 pi_input_paths = pip_m, Tr_path = Trm,
+                                 r_minus_path = rmm)
       dD <- (out_p$Dpath - out_m$Dpath) / (2 * delta)   # (n_cell x T_h), col t
       for (tt in seq_len(T_h)) JD_nd[[i]][tt, s, ] <- dD[, tt]
     }
@@ -114,6 +239,16 @@ hank_het_dist_jacobian_nd <- function(block, T_h,
 #' shock to input \code{i} at horizon \code{s = 1 .. T_h} (s=1 is the direct
 #' current-period shock; s>=2 propagate via the value-function derivative).
 #'
+#' For a transition-probability input (\code{i} in
+#' \code{names(block$Pi_inputs)}), the s=1 term perturbs Pi in BOTH places it
+#' enters the shock date (see the file header): the backward step's
+#' expectation uses \code{Pi_fn(x +/- delta_in)}, and curly-D is the JOINT
+#' central difference of \eqn{t(\Lambda(a', \Pi))\,D_{ss}} along the direction
+#' (policy change \code{dA}, unit input change) -- the policy-only
+#' \code{curlyD_from_dA} would miss Pi's direct entry in the forward law of
+#' motion.  The s>=2 anticipation terms are unchanged: at dates before the
+#' shock both the step's Pi and Lambda's Pi sit at steady state.
+#'
 #' @return List with \code{curlyY} (named list over \code{outputs}, each a
 #'   length-\code{T_h} vector) and \code{curlyD} (\code{(n_e*n_a) x T_h}
 #'   matrix, column \code{s}).
@@ -122,13 +257,16 @@ hank_het_dist_jacobian_nd <- function(block, T_h,
                               delta_in, delta_va, delta_d) {
   a_grid <- block$a_grid; Pi <- block$Pi; D_ss <- block$D
   Va_ss <- block$Va; a_ss <- block$a
+  is_pi_input <- !(i %in% c("r", "w", "Tr", "r_minus"))
 
   ## Helper: distributional response (curly-D) to a savings-policy change dA.
+  ## MATRIX-FREE: this ran twice per date and was 78-83% of the whole sweep
+  ## when it built two sparse Lambdas for a product that needs none (measured
+  ## in .hank_forward_push's header). Same algebra, contracted rather than
+  ## materialized -- parity with the sparse path at round-off.
   curlyD_from_dA <- function(dA) {
-    Lp <- hank_forward_operator(a_ss + delta_d * dA, a_grid, Pi)
-    Lm <- hank_forward_operator(a_ss - delta_d * dA, a_grid, Pi)
-    (as.numeric(Matrix::t(Lp) %*% D_ss) -
-       as.numeric(Matrix::t(Lm) %*% D_ss)) / (2 * delta_d)
+    (.hank_forward_push(a_ss + delta_d * dA, a_grid, Pi, D_ss) -
+       .hank_forward_push(a_ss - delta_d * dA, a_grid, Pi, D_ss)) / (2 * delta_d)
   }
 
   curlyY <- setNames(lapply(outputs, function(o) numeric(T_h)), outputs)
@@ -138,20 +276,65 @@ hank_het_dist_jacobian_nd <- function(block, T_h,
   if (i == "r") {
     sp <- .hank_block_step(block, Va_ss, block$r + delta_in, block$w)
     sm <- .hank_block_step(block, Va_ss, block$r - delta_in, block$w)
-  } else {
+  } else if (i == "w") {
     sp <- .hank_block_step(block, Va_ss, block$r, block$w + delta_in)
     sm <- .hank_block_step(block, Va_ss, block$r, block$w - delta_in)
+  } else if (i == "r_minus") {
+    ## The borrowing-rate input. Around a SYMMETRIC block this perturbs
+    ## r_minus away from r in both directions (the step dispatches to the
+    ## wedge solver as soon as r_minus is non-NULL), which is exactly the
+    ## directional derivative the DAG composition rb -> repricing -> r_minus
+    ## needs at a zero-wedge steady state.
+    rm0 <- if (is.null(block$r_minus)) block$r else block$r_minus
+    sp <- .hank_block_step(block, Va_ss, block$r, block$w,
+                           r_minus = rm0 + delta_in)
+    sm <- .hank_block_step(block, Va_ss, block$r, block$w,
+                           r_minus = rm0 - delta_in)
+  } else if (i == "Tr") {
+    ## Lump-sum transfer: enters the budget additively (y = w*e + Tr*omega),
+    ## so its s = 1 column is the iMPC out of a date-1 transfer -- see
+    ## hank_impc(), an independent implementation this is cross-validated
+    ## against in test-hank-transfer.R.
+    ##
+    ## The incidence weight omega needs NO branch of its own here: it is block
+    ## state, not a perturbable input, so .hank_block_step applies it and this
+    ## stays a plain central difference in the scalar Tr. Nor does it reach
+    ## curlyD below -- omega shifts income within a period but not the state
+    ## coordinate, so the policy-only curlyD_from_dA branch remains correct
+    ## (contrast theta_coll in .hank_curly_sweep2, which DOES move the
+    ## coordinate and needs the date-1/date-2 rebasing corrections).
+    Tr0 <- .hank_block_tr(block)
+    sp <- .hank_block_step(block, Va_ss, block$r, block$w, Tr = Tr0 + delta_in)
+    sm <- .hank_block_step(block, Va_ss, block$r, block$w, Tr = Tr0 - delta_in)
+  } else {
+    ## transition-probability input: the date-1 expectation uses perturbed Pi
+    sp <- .hank_block_step(block, Va_ss, block$r, block$w,
+                           Pi = .hank_pi_perturb(block, i, +delta_in))
+    sm <- .hank_block_step(block, Va_ss, block$r, block$w,
+                           Pi = .hank_pi_perturb(block, i, -delta_in))
   }
   dA  <- (sp$a  - sm$a)  / (2 * delta_in)
   dC  <- (sp$c  - sm$c)  / (2 * delta_in)
   dVa <- (sp$Va - sm$Va) / (2 * delta_in)
   if ("A" %in% outputs) curlyY[["A"]][1L] <- hank_aggregate(D_ss, dA)
   if ("C" %in% outputs) curlyY[["C"]][1L] <- hank_aggregate(D_ss, dC)
-  curlyD[, 1L] <- curlyD_from_dA(dA)
+  if (is_pi_input) {
+    ## Joint (policy, Pi) directional derivative of the forward update: Pi
+    ## enters Lambda directly on the shock date, so perturb both together
+    ## with the SAME step (unit direction in the input, dA in the policy).
+    curlyD[, 1L] <-
+      (.hank_forward_push(a_ss + delta_d * dA, a_grid,
+                          .hank_pi_perturb(block, i, +delta_d), D_ss) -
+         .hank_forward_push(a_ss - delta_d * dA, a_grid,
+                            .hank_pi_perturb(block, i, -delta_d), D_ss)) /
+      (2 * delta_d)
+  } else {
+    curlyD[, 1L] <- curlyD_from_dA(dA)
+  }
 
   ## s >= 2: propagate the anticipation via the value-function derivative.
   dVa_prev <- dVa
-  for (s in 2L:T_h) {
+  for (s in seq_len(T_h - 1L) + 1L) {              # s = 2 .. T_h, empty if T_h < 2
     h  <- delta_va / max(1, max(abs(dVa_prev)))
     sp <- .hank_block_step(block, Va_ss + h * dVa_prev, block$r, block$w)
     sm <- .hank_block_step(block, Va_ss - h * dVa_prev, block$r, block$w)
@@ -170,8 +353,15 @@ hank_het_dist_jacobian_nd <- function(block, T_h,
 
 #' Sequence-space Jacobian of a het block via the fake-news algorithm
 #'
+#' For a block built with \code{Pi_fn}/\code{Pi_inputs} (e.g. via
+#' \code{\link{hank_employment_income}}), the transition-probability inputs
+#' are perturbable alongside \code{(r, w)}: pass their names in \code{inputs}
+#' to get the Jacobian columns w.r.t. anticipated job-finding/separation-rate
+#' paths (see the file header for how the Pi perturbation enters the sweep).
+#'
 #' @inheritParams hank_het_jacobian_nd
-#' @param delta_in FD step for the input (r/w) perturbation in the s=0 term.
+#' @param delta_in FD step for the input (r/w/transition-probability)
+#'   perturbation in the s=0 term.
 #' @param delta_va Relative FD step for the backward value-function propagation.
 #' @param delta_d FD step for the distributional (curly-D) response.
 #'
@@ -184,7 +374,7 @@ hank_het_jacobian <- function(block, T_h,
                               outputs = c("A", "C"),
                               delta_in = 1e-5, delta_va = 1e-6,
                               delta_d = 1e-6) {
-  inputs  <- match.arg(inputs, several.ok = TRUE)
+  inputs  <- .hank_het_check_inputs(block, inputs)
   outputs <- match.arg(outputs, several.ok = TRUE)
   Lam <- block$Lambda
 
@@ -195,7 +385,8 @@ hank_het_jacobian <- function(block, T_h,
   for (o in outputs) {
     E <- vector("list", T_h)
     E[[1L]] <- y_out[[o]]                        # E_0
-    for (s in 2L:T_h) E[[s]] <- as.numeric(Lam %*% E[[s - 1L]])
+    ## s = 2 .. T_h, empty if T_h < 2
+    for (s in seq_len(T_h - 1L) + 1L) E[[s]] <- as.numeric(Lam %*% E[[s - 1L]])
     Elist[[o]] <- E
   }
 
@@ -214,15 +405,16 @@ hank_het_jacobian <- function(block, T_h,
       Fm <- matrix(0, T_h, T_h)
       Fm[1L, ] <- curlyY[[o]]                       # F[0, s] = curlyY[s]
       E <- Elist[[o]]
-      for (tt in 2L:T_h) {
+      for (tt in seq_len(T_h - 1L) + 1L) {           # tt = 2 .. T_h, empty if T_h < 2
         Etm1 <- E[[tt - 1L]]                         # E_{t-1}
         Fm[tt, ] <- as.numeric(crossprod(curlyD, Etm1))  # <E_{t-1}, curlyD[,s]>
       }
       ## Diagonal cumulative sum.
       Jm <- matrix(0, T_h, T_h)
       Jm[1L, ] <- Fm[1L, ]
-      for (tt in 2L:T_h) {
+      for (tt in seq_len(T_h - 1L) + 1L) {           # tt = 2 .. T_h, empty if T_h < 2
         Jm[tt, 1L] <- Fm[tt, 1L]
+        ## Body only runs when T_h >= 2, so the 2L:T_h slices are in range here.
         Jm[tt, 2L:T_h] <- Jm[tt - 1L, 1L:(T_h - 1L)] + Fm[tt, 2L:T_h]
       }
       J[[o]][[i]] <- Jm
@@ -272,7 +464,13 @@ hank_het_dist_jacobian <- function(block, T_h,
                                    inputs = c("r", "w"),
                                    delta_in = 1e-5, delta_va = 1e-6,
                                    delta_d = 1e-6) {
-  inputs <- match.arg(inputs, several.ok = TRUE)
+  ## own internal sweep, not yet wedge-aware (it would price the debt side at
+  ## the saving rate) -- refuse loudly rather than return plausible nonsense
+  .hank_reject_wedge(block, "hank_het_dist_jacobian")
+  inputs <- .hank_het_check_inputs(block, inputs)
+  if ("r_minus" %in% inputs)
+    stop("hank_het_dist_jacobian: the 'r_minus' column is not wired for the ",
+         "distribution Jacobian (its internal sweep is wedge-unaware).")
   Lam <- block$Lambda
   n_cell <- block$n_e * block$n_a
   P <- function(x) as.numeric(Matrix::t(Lam) %*% x)   ## distribution push

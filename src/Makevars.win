@@ -1,1 +1,4 @@
-PKG_LIBS = $(LAPACK_LIBS) $(BLAS_LIBS) $(FLIBS)
+## -lpsapi: Windows-only, for GetProcessMemoryInfo() in src/proc_rss.cpp
+## (.hank_peak_rss(), A8 run-manifest metadata). This file is used ONLY on
+## Windows builds, so it cannot affect macOS/Linux link flags.
+PKG_LIBS = $(LAPACK_LIBS) $(BLAS_LIBS) $(FLIBS) -lpsapi

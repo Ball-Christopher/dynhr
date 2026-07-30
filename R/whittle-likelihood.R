@@ -19,6 +19,77 @@
 ## --------------------------------------------------------------------------
 
 
+#' Hermitian eigendecomposition that is safe under Apple vecLib BLAS
+#'
+#' \code{eigen(H, symmetric = TRUE)} on a COMPLEX Hermitian matrix routes
+#' through LAPACK \code{zheev}, whose internal complex-BLAS calls SEGFAULT R
+#' when \code{libRblas} is symlinked to Apple's vecLib/Accelerate (verified
+#' on R 4.6 / macOS: a 4x4 complex Hermitian input crashes the session;
+#' see the 2026-07-13 vecLib suite-register row). \code{tryCatch} cannot
+#' contain a segfault, so every spectral-density call site must avoid
+#' \code{zheev} entirely. General complex drivers (\code{zgeev},
+#' \code{zgesdd}) and all REAL symmetric calls (\code{dsyev}) are fine.
+#'
+#' This helper computes the same decomposition through the exact
+#' 2n-dimensional REAL symmetric embedding: for Hermitian H = X + iY (X
+#' symmetric, Y antisymmetric), the real symmetric matrix
+#' \deqn{M = [[X, -Y], [Y, X]]}
+#' has each eigenvalue of H twice, and a real eigenvector w = (w1; w2) of M
+#' maps to a complex eigenvector u = w1 + i w2 of H. Eigenvalues are
+#' recovered by averaging adjacent (doubled) pairs of M's sorted values;
+#' eigenvectors by a sequential complex Gram-Schmidt over the mapped
+#' candidates (each doubled pair contributes two candidates that are
+#' complex-collinear, so the sweep keeps exactly one per pair and handles
+#' genuine multiplicity the same way). Real symmetric input passes straight
+#' through to \code{eigen(symmetric = TRUE)} (dsyev), byte-identical to
+#' before.
+#'
+#' Cost is one 2n x 2n dsyev instead of one n x n zheev (~4x flops) --
+#' negligible for the n_obs-sized spectral matrices this package feeds it.
+#'
+#' @param H A real symmetric or complex Hermitian matrix. (Hermitian
+#'   structure is enforced exactly by symmetrizing Re and antisymmetrizing
+#'   Im, matching \code{eigen(symmetric = TRUE)}'s use-one-triangle
+#'   convention.)
+#' @param only_values Logical; if \code{TRUE}, skip eigenvector recovery.
+#' @return A list with \code{values} (decreasing, real) and \code{vectors}
+#'   (unitary complex n x n, or \code{NULL} when \code{only_values}),
+#'   matching \code{eigen()}'s contract.
+#' @keywords internal
+.eigen_hermitian_safe <- function(H, only_values = FALSE) {
+  if (!is.complex(H))
+    return(eigen(H, symmetric = TRUE, only.values = only_values))
+  n <- nrow(H)
+  X <- Re(H); Y <- Im(H)
+  X <- (X + t(X)) / 2
+  Y <- (Y - t(Y)) / 2
+  M <- rbind(cbind(X, -Y), cbind(Y, X))
+  em <- eigen(M, symmetric = TRUE, only.values = only_values)
+  odd  <- seq(1L, 2L * n, by = 2L)
+  vals <- (em$values[odd] + em$values[odd + 1L]) / 2
+  if (only_values) return(list(values = vals, vectors = NULL))
+  W <- em$vectors
+  U <- matrix(0 + 0i, n, n)
+  cnt <- 0L
+  for (k in seq_len(2L * n)) {
+    u <- W[seq_len(n), k] + 1i * W[n + seq_len(n), k]
+    if (cnt > 0L)
+      for (j in seq_len(cnt))
+        u <- u - drop(Conj(U[, j]) %*% u) * U[, j]
+    nu <- sqrt(sum(Mod(u)^2))
+    ## candidates have unit norm pre-projection; within a doubled pair the
+    ## second candidate is exactly i*u of the first (residual ~ 0), across
+    ## eigenvalues residual ~ 1 -- the threshold sits far from both
+    if (nu > 1e-4) { cnt <- cnt + 1L; U[, cnt] <- u / nu }
+    if (cnt == n) break
+  }
+  if (cnt < n)
+    stop(".eigen_hermitian_safe(): eigenvector recovery kept ", cnt, " of ",
+         n, " vectors -- input is likely not Hermitian.")
+  list(values = vals, vectors = U)
+}
+
+
 ## --------------------------------------------------------------------------
 ## 1.  DATA PERIODOGRAM
 ## --------------------------------------------------------------------------
@@ -396,10 +467,11 @@
     S <- if (use_debias) EI_list[[j]] else S_fn(omega[j])
 
     ## Exact complex Hermitian path — works in base R for any n_obs.
-    ## eigen(S, symmetric=TRUE) returns real eigenvalues for Hermitian S;
-    ## For the debiased path S is real symmetric so symmetric=TRUE is exact.
-    ## solve(S) works on complex matrices in base R.
-    ev <- tryCatch(eigen(S, symmetric = TRUE), error = function(e) NULL)
+    ## .eigen_hermitian_safe returns real eigenvalues for Hermitian S and
+    ## avoids the zheev segfault under vecLib BLAS (see helper docs);
+    ## for the debiased path S is real symmetric and passes through to
+    ## eigen(symmetric=TRUE) unchanged.
+    ev <- tryCatch(.eigen_hermitian_safe(S), error = function(e) NULL)
     if (is.null(ev)) return(-Inf)
     ## Clamp near-zero eigenvalues from roundoff: reject only when S is
     ## identically zero/negative (max(ev) <= 0).  A genuinely PD S whose
@@ -725,7 +797,7 @@ make_log_posterior_whittle <- function(model, data, prior_spec, obs_vars,
       EI_j <- EI_list[[j]]                  ## real symmetric n_obs x n_obs
       I_j  <- I_list[[j]]
 
-      ev_j <- tryCatch(eigen(EI_j, symmetric = TRUE), error = function(e) NULL)
+      ev_j <- tryCatch(.eigen_hermitian_safe(EI_j), error = function(e) NULL)
       if (is.null(ev_j)) next
       ev_max_j <- max(ev_j$values)
       if (ev_max_j <= 0) next
@@ -784,7 +856,7 @@ make_log_posterior_whittle <- function(model, data, prior_spec, obs_vars,
     ## Exact complex Hermitian path — consistent with .whittle_loglik.
     ## Clamp near-zero eigenvalues (same rule as in .whittle_loglik) so that
     ## loglik and gradient are built from the same clamped spectral density.
-    ev_j <- tryCatch(eigen(S_j, symmetric = TRUE), error = function(e) NULL)
+    ev_j <- tryCatch(.eigen_hermitian_safe(S_j), error = function(e) NULL)
     if (is.null(ev_j)) next
     ev_max_j <- max(ev_j$values)
     if (ev_max_j <= 0) next   # identically zero / negative — skip frequency

@@ -56,16 +56,22 @@
 #' @param lx_bracket Initial search bracket for \code{lx} (expanded downward
 #'   automatically; the upper end is capped so \code{beta_eff * (1 + r) < 1}).
 #' @param tol Root-finding tolerance on \code{lx}.
+#' @param Pi_fn,Pi_inputs Optional transition-matrix constructor and its
+#'   steady-state inputs (see \code{\link{hank_het_block}}), carried onto the
+#'   anchored block so the HANK+SAM endogenous-Pi machinery
+#'   (\code{\link{hank_het_jacobian}} transition-input columns,
+#'   \code{\link{hank_sam_reiter_statespace}}) works on the coarse block.
 #'
 #' @return A list with the anchored \code{block} (a
 #'   \code{\link{hank_het_block}} solved at \code{beta_eff}), \code{beta_eff},
 #'   \code{lx}, and \code{A_err = block$A - A_target}.
 #' @export
 hank_coarse_anchored <- function(a_grid, Pi, e, beta, eis, r, w, A_target,
-                                 lx_bracket = c(-0.05, 0.005), tol = 1e-12) {
+                                 lx_bracket = c(-0.05, 0.005), tol = 1e-12,
+                                 Pi_fn = NULL, Pi_inputs = NULL) {
   mk <- function(lx) suppressWarnings(
     hank_het_block(a_grid, Pi, e, beta = beta * exp(lx), eis = eis,
-                   r = r, w = w))
+                   r = r, w = w, Pi_fn = Pi_fn, Pi_inputs = Pi_inputs))
   f <- function(lx) mk(lx)$A - A_target
 
   ## cap the upper end so beta_eff * (1 + r) < 1 (EGM diverges otherwise)
@@ -141,7 +147,9 @@ hank_ks_coarse_anchored <- function(ks, n_a = 24L, a_grid = NULL) {
                               amin = min(fine_grid))
   anch <- hank_coarse_anchored(a_grid, ks$block$Pi, ks$block$e,
                                beta = ks$beta, eis = ks$eis,
-                               r = ks$r, w = ks$w, A_target = ks$K)
+                               r = ks$r, w = ks$w, A_target = ks$K,
+                               Pi_fn = ks$block$Pi_fn,
+                               Pi_inputs = ks$block$Pi_inputs)
   structure(
     list(r = ks$r, w = ks$w, K = ks$K, Z = ks$Z,
          alpha = ks$alpha, delta = ks$delta,
@@ -356,8 +364,15 @@ hank_reiter_linearize <- function(ks, delta_fd = 1e-6) {
 
   ## Da = d(Lambda(a)' D_ss)/da_k. One-sided UP step at constrained nodes:
   ## a = amin sits ON a Young-lottery kink and below it is infeasible.
-  push <- function(A_mat)
-    as.numeric(Matrix::t(hank_forward_operator(A_mat, a_grid, Pi)) %*% D_ss)
+  ## MATRIX-FREE (0.9.0.0026): this loop calls push() up to 2n times, and the
+  ## sparse route built a whole n x n Lambda for a single matvec each time --
+  ## quadratic in the grid size for a product that is linear in it. Measured at
+  ## n_a = 60, n_e = 3 (installed -O2) the loop was 73% of
+  ## hank_reiter_linearize; see briefs/21 section 12. .hank_forward_push()
+  ## contracts the same identity instead of materializing it, so this is an
+  ## algebraic reassociation (round-off-level agreement, asserted in
+  ## test-hank-forward-push.R), not a different discretization.
+  push <- function(A_mat) .hank_forward_push(A_mat, a_grid, Pi, D_ss)
   p0 <- push(a_ss)
   va <- vc(a_ss)
   Da <- matrix(0, n, n)

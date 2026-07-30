@@ -10,9 +10,13 @@ make_log_posterior_hank(
   observables,
   q = NULL,
   me_var = 0,
+  likelihood = c("kalman", "exact_ar"),
+  me_sd = NULL,
   prior_rho_mean = 0.5,
   prior_rho_sd = 0.3,
-  prior_sigma_sd = 0.05
+  prior_sigma_sd = 0.05,
+  boundary = c("warn", "reject", "ignore"),
+  boundary_tol = 0.001
 )
 }
 \arguments{
@@ -23,9 +27,28 @@ make_log_posterior_hank(
 \item{observables}{Character vector of observable names (see
 \code{\link{hank_state_space}}).}
 
-\item{q}{Optional truncation horizon passed to \code{\link{hank_state_space}}.}
+\item{q}{Optional truncation horizon passed to \code{\link{hank_state_space}}
+(\code{likelihood = "kalman"}) or \code{\link{hank_loglik_ar}}
+(\code{likelihood = "exact_ar"}).}
 
 \item{me_var}{Measurement-error variance (see \code{\link{hank_kalman_loglik}}).}
+
+\item{likelihood}{\code{"kalman"} (default) runs the Kalman filter on the
+truncated-MA companion form (\code{\link{hank_kalman_loglik}});
+\code{"exact_ar"} uses the exact-AR(1) stacked-covariance likelihood
+(\code{\link{hank_loglik_ar}}), which keeps each shock's AR(1) variance
+tail in closed form instead of truncating it with the MA lag polynomial
+-- prefer it whenever the \code{rho} posterior may visit near-unit-root
+values (see the representability bound in \code{\link{hank_loglik_ar}}:
+\eqn{|\rho|^{T_h}} should stay small, so bound/cap the persistences).
+A draw whose likelihood evaluation fails (e.g. a non-positive-definite
+stacked covariance at extreme \code{rho}) is rejected with
+\code{logpost = -Inf} rather than erroring the chain.}
+
+\item{me_sd}{Per-observable measurement-error standard deviation for
+\code{likelihood = "exact_ar"} (scalar or length-\code{n_obs}); default
+\code{sqrt(me_var)}, so the two likelihood options describe the same
+measurement error unless overridden.}
 
 \item{prior_rho_mean, prior_rho_sd}{Named numeric vectors (by shock name) or
 scalars (recycled) giving the Normal prior mean/sd for each shock's
@@ -33,6 +56,21 @@ scalars (recycled) giving the Normal prior mean/sd for each shock's
 
 \item{prior_sigma_sd}{Named numeric vector or scalar: half-Normal scale for
 each shock's \code{sigma}. Default \code{0.05}.}
+
+\item{boundary}{Representability guard for \code{likelihood = "exact_ar"},
+applied per DRAW (the likelihoods' own \code{check_boundary} warns per
+call, which is unusable inside a sampler). \code{"warn"} (default) warns
+ONCE per closure, naming the offending shocks and the implied \code{rho}
+cap, and changes no posterior; \code{"reject"} makes
+\eqn{|\rho|^{T_h} \le} \code{boundary_tol} part of the PRIOR SUPPORT and
+returns \code{-Inf} outside it, exactly as the existing \eqn{|\rho| \ge 1}
+guard does; \code{"ignore"} restores the previous silent behaviour.
+Out here the sequence-space \code{Theta} is itself contaminated by the
+solve's terminal boundary, so the likelihood is WRONG rather than
+imprecise and no \code{q} repairs it -- see
+\code{\link{hank_theta_boundary_check}}.}
+
+\item{boundary_tol}{Bound on \eqn{|\rho|^{T_h}}; default \code{1e-3}.}
 }
 \value{
 A function \code{log_post_fn(theta)} where \code{theta} is a named
@@ -55,5 +93,5 @@ positive axis, i.e. \code{-Inf} for \code{sigma <= 0}) for each
 }
 \seealso{
 \code{\link{hank_state_space}}, \code{\link{hank_kalman_loglik}},
-  \code{rwmh}
+  \code{\link{hank_loglik_ar}}, \code{rwmh}
 }

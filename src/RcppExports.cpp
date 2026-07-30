@@ -26,6 +26,346 @@ BEGIN_RCPP
     return rcpp_result_gen;
 END_RCPP
 }
+// hank_ar_slab_adjoint_psi_cpp
+Rcpp::NumericMatrix hank_ar_slab_adjoint_psi_cpp(const Rcpp::NumericMatrix& Bvec, const Rcpp::NumericMatrix& Psi);
+RcppExport SEXP _dynhr_hank_ar_slab_adjoint_psi_cpp(SEXP BvecSEXP, SEXP PsiSEXP) {
+BEGIN_RCPP
+    Rcpp::RObject rcpp_result_gen;
+    Rcpp::RNGScope rcpp_rngScope_gen;
+    Rcpp::traits::input_parameter< const Rcpp::NumericMatrix& >::type Bvec(BvecSEXP);
+    Rcpp::traits::input_parameter< const Rcpp::NumericMatrix& >::type Psi(PsiSEXP);
+    rcpp_result_gen = Rcpp::wrap(hank_ar_slab_adjoint_psi_cpp(Bvec, Psi));
+    return rcpp_result_gen;
+END_RCPP
+}
+// hank_ar_score_weights_cpp
+Rcpp::NumericVector hank_ar_score_weights_cpp(const Rcpp::IntegerMatrix& Sidx, const Rcpp::NumericMatrix& Sinv, const Rcpp::NumericVector& v, int n_g);
+RcppExport SEXP _dynhr_hank_ar_score_weights_cpp(SEXP SidxSEXP, SEXP SinvSEXP, SEXP vSEXP, SEXP n_gSEXP) {
+BEGIN_RCPP
+    Rcpp::RObject rcpp_result_gen;
+    Rcpp::RNGScope rcpp_rngScope_gen;
+    Rcpp::traits::input_parameter< const Rcpp::IntegerMatrix& >::type Sidx(SidxSEXP);
+    Rcpp::traits::input_parameter< const Rcpp::NumericMatrix& >::type Sinv(SinvSEXP);
+    Rcpp::traits::input_parameter< const Rcpp::NumericVector& >::type v(vSEXP);
+    Rcpp::traits::input_parameter< int >::type n_g(n_gSEXP);
+    rcpp_result_gen = Rcpp::wrap(hank_ar_score_weights_cpp(Sidx, Sinv, v, n_g));
+    return rcpp_result_gen;
+END_RCPP
+}
+// hank_egm_step_cpp
+List hank_egm_step_cpp(NumericMatrix Va_p_, NumericVector a_grid_, NumericVector y_, double r, double beta, double eis, NumericMatrix Pi_, double amin);
+RcppExport SEXP _dynhr_hank_egm_step_cpp(SEXP Va_p_SEXP, SEXP a_grid_SEXP, SEXP y_SEXP, SEXP rSEXP, SEXP betaSEXP, SEXP eisSEXP, SEXP Pi_SEXP, SEXP aminSEXP) {
+BEGIN_RCPP
+    Rcpp::RObject rcpp_result_gen;
+    Rcpp::RNGScope rcpp_rngScope_gen;
+    Rcpp::traits::input_parameter< NumericMatrix >::type Va_p_(Va_p_SEXP);
+    Rcpp::traits::input_parameter< NumericVector >::type a_grid_(a_grid_SEXP);
+    Rcpp::traits::input_parameter< NumericVector >::type y_(y_SEXP);
+    Rcpp::traits::input_parameter< double >::type r(rSEXP);
+    Rcpp::traits::input_parameter< double >::type beta(betaSEXP);
+    Rcpp::traits::input_parameter< double >::type eis(eisSEXP);
+    Rcpp::traits::input_parameter< NumericMatrix >::type Pi_(Pi_SEXP);
+    Rcpp::traits::input_parameter< double >::type amin(aminSEXP);
+    rcpp_result_gen = Rcpp::wrap(hank_egm_step_cpp(Va_p_, a_grid_, y_, r, beta, eis, Pi_, amin));
+    return rcpp_result_gen;
+END_RCPP
+}
+// hank_egm_solve_cpp
+List hank_egm_solve_cpp(NumericVector a_grid_, NumericVector y_, double r, double beta, double eis, NumericMatrix Pi_, double amin, double tol, int maxit, Nullable<NumericMatrix> Va_init_);
+RcppExport SEXP _dynhr_hank_egm_solve_cpp(SEXP a_grid_SEXP, SEXP y_SEXP, SEXP rSEXP, SEXP betaSEXP, SEXP eisSEXP, SEXP Pi_SEXP, SEXP aminSEXP, SEXP tolSEXP, SEXP maxitSEXP, SEXP Va_init_SEXP) {
+BEGIN_RCPP
+    Rcpp::RObject rcpp_result_gen;
+    Rcpp::RNGScope rcpp_rngScope_gen;
+    Rcpp::traits::input_parameter< NumericVector >::type a_grid_(a_grid_SEXP);
+    Rcpp::traits::input_parameter< NumericVector >::type y_(y_SEXP);
+    Rcpp::traits::input_parameter< double >::type r(rSEXP);
+    Rcpp::traits::input_parameter< double >::type beta(betaSEXP);
+    Rcpp::traits::input_parameter< double >::type eis(eisSEXP);
+    Rcpp::traits::input_parameter< NumericMatrix >::type Pi_(Pi_SEXP);
+    Rcpp::traits::input_parameter< double >::type amin(aminSEXP);
+    Rcpp::traits::input_parameter< double >::type tol(tolSEXP);
+    Rcpp::traits::input_parameter< int >::type maxit(maxitSEXP);
+    Rcpp::traits::input_parameter< Nullable<NumericMatrix> >::type Va_init_(Va_init_SEXP);
+    rcpp_result_gen = Rcpp::wrap(hank_egm_solve_cpp(a_grid_, y_, r, beta, eis, Pi_, amin, tol, maxit, Va_init_));
+    return rcpp_result_gen;
+END_RCPP
+}
+// hank_stationary_dist_cpp
+List hank_stationary_dist_cpp(NumericMatrix a_pol_, NumericVector a_grid_, NumericMatrix Pi_, double tol, int maxit);
+RcppExport SEXP _dynhr_hank_stationary_dist_cpp(SEXP a_pol_SEXP, SEXP a_grid_SEXP, SEXP Pi_SEXP, SEXP tolSEXP, SEXP maxitSEXP) {
+BEGIN_RCPP
+    Rcpp::RObject rcpp_result_gen;
+    Rcpp::RNGScope rcpp_rngScope_gen;
+    Rcpp::traits::input_parameter< NumericMatrix >::type a_pol_(a_pol_SEXP);
+    Rcpp::traits::input_parameter< NumericVector >::type a_grid_(a_grid_SEXP);
+    Rcpp::traits::input_parameter< NumericMatrix >::type Pi_(Pi_SEXP);
+    Rcpp::traits::input_parameter< double >::type tol(tolSEXP);
+    Rcpp::traits::input_parameter< int >::type maxit(maxitSEXP);
+    rcpp_result_gen = Rcpp::wrap(hank_stationary_dist_cpp(a_pol_, a_grid_, Pi_, tol, maxit));
+    return rcpp_result_gen;
+END_RCPP
+}
+// hank_stationary_dist_lambda_cpp
+List hank_stationary_dist_lambda_cpp(IntegerVector p, IntegerVector i, NumericVector x, int n, NumericVector d0, double tol, int maxit);
+RcppExport SEXP _dynhr_hank_stationary_dist_lambda_cpp(SEXP pSEXP, SEXP iSEXP, SEXP xSEXP, SEXP nSEXP, SEXP d0SEXP, SEXP tolSEXP, SEXP maxitSEXP) {
+BEGIN_RCPP
+    Rcpp::RObject rcpp_result_gen;
+    Rcpp::RNGScope rcpp_rngScope_gen;
+    Rcpp::traits::input_parameter< IntegerVector >::type p(pSEXP);
+    Rcpp::traits::input_parameter< IntegerVector >::type i(iSEXP);
+    Rcpp::traits::input_parameter< NumericVector >::type x(xSEXP);
+    Rcpp::traits::input_parameter< int >::type n(nSEXP);
+    Rcpp::traits::input_parameter< NumericVector >::type d0(d0SEXP);
+    Rcpp::traits::input_parameter< double >::type tol(tolSEXP);
+    Rcpp::traits::input_parameter< int >::type maxit(maxitSEXP);
+    rcpp_result_gen = Rcpp::wrap(hank_stationary_dist_lambda_cpp(p, i, x, n, d0, tol, maxit));
+    return rcpp_result_gen;
+END_RCPP
+}
+// hank_egm2_step_cpp
+List hank_egm2_step_cpp(NumericVector Vb_p_, NumericVector Va_p_, NumericVector b_grid_, NumericVector a_grid_, NumericVector k_grid_, NumericVector y_, double rb, double ra, double beta, double eis, double chi0, double chi1, double chi2, NumericMatrix Pi_, NumericMatrix Psi1_grid_, int threads);
+RcppExport SEXP _dynhr_hank_egm2_step_cpp(SEXP Vb_p_SEXP, SEXP Va_p_SEXP, SEXP b_grid_SEXP, SEXP a_grid_SEXP, SEXP k_grid_SEXP, SEXP y_SEXP, SEXP rbSEXP, SEXP raSEXP, SEXP betaSEXP, SEXP eisSEXP, SEXP chi0SEXP, SEXP chi1SEXP, SEXP chi2SEXP, SEXP Pi_SEXP, SEXP Psi1_grid_SEXP, SEXP threadsSEXP) {
+BEGIN_RCPP
+    Rcpp::RObject rcpp_result_gen;
+    Rcpp::RNGScope rcpp_rngScope_gen;
+    Rcpp::traits::input_parameter< NumericVector >::type Vb_p_(Vb_p_SEXP);
+    Rcpp::traits::input_parameter< NumericVector >::type Va_p_(Va_p_SEXP);
+    Rcpp::traits::input_parameter< NumericVector >::type b_grid_(b_grid_SEXP);
+    Rcpp::traits::input_parameter< NumericVector >::type a_grid_(a_grid_SEXP);
+    Rcpp::traits::input_parameter< NumericVector >::type k_grid_(k_grid_SEXP);
+    Rcpp::traits::input_parameter< NumericVector >::type y_(y_SEXP);
+    Rcpp::traits::input_parameter< double >::type rb(rbSEXP);
+    Rcpp::traits::input_parameter< double >::type ra(raSEXP);
+    Rcpp::traits::input_parameter< double >::type beta(betaSEXP);
+    Rcpp::traits::input_parameter< double >::type eis(eisSEXP);
+    Rcpp::traits::input_parameter< double >::type chi0(chi0SEXP);
+    Rcpp::traits::input_parameter< double >::type chi1(chi1SEXP);
+    Rcpp::traits::input_parameter< double >::type chi2(chi2SEXP);
+    Rcpp::traits::input_parameter< NumericMatrix >::type Pi_(Pi_SEXP);
+    Rcpp::traits::input_parameter< NumericMatrix >::type Psi1_grid_(Psi1_grid_SEXP);
+    Rcpp::traits::input_parameter< int >::type threads(threadsSEXP);
+    rcpp_result_gen = Rcpp::wrap(hank_egm2_step_cpp(Vb_p_, Va_p_, b_grid_, a_grid_, k_grid_, y_, rb, ra, beta, eis, chi0, chi1, chi2, Pi_, Psi1_grid_, threads));
+    return rcpp_result_gen;
+END_RCPP
+}
+// hank_egm2_solve_cpp
+List hank_egm2_solve_cpp(NumericVector Vb_init, NumericVector Va_init, NumericVector b_grid_, NumericVector a_grid_, NumericVector k_grid_, NumericVector y_, double rb, double ra, double beta, double eis, double chi0, double chi1, double chi2, NumericMatrix Pi_, NumericMatrix Psi1_grid_, double tol, int maxit, int threads);
+RcppExport SEXP _dynhr_hank_egm2_solve_cpp(SEXP Vb_initSEXP, SEXP Va_initSEXP, SEXP b_grid_SEXP, SEXP a_grid_SEXP, SEXP k_grid_SEXP, SEXP y_SEXP, SEXP rbSEXP, SEXP raSEXP, SEXP betaSEXP, SEXP eisSEXP, SEXP chi0SEXP, SEXP chi1SEXP, SEXP chi2SEXP, SEXP Pi_SEXP, SEXP Psi1_grid_SEXP, SEXP tolSEXP, SEXP maxitSEXP, SEXP threadsSEXP) {
+BEGIN_RCPP
+    Rcpp::RObject rcpp_result_gen;
+    Rcpp::RNGScope rcpp_rngScope_gen;
+    Rcpp::traits::input_parameter< NumericVector >::type Vb_init(Vb_initSEXP);
+    Rcpp::traits::input_parameter< NumericVector >::type Va_init(Va_initSEXP);
+    Rcpp::traits::input_parameter< NumericVector >::type b_grid_(b_grid_SEXP);
+    Rcpp::traits::input_parameter< NumericVector >::type a_grid_(a_grid_SEXP);
+    Rcpp::traits::input_parameter< NumericVector >::type k_grid_(k_grid_SEXP);
+    Rcpp::traits::input_parameter< NumericVector >::type y_(y_SEXP);
+    Rcpp::traits::input_parameter< double >::type rb(rbSEXP);
+    Rcpp::traits::input_parameter< double >::type ra(raSEXP);
+    Rcpp::traits::input_parameter< double >::type beta(betaSEXP);
+    Rcpp::traits::input_parameter< double >::type eis(eisSEXP);
+    Rcpp::traits::input_parameter< double >::type chi0(chi0SEXP);
+    Rcpp::traits::input_parameter< double >::type chi1(chi1SEXP);
+    Rcpp::traits::input_parameter< double >::type chi2(chi2SEXP);
+    Rcpp::traits::input_parameter< NumericMatrix >::type Pi_(Pi_SEXP);
+    Rcpp::traits::input_parameter< NumericMatrix >::type Psi1_grid_(Psi1_grid_SEXP);
+    Rcpp::traits::input_parameter< double >::type tol(tolSEXP);
+    Rcpp::traits::input_parameter< int >::type maxit(maxitSEXP);
+    Rcpp::traits::input_parameter< int >::type threads(threadsSEXP);
+    rcpp_result_gen = Rcpp::wrap(hank_egm2_solve_cpp(Vb_init, Va_init, b_grid_, a_grid_, k_grid_, y_, rb, ra, beta, eis, chi0, chi1, chi2, Pi_, Psi1_grid_, tol, maxit, threads));
+    return rcpp_result_gen;
+END_RCPP
+}
+// hank_curly_sweep2_cpp
+List hank_curly_sweep2_cpp(NumericVector Vb_ss_, NumericVector Va_ss_, NumericVector dVb0_, NumericVector dVa0_, NumericVector b_grid_, NumericVector a_grid_, NumericVector k_grid_, NumericVector y_, double rb, double ra, double beta, double eis, double chi0, double chi1, double chi2, NumericMatrix Pi_, NumericMatrix Psi1_grid_, double delta_va, int T_h, int threads);
+RcppExport SEXP _dynhr_hank_curly_sweep2_cpp(SEXP Vb_ss_SEXP, SEXP Va_ss_SEXP, SEXP dVb0_SEXP, SEXP dVa0_SEXP, SEXP b_grid_SEXP, SEXP a_grid_SEXP, SEXP k_grid_SEXP, SEXP y_SEXP, SEXP rbSEXP, SEXP raSEXP, SEXP betaSEXP, SEXP eisSEXP, SEXP chi0SEXP, SEXP chi1SEXP, SEXP chi2SEXP, SEXP Pi_SEXP, SEXP Psi1_grid_SEXP, SEXP delta_vaSEXP, SEXP T_hSEXP, SEXP threadsSEXP) {
+BEGIN_RCPP
+    Rcpp::RObject rcpp_result_gen;
+    Rcpp::RNGScope rcpp_rngScope_gen;
+    Rcpp::traits::input_parameter< NumericVector >::type Vb_ss_(Vb_ss_SEXP);
+    Rcpp::traits::input_parameter< NumericVector >::type Va_ss_(Va_ss_SEXP);
+    Rcpp::traits::input_parameter< NumericVector >::type dVb0_(dVb0_SEXP);
+    Rcpp::traits::input_parameter< NumericVector >::type dVa0_(dVa0_SEXP);
+    Rcpp::traits::input_parameter< NumericVector >::type b_grid_(b_grid_SEXP);
+    Rcpp::traits::input_parameter< NumericVector >::type a_grid_(a_grid_SEXP);
+    Rcpp::traits::input_parameter< NumericVector >::type k_grid_(k_grid_SEXP);
+    Rcpp::traits::input_parameter< NumericVector >::type y_(y_SEXP);
+    Rcpp::traits::input_parameter< double >::type rb(rbSEXP);
+    Rcpp::traits::input_parameter< double >::type ra(raSEXP);
+    Rcpp::traits::input_parameter< double >::type beta(betaSEXP);
+    Rcpp::traits::input_parameter< double >::type eis(eisSEXP);
+    Rcpp::traits::input_parameter< double >::type chi0(chi0SEXP);
+    Rcpp::traits::input_parameter< double >::type chi1(chi1SEXP);
+    Rcpp::traits::input_parameter< double >::type chi2(chi2SEXP);
+    Rcpp::traits::input_parameter< NumericMatrix >::type Pi_(Pi_SEXP);
+    Rcpp::traits::input_parameter< NumericMatrix >::type Psi1_grid_(Psi1_grid_SEXP);
+    Rcpp::traits::input_parameter< double >::type delta_va(delta_vaSEXP);
+    Rcpp::traits::input_parameter< int >::type T_h(T_hSEXP);
+    Rcpp::traits::input_parameter< int >::type threads(threadsSEXP);
+    rcpp_result_gen = Rcpp::wrap(hank_curly_sweep2_cpp(Vb_ss_, Va_ss_, dVb0_, dVa0_, b_grid_, a_grid_, k_grid_, y_, rb, ra, beta, eis, chi0, chi1, chi2, Pi_, Psi1_grid_, delta_va, T_h, threads));
+    return rcpp_result_gen;
+END_RCPP
+}
+// hank_forward_apply3_cpp
+NumericVector hank_forward_apply3_cpp(NumericVector d_pol, NumericVector f_pol, NumericVector a_pol, NumericVector d_grid, NumericVector f_grid, NumericVector a_grid, NumericMatrix Pi, NumericVector x, bool transpose);
+RcppExport SEXP _dynhr_hank_forward_apply3_cpp(SEXP d_polSEXP, SEXP f_polSEXP, SEXP a_polSEXP, SEXP d_gridSEXP, SEXP f_gridSEXP, SEXP a_gridSEXP, SEXP PiSEXP, SEXP xSEXP, SEXP transposeSEXP) {
+BEGIN_RCPP
+    Rcpp::RObject rcpp_result_gen;
+    Rcpp::RNGScope rcpp_rngScope_gen;
+    Rcpp::traits::input_parameter< NumericVector >::type d_pol(d_polSEXP);
+    Rcpp::traits::input_parameter< NumericVector >::type f_pol(f_polSEXP);
+    Rcpp::traits::input_parameter< NumericVector >::type a_pol(a_polSEXP);
+    Rcpp::traits::input_parameter< NumericVector >::type d_grid(d_gridSEXP);
+    Rcpp::traits::input_parameter< NumericVector >::type f_grid(f_gridSEXP);
+    Rcpp::traits::input_parameter< NumericVector >::type a_grid(a_gridSEXP);
+    Rcpp::traits::input_parameter< NumericMatrix >::type Pi(PiSEXP);
+    Rcpp::traits::input_parameter< NumericVector >::type x(xSEXP);
+    Rcpp::traits::input_parameter< bool >::type transpose(transposeSEXP);
+    rcpp_result_gen = Rcpp::wrap(hank_forward_apply3_cpp(d_pol, f_pol, a_pol, d_grid, f_grid, a_grid, Pi, x, transpose));
+    return rcpp_result_gen;
+END_RCPP
+}
+// hank_forward_direction3_cpp
+NumericVector hank_forward_direction3_cpp(NumericVector d_pol, NumericVector f_pol, NumericVector a_pol, NumericVector dd, NumericVector df, NumericVector da, NumericVector d_grid, NumericVector f_grid, NumericVector a_grid, NumericMatrix Pi, NumericVector dist, double delta, Nullable<NumericMatrix> Pi_p, Nullable<NumericMatrix> Pi_m);
+RcppExport SEXP _dynhr_hank_forward_direction3_cpp(SEXP d_polSEXP, SEXP f_polSEXP, SEXP a_polSEXP, SEXP ddSEXP, SEXP dfSEXP, SEXP daSEXP, SEXP d_gridSEXP, SEXP f_gridSEXP, SEXP a_gridSEXP, SEXP PiSEXP, SEXP distSEXP, SEXP deltaSEXP, SEXP Pi_pSEXP, SEXP Pi_mSEXP) {
+BEGIN_RCPP
+    Rcpp::RObject rcpp_result_gen;
+    Rcpp::RNGScope rcpp_rngScope_gen;
+    Rcpp::traits::input_parameter< NumericVector >::type d_pol(d_polSEXP);
+    Rcpp::traits::input_parameter< NumericVector >::type f_pol(f_polSEXP);
+    Rcpp::traits::input_parameter< NumericVector >::type a_pol(a_polSEXP);
+    Rcpp::traits::input_parameter< NumericVector >::type dd(ddSEXP);
+    Rcpp::traits::input_parameter< NumericVector >::type df(dfSEXP);
+    Rcpp::traits::input_parameter< NumericVector >::type da(daSEXP);
+    Rcpp::traits::input_parameter< NumericVector >::type d_grid(d_gridSEXP);
+    Rcpp::traits::input_parameter< NumericVector >::type f_grid(f_gridSEXP);
+    Rcpp::traits::input_parameter< NumericVector >::type a_grid(a_gridSEXP);
+    Rcpp::traits::input_parameter< NumericMatrix >::type Pi(PiSEXP);
+    Rcpp::traits::input_parameter< NumericVector >::type dist(distSEXP);
+    Rcpp::traits::input_parameter< double >::type delta(deltaSEXP);
+    Rcpp::traits::input_parameter< Nullable<NumericMatrix> >::type Pi_p(Pi_pSEXP);
+    Rcpp::traits::input_parameter< Nullable<NumericMatrix> >::type Pi_m(Pi_mSEXP);
+    rcpp_result_gen = Rcpp::wrap(hank_forward_direction3_cpp(d_pol, f_pol, a_pol, dd, df, da, d_grid, f_grid, a_grid, Pi, dist, delta, Pi_p, Pi_m));
+    return rcpp_result_gen;
+END_RCPP
+}
+// hank_forward_legs3_cpp
+NumericVector hank_forward_legs3_cpp(NumericVector d_plus, NumericVector f_plus, NumericVector a_plus, NumericVector d_minus, NumericVector f_minus, NumericVector a_minus, NumericVector d_grid, NumericVector f_grid, NumericVector a_grid, NumericMatrix Pi_plus, NumericMatrix Pi_minus, NumericVector dist, double step);
+RcppExport SEXP _dynhr_hank_forward_legs3_cpp(SEXP d_plusSEXP, SEXP f_plusSEXP, SEXP a_plusSEXP, SEXP d_minusSEXP, SEXP f_minusSEXP, SEXP a_minusSEXP, SEXP d_gridSEXP, SEXP f_gridSEXP, SEXP a_gridSEXP, SEXP Pi_plusSEXP, SEXP Pi_minusSEXP, SEXP distSEXP, SEXP stepSEXP) {
+BEGIN_RCPP
+    Rcpp::RObject rcpp_result_gen;
+    Rcpp::RNGScope rcpp_rngScope_gen;
+    Rcpp::traits::input_parameter< NumericVector >::type d_plus(d_plusSEXP);
+    Rcpp::traits::input_parameter< NumericVector >::type f_plus(f_plusSEXP);
+    Rcpp::traits::input_parameter< NumericVector >::type a_plus(a_plusSEXP);
+    Rcpp::traits::input_parameter< NumericVector >::type d_minus(d_minusSEXP);
+    Rcpp::traits::input_parameter< NumericVector >::type f_minus(f_minusSEXP);
+    Rcpp::traits::input_parameter< NumericVector >::type a_minus(a_minusSEXP);
+    Rcpp::traits::input_parameter< NumericVector >::type d_grid(d_gridSEXP);
+    Rcpp::traits::input_parameter< NumericVector >::type f_grid(f_gridSEXP);
+    Rcpp::traits::input_parameter< NumericVector >::type a_grid(a_gridSEXP);
+    Rcpp::traits::input_parameter< NumericMatrix >::type Pi_plus(Pi_plusSEXP);
+    Rcpp::traits::input_parameter< NumericMatrix >::type Pi_minus(Pi_minusSEXP);
+    Rcpp::traits::input_parameter< NumericVector >::type dist(distSEXP);
+    Rcpp::traits::input_parameter< double >::type step(stepSEXP);
+    rcpp_result_gen = Rcpp::wrap(hank_forward_legs3_cpp(d_plus, f_plus, a_plus, d_minus, f_minus, a_minus, d_grid, f_grid, a_grid, Pi_plus, Pi_minus, dist, step));
+    return rcpp_result_gen;
+END_RCPP
+}
+// hank_egm3_step_cpp
+List hank_egm3_step_cpp(NumericVector Vd_, NumericVector Vf_, NumericVector Va_, NumericVector dg_, NumericVector fg_, NumericVector ag_, NumericVector y_, NumericMatrix Pi_, double rd, double rf, double ra, double beta, double eis, double chi0, double chi1, double chi2, double phi0, double phi1, double phi2, double px, int threads);
+RcppExport SEXP _dynhr_hank_egm3_step_cpp(SEXP Vd_SEXP, SEXP Vf_SEXP, SEXP Va_SEXP, SEXP dg_SEXP, SEXP fg_SEXP, SEXP ag_SEXP, SEXP y_SEXP, SEXP Pi_SEXP, SEXP rdSEXP, SEXP rfSEXP, SEXP raSEXP, SEXP betaSEXP, SEXP eisSEXP, SEXP chi0SEXP, SEXP chi1SEXP, SEXP chi2SEXP, SEXP phi0SEXP, SEXP phi1SEXP, SEXP phi2SEXP, SEXP pxSEXP, SEXP threadsSEXP) {
+BEGIN_RCPP
+    Rcpp::RObject rcpp_result_gen;
+    Rcpp::RNGScope rcpp_rngScope_gen;
+    Rcpp::traits::input_parameter< NumericVector >::type Vd_(Vd_SEXP);
+    Rcpp::traits::input_parameter< NumericVector >::type Vf_(Vf_SEXP);
+    Rcpp::traits::input_parameter< NumericVector >::type Va_(Va_SEXP);
+    Rcpp::traits::input_parameter< NumericVector >::type dg_(dg_SEXP);
+    Rcpp::traits::input_parameter< NumericVector >::type fg_(fg_SEXP);
+    Rcpp::traits::input_parameter< NumericVector >::type ag_(ag_SEXP);
+    Rcpp::traits::input_parameter< NumericVector >::type y_(y_SEXP);
+    Rcpp::traits::input_parameter< NumericMatrix >::type Pi_(Pi_SEXP);
+    Rcpp::traits::input_parameter< double >::type rd(rdSEXP);
+    Rcpp::traits::input_parameter< double >::type rf(rfSEXP);
+    Rcpp::traits::input_parameter< double >::type ra(raSEXP);
+    Rcpp::traits::input_parameter< double >::type beta(betaSEXP);
+    Rcpp::traits::input_parameter< double >::type eis(eisSEXP);
+    Rcpp::traits::input_parameter< double >::type chi0(chi0SEXP);
+    Rcpp::traits::input_parameter< double >::type chi1(chi1SEXP);
+    Rcpp::traits::input_parameter< double >::type chi2(chi2SEXP);
+    Rcpp::traits::input_parameter< double >::type phi0(phi0SEXP);
+    Rcpp::traits::input_parameter< double >::type phi1(phi1SEXP);
+    Rcpp::traits::input_parameter< double >::type phi2(phi2SEXP);
+    Rcpp::traits::input_parameter< double >::type px(pxSEXP);
+    Rcpp::traits::input_parameter< int >::type threads(threadsSEXP);
+    rcpp_result_gen = Rcpp::wrap(hank_egm3_step_cpp(Vd_, Vf_, Va_, dg_, fg_, ag_, y_, Pi_, rd, rf, ra, beta, eis, chi0, chi1, chi2, phi0, phi1, phi2, px, threads));
+    return rcpp_result_gen;
+END_RCPP
+}
+// hank_egm3_solve_cpp
+List hank_egm3_solve_cpp(NumericVector Vd, NumericVector Vf, NumericVector Va, NumericVector dg, NumericVector fg, NumericVector ag, NumericVector y, NumericMatrix Pi, double rd, double rf, double ra, double beta, double eis, double chi0, double chi1, double chi2, double phi0, double phi1, double phi2, double tol, int maxit, double relax, double px, int threads);
+RcppExport SEXP _dynhr_hank_egm3_solve_cpp(SEXP VdSEXP, SEXP VfSEXP, SEXP VaSEXP, SEXP dgSEXP, SEXP fgSEXP, SEXP agSEXP, SEXP ySEXP, SEXP PiSEXP, SEXP rdSEXP, SEXP rfSEXP, SEXP raSEXP, SEXP betaSEXP, SEXP eisSEXP, SEXP chi0SEXP, SEXP chi1SEXP, SEXP chi2SEXP, SEXP phi0SEXP, SEXP phi1SEXP, SEXP phi2SEXP, SEXP tolSEXP, SEXP maxitSEXP, SEXP relaxSEXP, SEXP pxSEXP, SEXP threadsSEXP) {
+BEGIN_RCPP
+    Rcpp::RObject rcpp_result_gen;
+    Rcpp::RNGScope rcpp_rngScope_gen;
+    Rcpp::traits::input_parameter< NumericVector >::type Vd(VdSEXP);
+    Rcpp::traits::input_parameter< NumericVector >::type Vf(VfSEXP);
+    Rcpp::traits::input_parameter< NumericVector >::type Va(VaSEXP);
+    Rcpp::traits::input_parameter< NumericVector >::type dg(dgSEXP);
+    Rcpp::traits::input_parameter< NumericVector >::type fg(fgSEXP);
+    Rcpp::traits::input_parameter< NumericVector >::type ag(agSEXP);
+    Rcpp::traits::input_parameter< NumericVector >::type y(ySEXP);
+    Rcpp::traits::input_parameter< NumericMatrix >::type Pi(PiSEXP);
+    Rcpp::traits::input_parameter< double >::type rd(rdSEXP);
+    Rcpp::traits::input_parameter< double >::type rf(rfSEXP);
+    Rcpp::traits::input_parameter< double >::type ra(raSEXP);
+    Rcpp::traits::input_parameter< double >::type beta(betaSEXP);
+    Rcpp::traits::input_parameter< double >::type eis(eisSEXP);
+    Rcpp::traits::input_parameter< double >::type chi0(chi0SEXP);
+    Rcpp::traits::input_parameter< double >::type chi1(chi1SEXP);
+    Rcpp::traits::input_parameter< double >::type chi2(chi2SEXP);
+    Rcpp::traits::input_parameter< double >::type phi0(phi0SEXP);
+    Rcpp::traits::input_parameter< double >::type phi1(phi1SEXP);
+    Rcpp::traits::input_parameter< double >::type phi2(phi2SEXP);
+    Rcpp::traits::input_parameter< double >::type tol(tolSEXP);
+    Rcpp::traits::input_parameter< int >::type maxit(maxitSEXP);
+    Rcpp::traits::input_parameter< double >::type relax(relaxSEXP);
+    Rcpp::traits::input_parameter< double >::type px(pxSEXP);
+    Rcpp::traits::input_parameter< int >::type threads(threadsSEXP);
+    rcpp_result_gen = Rcpp::wrap(hank_egm3_solve_cpp(Vd, Vf, Va, dg, fg, ag, y, Pi, rd, rf, ra, beta, eis, chi0, chi1, chi2, phi0, phi1, phi2, tol, maxit, relax, px, threads));
+    return rcpp_result_gen;
+END_RCPP
+}
+// hank_fnv1a64_cpp
+std::string hank_fnv1a64_cpp(RawVector x);
+RcppExport SEXP _dynhr_hank_fnv1a64_cpp(SEXP xSEXP) {
+BEGIN_RCPP
+    Rcpp::RObject rcpp_result_gen;
+    Rcpp::RNGScope rcpp_rngScope_gen;
+    Rcpp::traits::input_parameter< RawVector >::type x(xSEXP);
+    rcpp_result_gen = Rcpp::wrap(hank_fnv1a64_cpp(x));
+    return rcpp_result_gen;
+END_RCPP
+}
+// hank_forward_push2_scatter_cpp
+NumericVector hank_forward_push2_scatter_cpp(NumericVector b_pol, NumericVector a_pol, NumericVector b_grid, NumericVector a_grid, NumericVector Dv, int n_e, int n_b, int n_a);
+RcppExport SEXP _dynhr_hank_forward_push2_scatter_cpp(SEXP b_polSEXP, SEXP a_polSEXP, SEXP b_gridSEXP, SEXP a_gridSEXP, SEXP DvSEXP, SEXP n_eSEXP, SEXP n_bSEXP, SEXP n_aSEXP) {
+BEGIN_RCPP
+    Rcpp::RObject rcpp_result_gen;
+    Rcpp::RNGScope rcpp_rngScope_gen;
+    Rcpp::traits::input_parameter< NumericVector >::type b_pol(b_polSEXP);
+    Rcpp::traits::input_parameter< NumericVector >::type a_pol(a_polSEXP);
+    Rcpp::traits::input_parameter< NumericVector >::type b_grid(b_gridSEXP);
+    Rcpp::traits::input_parameter< NumericVector >::type a_grid(a_gridSEXP);
+    Rcpp::traits::input_parameter< NumericVector >::type Dv(DvSEXP);
+    Rcpp::traits::input_parameter< int >::type n_e(n_eSEXP);
+    Rcpp::traits::input_parameter< int >::type n_b(n_bSEXP);
+    Rcpp::traits::input_parameter< int >::type n_a(n_aSEXP);
+    rcpp_result_gen = Rcpp::wrap(hank_forward_push2_scatter_cpp(b_pol, a_pol, b_grid, a_grid, Dv, n_e, n_b, n_a));
+    return rcpp_result_gen;
+END_RCPP
+}
 // eval_jac_tape_cpp
 arma::mat eval_jac_tape_cpp(const arma::vec& dy, const arma::vec& params, const arma::vec& ss, const arma::ivec& op, const arma::ivec& ia, const arma::vec& da, const arma::ivec& expr_len, const arma::ivec& out_row, const arma::ivec& out_col, int n_eq, int total_cols);
 RcppExport SEXP _dynhr_eval_jac_tape_cpp(SEXP dySEXP, SEXP paramsSEXP, SEXP ssSEXP, SEXP opSEXP, SEXP iaSEXP, SEXP daSEXP, SEXP expr_lenSEXP, SEXP out_rowSEXP, SEXP out_colSEXP, SEXP n_eqSEXP, SEXP total_colsSEXP) {
@@ -312,6 +652,16 @@ BEGIN_RCPP
     return rcpp_result_gen;
 END_RCPP
 }
+// hank_peak_rss
+double hank_peak_rss();
+RcppExport SEXP _dynhr_hank_peak_rss() {
+BEGIN_RCPP
+    Rcpp::RObject rcpp_result_gen;
+    Rcpp::RNGScope rcpp_rngScope_gen;
+    rcpp_result_gen = Rcpp::wrap(hank_peak_rss());
+    return rcpp_result_gen;
+END_RCPP
+}
 // qr_static_transform_cpp
 List qr_static_transform_cpp(const arma::mat& f_static, const arma::mat& f_minus_r, const arma::mat& f_zero_r, const arma::mat& f_plus_r, const arma::mat& f_exo_r);
 RcppExport SEXP _dynhr_qr_static_transform_cpp(SEXP f_staticSEXP, SEXP f_minus_rSEXP, SEXP f_zero_rSEXP, SEXP f_plus_rSEXP, SEXP f_exo_rSEXP) {
@@ -324,6 +674,30 @@ BEGIN_RCPP
     Rcpp::traits::input_parameter< const arma::mat& >::type f_plus_r(f_plus_rSEXP);
     Rcpp::traits::input_parameter< const arma::mat& >::type f_exo_r(f_exo_rSEXP);
     rcpp_result_gen = Rcpp::wrap(qr_static_transform_cpp(f_static, f_minus_r, f_zero_r, f_plus_r, f_exo_r));
+    return rcpp_result_gen;
+END_RCPP
+}
+// sv_rbpf_loglik_cpp
+double sv_rbpf_loglik_cpp(const arma::mat& Y, const arma::mat& TT, const arma::mat& ZZ, const arma::mat& RR, const arma::mat& DD, const arma::mat& Sigma_e, const arma::vec& d, const arma::mat& P0, const arma::uvec& sv_idx1, const arma::vec& mu, const arma::vec& rho, const arma::vec& seta, const int n_particles, const arma::vec& me_diag);
+RcppExport SEXP _dynhr_sv_rbpf_loglik_cpp(SEXP YSEXP, SEXP TTSEXP, SEXP ZZSEXP, SEXP RRSEXP, SEXP DDSEXP, SEXP Sigma_eSEXP, SEXP dSEXP, SEXP P0SEXP, SEXP sv_idx1SEXP, SEXP muSEXP, SEXP rhoSEXP, SEXP setaSEXP, SEXP n_particlesSEXP, SEXP me_diagSEXP) {
+BEGIN_RCPP
+    Rcpp::RObject rcpp_result_gen;
+    Rcpp::RNGScope rcpp_rngScope_gen;
+    Rcpp::traits::input_parameter< const arma::mat& >::type Y(YSEXP);
+    Rcpp::traits::input_parameter< const arma::mat& >::type TT(TTSEXP);
+    Rcpp::traits::input_parameter< const arma::mat& >::type ZZ(ZZSEXP);
+    Rcpp::traits::input_parameter< const arma::mat& >::type RR(RRSEXP);
+    Rcpp::traits::input_parameter< const arma::mat& >::type DD(DDSEXP);
+    Rcpp::traits::input_parameter< const arma::mat& >::type Sigma_e(Sigma_eSEXP);
+    Rcpp::traits::input_parameter< const arma::vec& >::type d(dSEXP);
+    Rcpp::traits::input_parameter< const arma::mat& >::type P0(P0SEXP);
+    Rcpp::traits::input_parameter< const arma::uvec& >::type sv_idx1(sv_idx1SEXP);
+    Rcpp::traits::input_parameter< const arma::vec& >::type mu(muSEXP);
+    Rcpp::traits::input_parameter< const arma::vec& >::type rho(rhoSEXP);
+    Rcpp::traits::input_parameter< const arma::vec& >::type seta(setaSEXP);
+    Rcpp::traits::input_parameter< const int >::type n_particles(n_particlesSEXP);
+    Rcpp::traits::input_parameter< const arma::vec& >::type me_diag(me_diagSEXP);
+    rcpp_result_gen = Rcpp::wrap(sv_rbpf_loglik_cpp(Y, TT, ZZ, RR, DD, Sigma_e, d, P0, sv_idx1, mu, rho, seta, n_particles, me_diag));
     return rcpp_result_gen;
 END_RCPP
 }
@@ -399,6 +773,22 @@ END_RCPP
 
 static const R_CallMethodDef CallEntries[] = {
     {"_dynhr_fdb_compose_folded_cpp", (DL_FUNC) &_dynhr_fdb_compose_folded_cpp, 5},
+    {"_dynhr_hank_ar_slab_adjoint_psi_cpp", (DL_FUNC) &_dynhr_hank_ar_slab_adjoint_psi_cpp, 2},
+    {"_dynhr_hank_ar_score_weights_cpp", (DL_FUNC) &_dynhr_hank_ar_score_weights_cpp, 4},
+    {"_dynhr_hank_egm_step_cpp", (DL_FUNC) &_dynhr_hank_egm_step_cpp, 8},
+    {"_dynhr_hank_egm_solve_cpp", (DL_FUNC) &_dynhr_hank_egm_solve_cpp, 10},
+    {"_dynhr_hank_stationary_dist_cpp", (DL_FUNC) &_dynhr_hank_stationary_dist_cpp, 5},
+    {"_dynhr_hank_stationary_dist_lambda_cpp", (DL_FUNC) &_dynhr_hank_stationary_dist_lambda_cpp, 7},
+    {"_dynhr_hank_egm2_step_cpp", (DL_FUNC) &_dynhr_hank_egm2_step_cpp, 16},
+    {"_dynhr_hank_egm2_solve_cpp", (DL_FUNC) &_dynhr_hank_egm2_solve_cpp, 18},
+    {"_dynhr_hank_curly_sweep2_cpp", (DL_FUNC) &_dynhr_hank_curly_sweep2_cpp, 20},
+    {"_dynhr_hank_forward_apply3_cpp", (DL_FUNC) &_dynhr_hank_forward_apply3_cpp, 9},
+    {"_dynhr_hank_forward_direction3_cpp", (DL_FUNC) &_dynhr_hank_forward_direction3_cpp, 14},
+    {"_dynhr_hank_forward_legs3_cpp", (DL_FUNC) &_dynhr_hank_forward_legs3_cpp, 13},
+    {"_dynhr_hank_egm3_step_cpp", (DL_FUNC) &_dynhr_hank_egm3_step_cpp, 21},
+    {"_dynhr_hank_egm3_solve_cpp", (DL_FUNC) &_dynhr_hank_egm3_solve_cpp, 24},
+    {"_dynhr_hank_fnv1a64_cpp", (DL_FUNC) &_dynhr_hank_fnv1a64_cpp, 1},
+    {"_dynhr_hank_forward_push2_scatter_cpp", (DL_FUNC) &_dynhr_hank_forward_push2_scatter_cpp, 8},
     {"_dynhr_eval_jac_tape_cpp", (DL_FUNC) &_dynhr_eval_jac_tape_cpp, 11},
     {"_dynhr_eval_triplet_tape_cpp", (DL_FUNC) &_dynhr_eval_triplet_tape_cpp, 7},
     {"_dynhr_kf_adjoint_cpp", (DL_FUNC) &_dynhr_kf_adjoint_cpp, 18},
@@ -412,7 +802,9 @@ static const R_CallMethodDef CallEntries[] = {
     {"_dynhr_kf_tangent_cpp", (DL_FUNC) &_dynhr_kf_tangent_cpp, 17},
     {"_dynhr_mcp_sparse_solve_cpp", (DL_FUNC) &_dynhr_mcp_sparse_solve_cpp, 5},
     {"_dynhr_ordered_qz_cpp", (DL_FUNC) &_dynhr_ordered_qz_cpp, 3},
+    {"_dynhr_hank_peak_rss", (DL_FUNC) &_dynhr_hank_peak_rss, 0},
     {"_dynhr_qr_static_transform_cpp", (DL_FUNC) &_dynhr_qr_static_transform_cpp, 5},
+    {"_dynhr_sv_rbpf_loglik_cpp", (DL_FUNC) &_dynhr_sv_rbpf_loglik_cpp, 14},
     {"_dynhr_tpf_propagate_particles", (DL_FUNC) &_dynhr_tpf_propagate_particles, 8},
     {"_dynhr_tpf_run_period_cpp", (DL_FUNC) &_dynhr_tpf_run_period_cpp, 22},
     {"_dynhr_tpf_log_weights", (DL_FUNC) &_dynhr_tpf_log_weights, 9},

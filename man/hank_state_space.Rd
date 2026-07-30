@@ -24,7 +24,10 @@ default \code{model$T_h} (no truncation beyond the GE horizon).}
 \value{
 A lagged-timing \code{\link{new_dsge_ss}} object. Its
   \code{shock_names} field records \code{model$exogenous} order and
-  \code{obs_names} records \code{observables}.
+  \code{obs_names} records \code{observables}; \code{Theta_list},
+  \code{rho_vec} and \code{q} record the per-shock MA coefficients,
+  AR(1) persistences and truncation (consumed by
+  \code{\link{hank_loglik_ar}}).
 }
 \description{
 Converts a linearised \code{\link{hank_model}} solution into an explicit
@@ -37,5 +40,6 @@ length-\code{q} shift register per shock (shocks enter independently, so
 \code{Sigma_e} is diagonal).
 }
 \seealso{
-\code{\link{hank_kalman_loglik}}, \code{\link{make_log_posterior_hank}}
+\code{\link{hank_kalman_loglik}}, \code{\link{hank_loglik_ar}},
+  \code{\link{make_log_posterior_hank}}
 }

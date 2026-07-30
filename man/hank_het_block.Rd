@@ -14,7 +14,14 @@ hank_het_block(
   w,
   tol = 1e-11,
   maxit = 5000L,
-  amin = NULL
+  amin = NULL,
+  backend = getOption("dynhr.hank_backend", "cpp"),
+  Pi_fn = NULL,
+  Pi_inputs = NULL,
+  Tr = 0,
+  Tr_incidence = NULL,
+  r_minus = NULL,
+  Va_init = NULL
 )
 }
 \arguments{
@@ -36,13 +43,98 @@ Must satisfy \code{amin >= a_grid[1]}. Defaults to \code{NULL}, which
 resolves to \code{a_grid[1L]} (the historical hardcoded behavior, so
 existing calls are byte-identical). Lets different household types on a
 shared \code{a_grid} face distinct borrowing limits (the wealth axis).}
+
+\item{backend}{Character: \code{"cpp"} (default) or \code{"R"}, passed to
+\code{\link{hank_egm_solve}}. When \code{"cpp"}, the stationary
+distribution is also computed by the fused compiled kernel (savings
+policy -> distribution directly, skipping Lambda for the power
+iteration); \code{Lambda} itself is still always built via
+\code{\link{hank_forward_operator}} for the returned object, since it is
+part of this function's contract regardless of backend. Defaults to
+\code{getOption("dynhr.hank_backend", "cpp")}; the R reference path
+remains available via \code{backend = "R"} or
+\code{options(dynhr.hank_backend = "R")}.}
+
+\item{Pi_fn}{Optional function rebuilding the income transition matrix from
+named transition-probability inputs (e.g. the \code{Pi_fn(f, s)} returned
+by \code{\link{hank_employment_income}}). Supplying it makes those inputs
+perturbable aggregate inputs of the block alongside \code{(r, w)}: the
+nonlinear transition (\code{\link{hank_td_nonlinear}}, via
+\code{pi_input_paths}) and the fake-news Jacobian
+(\code{\link{hank_het_jacobian}}) then accept them by name. Must satisfy
+\code{do.call(Pi_fn, Pi_inputs) == Pi} at steady state (checked here).}
+
+\item{Pi_inputs}{Named list of the steady-state values of \code{Pi_fn}'s
+inputs (e.g. \code{list(f = 0.7, s = 0.05)}). Required together with
+\code{Pi_fn} (and only then); names must not collide with
+\code{"r"}/\code{"w"}.}
+
+\item{Tr}{Lump-sum transfer added to income (\code{y = w*e + Tr*omega},
+with \code{omega} the incidence weight of \code{Tr_incidence}); default
+\code{0} reproduces the transfer-free household byte-for-byte. This is
+the aggregate input a fiscal block's profit-rebate or transfer closure
+feeds (name it \code{"Tr"} in the DAG; \code{T} itself is avoided because
+it is \code{TRUE} in R).}
+
+\item{Tr_incidence}{Incidence weight \eqn{\omega} distributing \code{Tr}
+  across the idiosyncratic income states: household in state \code{i}
+  receives \code{Tr * omega[i]}. \code{NULL} (default) is the uniform rule
+  \code{omega == 1}, byte-for-byte identical to the pre-incidence
+  household. Otherwise a finite numeric vector of length \code{length(e)},
+  normalised here to \eqn{\sum_e \bar\pi_e \omega_e = 1} against the
+  \code{Pi}-invariant distribution \eqn{\bar\pi}, so that \code{Tr} always
+  means the per-capita transfer and the aggregate outlay is exactly
+  \code{Tr}. See \code{\link{hank_incidence_earnings}} for the
+  earnings-proportional rule.
+
+  The weight is indexed by the income state ONLY, never by assets. That is
+  what makes the aggregate outlay exactly \code{Tr} in every period of a
+  transition, not just at the steady state: the \code{e}-marginal of the
+  distribution is invariant under the forward operator (\code{e} is an
+  exogenous Markov chain and the steady-state marginal is already
+  \code{Pi}-invariant), so \eqn{\sum_i D_{t,i} \omega_i \equiv 1} for all
+  \code{t}. An asset-indexed weight would NOT have this property -- the
+  outlay would drift with the wealth distribution, breaking any accounting
+  closure written on \code{Tr} -- and is deliberately not supported.}
+
+\item{r_minus}{Borrowing rate applied on \code{a < 0}. \code{NULL} (the
+default) is the SYMMETRIC household, in which borrowers and savers both
+face \code{r}; otherwise a finite scalar, typically \code{r} plus a
+wedge. Reserved as a \code{Pi_fn} input name, so a transition function
+may respond to it.}
+
+\item{Va_init}{Optional \code{n_e x n_a} initial marginal value, passed
+straight through to \code{\link{hank_egm_solve}} (and to the wedge
+solver's symmetric starting solve). \code{NULL} (default) uses that
+solver's own cash-on-hand guess.}
 }
 \value{
 An object of class \code{hank_het_block} with the steady-state
   policies (\code{a}, \code{c}), marginal value \code{Va}, distribution
   \code{D} (vector) and forward operator \code{Lambda}, aggregate
   steady-state outputs \code{A}, \code{C}, the borrowing constraint
-  \code{amin}, and the calibration.
+  \code{amin}, the calibration, (when supplied) \code{Pi_fn} /
+  \code{Pi_inputs}, and the run metadata
+  \code{\link{hank_het_manifest}} reads:
+  \describe{
+    \item{\code{backend}}{The backend that ACTUALLY ran: the
+      \code{backend} argument on a symmetric block, and \code{"R"} on a
+      borrowing-wedge block (\code{r_minus} non-\code{NULL}), whose fixed
+      point has no compiled path.}
+    \item{\code{threads}}{Always \code{1L} -- the one-asset kernel is
+      deliberately serial; see \code{\link{hank_egm_solve}}.}
+    \item{\code{iterations}, \code{converged}}{From the household solve.}
+    \item{\code{last_value_gap}, \code{last_policy_gap}}{The solve's final
+      marginal-value and savings-policy gaps; \code{NA_real_} on the
+      compiled backend and on the wedge path, neither of which returns
+      them (see \code{\link{hank_egm_solve}}).}
+    \item{\code{elapsed_solve}, \code{elapsed_dist}}{Wall-clock seconds
+      (\code{proc.time()[["elapsed"]]} differences) spent in the household
+      solve and in the stationary-distribution iteration, timed
+      separately.}
+    \item{\code{dist_converged}}{Logical: whether the stationary
+      distribution's power iteration converged.}
+  }
 }
 \description{
 Solves the household EGM problem and its stationary distribution at fixed

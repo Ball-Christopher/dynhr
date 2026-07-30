@@ -45,8 +45,8 @@ model (no time dimension).
 }
 \details{
 For each MCP-constrained variable x with bound b:
-  φ(x − b, f_static(x, params)) = 0
-where f_static is the steady-state residual function and φ is the
+  phi(x - b, f_static(x, params)) = 0
+where f_static is the steady-state residual function and phi is the
 Fischer-Burmeister function.
 
 This is useful when a constraint binds in the steady state (e.g., a

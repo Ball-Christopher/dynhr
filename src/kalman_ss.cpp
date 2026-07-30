@@ -117,7 +117,9 @@ List kalman_standard_loop_cpp(const arma::mat& Y_minus_d,
       Ft += HH_full;
       Ft = 0.5 * (Ft + Ft.t());
       if (!arma::chol(Rc, Ft)) { ok = false; break; }   // upper: Ft = Rc'Rc
-      Fi  = arma::inv_sympd(Ft);
+      // Non-throwing form: chol() success does not imply inv_sympd() success
+      // (see kalman_adjoint.cpp) -- degrade gracefully instead of throwing.
+      if (!arma::inv_sympd(Fi, Ft)) { ok = false; break; }
       double ldf = 2.0 * arma::sum(arma::log(Rc.diag()));
       Fiv = Fi * v;
       double ll = ll_const - 0.5 * (ldf + arma::dot(v, Fiv));

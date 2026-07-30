@@ -1,0 +1,665 @@
+// Matrix-free three-asset transition application.
+//
+// Policy arrays arrive in R's native (e,d,f,a) column-major layout. State
+// vectors use the package distribution order (e slowest, then d, f, a with a
+// fastest), matching hank_forward_operator3().
+
+// [[Rcpp::depends(RcppArmadillo)]]
+#include <RcppArmadillo.h>
+#include <array>
+#include <functional>
+#include <atomic>
+#include <thread>
+#include <string>
+#include <vector>
+using namespace Rcpp;
+
+static inline std::size_t pidx3(int e, int d, int f, int a,
+                                int ne, int nd, int nf) {
+  return e + (std::size_t)ne * (d + nd * (f + nf * a));
+}
+
+static inline std::size_t sidx3(int e, int d, int f, int a,
+                                int nd, int nf, int na) {
+  return a + (std::size_t)na * (f + nf * (d + nd * e));
+}
+
+struct Lottery3 {
+  int lo, hi;
+  double plo, phi;
+};
+
+static inline Lottery3 lottery3(const NumericVector& grid, double z) {
+  const int n = grid.size();
+  if (n == 1) return Lottery3{0, 0, 1.0, 0.0};
+  int lo = std::upper_bound(grid.begin(), grid.end(), z) - grid.begin() - 1;
+  if (lo < 0) lo = 0;
+  if (lo > n - 2) lo = n - 2;
+  double p = (grid[lo + 1] - z) / (grid[lo + 1] - grid[lo]);
+  if (p < 0.0) p = 0.0;
+  if (p > 1.0) p = 1.0;
+  return Lottery3{lo, lo + 1, p, 1.0 - p};
+}
+
+// Apply the joint Young operator without materializing it.
+// transpose = FALSE: Lambda %*% x (backward expectation application).
+// transpose = TRUE:  t(Lambda) %*% x (forward distribution application).
+// [[Rcpp::export]]
+NumericVector hank_forward_apply3_cpp(NumericVector d_pol,
+                                      NumericVector f_pol,
+                                      NumericVector a_pol,
+                                      NumericVector d_grid,
+                                      NumericVector f_grid,
+                                      NumericVector a_grid,
+                                      NumericMatrix Pi,
+                                      NumericVector x,
+                                      bool transpose = false) {
+  IntegerVector dm = d_pol.attr("dim");
+  if (dm.size() != 4) stop("hank_forward_apply3_cpp: policies need four dimensions");
+  const int ne = dm[0], nd = dm[1], nf = dm[2], na = dm[3];
+  const std::size_t N = (std::size_t)ne * nd * nf * na;
+  if ((std::size_t)x.size() != N) stop("hank_forward_apply3_cpp: x has wrong length");
+  NumericVector out(N);
+
+  for (int e = 0; e < ne; ++e)
+    for (int d = 0; d < nd; ++d)
+      for (int f = 0; f < nf; ++f)
+        for (int a = 0; a < na; ++a) {
+          const std::size_t po = pidx3(e,d,f,a,ne,nd,nf);
+          const std::size_t from = sidx3(e,d,f,a,nd,nf,na);
+          Lottery3 ld = lottery3(d_grid, d_pol[po]);
+          Lottery3 lf = lottery3(f_grid, f_pol[po]);
+          Lottery3 la = lottery3(a_grid, a_pol[po]);
+          const int di[2] = {ld.lo, ld.hi}; const double dw[2] = {ld.plo, ld.phi};
+          const int fi[2] = {lf.lo, lf.hi}; const double fw[2] = {lf.plo, lf.phi};
+          const int ai[2] = {la.lo, la.hi}; const double aw[2] = {la.plo, la.phi};
+          for (int ep = 0; ep < ne; ++ep)
+            for (int jd = 0; jd < 2; ++jd)
+              for (int jf = 0; jf < 2; ++jf)
+                for (int ja = 0; ja < 2; ++ja) {
+                  double pr = Pi(e,ep) * dw[jd] * fw[jf] * aw[ja];
+                  if (pr == 0.0) continue;
+                  std::size_t to = sidx3(ep,di[jd],fi[jf],ai[ja],nd,nf,na);
+                  if (transpose) out[to] += pr * x[from];
+                  else out[from] += pr * x[to];
+                }
+        }
+  return out;
+}
+
+// Apply the central directional derivative of the transposed Young operator
+// to a distribution without constructing either perturbed sparse matrix.
+//
+// Pi_p / Pi_m (both NULL by default) are the income transition matrices used
+// by the PLUS and MINUS legs. They exist for the transition-probability
+// Jacobian columns (HANK+SAM f/s): a date-s perturbation of such an input
+// moves Pi_s, which enters Lambda_s DIRECTLY as well as through the policy, so
+// curly-D at the shock date is the JOINT (policy, Pi) directional derivative.
+// Supplying Pi(x + delta) / Pi(x - delta) alongside the policy directions --
+// same step, same direction -- is what makes it joint. Left NULL both legs use
+// Pi and the result is bit-identical to the pre-existing policy-only form.
+// [[Rcpp::export]]
+NumericVector hank_forward_direction3_cpp(NumericVector d_pol,
+                                          NumericVector f_pol,
+                                          NumericVector a_pol,
+                                          NumericVector dd,
+                                          NumericVector df,
+                                          NumericVector da,
+                                          NumericVector d_grid,
+                                          NumericVector f_grid,
+                                          NumericVector a_grid,
+                                          NumericMatrix Pi,
+                                          NumericVector dist,
+                                          double delta,
+                                          Nullable<NumericMatrix> Pi_p = R_NilValue,
+                                          Nullable<NumericMatrix> Pi_m = R_NilValue) {
+  IntegerVector dm = d_pol.attr("dim");
+  if (dm.size() != 4) stop("hank_forward_direction3_cpp: policies need four dimensions");
+  const int ne = dm[0], nd = dm[1], nf = dm[2], na = dm[3];
+  const std::size_t N = (std::size_t)ne * nd * nf * na;
+  if ((std::size_t)dist.size() != N || (std::size_t)dd.size() != N ||
+      (std::size_t)df.size() != N || (std::size_t)da.size() != N)
+    stop("hank_forward_direction3_cpp: state arrays have wrong length");
+  if (!R_finite(delta) || delta <= 0.0)
+    stop("hank_forward_direction3_cpp: delta must be finite and positive");
+  NumericMatrix Pip = Pi_p.isNotNull() ? NumericMatrix(Pi_p.get()) : Pi;
+  NumericMatrix Pim = Pi_m.isNotNull() ? NumericMatrix(Pi_m.get()) : Pi;
+  if (Pip.nrow() != ne || Pip.ncol() != ne ||
+      Pim.nrow() != ne || Pim.ncol() != ne)
+    stop("hank_forward_direction3_cpp: Pi_p/Pi_m must be n_e x n_e");
+  // Take the joint arithmetic path only when the two legs GENUINELY differ,
+  // not merely when the arguments were supplied. An INERT transition input --
+  // one its Pi_fn ignores, the transition analogue of px on a singleton-f
+  // reduction -- produces Pi_p == Pi_m bitwise, and must yield an exactly
+  // zero column, not a contraction-level 1e-12 one. Comparing here is O(ne^2)
+  // once against an O(N*ne*8) loop, so it costs nothing and buys the exact
+  // zero.
+  bool joint = false;
+  for (int i = 0; i < ne && !joint; ++i)
+    for (int j = 0; j < ne; ++j)
+      if (Pip(i, j) != Pim(i, j)) { joint = true; break; }
+  NumericVector out(N);
+  const double scale = 0.5 / delta;
+
+  for (int e = 0; e < ne; ++e)
+    for (int d = 0; d < nd; ++d)
+      for (int f = 0; f < nf; ++f)
+        for (int a = 0; a < na; ++a) {
+          const std::size_t po = pidx3(e,d,f,a,ne,nd,nf);
+          const std::size_t from = sidx3(e,d,f,a,nd,nf,na);
+          Lottery3 ldp = lottery3(d_grid, d_pol[po] + delta * dd[po]);
+          Lottery3 lfp = lottery3(f_grid, f_pol[po] + delta * df[po]);
+          Lottery3 lap = lottery3(a_grid, a_pol[po] + delta * da[po]);
+          Lottery3 ldm = lottery3(d_grid, d_pol[po] - delta * dd[po]);
+          Lottery3 lfm = lottery3(f_grid, f_pol[po] - delta * df[po]);
+          Lottery3 lam = lottery3(a_grid, a_pol[po] - delta * da[po]);
+          const int dpi[2] = {ldp.lo, ldp.hi}; const double dpw[2] = {ldp.plo, ldp.phi};
+          const int fpi[2] = {lfp.lo, lfp.hi}; const double fpw[2] = {lfp.plo, lfp.phi};
+          const int api[2] = {lap.lo, lap.hi}; const double apw[2] = {lap.plo, lap.phi};
+          const int dmi[2] = {ldm.lo, ldm.hi}; const double dmw[2] = {ldm.plo, ldm.phi};
+          const int fmi[2] = {lfm.lo, lfm.hi}; const double fmw[2] = {lfm.plo, lfm.phi};
+          const int ami[2] = {lam.lo, lam.hi}; const double amw[2] = {lam.plo, lam.phi};
+          const double mass = dist[from] * scale;
+          for (int ep = 0; ep < ne; ++ep)
+            for (int jd = 0; jd < 2; ++jd)
+              for (int jf = 0; jf < 2; ++jf)
+                for (int ja = 0; ja < 2; ++ja) {
+                  // Per-LEG transition weights. With Pi_p == Pi_m == Pi these
+                  // are the same number and everything below reduces to the
+                  // original policy-only expression exactly; when they differ
+                  // the gap between them IS the direct-Pi term.
+                  const double bp = mass * Pip(e,ep);
+                  const double bm = mass * Pim(e,ep);
+                  const double wp = dpw[jd] * fpw[jf] * apw[ja];
+                  const double wm = dmw[jd] * fmw[jf] * amw[ja];
+                  const std::size_t top = sidx3(ep,dpi[jd],fpi[jf],api[ja],nd,nf,na);
+                  const std::size_t tom = sidx3(ep,dmi[jd],fmi[jf],ami[ja],nd,nf,na);
+                  // Combine coincident destinations before accumulation, which
+                  // preserves exact structural zeros (notably singleton f).
+                  //
+                  // The two branches are NOT a micro-optimization. On the
+                  // policy-only path the legs share a transition matrix, so
+                  // factoring it out cancels wp - wm EXACTLY; writing that as
+                  // bp*wp - bm*wm instead lets the compiler contract one
+                  // product into an FMA while rounding the other, leaving a
+                  // ~1e-17 relative residue that the 0.5/delta scale lifts to
+                  // ~1e-12 -- enough to destroy the exact zero this branch
+                  // exists to protect, and with it the guarantee that adding
+                  // the Pi arguments left every price column bit-identical.
+                  //
+                  // Once the legs carry DIFFERENT transition matrices the
+                  // factoring is not available: it would cancel the direct-Pi
+                  // derivative to zero wherever the destinations coincide,
+                  // which on a singleton-f reduction (or any unmoved
+                  // coordinate) is everywhere -- i.e. exactly the term a
+                  // transition-probability column is made of.
+                  if (top == tom) {
+                    out[top] += joint ? (bp * wp - bm * wm) : (bp * (wp - wm));
+                  } else {
+                    if (wp != 0.0) out[top] += bp * wp;
+                    if (wm != 0.0) out[tom] -= bm * wm;
+                  }
+                }
+        }
+  return out;
+}
+
+// Apply the central difference of two ACTUAL policy/transition legs of the
+// transposed Young operator to a distribution. Unlike
+// hank_forward_direction3_cpp(), this does not reconstruct a symmetric pair
+// around the steady policy. That distinction is binding at active asset
+// bounds: reconstructing steady +/- delta*dpolicy can clip one leg after the
+// local policy derivative has already averaged an asymmetric active-set
+// response, breaking exact first-moment accounting.
+// [[Rcpp::export]]
+NumericVector hank_forward_legs3_cpp(NumericVector d_plus,
+                                     NumericVector f_plus,
+                                     NumericVector a_plus,
+                                     NumericVector d_minus,
+                                     NumericVector f_minus,
+                                     NumericVector a_minus,
+                                     NumericVector d_grid,
+                                     NumericVector f_grid,
+                                     NumericVector a_grid,
+                                     NumericMatrix Pi_plus,
+                                     NumericMatrix Pi_minus,
+                                     NumericVector dist,
+                                     double step) {
+  IntegerVector dm = d_plus.attr("dim");
+  if (dm.size() != 4)
+    stop("hank_forward_legs3_cpp: policies need four dimensions");
+  const int ne = dm[0], nd = dm[1], nf = dm[2], na = dm[3];
+  const std::size_t N = (std::size_t)ne * nd * nf * na;
+  const NumericVector policies[6] =
+    {d_plus, f_plus, a_plus, d_minus, f_minus, a_minus};
+  for (int k = 0; k < 6; ++k) {
+    IntegerVector dk = policies[k].attr("dim");
+    if (dk.size() != 4 || dk[0] != ne || dk[1] != nd ||
+        dk[2] != nf || dk[3] != na || (std::size_t)policies[k].size() != N)
+      stop("hank_forward_legs3_cpp: policy legs must be conformable");
+  }
+  if ((std::size_t)dist.size() != N)
+    stop("hank_forward_legs3_cpp: dist has wrong length");
+  if (!R_finite(step) || step <= 0.0)
+    stop("hank_forward_legs3_cpp: step must be finite and positive");
+  if (Pi_plus.nrow() != ne || Pi_plus.ncol() != ne ||
+      Pi_minus.nrow() != ne || Pi_minus.ncol() != ne)
+    stop("hank_forward_legs3_cpp: Pi legs must be n_e x n_e");
+
+  bool joint = false;
+  for (int i = 0; i < ne && !joint; ++i)
+    for (int j = 0; j < ne; ++j)
+      if (Pi_plus(i, j) != Pi_minus(i, j)) { joint = true; break; }
+
+  NumericVector out(N);
+  const double scale = 0.5 / step;
+  for (int e = 0; e < ne; ++e)
+    for (int d = 0; d < nd; ++d)
+      for (int f = 0; f < nf; ++f)
+        for (int a = 0; a < na; ++a) {
+          const std::size_t po = pidx3(e,d,f,a,ne,nd,nf);
+          const std::size_t from = sidx3(e,d,f,a,nd,nf,na);
+          Lottery3 ldp = lottery3(d_grid, d_plus[po]);
+          Lottery3 lfp = lottery3(f_grid, f_plus[po]);
+          Lottery3 lap = lottery3(a_grid, a_plus[po]);
+          Lottery3 ldm = lottery3(d_grid, d_minus[po]);
+          Lottery3 lfm = lottery3(f_grid, f_minus[po]);
+          Lottery3 lam = lottery3(a_grid, a_minus[po]);
+          const int dpi[2] = {ldp.lo, ldp.hi};
+          const double dpw[2] = {ldp.plo, ldp.phi};
+          const int fpi[2] = {lfp.lo, lfp.hi};
+          const double fpw[2] = {lfp.plo, lfp.phi};
+          const int api[2] = {lap.lo, lap.hi};
+          const double apw[2] = {lap.plo, lap.phi};
+          const int dmi[2] = {ldm.lo, ldm.hi};
+          const double dmw[2] = {ldm.plo, ldm.phi};
+          const int fmi[2] = {lfm.lo, lfm.hi};
+          const double fmw[2] = {lfm.plo, lfm.phi};
+          const int ami[2] = {lam.lo, lam.hi};
+          const double amw[2] = {lam.plo, lam.phi};
+          const double mass = dist[from] * scale;
+          for (int ep = 0; ep < ne; ++ep)
+            for (int jd = 0; jd < 2; ++jd)
+              for (int jf = 0; jf < 2; ++jf)
+                for (int ja = 0; ja < 2; ++ja) {
+                  const double bp = mass * Pi_plus(e,ep);
+                  const double bm = mass * Pi_minus(e,ep);
+                  const double wp = dpw[jd] * fpw[jf] * apw[ja];
+                  const double wm = dmw[jd] * fmw[jf] * amw[ja];
+                  const std::size_t top =
+                    sidx3(ep,dpi[jd],fpi[jf],api[ja],nd,nf,na);
+                  const std::size_t tom =
+                    sidx3(ep,dmi[jd],fmi[jf],ami[ja],nd,nf,na);
+                  if (top == tom) {
+                    out[top] += joint ? (bp * wp - bm * wm)
+                                      : (bp * (wp - wm));
+                  } else {
+                    if (wp != 0.0) out[top] += bp * wp;
+                    if (wm != 0.0) out[tom] -= bm * wm;
+                  }
+                }
+        }
+  return out;
+}
+
+static inline void psi3(double ap, double a, double r, double c0,
+                        double c1, double c2, double *P, double *P1,
+                        double *P2) {
+  const double ar = (1.0 + r) * a;
+  const double dx = ap - ar, adx = std::fabs(dx);
+  const double den = ar + c0;
+  const double core = R_pow(adx / den, c2 - 1.0);
+  const double p = (c1 / c2) * adx * core;
+  const double p1 = c1 * ((dx > 0.0) - (dx < 0.0)) * core;
+  if (P) *P = p;
+  if (P1) *P1 = p1;
+  if (P2) *P2 = -(1.0 + r) * (p1 + (c2 - 1.0) * p / den);
+}
+
+// Takes a raw pointer rather than a std::vector reference so the expectation
+// slabs can be read from worker threads without touching any R or container
+// machinery.
+static inline double interp3_2(const double *Z, int e, int d,
+                               double f, double a, const double *fg,
+                               const double *ag, int ne, int nd, int nf,
+                               int na) {
+  int jf = std::upper_bound(fg, fg + nf, f) - fg - 1;
+  int ja = std::upper_bound(ag, ag + na, a) - ag - 1;
+  jf = std::max(0, std::min(jf, nf - 2));
+  ja = std::max(0, std::min(ja, na - 2));
+  const double wf = (f - fg[jf]) / (fg[jf + 1] - fg[jf]);
+  const double wa = (a - ag[ja]) / (ag[ja + 1] - ag[ja]);
+  const std::size_t o00 = pidx3(e,d,jf,ja,ne,nd,nf);
+  const std::size_t o10 = pidx3(e,d,jf+1,ja,ne,nd,nf);
+  const std::size_t o01 = pidx3(e,d,jf,ja+1,ne,nd,nf);
+  const std::size_t o11 = pidx3(e,d,jf+1,ja+1,ne,nd,nf);
+  return (1-wf)*(1-wa)*Z[o00] + wf*(1-wa)*Z[o10] +
+         (1-wf)*wa*Z[o01] + wf*wa*Z[o11];
+}
+
+using Foc3 = std::function<std::array<double,2>(double,double)>;
+
+static inline bool valid_kkt3(const Foc3& foc, const std::array<double,2>& z,
+                              const std::array<double,2>& lo,
+                              const std::array<double,2>& hi) {
+  const auto g = foc(z[0], z[1]);
+  for (int j=0;j<2;++j) {
+    const bool in = z[j] > lo[j] + 1e-6 && z[j] < hi[j] - 1e-6;
+    if (in) { if (std::fabs(g[j]) > 1e-5) return false; }
+    else if (z[j] <= lo[j] + 1e-6) { if (g[j] > 1e-5) return false; }
+    else if (g[j] < -1e-5) return false;
+  }
+  return R_finite(g[0]) && R_finite(g[1]);
+}
+
+static inline double golden3(const std::function<double(double)>& objective,
+                             double lo, double hi) {
+  const double gr = 0.6180339887498948482;
+  double x1 = hi - gr*(hi-lo), x2 = lo + gr*(hi-lo);
+  double f1 = objective(x1), f2 = objective(x2);
+  for (int it=0; it<200 && hi-lo > 1e-13; ++it) {
+    if (f1 <= f2) { hi=x2; x2=x1; f2=f1; x1=hi-gr*(hi-lo); f1=objective(x1); }
+    else { lo=x1; x1=x2; f1=f2; x2=lo+gr*(hi-lo); f2=objective(x2); }
+  }
+  return f1 <= f2 ? x1 : x2;
+}
+
+// `status` replaces what used to be an Rcpp::stop() from inside this routine.
+// The active-set search runs on worker threads, and R's error mechanism
+// (longjmp out of a C++ throw) is main-thread-only: unwinding from a worker is
+// undefined behaviour, not a caught error. Failures are therefore reported as
+// a code, propagated up, and re-raised as an R error by the main thread after
+// every worker has joined. 0 = ok, 2 = no active-set candidate satisfies KKT.
+static std::array<double,2> active_foc3(const Foc3& foc,
+                                        std::array<double,2> z,
+                                        const std::array<double,2>& lo,
+                                        const std::array<double,2>& hi,
+                                        int *status) {
+  for (int j=0;j<2;++j) z[j]=std::max(lo[j],std::min(hi[j],z[j]));
+  // Safeguarded finite-difference Newton, followed by the reference projected
+  // ascent iteration. The active-set enumeration below is the binding guard.
+  for (int it=0; it<80; ++it) {
+    auto g=foc(z[0],z[1]);
+    if (!R_finite(g[0]) || !R_finite(g[1])) break;
+    if (std::max(std::fabs(g[0]),std::fabs(g[1])) < 1e-10) break;
+    double J[2][2];
+    for (int j=0;j<2;++j) {
+      double h=1e-6*std::max(1.0,std::fabs(z[j]));
+      auto zp=z, zm=z; zp[j]=std::min(hi[j],z[j]+h); zm[j]=std::max(lo[j],z[j]-h);
+      auto gp=foc(zp[0],zp[1]), gm=foc(zm[0],zm[1]);
+      const double den=zp[j]-zm[j];
+      J[0][j]=(gp[0]-gm[0])/den; J[1][j]=(gp[1]-gm[1])/den;
+    }
+    const double det=J[0][0]*J[1][1]-J[0][1]*J[1][0];
+    if (!R_finite(det)||std::fabs(det)<1e-14) break;
+    const std::array<double,2> dz = {
+      (J[1][1]*g[0]-J[0][1]*g[1])/det,
+      (-J[1][0]*g[0]+J[0][0]*g[1])/det};
+    const double old=std::max(std::fabs(g[0]),std::fabs(g[1]));
+    bool moved=false;
+    for(double step=1.0;step>=1.0/128.0;step*=.5) {
+      std::array<double,2> zn={std::max(lo[0],std::min(hi[0],z[0]-step*dz[0])),
+                               std::max(lo[1],std::min(hi[1],z[1]-step*dz[1]))};
+      auto gn=foc(zn[0],zn[1]);
+      if(R_finite(gn[0])&&R_finite(gn[1])&&std::max(std::fabs(gn[0]),std::fabs(gn[1]))<old){z=zn;moved=true;break;}
+    }
+    if(!moved) break;
+  }
+  for(int it=0;it<1000&&!valid_kkt3(foc,z,lo,hi);++it){
+    auto g=foc(z[0],z[1]); std::array<double,2> zn;
+    for(int j=0;j<2;++j)zn[j]=std::max(lo[j],std::min(hi[j],z[j]+.05*g[j]));
+    if(std::max(std::fabs(zn[0]-z[0]),std::fabs(zn[1]-z[1]))<1e-7){z=zn;break;} z=zn;
+  }
+  std::vector<std::array<double,2>> cand;
+  if(valid_kkt3(foc,z,lo,hi)) {
+    const bool interior=z[0]>lo[0]+1e-6&&z[0]<hi[0]-1e-6&&
+                        z[1]>lo[1]+1e-6&&z[1]<hi[1]-1e-6;
+    if(interior) return z;
+    cand.push_back(z);
+  }
+  for(double ff: {lo[0],hi[0]}) {
+    double aa=golden3([&](double q){auto g=foc(ff,q);return g[1]*g[1];},lo[1],hi[1]);
+    cand.push_back({ff,aa});
+  }
+  for(double aa: {lo[1],hi[1]}) {
+    double ff=golden3([&](double q){auto g=foc(q,aa);return g[0]*g[0];},lo[0],hi[0]);
+    cand.push_back({ff,aa});
+  }
+  for(double ff:{lo[0],hi[0]})for(double aa:{lo[1],hi[1]})cand.push_back({ff,aa});
+  bool found=false; double best=R_PosInf; std::array<double,2> ans=z;
+  for(auto q:cand)if(valid_kkt3(foc,q,lo,hi)){auto g=foc(q[0],q[1]);double v=std::fabs(g[0])+std::fabs(g[1]);if(v<best){best=v;ans=q;found=true;}}
+  if(!found&&status) *status=2;
+  return ans;
+}
+
+// Everything one (e, f0, a0) triple needs. Raw pointers only: a worker thread
+// may not construct, destroy or index an R object, so all Rcpp interaction
+// stays on the main thread and the parallel region sees plain memory.
+namespace {
+struct Egm3Ctx {
+  const double *dg,*fg,*ag,*y,*Ed,*Ef,*Ea;
+  int ne,nd,nf,na;
+  double rd,rf,ra,px,beta,eis,chi0,chi1,chi2,phi0,phi1,phi2;
+  double *D,*F,*A,*C,*Chi,*Phi,*Vdn,*Vfn,*Van;
+};
+}
+
+// One (e, f0, a0) triple: solves the nd endogenous-grid problems, then maps
+// back onto the exogenous liquid grid. Writes only to indices
+// pidx3(e, ., f0, a0), which are disjoint across triples -- that disjointness,
+// plus read-only expectation slabs, is what makes the loop over triples
+// parallel with no synchronisation and BIT-IDENTICAL output: each element is
+// produced by exactly the same operations in the same order regardless of how
+// the triples are distributed over threads.
+//
+// Scratch (de/fe/ae/ce) is passed in per worker rather than shared: it used to
+// be hoisted outside the loop, which is correct serially but is a data race
+// the moment two triples run at once.
+//
+// Returns 0 ok, 1 non-monotone endogenous grid, 2 no valid active-set candidate.
+static int egm3_triple(const Egm3Ctx& X, int e, int f0, int a0,
+                       std::vector<double>& de, std::vector<double>& fe,
+                       std::vector<double>& ae, std::vector<double>& ce) {
+  const double *dg=X.dg,*fg=X.fg,*ag=X.ag,*y=X.y;
+  const int ne=X.ne,nd=X.nd,nf=X.nf,na=X.na;
+  const double rd=X.rd,rf=X.rf,ra=X.ra,px=X.px,beta=X.beta,eis=X.eis;
+  const double chi0=X.chi0,chi1=X.chi1,chi2=X.chi2;
+  const double phi0=X.phi0,phi1=X.phi1,phi2=X.phi2;
+  const std::array<double,2> lo={fg[0],ag[0]},hi={fg[nf-1],ag[na-1]};
+  int status=0;
+  std::array<double,2> start={fg[f0],ag[a0]};
+  for(int d=0;d<nd;++d){
+    Foc3 foc=[&](double ff,double aa){
+      double wd=interp3_2(X.Ed,e,d,ff,aa,fg,ag,ne,nd,nf,na),p1f,p1a;
+      psi3(ff,fg[f0],rf,phi0,phi1,phi2,nullptr,&p1f,nullptr);
+      psi3(aa,ag[a0],ra,chi0,chi1,chi2,nullptr,&p1a,nullptr);
+      // Foreign claims trade at the world price px, so a unit of f' costs px
+      // domestic goods plus the marginal adjustment cost -- hence `-px-p1f`
+      // where a unit-priced asset would give `-1-p1f`. px enters the PURCHASE
+      // side, not only the revaluation of the existing stock: the paper's
+      // Stage-4 contract has foreign market clearing determine px, and a price
+      // that only revalued the predetermined position could not clear a market
+      // for new purchases. It would also be exactly collinear with rf (both
+      // multiplying f alone), making it a redundant Jacobian input.
+      return std::array<double,2>{interp3_2(X.Ef,e,d,ff,aa,fg,ag,ne,nd,nf,na)/wd-px-p1f,
+        interp3_2(X.Ea,e,d,ff,aa,fg,ag,ne,nd,nf,na)/wd-1-p1a};};
+    auto z=active_foc3(foc,start,lo,hi,&status);
+    if(status) return status;
+    start=z;
+    double wd=interp3_2(X.Ed,e,d,z[0],z[1],fg,ag,ne,nd,nf,na);
+    double cc=R_pow(beta*wd,-eis),pf,pa;psi3(z[0],fg[f0],rf,phi0,phi1,phi2,&pf,nullptr,nullptr);psi3(z[1],ag[a0],ra,chi0,chi1,chi2,&pa,nullptr,nullptr);
+    de[d]=(cc+dg[d]+px*z[0]+z[1]+pf+pa-y[e]-px*(1+rf)*fg[f0]-(1+ra)*ag[a0])/(1+rd);
+    fe[d]=z[0];ae[d]=z[1];ce[d]=cc;
+  }
+  for(int d=1;d<nd;++d)if(de[d]<=de[d-1])return 1;
+  start={fg[f0],ag[a0]};
+  for(int id=0;id<nd;++id){
+    double dp,fp,ap,cp;
+    if(dg[id]<de[0]){
+      Foc3 foc=[&](double ff,double aa){double pf,p1f,pa,p1a;psi3(ff,fg[f0],rf,phi0,phi1,phi2,&pf,&p1f,nullptr);psi3(aa,ag[a0],ra,chi0,chi1,chi2,&pa,&p1a,nullptr);double cc=y[e]+(1+rd)*dg[id]+px*(1+rf)*fg[f0]+(1+ra)*ag[a0]-dg[0]-px*ff-aa-pf-pa;if(!R_finite(cc)||cc<=0)return std::array<double,2>{1e12,1e12};double uc=R_pow(cc,-1/eis);return std::array<double,2>{beta*interp3_2(X.Ef,e,0,ff,aa,fg,ag,ne,nd,nf,na)/uc-px-p1f,beta*interp3_2(X.Ea,e,0,ff,aa,fg,ag,ne,nd,nf,na)/uc-1-p1a};};
+      auto z=active_foc3(foc,start,lo,hi,&status);
+      if(status) return status;
+      start=z;double pf,pa;psi3(z[0],fg[f0],rf,phi0,phi1,phi2,&pf,nullptr,nullptr);psi3(z[1],ag[a0],ra,chi0,chi1,chi2,&pa,nullptr,nullptr);dp=dg[0];fp=z[0];ap=z[1];cp=y[e]+(1+rd)*dg[id]+px*(1+rf)*fg[f0]+(1+ra)*ag[a0]-dp-px*fp-ap-pf-pa;
+    } else {
+      if(dg[id]>=de[nd-1]){dp=dg[nd-1];fp=fe[nd-1];ap=ae[nd-1];}
+      else {int j=std::upper_bound(de.begin(),de.end(),dg[id])-de.begin()-1;double w=(dg[id]-de[j])/(de[j+1]-de[j]);dp=dg[j]+w*(dg[j+1]-dg[j]);fp=fe[j]+w*(fe[j+1]-fe[j]);ap=ae[j]+w*(ae[j+1]-ae[j]);}
+      // Rebuild c from the BUDGET at the interpolated portfolio, rather than
+      // interpolating the endogenous-grid c alongside it. The budget is
+      // nonlinear in (f', a') through Phi and Psi, so a fourth independent
+      // interpolation does not satisfy it off a source knot -- measured 1.98e-4
+      // on the 54-state reference, shrinking only as the grid refines, i.e. a
+      // real discretisation error rather than solver noise. The top branch had
+      // the same defect for a different reason: it paired ce[nd-1] with dg[id]
+      // != de[nd-1]. hank_egm2_solve has always done it this way (c_pol is
+      // formed from the budget AFTER b_pol/a_pol are fixed); this brings the
+      // three-asset kernel onto the same convention, so the household budget
+      // holds by construction at every state and the aggregate resource
+      // identity is no longer capped at 1e-4.
+      double pf2,pa2;
+      psi3(fp,fg[f0],rf,phi0,phi1,phi2,&pf2,nullptr,nullptr);
+      psi3(ap,ag[a0],ra,chi0,chi1,chi2,&pa2,nullptr,nullptr);
+      cp=y[e]+(1+rd)*dg[id]+px*(1+rf)*fg[f0]+(1+ra)*ag[a0]-dp-px*fp-ap-pf2-pa2;
+    }
+    // The adjustment technologies are REAL RESOURCE costs, so the block has to
+    // be able to report them: they are the wedge between what households
+    // finance and what the goods market must supply. Recovered here from the
+    // same psi3 call that already produces Psi2 for the envelope, at the ONE
+    // place where (fp, ap) are final -- recomputing them in the caller would
+    // re-introduce exactly the off-policy evaluation the budget fix removed.
+    const std::size_t o=pidx3(e,id,f0,a0,ne,nd,nf);X.D[o]=dp;X.F[o]=fp;X.A[o]=ap;X.C[o]=cp;double p2f,p2a,pfc,pac;psi3(fp,fg[f0],rf,phi0,phi1,phi2,&pfc,nullptr,&p2f);psi3(ap,ag[a0],ra,chi0,chi1,chi2,&pac,nullptr,&p2a);X.Phi[o]=pfc;X.Chi[o]=pac;double uc=R_pow(cp,-1/eis);X.Vdn[o]=uc*(1+rd);X.Vfn[o]=uc*(px*(1+rf)-p2f);X.Van[o]=uc*((1+ra)-p2a);
+  }
+  return 0;
+}
+
+// One compiled three-asset EGM backward step. The R implementation remains
+// the oracle and owns validation/default initialization.
+//
+// `threads` is resolved in R (see hank_resolve_threads); <= 1 runs the
+// serial path, which is the code the parallel path must reproduce bit for bit.
+// [[Rcpp::export]]
+List hank_egm3_step_cpp(NumericVector Vd_, NumericVector Vf_, NumericVector Va_,
+                        NumericVector dg_, NumericVector fg_, NumericVector ag_,
+                        NumericVector y_, NumericMatrix Pi_, double rd, double rf,
+                        double ra, double beta, double eis, double chi0,
+                        double chi1, double chi2, double phi0, double phi1,
+                        double phi2, double px = 1.0, int threads = 1) {
+  IntegerVector dm=Vd_.attr("dim");
+  const int ne=dm[0],nd=dm[1],nf=dm[2],na=dm[3];
+  const std::size_t N=(std::size_t)ne*nd*nf*na;
+  const double *dg=dg_.begin(),*fg=fg_.begin(),*ag=ag_.begin(),*y=y_.begin();
+  std::vector<double> Ed(N),Ef(N),Ea(N);
+  for(int e=0;e<ne;++e)for(int d=0;d<nd;++d)for(int f=0;f<nf;++f)for(int a=0;a<na;++a){
+    const std::size_t o=pidx3(e,d,f,a,ne,nd,nf); double vd=0,vf=0,va=0;
+    for(int ep=0;ep<ne;++ep){const std::size_t op=pidx3(ep,d,f,a,ne,nd,nf);vd+=Pi_(e,ep)*Vd_[op];vf+=Pi_(e,ep)*Vf_[op];va+=Pi_(e,ep)*Va_[op];}
+    Ed[o]=vd;Ef[o]=vf;Ea[o]=va;
+  }
+  NumericVector D(N),F(N),A(N),C(N),Chi(N),Phi(N),Vdn(N),Vfn(N),Van(N);
+  Egm3Ctx X{dg,fg,ag,y,Ed.data(),Ef.data(),Ea.data(),ne,nd,nf,na,
+            rd,rf,ra,px,beta,eis,chi0,chi1,chi2,phi0,phi1,phi2,
+            D.begin(),F.begin(),A.begin(),C.begin(),
+            Chi.begin(),Phi.begin(),
+            Vdn.begin(),Vfn.begin(),Van.begin()};
+
+  const std::size_t ntask=(std::size_t)ne*nf*na;
+  const int nthr=std::max(1,std::min(threads,(int)ntask));
+  // First failure wins; the losers' codes are discarded, which is fine because
+  // any one of them is enough to abort the step.
+  std::atomic<int> err(0); std::atomic<std::size_t> err_task(0);
+
+  auto run_range=[&](std::size_t lo_t,std::size_t hi_t){
+    std::vector<double> de(nd),fe(nd),ae(nd),ce(nd);   // per-worker scratch
+    for(std::size_t t=lo_t;t<hi_t;++t){
+      if(err.load(std::memory_order_relaxed)) return;  // abandon early
+      const int a0=(int)(t%(std::size_t)na);
+      const int f0=(int)((t/(std::size_t)na)%(std::size_t)nf);
+      const int e=(int)(t/((std::size_t)na*(std::size_t)nf));
+      const int s=egm3_triple(X,e,f0,a0,de,fe,ae,ce);
+      if(s){int expect=0;
+        if(err.compare_exchange_strong(expect,s)) err_task.store(t);
+        return;}
+    }
+  };
+
+  if(nthr<=1){
+    run_range(0,ntask);
+  } else {
+    std::vector<std::thread> pool; pool.reserve(nthr-1);
+    const std::size_t chunk=(ntask+nthr-1)/nthr;
+    for(int k=1;k<nthr;++k){
+      const std::size_t lo_t=std::min(ntask,(std::size_t)k*chunk);
+      const std::size_t hi_t=std::min(ntask,lo_t+chunk);
+      if(lo_t<hi_t) pool.emplace_back(run_range,lo_t,hi_t);
+    }
+    run_range(0,std::min(ntask,chunk));               // main thread takes chunk 0
+    for(auto& th: pool) th.join();
+  }
+
+  // Errors are raised HERE, on the main thread, after every worker has joined.
+  const int e_code=err.load();
+  if(e_code){
+    const std::size_t t=err_task.load();
+    const int a0=(int)(t%(std::size_t)na);
+    const int f0=(int)((t/(std::size_t)na)%(std::size_t)nf);
+    const int e=(int)(t/((std::size_t)na*(std::size_t)nf));
+    if(e_code==1)
+      stop("hank_egm3_step_cpp: non-monotone endogenous liquid grid at "
+           "(e=%d, f=%d, a=%d)",e+1,f0+1,a0+1);
+    stop("hank_egm3_step_cpp: no active-set candidate satisfies joint KKT "
+         "conditions at (e=%d, f=%d, a=%d)",e+1,f0+1,a0+1);
+  }
+
+  IntegerVector dims=IntegerVector::create(ne,nd,nf,na);for(auto v:{D,F,A,C,Chi,Phi,Vdn,Vfn,Van})v.attr("dim")=dims;
+  return List::create(_["d"]=D,_["f"]=F,_["a"]=A,_["c"]=C,_["chi"]=Chi,_["phi"]=Phi,
+                      _["Vd"]=Vdn,_["Vf"]=Vfn,_["Va"]=Van);
+}
+
+// Fused fixed-point iteration around the compiled three-asset step.
+// [[Rcpp::export]]
+List hank_egm3_solve_cpp(NumericVector Vd, NumericVector Vf, NumericVector Va,
+                         NumericVector dg, NumericVector fg, NumericVector ag,
+                         NumericVector y, NumericMatrix Pi, double rd, double rf,
+                         double ra, double beta, double eis, double chi0,
+                         double chi1, double chi2, double phi0, double phi1,
+                         double phi2, double tol, int maxit, double relax,
+                         double px = 1.0, int threads = 1) {
+  Vd=clone(Vd);Vf=clone(Vf);Va=clone(Va);
+  NumericVector Dold,Fold,Aold,Cold; bool have_old=false,ok=false;
+  double gap=R_PosInf,pol_gap=R_PosInf; int it=0; List step;
+  // A step-guard failure (non-monotone endogenous grid / no KKT candidate) is
+  // RECOVERABLE, not fatal: it means this particular update overshot into an
+  // infeasible region, and a damped retry from the last good marginal values
+  // usually walks straight past it. Previously the Rcpp::stop() propagated out
+  // of the fused loop and destroyed every completed iterate -- measured on the
+  // paper's cross-rung continuation, 196 perfectly good iterations were thrown
+  // away by a failure at iteration 197. So catch it, stop iterating, and hand
+  // the LAST GOOD state back to R with a status, which lets hank_egm3_solve()
+  // lower `relax` and continue instead of starting over.
+  //
+  // A failure on the FIRST iteration is rethrown: there is no good iterate to
+  // return, and the caller's initial values really are unusable.
+  std::string step_error; int step_status=0;
+  for(it=1;it<=maxit;++it){
+    try {
+      step=hank_egm3_step_cpp(Vd,Vf,Va,dg,fg,ag,y,Pi,rd,rf,ra,beta,eis,
+                              chi0,chi1,chi2,phi0,phi1,phi2,px,threads);
+    } catch (std::exception &e) {
+      if (it==1) throw;
+      step_error=e.what(); step_status=1; it=it-1; break;
+    }
+    NumericVector vn_d=step["Vd"],vn_f=step["Vf"],vn_a=step["Va"];
+    NumericVector D=step["d"],F=step["f"],A=step["a"],C=step["c"];
+    gap=0.0;pol_gap=have_old?0.0:R_PosInf;
+    for(R_xlen_t k=0;k<Vd.size();++k){
+      gap=std::max(gap,std::fabs(vn_d[k]-Vd[k]));gap=std::max(gap,std::fabs(vn_f[k]-Vf[k]));gap=std::max(gap,std::fabs(vn_a[k]-Va[k]));
+      if(have_old){pol_gap=std::max(pol_gap,std::fabs(D[k]-Dold[k]));pol_gap=std::max(pol_gap,std::fabs(F[k]-Fold[k]));pol_gap=std::max(pol_gap,std::fabs(A[k]-Aold[k]));pol_gap=std::max(pol_gap,std::fabs(C[k]-Cold[k]));}
+      Vd[k]=(1-relax)*Vd[k]+relax*vn_d[k];Vf[k]=(1-relax)*Vf[k]+relax*vn_f[k];Va[k]=(1-relax)*Va[k]+relax*vn_a[k];
+    }
+    Dold=clone(D);Fold=clone(F);Aold=clone(A);Cold=clone(C);have_old=true;
+    if(gap<tol){ok=true;break;}
+  }
+  if(!ok && step_status==0) it=maxit;
+  step["Vd"]=Vd;step["Vf"]=Vf;step["Va"]=Va;step["iterations"]=it;
+  step["converged"]=ok;step["last_value_gap"]=gap;step["last_policy_gap"]=pol_gap;
+  step["step_status"]=step_status;step["step_error"]=step_error;
+  return step;
+}

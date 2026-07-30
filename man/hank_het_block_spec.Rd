@@ -12,8 +12,13 @@ hank_het_block_spec(name, block, inputs = c("r", "w"), outputs = c("A", "C"))
 \item{block}{A \code{\link{hank_het_block}} solved at steady state.}
 
 \item{inputs, outputs}{Character vectors; must be supported by
-\code{\link{hank_het_jacobian}} (inputs a subset of \code{c("r","w")},
-outputs a subset of \code{c("A","C")}).}
+\code{\link{hank_het_jacobian}} (inputs a subset of \code{c("r","w","Tr")}
+plus, for a block built with \code{Pi_fn}/\code{Pi_inputs}, the block's
+named transition-probability inputs -- e.g. \code{c("r","w","f","s")}
+for a \code{\link{hank_employment_income}} household whose job-finding
+and separation rates are produced by an upstream matching block;
+outputs a subset of \code{c("A","C")}). Validated here so a bad wiring
+fails at spec time, not inside the Jacobian dispatch.}
 }
 \value{
 An object of class \code{hank_block} (kind \code{"het"}).

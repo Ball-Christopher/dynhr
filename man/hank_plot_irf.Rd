@@ -8,9 +8,10 @@ hank_plot_irf(irf, vars = NULL, main = "HANK GE impulse responses")
 }
 \arguments{
 \item{irf}{A list of named deviation paths (e.g. from
-\code{\link{hank_ks_linear_irf}}).}
+\code{\link{hank_ks_linear_irf}} or \code{\link{hank_model_irf}}).}
 
-\item{vars}{Character: which paths to plot (defaults to all \code{d*} paths).}
+\item{vars}{Character: which paths to plot. Defaults to all \code{d*} paths
+if the IRF has any, otherwise to every path of the right length.}
 
 \item{main}{Plot title.}
 }
@@ -18,5 +19,13 @@ hank_plot_irf(irf, vars = NULL, main = "HANK GE impulse responses")
 Invisibly, a matrix of the plotted paths (columns = variables).
 }
 \description{
-Plot impulse-response paths from a linear GE IRF
+The two IRF producers in this package name their paths differently:
+\code{\link{hank_ks_linear_irf}} returns \code{d}-prefixed names
+(\code{dK}, \code{dC}, ...), while the general \code{\link{hank_model_irf}}
+returns the model's own bare variable names (\code{K}, \code{C}, ...). The
+default therefore takes the \code{d*} paths when there are any and every
+path otherwise, and a \code{vars} entry that is not in \code{irf} is an
+error naming what IS available -- previously it silently produced a list
+column and died inside \code{matplot} with "'list' object cannot be coerced
+to type 'double'".
 }

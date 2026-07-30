@@ -178,7 +178,10 @@ List kf_loglik_dG_cpp(const arma::mat& Y,
     // Cholesky
     arma::mat Fc;
     if (!arma::chol(Fc, Ft)) return fail();
-    const arma::mat Fi  = arma::inv_sympd(Ft);
+    // Non-throwing form: chol() success does not imply inv_sympd() success
+    // (see kalman_adjoint.cpp) -- degrade gracefully instead of throwing.
+    arma::mat Fi;
+    if (!arma::inv_sympd(Fi, Ft)) return fail();
     const double ldf    = 2.0 * arma::accu(arma::log(Fc.diag()));
 
     const arma::vec v   = Y.col(t) - d - ZZ * s;

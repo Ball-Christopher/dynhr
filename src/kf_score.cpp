@@ -98,7 +98,10 @@ List kf_score_sigma_cpp(const arma::mat& Yd,        // n_obs x T (already Y - d)
     arma::mat Fc;
     if (!arma::chol(Fc, F)) { ok = false; break; }   // not PD -> infeasible
     double logdetF = 2.0 * arma::accu(arma::log(Fc.diag()));
-    arma::mat Fi = arma::inv_sympd(F);
+    // Non-throwing form: chol() success does not imply inv_sympd() success
+    // (see kalman_adjoint.cpp) -- degrade gracefully instead of throwing.
+    arma::mat Fi;
+    if (!arma::inv_sympd(Fi, F)) { ok = false; break; }
 
     arma::vec Fiv = Fi * v;
     double llt = ll_const - 0.5 * (logdetF + arma::dot(v, Fiv));

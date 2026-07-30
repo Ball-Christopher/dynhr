@@ -11,7 +11,8 @@ run_mode_finding(
   n_iter = 10000L,
   method = "newrat",
   me_variance = 0,
-  likelihood = c("gaussian", "cumulant", "whittle", "pruned", "pskf", "student_t"),
+  likelihood = c("gaussian", "cumulant", "whittle", "pruned", "pskf", "student_t",
+    "sv_rbpf"),
   pruned_order = 2L,
   data_col_map = NULL,
   mode_options = list(),
@@ -23,6 +24,7 @@ run_mode_finding(
   transform_params = NULL,
   filter_tunes = NULL,
   heteroskedastic_shocks = NULL,
+  stochastic_volatility = NULL,
   plan = NULL,
   use_exact_hessian = FALSE,
   verbose = TRUE,
@@ -151,6 +153,11 @@ to override the mod-file block, or \code{FALSE} to disable tunes.}
 \item{heteroskedastic_shocks}{Call-level heteroskedastic-shocks override.
 \code{NULL} (default) uses the \code{heteroskedastic_shocks} block from
 the \code{.mod} file if present.  Mutually exclusive with \code{plan}.}
+
+\item{stochastic_volatility}{Call-level stochastic-volatility override.
+\code{NULL} (default) uses the \code{stochastic_volatility} block from
+the \code{.mod} file if present; supply one to attach or replace the
+SV specification for this call only, leaving the model object untouched.}
 
 \item{plan}{A \code{\link{dynhr_plan}} object bundling
 \code{filter_tunes} and \code{heteroskedastic_shocks} overrides.

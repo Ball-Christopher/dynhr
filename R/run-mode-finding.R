@@ -123,6 +123,10 @@
 #' @param heteroskedastic_shocks  Call-level heteroskedastic-shocks override.
 #'   \code{NULL} (default) uses the \code{heteroskedastic_shocks} block from
 #'   the \code{.mod} file if present.  Mutually exclusive with \code{plan}.
+#' @param stochastic_volatility  Call-level stochastic-volatility override.
+#'   \code{NULL} (default) uses the \code{stochastic_volatility} block from
+#'   the \code{.mod} file if present; supply one to attach or replace the
+#'   SV specification for this call only, leaving the model object untouched.
 #' @param plan  A \code{\link{dynhr_plan}} object bundling
 #'   \code{filter_tunes} and \code{heteroskedastic_shocks} overrides.
 #'   Mutually exclusive with \code{filter_tunes} and
@@ -188,7 +192,8 @@ run_mode_finding <- function(solved,
                              method           = "newrat",
                              me_variance      = 0,
                              likelihood       = c("gaussian", "cumulant", "whittle",
-                                                  "pruned", "pskf", "student_t"),
+                                                  "pruned", "pskf", "student_t",
+                                                  "sv_rbpf"),
                              pruned_order     = 2L,
                              data_col_map     = NULL,
                              mode_options     = list(),
@@ -200,6 +205,7 @@ run_mode_finding <- function(solved,
                              transform_params = NULL,
                              filter_tunes     = NULL,
                              heteroskedastic_shocks = NULL,
+                             stochastic_volatility = NULL,
                              plan             = NULL,
                              use_exact_hessian = FALSE,
                              verbose          = TRUE,
@@ -271,6 +277,7 @@ run_mode_finding <- function(solved,
   ## Apply call-level filter_tunes and heteroskedastic_shocks overrides.
   model <- .resolve_filter_tunes(model, filter_tunes)
   model <- .resolve_heteroskedastic_shocks(model, heteroskedastic_shocks)
+  model <- .resolve_stochastic_volatility(model, stochastic_volatility)
 
   .vcat("\n================================================================\n")
   .vcat("  run_mode_finding\n")

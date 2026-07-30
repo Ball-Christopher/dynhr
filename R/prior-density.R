@@ -108,7 +108,7 @@ log_prior_density <- function(x, dist, p1, p2, p3 = -Inf, p4 = Inf) {
 #' @param prior_spec Data.frame with columns: name, distribution, p1, p2,
 #'                   lower, upper
 #' @return Scalar log-prior (finite, or -Inf if any parameter is out of bounds)
-#' @noRd
+#' @export
 log_prior <- function(theta, prior_spec) {
   lp <- 0
   for (i in seq_len(nrow(prior_spec))) {

@@ -231,10 +231,29 @@
           function() max(lo2, rgamma(1, shape = shape, rate = rate))
         })
       },
-      "inv_gamma" =, "invg" =, "inv_gamma1" =, "inv_gamma2" = {
+      "inv_gamma" =, "invg" =, "inv_gamma1" = {
+        ## IG1 (Dynare.jl convention, matching .lp_ig1 in prior-density.R):
+        ## the SQUARE of an IG1 variable is IG2(alpha, theta), so draw
+        ## G ~ Gamma(shape = alpha, rate = theta) and return 1/sqrt(G), with
+        ## (alpha, theta) from the SAME (mean, sd) mapping the density uses.
+        ## Previously this branch drew IG2 -- a DIFFERENT distribution from
+        ## the one log_prior scores, so prior draws and prior density
+        ## disagreed for every inv_gamma parameter (KS distance 0.149;
+        ## caught by the sv_rbpf rank-uniformity SBC, 2026-07-12).
         local({
           m <- mu; s <- sig; lo <- lb
-          # Inverse gamma type 2 parameterisation
+          alpha <- .ig1_alpha(m, s)
+          theta <- (alpha - 1) * (s^2 + m^2)
+          lo2 <- if (is.finite(lo)) lo else 0
+          function() max(lo2, 1 / sqrt(rgamma(1, shape = alpha, rate = theta)))
+        })
+      },
+      "inv_gamma2" = {
+        local({
+          m <- mu; s <- sig; lo <- lb
+          # Inverse gamma type 2 parameterisation. shape/rate match the
+          # "inv_gamma2" branch of log_prior_density exactly:
+          # alpha = (m/s)^2 + 2 = nu/2, beta = m (alpha - 1) = nu * s_dens / 2.
           alpha <- (m / s)^2 + 2
           beta_p <- m * (alpha - 1)
           lo2 <- if (is.finite(lo)) lo else 0

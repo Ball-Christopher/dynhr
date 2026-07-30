@@ -87,7 +87,12 @@ hank_mixture_blocks <- function(a_grid, Pi, e, betas, eis = 1, r, w) {
 #' the IDENTICAL \code{(n_e*n_a)}-cell state space, i.e. all blocks share
 #' \code{a_grid}, \code{Pi}, and \code{e} (see \code{\link{hank_mixture_blocks}}):
 #' only then is cell \code{j} the same income-asset pair for every type, so
-#' the pointwise weighted sum is a meaningful pooled distribution. When the
+#' the pointwise weighted sum is a meaningful pooled distribution. A
+#' per-type borrowing constraint \code{amin} (the wealth heterogeneity
+#' axis) does NOT break this: \code{amin} lives on the shared
+#' \code{a_grid}, so the cell space stays common and the pooled \code{D}
+#' remains valid (a type simply carries zero mass below its own
+#' \code{amin}). When the
 #' blocks differ in their income process (distinct \code{Pi}/\code{e} -- an
 #' income-risk heterogeneity axis), pooling cell-by-cell is semantically
 #' invalid (cell \code{j} means a different income level per type), so this

@@ -19,7 +19,7 @@
 #' @param verbose Logical. Print extracted prior info to console (default TRUE).
 #' @return data.frame with columns: name, distribution, p1, p2, lower, upper,
 #'         mean, std
-#' @noRd
+#' @export
 extract_prior_spec <- function(model, verbose = TRUE) {
   ep <- model$estimated_params
   if (is.null(ep) || nrow(ep) == 0) {

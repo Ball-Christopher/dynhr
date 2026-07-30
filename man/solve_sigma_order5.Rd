@@ -24,8 +24,8 @@ solve_sigma_order5(dr5, compiled, ss, params, Sigma_e = NULL, verbose = FALSE)
 }
 \description{
 Computes:
-  \code{ghxxxss} (n × n_s³) — mixed 3rd state × σ² correction
-  \code{ghxss2}  (n × n_s)   — mixed 1st state × σ⁴ correction
+  \code{ghxxxss} (n × n_s³) — mixed 3rd state × sigma^2 correction
+  \code{ghxss2}  (n × n_s)   — mixed 1st state × sigma^4 correction
 }
 \details{
 Requires order-4 sigma terms (\code{ghxxss}, \code{ghss2}) from

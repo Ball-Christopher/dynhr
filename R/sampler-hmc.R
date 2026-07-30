@@ -275,6 +275,10 @@ dynhr_hmc <- function(
   }
 
   # --- Gradient function ---
+  # kernel_stats (F5): capture make_posterior_grad()'s fallback-usage
+  # counters (attr(grad_fn, "kernel_stats")) from the caller-supplied
+  # grad_fn BEFORE any transform-wrapping (which would drop the attribute).
+  grad_fn_kernel_stats <- attr(grad_fn, "kernel_stats")
   if (is.null(grad_fn)) {
     grad <- function(theta) .hmc_gradient(lp_scalar, theta, method = grad_method)
   } else if (!is.null(transform)) {
@@ -526,7 +530,9 @@ dynhr_hmc <- function(
     n_burn          = as.integer(n_warmup),
     n_grad_evals    = n_grad_evals,
     elapsed_secs    = elapsed,
-    sampler         = "hmc"
+    sampler         = "hmc",
+    kernel_stats    = if (is.null(grad_fn_kernel_stats)) NULL
+                       else as.list(grad_fn_kernel_stats)
   )
 }
 

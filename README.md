@@ -23,6 +23,12 @@ pure R (with optional Rcpp/Armadillo acceleration):
   NUTS, with mode-finding (Nelder-Mead, CMA-ES, JADE), prior tooling, and an
   exact-Hessian curvature stack (`posterior_hessian()` with finite-difference-
   free adjoint second-order terms, `laplace_log_marglik()`, `profile_ci()`).
+- **Stochastic volatility on shocks** — declare AR(1) log-variance processes on
+  any subset of a model's shocks (`stochastic_volatility()`) and estimate them
+  with a Rao-Blackwellised particle filter (`make_log_posterior_sv_rbpf()`).
+- **Benchmarking** — `dynhr_benchmark()` runs a fixed Smets-Wouters (2007)
+  estimation workload across a sweep of core counts and reports normalised
+  throughputs plus full system information, so two machines can be compared.
 - **Occasionally-binding constraints** — OccBin/MCP/LCP and Boehl-style solvers,
   plus Ramsey/OSR/discretionary optimal-policy machinery.
 - **Diagnostics** — an identification → convergence → fit → narrative battery
@@ -80,7 +86,9 @@ by `run_full_estimation()`.
 - `src/` — Rcpp/Armadillo backends (folded Faà-di-Bruno compose, Kalman steady
   state, sparse MCP solve), each with a pure-R fallback toggled by
   `options(dynhr.use_rcpp = )`
-- `inst/extdata/models/` — a few reference DSGE models used by the examples
+- `inst/extdata/models/` — a few reference DSGE models used by the examples,
+  plus the Smets-Wouters (2007) model, data and published mode that
+  `dynhr_benchmark()` runs (provenance and licensing in `sw2007_SOURCE.md`)
 - `inst/templates/` — report templates for the diagnostic battery
 
 ## A note on AI and reliability
@@ -113,7 +121,7 @@ used from this page alone.
 - `solve_perturbation(model, compiled, ss, params, order = 1L)` — perturbation
   decision rules to **orders 1–5** (deterministic + stochastic `sigma` terms).
 - `compute_irfs(dr, model, n_periods = 40L)`, `simulate_model()`,
-  `theoretical_moments()`, `stoch_simul()` — IRFs, stochastic simulation,
+  `compute_moments()`, `stoch_simul()` — IRFs, stochastic simulation,
   model-implied moments.
 - Determinacy: `bk_distance()` (signed Blanchard–Kahn distance to the
   indeterminacy / no-solution boundary), `solution_pencil_spectrum()`
@@ -183,6 +191,13 @@ used from this page alone.
   approximation (`hank_mixture_laplace()`), not a diagonal random-walk sampler.
   `hank_mixture_emulator()` is a distribution-agnostic surrogate;
   `hank_mixture_sbc()` ships simulation-based-calibration certification.
+- Multi-asset households: liquid/illiquid two-asset blocks (`hank_het2_block()`,
+  `hank_het2_jacobian()`, `hank_td2_nonlinear()`) and a three-asset block with
+  domestic, foreign and illiquid claims plus per-asset adjustment costs
+  (`hank_het3_block()`, `hank_het3_jacobian()`, `hank_td3_nonlinear()`). Both
+  carry an exact numerical-differentiation oracle (`*_jacobian_nd()`) and a
+  reproducibility fingerprint / manifest (`hank_het3_fingerprint()`,
+  `hank_het3_manifest()`).
 - Welfare: `hank_welfare_posterior()`, `hank_cev()`, `hank_value_transition()`,
   `hank_welfare_channels()`, `hank_mixture_welfare_pool()`.
 - Identification result baked into the tools: in a mixture economy the discount
@@ -193,7 +208,7 @@ used from this page alone.
 - Ramsey: `ramsey_model()` (augmented FOC system, Bodenstein–Guerrieri),
   `ramsey_nn1()` ((n, n+1) approximation, Gross–Hansen), `ramsey_obc_pf()` /
   `ramsey_obc_pwlinear()` (with OBC), `ramsey_regime_deterministic()` /
-  `ramsey_regime_markov()` (regime-dependent).
+  `ramsey_regime_independent()` (regime-dependent).
 - `osr()` — optimal simple rules; `discretionary_policy()` — Markov-perfect
   discretion; `nash_ramsey_cooperative()` / `nash_ramsey_openloop()` — policy
   games.
@@ -207,6 +222,15 @@ used from this page alone.
   narrative), rendered by `write_report()`.
 - Standalone helpers: `chain_diagnostics()`, `bk_distance()`,
   `kf_innovation_diagnostics()`, `solution_pencil_spectrum()`.
+
+### Benchmarking
+- `dynhr_benchmark()` — run a fixed Smets-Wouters (2007) estimation workload
+  (36 estimated parameters, 7 observables, 160 quarters) through random-walk
+  Metropolis at a sweep of core counts. Reports per-chain and aggregate
+  throughputs, all normalised per draw or per second so runs with different
+  draw counts stay comparable, plus a workload fingerprint.
+- `dynhr_system_info()` — CPU, RAM, OS, R build and the BLAS/LAPACK actually
+  linked. Two benchmark results are only comparable if these agree.
 
 ### Cookbook
 

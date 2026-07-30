@@ -29,8 +29,21 @@
 ## FIXED parameter-independent input -- the Lyapunov adjoint term is omitted and
 ## P0's gradient contribution is zero by construction.
 ##
-## Scope: scalar me_variance; no shock_scale / me_extra (use the dense adjoint
-## for those). R reference only.
+## shock_scale (n_exo x T multiplicative shock-std factors, heteroskedastic
+## shocks / SV conditional path): supported by the R reference since
+## 0.9.0.0008. Per period the effective shock covariance is
+## Se_t = diag(sc_t) Sigma_e diag(sc_t) with sc_t FIXED DATA, so every
+## backward-sweep accumulation into the Sigma_e gradient is sandwiched
+## elementwise by outer(sc_t, sc_t) (chain rule through Se_t), and every
+## date-t use of Sigma_e (HHo/SSo/QQ_t/covariance update, and the Se factors
+## feeding G_RR/G_DD) substitutes Se_t. The stationary Lyapunov P0 stays on
+## the BASELINE Sigma_e -- matching kalman_filter's lik_init = "stationary"
+## convention under shock_scale -- so the Lyapunov adjoint contributions are
+## NOT sandwiched. Mirrors the dense adjoint's shock_scale treatment
+## (R/gradient-adjoint-kf.R). The compiled fast path (kf_adjoint_uni_cpp)
+## does not take shock_scale; the R reference runs instead.
+##
+## Scope: scalar me_variance; no me_extra (use the dense adjoint for that).
 ## --------------------------------------------------------------------------
 
 #' Adjoint KF gradient with missing-data + optional supplied P0
@@ -43,10 +56,12 @@
 #' @param P0         optional n_state x n_state initial state covariance. NULL
 #'                   => stationary Lyapunov P0 (gradient included). Supplied =>
 #'                   fixed input (no Lyapunov adjoint).
+#' @param shock_scale optional n_exo x n_T matrix of multiplicative shock-std
+#'                   factors (fixed data; see the file header). NULL = baseline.
 #' @return list(loglik, grad).
 #' @noRd
 .kf_loglik_adjoint_uni <- function(Y, ss, d_ss_list, me_variance = 0,
-                                   P0 = NULL) {
+                                   P0 = NULL, shock_scale = NULL) {
   TT <- ss$TT; RR <- ss$RR; ZZ <- ss$ZZ; DD <- ss$DD
   d  <- as.numeric(ss$d); Sigma_e <- ss$Sigma_e
 
@@ -56,6 +71,18 @@
   if (is.null(dim(Y))) Y <- matrix(Y, nrow = n_obs)
   if (nrow(Y) != n_obs) Y <- t(Y)
   n_T <- ncol(Y)
+
+  has_sc <- !is.null(shock_scale)
+  if (has_sc && (!is.matrix(shock_scale) || nrow(shock_scale) != n_exo ||
+                 ncol(shock_scale) != n_T))
+    stop(".kf_loglik_adjoint_uni: shock_scale must be n_exo x n_T.",
+         call. = FALSE)
+  ## Per-period effective shock covariance (baseline when no scaling).
+  Se_at <- if (has_sc) {
+    function(t) Sigma_e * outer(shock_scale[, t], shock_scale[, t])
+  } else {
+    function(t) Sigma_e
+  }
 
   QQ <- tcrossprod(RR %*% Sigma_e, RR)
   ll_2pi <- log(2 * pi)
@@ -70,8 +97,15 @@
     if (!all(is.finite(P0_use))) return(fail)
   }
 
+  ## Sandwich a Sigma_e-gradient accumulation through Se_t = S_t Sigma_e S_t
+  ## (chain rule with S_t = diag(sc_t) fixed data); identity when unscaled.
+  sand <- function(M, t) {
+    if (has_sc) M * outer(shock_scale[, t], shock_scale[, t]) else M
+  }
+
   ## -- Fast path: compiled univariate adjoint (kf_adjoint_uni_cpp) ----------
-  if (.HAS_RCPP_KF_ADJOINT_UNI()) {
+  ## (not extended for shock_scale -- the R reference below handles it)
+  if (.HAS_RCPP_KF_ADJOINT_UNI() && !has_sc) {
     zTT0  <- matrix(0, n_state, n_state)
     zRR0  <- matrix(0, n_state, n_exo)
     zZZ0  <- matrix(0, n_obs, n_state)
@@ -122,18 +156,20 @@
     O <- which(is.finite(Y[, t]))   # observed rows this period
     O_store[[t]] <- O
     q <- length(O)
+    Se_t <- Se_at(t)
 
     if (q == 0L) {
       ## Pure prediction (K = 0): A = TT, B = RR.
       A_store[[t]] <- NULL; B_store[[t]] <- NULL
       s <- as.numeric(TT %*% s)
-      P <- .sym(tcrossprod(TT %*% P, TT) + QQ)
+      QQ_t <- if (has_sc) tcrossprod(RR %*% Se_t, RR) else QQ
+      P <- .sym(tcrossprod(TT %*% P, TT) + QQ_t)
       next
     }
 
     ZZo <- ZZ[O, , drop = FALSE]; DDo <- DD[O, , drop = FALSE]
-    HHo <- tcrossprod(DDo %*% Sigma_e, DDo)
-    SSo <- RR %*% Sigma_e %*% t(DDo)
+    HHo <- tcrossprod(DDo %*% Se_t, DDo)
+    SSo <- RR %*% Se_t %*% t(DDo)
     me_o <- me_variance * diag(q)
 
     PZ <- P %*% t(ZZo)
@@ -156,7 +192,7 @@
     A_store[[t]] <- A;   B_store[[t]] <- B
 
     s <- as.numeric(TT %*% s) + as.numeric(K %*% v)
-    P <- .sym(tcrossprod(A %*% P, A) + tcrossprod(B %*% Sigma_e, B))
+    P <- .sym(tcrossprod(A %*% P, A) + tcrossprod(B %*% Se_t, B))
   }
 
   ## -- Backward sweep -------------------------------------------------------
@@ -169,13 +205,14 @@
     s_prev <- s_store[[t]]; P_prev <- P_store[[t]]
     O <- O_store[[t]]; q <- length(O)
     bar_P <- .sym(bar_P)
+    Se_t <- Se_at(t)
 
     if (q == 0L) {
       ## Pure-prediction adjoint: A = TT, B = RR, no measurement terms.
       bar_A <- 2 * bar_P %*% TT %*% P_prev
-      bar_B <- 2 * bar_P %*% RR %*% Sigma_e
+      bar_B <- 2 * bar_P %*% RR %*% Se_t
       bar_P_prev <- t(TT) %*% bar_P %*% TT
-      G_Sig <- G_Sig + t(RR) %*% bar_P %*% RR
+      G_Sig <- G_Sig + sand(t(RR) %*% bar_P %*% RR, t)
       G_TT  <- G_TT + outer(bar_s, s_prev)
       bar_s_prev <- as.numeric(t(TT) %*% bar_s)
       G_TT  <- G_TT + bar_A
@@ -190,11 +227,11 @@
     A  <- A_store[[t]]; B <- B_store[[t]]
     Fiv <- as.numeric(Fi %*% v)
 
-    ## Step 1: P_t = sym(A P_prev A' + B Sigma_e B')
+    ## Step 1: P_t = sym(A P_prev A' + B Se_t B')
     bar_A <- 2 * bar_P %*% A %*% P_prev
-    bar_B <- 2 * bar_P %*% B %*% Sigma_e
+    bar_B <- 2 * bar_P %*% B %*% Se_t
     bar_P_prev_AP <- t(A) %*% bar_P %*% A
-    G_Sig <- G_Sig + t(B) %*% bar_P %*% B
+    G_Sig <- G_Sig + sand(t(B) %*% bar_P %*% B, t)
 
     ## Step 2: s_t = TT s_prev + K v
     G_TT  <- G_TT + outer(bar_s, s_prev)
@@ -216,22 +253,22 @@
     G_DD[O, ] <- G_DD[O, ] - t(K) %*% bar_B
     bar_K <- bar_K - bar_B %*% t(DDo)
 
-    ## Step 6: K = (TT P_prev ZZo' + SSo) Fi
+    ## Step 6: K = (TT P_prev ZZo' + SSo) Fi, SSo = RR Se_t DDo'
     bar_F <- bar_F - t(K) %*% bar_K %*% Fi
     bar_F <- .sym(bar_F)
     bar_Mnum <- bar_K %*% Fi
     G_TT <- G_TT + bar_Mnum %*% ZZo %*% P_prev
     G_ZZ[O, ] <- G_ZZ[O, ] + t(bar_Mnum) %*% TT %*% P_prev
     bar_P_prev_Mnum <- t(TT) %*% bar_Mnum %*% ZZo
-    G_RR <- G_RR + bar_Mnum %*% DDo %*% Sigma_e
-    G_DD[O, ] <- G_DD[O, ] + t(bar_Mnum) %*% RR %*% Sigma_e
-    G_Sig <- G_Sig + t(RR) %*% bar_Mnum %*% DDo
+    G_RR <- G_RR + bar_Mnum %*% DDo %*% Se_t
+    G_DD[O, ] <- G_DD[O, ] + t(bar_Mnum) %*% RR %*% Se_t
+    G_Sig <- G_Sig + sand(t(RR) %*% bar_Mnum %*% DDo, t)
 
-    ## Step 7: F = sym(ZZo P_prev ZZo' + HHo + me)
+    ## Step 7: F = sym(ZZo P_prev ZZo' + HHo + me), HHo = DDo Se_t DDo'
     bar_P_prev_F <- t(ZZo) %*% bar_F %*% ZZo
     G_ZZ[O, ] <- G_ZZ[O, ] + 2 * bar_F %*% ZZo %*% P_prev
-    G_DD[O, ] <- G_DD[O, ] + 2 * bar_F %*% DDo %*% Sigma_e
-    G_Sig <- G_Sig + t(DDo) %*% bar_F %*% DDo
+    G_DD[O, ] <- G_DD[O, ] + 2 * bar_F %*% DDo %*% Se_t
+    G_Sig <- G_Sig + sand(t(DDo) %*% bar_F %*% DDo, t)
 
     ## Step 8: v = y[O] - d[O] - ZZo s_prev
     g_d[O] <- g_d[O] - bar_v

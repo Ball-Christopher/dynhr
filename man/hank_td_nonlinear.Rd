@@ -9,7 +9,11 @@ hank_td_nonlinear(
   r_path = NULL,
   w_path = NULL,
   T_h = NULL,
-  keep_policies = FALSE
+  keep_policies = FALSE,
+  pi_input_paths = NULL,
+  D0 = NULL,
+  Tr_path = NULL,
+  r_minus_path = NULL
 )
 }
 \arguments{
@@ -30,6 +34,35 @@ operators from the forward pass; same no-transpose convention as
 \code{t(Lambda[[t]]) \%*\% d}). Inputs for date-indexed distributional/
 welfare analysis along the transition. Off by default (\code{Lambda}
 costs \code{O(T_h)} sparse \code{n_cell x n_cell} matrices of memory).}
+
+\item{pi_input_paths}{Optional named list of length-\code{T} LEVEL paths
+for (a subset of) the block's transition-probability inputs
+(\code{names(block$Pi_inputs)}, e.g. \code{list(f = f_path)}); missing
+inputs stay at their steady-state values. Requires a block built with
+\code{Pi_fn}/\code{Pi_inputs}. \code{Pi_t = Pi_fn(inputs_t)} is applied
+between periods \code{t} and \code{t+1}: it enters the date-\code{t}
+backward expectation AND the date-\code{t} forward push (see the timing
+convention in the file header). Default \code{NULL} (constant
+steady-state \code{Pi}; existing calls are byte-identical).}
+
+\item{D0}{Optional initial (beginning-of-period-1) distribution, a
+length-\code{n_e*n_a} nonnegative vector summing to 1 in the package
+distribution order (\code{.hank_mat_to_vec}: asset index fastest).
+Default \code{NULL} starts from the steady-state \code{block$D}. Use for
+STATE-DEPENDENCE experiments (e.g. a high-debt vs low-debt initial
+cross-section facing the same shock). The backward pass is unchanged
+(terminal \code{Va = Va_ss}); only the forward simulation reweights.}
+
+\item{Tr_path}{Optional length-\code{T} LEVEL path of the lump-sum
+transfer; default holds it at the block's steady-state \code{Tr}. The
+block's own \code{Tr_incidence} weight distributes it across income
+states in every period (the path scales the aggregate, not the rule).}
+
+\item{r_minus_path}{Optional length-\code{T} LEVEL path of the BORROWING
+rate (the rate applied on \code{a < 0}). \code{NULL} (default) holds it
+at the block's own \code{r_minus}, and if the block is symmetric
+(\code{r_minus = NULL}) the borrowing rate tracks \code{r_path}, which is
+the pre-wedge household exactly.}
 }
 \value{
 A list with numeric length-\code{T} paths \code{A} and \code{C}, and

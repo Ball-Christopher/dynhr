@@ -340,8 +340,25 @@ d15_dsge_var <- function(dr            = NULL,
         log(det(S_post))
       }
 
-      # Log marginal likelihood (up to constant)
-      log_ml_val <- 0.5 * n_obs * ln_det_XtX_prior +
+      # Log marginal likelihood -- EXACT conjugate matrix-variate
+      # Normal-Inverse-Wishart evidence (Del Negro & Schorfheide 2004;
+      # equivalently the natural-conjugate BVAR marginal likelihood of
+      # Kadiyala & Karlsson 1997 / Banbura, Giannone & Reichlin 2010):
+      #
+      #   ln p(Y|lambda) = -(n*T/2) ln(pi) + [ln Gamma_n(nu_post/2) - ln Gamma_n(nu_prior/2)]
+      #     + (n/2) ln|XtX_prior| - (n/2) ln|XtX_post|
+      #     + (nu_prior/2) ln|S_prior| - (nu_post/2) ln|S_post|
+      #
+      # where Gamma_n(.) is the multivariate gamma function. The
+      # log-multivariate-gamma RATIO term is NOT a constant across lambda
+      # (nu_prior depends on T_dummy = round(lambda*n_obs)) and was
+      # previously omitted here (a BIC/Laplace-style approximation) --
+      # ground-truth validated against an independent closed-form oracle
+      # in test-mdd-calibration.R (mdd_calibration(case = "dsge_var")).
+      mvgamma_ratio <- .d15_lmvgamma_ratio(nu_post, nu_prior, n_obs)
+
+      log_ml_val <- mvgamma_ratio +
+                    0.5 * n_obs * ln_det_XtX_prior +
                     0.5 * nu_prior * ln_det_Sp -
                     0.5 * n_obs * ln_det_XtX_post -
                     0.5 * nu_post * ln_det_S_post
@@ -479,12 +496,27 @@ d15_dsge_var <- function(dr            = NULL,
       n_obs           = n_obs,
       var_lag         = var_lag,
       T_eff           = T_eff,
+      k_coef          = k_coef,
       at_lower_bound  = at_lower,
       at_upper_bound  = at_upper,
       extended_grid   = extended_grid,
       resid_ratio_opt_unrest  = resid_ratio_opt_unrest,
       resid_ratio_prior_unrest = resid_ratio_prior_unrest,
-      worst_resid_obs = worst_resid
+      worst_resid_obs = worst_resid,
+      # ---- DSGE-implied prior moments + data sufficient statistics.
+      # Exposed (beyond what the diagnostic itself needs) so an independent
+      # ground-truth oracle can reconstruct the exact lambda-scaled MNIW
+      # sufficient statistics (XtX_prior(lambda) = blockdiag(T_dummy,
+      # T_dummy*G), XtY_prior(lambda) = T_dummy*[0; rhs], YtY_prior(lambda)
+      # = T_dummy*Gamma_0, with T_dummy = round(lambda*n_obs)) without
+      # re-deriving the Yule-Walker/Lyapunov machinery -- see
+      # mdd_calibration(case = "dsge_var") / test-mdd-calibration.R.
+      G_prior         = G,
+      rhs_prior       = rhs,
+      Gamma0_prior    = Gamma_0,
+      XtX_data        = XtX_data,
+      XtY_data        = XtY_data,
+      YtY_data        = YtY_data
     )
 
     # ---- 8. Plots ----
@@ -676,7 +708,10 @@ d15_dsge_var <- function(dr            = NULL,
     S_post <- YtY_aug - t(XtY_aug) %*% A_aug
     ln_det_S_post <- log(det(S_post))
 
-    log_ml_val <- 0.5 * n_obs * ln_det_XtX_prior +
+    mvgamma_ratio <- .d15_lmvgamma_ratio(nu_post, nu_prior, n_obs)
+
+    log_ml_val <- mvgamma_ratio +
+                  0.5 * n_obs * ln_det_XtX_prior +
                   0.5 * nu_prior * ln_det_Sp -
                   0.5 * n_obs * ln_det_XtX_post -
                   0.5 * nu_post * ln_det_S_post
@@ -686,4 +721,22 @@ d15_dsge_var <- function(dr            = NULL,
   }
 
   list(log_ml = log_ml, A_list = A_list, Sigma_list = Sigma_list)
+}
+
+
+#' Helper: log ratio of multivariate gamma functions Gamma_n(v1/2)/Gamma_n(v0/2)
+#'
+#' The multivariate gamma function is
+#' \code{Gamma_n(a) = pi^{n(n-1)/4} * prod_{i=1}^n Gamma(a - (i-1)/2)}.
+#' The \code{pi^{n(n-1)/4}} prefactor is identical for \code{Gamma_n(v1/2)}
+#' and \code{Gamma_n(v0/2)} (same \code{n}) and cancels in the ratio, so only
+#' the sum of \code{lgamma} differences is returned.
+#'
+#' @param v1,v0 Degrees of freedom (posterior, prior).
+#' @param n     Matrix dimension (number of observables).
+#' @return Numeric scalar: \code{log(Gamma_n(v1/2) / Gamma_n(v0/2))}.
+#' @noRd
+.d15_lmvgamma_ratio <- function(v1, v0, n) {
+  i <- seq_len(n)
+  sum(lgamma((v1 - i + 1) / 2) - lgamma((v0 - i + 1) / 2))
 }

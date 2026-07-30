@@ -10,7 +10,13 @@ hank_aggregate(d, x)
 \item{d}{Distribution: a length-\code{n_e*n_a} vector (distribution order) or
 an \code{n_e x n_a} matrix.}
 
-\item{x}{Per-agent quantity, same shape as \code{d}.}
+\item{x}{Per-agent quantity, same shape as \code{d}. Mixing a distribution
+VECTOR with a policy MATRIX (or vice versa) is allowed when the total
+cell counts agree -- the standard package idiom
+\code{hank_aggregate(block$D, block$a)} -- but incompatible sizes are an
+error: R's silent recycling previously let an exactly-dividing mismatch
+(e.g. \code{length(d) = 4}, \code{length(x) = 2}) return a plausible,
+numerically wrong scalar.}
 }
 \value{
 The scalar mass-weighted mean \code{sum(d * x)}.

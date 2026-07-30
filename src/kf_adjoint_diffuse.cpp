@@ -282,7 +282,11 @@ List kf_adjoint_diffuse_cpp(const arma::mat& Y,
         arma::mat Ft = sym(ZZ * PZ + HHme);
         arma::mat Fc;
         if (!arma::chol(Fc, Ft)) return fail();
-        arma::mat Fi   = arma::inv_sympd(Ft);
+        // Non-throwing form: chol() success does not imply inv_sympd()
+        // success (see kalman_adjoint.cpp) -- degrade like any other
+        // numerical KF failure instead of throwing.
+        arma::mat Fi;
+        if (!arma::inv_sympd(Fi, Ft)) return fail();
         double ldf     = 2.0 * arma::accu(arma::log(Fc.diag()));
         arma::vec Fiv  = Fi * v;
         double ll_t    = ll_const - 0.5 * (ldf + arma::dot(v, Fiv));
@@ -320,7 +324,10 @@ List kf_adjoint_diffuse_cpp(const arma::mat& Y,
         if (!arma::chol(Fc_inf, F_inf) || !std::isfinite(rc) ||
             rc <= diffuse_tol) return fail();
 
-        arma::mat F_inf_inv = arma::inv_sympd(F_inf);
+        // Non-throwing form: chol() success does not imply inv_sympd()
+        // success (see kalman_adjoint.cpp) -- degrade instead of throwing.
+        arma::mat F_inf_inv;
+        if (!arma::inv_sympd(F_inf_inv, F_inf)) return fail();
         double ll_t = -0.5 * 2.0 * arma::accu(arma::log(Fc_inf.diag()));
         if (!std::isfinite(ll_t)) return fail();
         loglik += ll_t;
@@ -369,7 +376,10 @@ List kf_adjoint_diffuse_cpp(const arma::mat& Y,
       arma::mat Ft = sym(ZZ * PZ + HHme);
       arma::mat Fc;
       if (!arma::chol(Fc, Ft)) return fail();
-      arma::mat Fi   = arma::inv_sympd(Ft);
+      // Non-throwing form: chol() success does not imply inv_sympd()
+      // success (see kalman_adjoint.cpp) -- degrade instead of throwing.
+      arma::mat Fi;
+      if (!arma::inv_sympd(Fi, Ft)) return fail();
       double ldf     = 2.0 * arma::accu(arma::log(Fc.diag()));
       arma::vec Fiv  = Fi * v;
       double ll_t    = ll_const - 0.5 * (ldf + arma::dot(v, Fiv));

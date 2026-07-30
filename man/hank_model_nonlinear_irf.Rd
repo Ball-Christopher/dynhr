@@ -9,8 +9,11 @@ hank_model_nonlinear_irf(model, Z_paths, tol = 1e-09, maxit = 50L)
 \arguments{
 \item{model}{A \code{\link{hank_model}}.}
 
-\item{Z_paths}{Named list of exogenous LEVEL paths (length \code{T}), one per
-\code{model$exogenous}.}
+\item{Z_paths}{Named list of exogenous LEVEL paths (length \code{T}) for a
+SUBSET of \code{model$exogenous}; any exogenous not named stays at its
+steady-state level for the whole horizon (the nonlinear analogue of
+\code{\link{hank_model_irf}}'s missing-shock-is-zero-deviation
+convention). Unknown names are an error.}
 
 \item{tol, maxit}{Newton tolerance (max abs target residual) and iteration cap.}
 }

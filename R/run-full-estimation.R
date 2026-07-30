@@ -253,6 +253,10 @@ print.dynhr_estimation_result <- function(x, ...) {
 #' @param heteroskedastic_shocks  Call-level heteroskedastic-shocks override.
 #'   \code{NULL} (default) uses the \code{heteroskedastic_shocks} block from
 #'   the \code{.mod} file if present.  Mutually exclusive with \code{plan}.
+#' @param stochastic_volatility  Call-level stochastic-volatility override.
+#'   \code{NULL} (default) uses the \code{stochastic_volatility} block from
+#'   the \code{.mod} file if present; supply one to attach or replace the
+#'   SV specification for this call only, leaving the model object untouched.
 #' @param tpf_options  Named list of options forwarded to
 #'   \code{make_log_posterior_tpf} when \code{likelihood = "tpf"}.
 #'   Typical keys: \code{n_particles}, \code{ess_target}, \code{n_mh},
@@ -328,7 +332,7 @@ run_full_estimation <- function(
     mode_method   = "newrat",
     mode_n_starts = NULL,
     me_variance   = 0,
-    likelihood    = c("gaussian", "cumulant", "whittle", "tpf"),
+    likelihood    = c("gaussian", "cumulant", "whittle", "tpf", "sv_rbpf"),
     lik_init      = "auto",
     freq_band     = c(0, pi),
     system_priors = NULL,
@@ -349,6 +353,7 @@ run_full_estimation <- function(
     ramsey_burn_in = 100L,
     filter_tunes  = NULL,
     heteroskedastic_shocks = NULL,
+    stochastic_volatility = NULL,
     tpf_options   = list(),
     plan          = NULL,
     ...) {
@@ -452,6 +457,9 @@ run_full_estimation <- function(
   ## Apply call-level heteroskedastic_shocks override.
   model <- .resolve_heteroskedastic_shocks(model, heteroskedastic_shocks)
 
+  ## Apply call-level stochastic_volatility override (latent SV on shocks).
+  model <- .resolve_stochastic_volatility(model, stochastic_volatility)
+
   ## Expand observables for filter_tunes (no-op when no tunes are present).
   tunes_exp <- .expand_observables_for_tunes(model, obs_vars, data)
   obs_vars  <- tunes_exp$obs_vars
@@ -495,15 +503,20 @@ run_full_estimation <- function(
       max_inner   = obc_max_inner
     )
   } else {
-    log_post_fn <- make_log_posterior(model, data, priors, obs_vars, compiled,
-                                      me_variance   = me_variance,
-                                      likelihood    = likelihood,
-                                      lik_init      = lik_init,
-                                      me_extra      = me_extra,
-                                      shock_scale   = shock_scale_mat,
-                                      freq_band     = freq_band,
-                                      system_priors = system_priors,
-                                      ...)
+    ## sv_rbpf: forward the RB-PF particle count (a run_full_estimation formal,
+    ## otherwise consumed here and never seen by the factory) into make_log_posterior.
+    sv_lp_args <- if (identical(likelihood, "sv_rbpf"))
+      list(n_particles = n_particles) else list()
+    log_post_fn <- do.call(make_log_posterior,
+      c(list(model, data, priors, obs_vars, compiled,
+             me_variance   = me_variance,
+             likelihood    = likelihood,
+             lik_init      = lik_init,
+             me_extra      = me_extra,
+             shock_scale   = shock_scale_mat,
+             freq_band     = freq_band,
+             system_priors = system_priors),
+        sv_lp_args, list(...)))
   }
 
   ## Estimation context: single carrier for the per-estimation options.
