@@ -1,0 +1,54 @@
+# Cross-platform build gate. Exists because of the 0.9.1 -> 0.9.1.1 hotfix:
+# src/ uses C++20 (std::barrier in the HANK EGM thread pools), and a missing
+# CXX_STD declaration made some Windows Rtools setups fall back to C++17 and
+# fail at install -- invisible to any macOS/Linux check. The Windows jobs are
+# the point; R 4.3 is the oldest supported Windows toolchain (Rtools43 =
+# GCC 12, the first with <barrier>).
+#
+# Deliberately lean: hard dependencies only, no vignettes, no manual. This
+# gates "does it compile and check cleanly on each platform", not the full
+# --as-cran release check (which stays a local release-cut step).
+name: R-CMD-check
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+    branches: [main]
+  workflow_dispatch:
+
+jobs:
+  R-CMD-check:
+    runs-on: ${{ matrix.config.os }}
+    name: ${{ matrix.config.os }} (R ${{ matrix.config.r }})
+    strategy:
+      fail-fast: false
+      matrix:
+        config:
+          - {os: windows-latest, r: 'release'}
+          - {os: windows-latest, r: '4.3'}
+          - {os: macos-latest,   r: 'release'}
+          - {os: ubuntu-latest,  r: 'release'}
+    env:
+      R_KEEP_PKG_SOURCE: yes
+      _R_CHECK_FORCE_SUGGESTS_: false
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: r-lib/actions/setup-r@v2
+        with:
+          r-version: ${{ matrix.config.r }}
+          use-public-rspm: true
+
+      - uses: r-lib/actions/setup-r-dependencies@v2
+        with:
+          dependencies: '"hard"'
+          extra-packages: any::rcmdcheck
+          needs: check
+
+      - uses: r-lib/actions/check-r-package@v2
+        with:
+          args: 'c("--no-manual", "--ignore-vignettes")'
+          build_args: 'c("--no-manual", "--no-build-vignettes")'
+          error-on: '"warning"'
+          upload-snapshots: false
