@@ -1,3 +1,6 @@
+## CXX_STD: src/hank_egm2.cpp uses std::barrier (C++20). Without this line
+## some Windows toolchains fall back to C++17 and fail on <barrier>.
+CXX_STD = CXX20
 ## -lpsapi: Windows-only, for GetProcessMemoryInfo() in src/proc_rss.cpp
 ## (.hank_peak_rss(), A8 run-manifest metadata). This file is used ONLY on
 ## Windows builds, so it cannot affect macOS/Linux link flags.

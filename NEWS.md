@@ -1,3 +1,12 @@
+# dynhr 0.9.1.1
+
+A build hotfix. `src/Makevars` and `src/Makevars.win` now declare
+`CXX_STD = CXX20`. Without it, toolchains whose default C++ standard is
+C++17 (notably some Windows Rtools setups) failed to compile
+`src/hank_egm2.cpp`, which uses the C++20 `<barrier>` header for the
+two-asset EGM thread pool. No R-level changes. Note that `<barrier>`
+requires GCC >= 11, i.e. Rtools43 (R 4.3) or newer on Windows.
+
 # dynhr 0.9.1
 
 A feature release. The headline additions since 0.9.0 are **multi-asset

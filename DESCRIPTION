@@ -1,6 +1,6 @@
 Package: dynhr
 Title: DSGE Modelling Toolkit (Parsing, Solving, Estimating, Diagnosing)
-Version: 0.9.1
+Version: 0.9.1.1
 Authors@R: c(
     person("Chris", "Ball", role = c("aut", "cre"),
            email = "chrispball1@gmail.com"))
