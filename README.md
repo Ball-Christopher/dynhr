@@ -44,16 +44,21 @@ package.
 ## Install
 
 ```r
-# install.packages("devtools")
-devtools::install_github("Ball-Christopher/dynhr")
+# install.packages("pak")
+pak::pak("Ball-Christopher/dynhr")
 
 library(dynhr)
 ```
 
-The package compiles a small amount of C++ (`src/`, via Rcpp + RcppArmadillo);
-a C++ toolchain (Rtools on Windows, or Xcode command-line tools on macOS) is
-required to install from source. Julia is **optional** and only needed for the
-Dynare.jl interop.
+(`devtools::install_github()` is deprecated as of devtools 2.5.0; if you
+prefer not to use pak, `remotes::install_github("Ball-Christopher/dynhr")`
+still works.)
+
+The package compiles a small amount of C++ (`src/`, via Rcpp + RcppArmadillo,
+using the C++20 standard); a C++ toolchain is required to install from
+source — on Windows that means **Rtools43 or newer** (i.e. R >= 4.3), on
+macOS the Xcode command-line tools. Julia is **optional** and only needed for
+the Dynare.jl interop.
 
 ## Quick start
 
