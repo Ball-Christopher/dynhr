@@ -466,6 +466,12 @@ run_posterior_estimation <- function(mode_result,
       "RWMH" = {
         ## CPM dispatch: when cpm_rho_u is set and likelihood = "tpf", use
         ## rwmh_cpm (serial path only). Otherwise fall through to .run_rwmh_batch.
+        ## log_post_fn here is the closure built at mode-finding time; its
+        ## burn_in_init must already be 0L (make_log_posterior()'s "tpf"
+        ## branch pins this whenever ctx$tpf_options$cpm_rho_u is set -- see
+        ## R/posterior.R) since rwmh_cpm calls it with a non-NULL U_list on
+        ## every step after the priming call, and burn_in_init > 0 hard-errors
+        ## against a supplied U_list (R/tpf-likelihood.R).
         cpm_rho_u <- (par_ctx$tpf_options %||% list())$cpm_rho_u
         use_cpm   <- !is.null(cpm_rho_u) && is.numeric(cpm_rho_u) &&
                      is.finite(cpm_rho_u) && cpm_rho_u > 0 && cpm_rho_u < 1 &&

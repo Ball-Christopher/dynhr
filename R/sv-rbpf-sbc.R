@@ -194,8 +194,15 @@ sv_rbpf_sbc <- function(n_repl = 100L, T_obs = 60L, n_particles = 500L,
 
   ranks_mat <- do.call(rbind, lapply(reps, function(x) x$ranks))
   colnames(ranks_mat) <- par_nm
+  ## True rank support: keep_every/kept-draws is deterministic given the
+  ## (n_draws, thin_L) config, so every successful replication kept the SAME
+  ## number of draws (x$L) -- pass it explicitly instead of letting
+  ## sbc_uniformity_test infer the support from the observed ranks, which is
+  ## silently wrong whenever the top rank never appears by chance (#7
+  ## one-liner, adversarial review, mirrors the tpf_order3_sbc() fix).
+  L_support <- if (length(reps)) reps[[1L]]$L else NULL
   list(ranks = ranks_mat,
-       uniformity = sbc_uniformity_test(ranks_mat),
+       uniformity = sbc_uniformity_test(ranks_mat, L = L_support),
        accept_rates = vapply(reps, function(x) x$accept, numeric(1)),
        loglik_sd_at_truth = vapply(reps, function(x) x$ll_sd, numeric(1)),
        settings = list(n_repl = n_repl, T_obs = T_obs,

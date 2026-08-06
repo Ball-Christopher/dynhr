@@ -60,6 +60,11 @@ run_sbc_mirai <- function(model, prior_spec, prior_sampler,
                           likelihood = "gaussian", order = 1L) {
 
   ## ---- daemon pool -------------------------------------------------------
+  ## BLAS/OpenMP pinned to 1 per daemon (env inherited at spawn, restored on
+  ## exit) -- prevents OpenBLAS-build oversubscription; see
+  ## .mirai_pin_blas_threads and the note in .smc_pool_setup.
+  .restore_blas <- .mirai_pin_blas_threads()
+  on.exit(.restore_blas(), add = TRUE)
   mirai::daemons(n_cores)
   on.exit(mirai::daemons(NULL), add = TRUE)
 

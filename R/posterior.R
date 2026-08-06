@@ -345,7 +345,8 @@ apply_theta_to_params <- function(model, theta, params = NULL) {
 #'   need the true likelihood are unaffected. Only \code{$logpost} is tempered.
 #'   Can also be set globally via
 #'   \code{dynhr_set_options(power_posterior = 0.5)}.
-#' @param pruned_order For \code{likelihood = "pruned"}: the perturbation order
+#' @param pruned_order For \code{likelihood = "pruned"} or \code{"tpf"}: the
+#'   perturbation order
 #'   of the AFVRR pruned state space, \code{2L} (default) or \code{3L}. Order 3
 #'   uses \code{pruned_ss_loglik3} (skewness/kurtosis content via the cubic
 #'   augmented state). Ignored for other likelihoods.
@@ -566,6 +567,20 @@ make_log_posterior <- function(model, data, prior_spec, obs_vars = NULL,
       dots <- list(...)
       modifyList(ctx$tpf_options, dots)
     } else list(...)
+    ## Order routing: pruned_order (ctx or argument) selects the pruned
+    ## state-space order the TPF particles live on, exactly as it does for
+    ## likelihood = "pruned".  An explicit `order` in tpf_options/... wins.
+    if (is.null(tpf_extra_args$order)) tpf_extra_args$order <- pruned_order
+    ## cpm_rho_u (CPM routing signal, read downstream by
+    ## run_posterior_estimation() to select rwmh_cpm) is NOT a
+    ## make_log_posterior_tpf() argument -- strip it before dispatch. Its
+    ## presence means this closure is destined for CPM/U_list use, whose slot
+    ## layout has no burn-in slots, so pin burn_in_init = 0L (default-flip
+    ## 2026-08-05) unless the caller already set it explicitly.
+    if (!is.null(tpf_extra_args$cpm_rho_u)) {
+      tpf_extra_args$cpm_rho_u <- NULL
+      if (is.null(tpf_extra_args$burn_in_init)) tpf_extra_args$burn_in_init <- 0L
+    }
     return(do.call(make_log_posterior_tpf,
                    c(list(model, data_tpf, prior_spec, obs_vars,
                           compiled, me_variance = me_variance,

@@ -17,7 +17,9 @@ make_log_posterior_tpf(
   mh_scale = 1,
   seed = NULL,
   system_priors = NULL,
-  max_stages_u = 16L
+  max_stages_u = 16L,
+  order = 2L,
+  burn_in_init = 50L
 )
 }
 \arguments{
@@ -38,9 +40,13 @@ This is the TPF tempering instrument; me_variance = 0 is not allowed.}
 
 \item{ess_target}{ESS resampling threshold as fraction of N (default 0.5).}
 
-\item{n_mh}{RWMH mutation steps per phi stage (default 1).}
+\item{n_mh}{Herbst & Schorfheide (2019) mutation steps per phi
+stage (default 1); each step is an independence proposal on the
+period-t shock only (ancestor state fixed) -- see the internal
+\code{tpf_run_period()} mutation step.}
 
-\item{mh_scale}{RWMH proposal scale relative to particle cloud covariance.}
+\item{mh_scale}{Unused since the mutation step fix (ancestor state is
+never moved); kept for API/back-compat only.}
 
 \item{seed}{Integer RNG seed for reproducibility (NULL = no fixed seed).}
 
@@ -50,6 +56,33 @@ This is the TPF tempering instrument; me_variance = 0 is not allowed.}
 (default 16).  The filter raises phi from 0 to 1 in at most this many
 steps; a smaller value speeds up the filter at the cost of coarser
 tempering.}
+
+\item{order}{Integer, \code{2L} (default) or \code{3L}: perturbation order
+of the pruned state space the particles live on.  \code{2L} is the
+original (C++-accelerated) path and is byte-identical to previous
+releases; \code{3L} runs the AFVRR pruned third-order transition
+(pure-R kernel, see \code{tpf_run_period3}).  Selected via
+\code{pruned_order = 3L} from \code{make_log_posterior} /
+\code{estimation_context} when \code{likelihood = "tpf"}.}
+
+\item{burn_in_init}{Integer >= 0 (default 50L, flipped 2026-08-05 from the
+prior default of 0). When positive, the initial particle cloud is
+propagated this many periods with fresh shocks before the first
+observation, so it starts from (approximately) the FULL pruned
+stationary joint instead of the first-order Lyapunov draw with
+\code{x2_0 = x3_0 = 0}. The Lyapunov-only init mis-states the initial
+LEVEL (the pruned model's stationary x2 mean is the nonzero
+risk-adjustment shift), which short samples absorb as extra
+persistence — caught by the 2026-08-04 order-3 rank-uniformity SBC as
+a rho-specific rank shift after the obs-tensor fix. ~50 is ample for
+business-cycle persistence and matches the SBC-certified order-3 TPF
+config, hence the new default. Pass \code{burn_in_init = 0} to
+reproduce pre-0.9.2 behavior (needed for fixed-seed pins keyed to the
+old Lyapunov-only init). Incompatible with an externally supplied
+\code{U_list} (CPM): callers that build a TPF closure for
+\code{rwmh_cpm}/\code{U_list} use MUST pass \code{burn_in_init = 0L}
+explicitly, since the CPM slot layout has no burn-in slots — the
+closure errors at the boundary if this is violated.}
 }
 \value{
 A \code{function(theta)} returning
@@ -58,5 +91,29 @@ A \code{function(theta)} returning
 \description{
 Returns a \code{function(theta)} that evaluates the log-posterior using
 the Herbst & Schorfheide (2019) Tempered Particle Filter on the pruned
-order-2 state space.
+order-2 state space (default), or on the pruned ORDER-3 (AFVRR 2018)
+state space when \code{order = 3L}.
 }
+\section{Missing data}{
+
+\code{data} may contain \code{NA}/non-finite entries, handled per the
+package's usual per-element (univariate-KF-style) convention rather than
+dropping whole periods:
+\itemize{
+  \item A period with SOME but not all observables missing is handled by
+    subsetting the observation vector (and the corresponding rows of the
+    loading matrices/obs-tensors) to the observed elements for that
+    period only, then running the normal tempering step on the reduced
+    observation.
+  \item A period with ALL observables missing draws that period's shocks
+    and propagates the particle cloud one step forward with no
+    weighting/resampling/mutation (a pure predictive step), contributing
+    0 to the log-likelihood -- it does NOT glue the periods on either
+    side of the gap together with a single multi-period transition (the
+    pre-0.9.2 behavior, which silently evaluated the likelihood of a
+    different, gap-deleted model).
+  \item Fully-observed periods are unaffected: identical code path and
+    bit-identical results to previous releases.
+}
+}
+

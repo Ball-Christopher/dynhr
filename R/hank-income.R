@@ -270,6 +270,198 @@ hank_employment_income <- function(f, s, rho, sigma, n = 7L, b_ui = 0.5) {
 
 
 # =============================================================================
+# Public: three-state employment/participation extension (E/U/N)
+# =============================================================================
+
+#' Three-state (E/U/N) employment-margin base transition matrix
+#'
+#' Row order E, U, N. Zero-rate arguments enter as literal appended terms
+#' (\code{... - s_en}, \code{... - p_un}, \code{... - p_nu}) so that, at their
+#' default value \code{0}, every diagonal/off-diagonal entry that is SHARED
+#' with the two-state builder's \code{Pi_m} is bit-identical to it (IEEE
+#' \code{x - 0 == x} exactly) -- the mechanism the exact-nesting gate in
+#' \code{test-hank-eun-labour.R} relies on.
+#' @keywords internal
+.hank_pi_m3 <- function(f_ue, s_eu, p_un, p_nu, f_ne, s_en) {
+  matrix(c(1 - s_eu - s_en, s_eu,             s_en,
+           f_ue,             1 - f_ue - p_un, p_un,
+           f_ne,             p_nu,             1 - f_ne - p_nu),
+         3L, 3L, byrow = TRUE)
+}
+
+
+#' Validate the six E/U/N employment-margin transition rates
+#' @keywords internal
+.hank_check_eun_rates <- function(f_ue, s_eu, p_un, p_nu, f_ne, s_en,
+                                  prefix = "") {
+  if (!is.finite(f_ue) || f_ue <= 0 || f_ue > 1)
+    stop(prefix, "f_ue (U->E job-finding rate) must be in (0, 1]")
+  if (!is.finite(s_eu) || s_eu <= 0 || s_eu >= 1)
+    stop(prefix, "s_eu (E->U separation rate) must be in (0, 1)")
+  if (!is.finite(p_un) || p_un < 0 || p_un >= 1)
+    stop(prefix, "p_un (U->N participation-exit rate) must be in [0, 1)")
+  if (!is.finite(p_nu) || p_nu < 0 || p_nu >= 1)
+    stop(prefix, "p_nu (N->U participation-entry rate) must be in [0, 1)")
+  if (!is.finite(f_ne) || f_ne < 0 || f_ne >= 1)
+    stop(prefix, "f_ne (N->E direct hiring rate) must be in [0, 1)")
+  if (!is.finite(s_en) || s_en < 0 || s_en >= 1)
+    stop(prefix, "s_en (E->N direct exit rate) must be in [0, 1)")
+  if (s_eu + s_en >= 1)
+    stop(prefix, "s_eu + s_en must be < 1 (row E must keep positive stay ",
+         "probability)")
+  if (f_ue + p_un >= 1)
+    stop(prefix, "f_ue + p_un must be < 1 (row U must keep positive stay ",
+         "probability)")
+  if (f_ne + p_nu >= 1)
+    stop(prefix, "f_ne + p_nu must be < 1 (row N must keep positive stay ",
+         "probability)")
+  invisible(NULL)
+}
+
+
+#' Three-state employment/participation-augmented idiosyncratic income
+#' process (E/U/N household)
+#'
+#' The direct three-state analogue of \code{\link{hank_employment_income}}:
+#' extends a Rouwenhorst productivity chain with an employment-margin state
+#' \eqn{m \in \{E, U, N\}} (employed / unemployed-searching / not
+#' participating), so an omitted participation margin has somewhere to live
+#' besides the matching-efficiency (E/U) state. The combined chain keeps the
+#' Kronecker structure \eqn{\Pi = \Pi_m \otimes \Pi_e} on the \code{3 * n}
+#' combined states, with \code{Pi_m} built from SIX named transition rates:
+#' \describe{
+#'   \item{\code{f_ue}}{\eqn{P(U \to E)}, job-finding.}
+#'   \item{\code{s_eu}}{\eqn{P(E \to U)}, separation.}
+#'   \item{\code{p_un}}{\eqn{P(U \to N)}, participation exit (discouraged
+#'     search).}
+#'   \item{\code{p_nu}}{\eqn{P(N \to U)}, participation entry (re-entering
+#'     search).}
+#'   \item{\code{f_ne}}{\eqn{P(N \to E)}, direct hiring out of
+#'     non-participation. DEFAULT \code{0}: the package's chosen restriction
+#'     is that participation churn routes through \code{U} (no direct N<->E
+#'     flows), matching the referee's E/U/N specification; override
+#'     deliberately if direct hires from non-participation are wanted.}
+#'   \item{\code{s_en}}{\eqn{P(E \to N)}, direct exit into non-participation.
+#'     Same default-\code{0} restriction as \code{f_ne}, for the same reason.}
+#' }
+#' ALL SIX rates are \code{Pi_inputs} of the returned \code{Pi_fn}, so any of
+#' them can be an aggregate/Jacobian input of \code{\link{hank_het_jacobian}}
+#' once passed to \code{\link{hank_het_block}} (T_h-vector transition-rate
+#' paths, exactly as \code{f}/\code{s} are for the two-state block).
+#'
+#' STATE ORDERING: employment margin OUTER (E, U, N in that order),
+#' productivity INNER -- combined state \code{(m, j)} has index
+#' \code{(m - 1) * n + j}. Rows \code{1..n}/\code{n+1..2n}/\code{2n+1..3n} of
+#' a \code{(3n) x n_a} policy matrix are the employed / unemployed /
+#' non-participating states respectively.
+#'
+#' EXACT NESTING: at \code{p_un = p_nu = f_ne = s_en = 0} the \code{E, U}
+#' rows/columns of \code{Pi_m} (and hence of the full Kronecker \code{Pi})
+#' are BIT-IDENTICAL to \code{\link{hank_employment_income}}'s two-state
+#' \code{Pi_m(f_ue, s_eu)}, because the zero rates enter as literal
+#' subtracted/appended terms (\code{x - 0 == x} exactly in IEEE) rather than
+#' through a separate code path -- see \code{\link{.hank_pi_m3}}. At that
+#' same restriction the chain is REDUCIBLE (the N block becomes absorbing
+#' and unreachable), so the stationary distribution is not unique; this
+#' function special-cases exactly that restriction to return the
+#' economically sensible zero-N-mass solution, computed with the SAME
+#' closed-form arithmetic (\code{u = s_eu / (s_eu + f_ue)}) the two-state
+#' builder uses, rather than trusting a generic eigensolve on a reducible
+#' matrix (which returns an arbitrary member of a multi-dimensional
+#' eigenspace).
+#'
+#' Income: employed households earn \eqn{w e}; unemployed earn replacement
+#' income \eqn{b_{ui} w e}; non-participants earn \eqn{b_n w e}, with
+#' \code{b_n} DEFAULTING to \code{b_ui} (a calibration choice, not a
+#' hard-coded equality -- pass a different \code{b_n} to give
+#' non-participants a different replacement rate).
+#'
+#' @param f_ue,s_eu,p_un,p_nu,f_ne,s_en The six steady-state transition
+#'   rates (see above). \code{f_ne} and \code{s_en} default to \code{0}.
+#' @param rho Numeric in (-1, 1): AR(1) persistence of log productivity.
+#' @param sigma Numeric > 0: UNCONDITIONAL standard deviation of log
+#'   productivity (\code{\link{hank_income_rouwenhorst}} convention).
+#' @param n Integer >= 2: number of productivity states (default 7).
+#' @param b_ui Numeric > 0: unemployment replacement rate (default 0.5).
+#' @param b_n Numeric > 0: non-participation replacement rate (default
+#'   \code{b_ui}).
+#'
+#' @return A list with:
+#'   \describe{
+#'     \item{\code{e}}{Numeric length-\code{3n}: EFFECTIVE income levels,
+#'       \code{c(e_prod, b_ui * e_prod, b_n * e_prod)}.}
+#'     \item{\code{Pi}}{\code{3n x 3n} row-stochastic combined transition
+#'       matrix, \code{kronecker(Pi_m, Pi_e)}.}
+#'     \item{\code{pi}}{Numeric length-\code{3n}: stationary distribution.}
+#'     \item{\code{Pi_fn}}{Function of the six named rates \code{->} \code{3n
+#'       x 3n} combined transition matrix.}
+#'     \item{\code{shares}}{Named numeric length-3 (\code{E}, \code{U},
+#'       \code{N}): stationary employment-margin shares.}
+#'     \item{\code{idx_E}, \code{idx_U}, \code{idx_N}}{Integer index vectors
+#'       of the employed / unemployed / non-participating combined states.}
+#'     \item{\code{e_prod}, \code{Pi_e}, \code{pi_e}}{The underlying
+#'       productivity chain.}
+#'     \item{\code{f_ue}, \code{s_eu}, \code{p_un}, \code{p_nu}, \code{f_ne},
+#'       \code{s_en}, \code{b_ui}, \code{b_n}, \code{rho}, \code{sigma},
+#'       \code{n}, \code{n_m}, \code{method}}{Echoed inputs / metadata
+#'       (\code{n_m = 3L}, \code{method = "rouwenhorst_employment3"}).}
+#'   }
+#'
+#' @examples
+#' inc3 <- hank_employment_income3(f_ue = 0.7, s_eu = 0.05,
+#'                                 p_un = 0.1, p_nu = 0.3,
+#'                                 rho = 0.9, sigma = 0.6, n = 3)
+#' inc3$shares
+#' @export
+hank_employment_income3 <- function(f_ue, s_eu, p_un, p_nu, f_ne = 0, s_en = 0,
+                                    rho, sigma, n = 7L, b_ui = 0.5,
+                                    b_n = b_ui) {
+  .hank_check_eun_rates(f_ue, s_eu, p_un, p_nu, f_ne, s_en)
+  if (!is.finite(b_ui) || b_ui <= 0)
+    stop("b_ui (U replacement rate) must be > 0 (zero income at the ",
+         "borrowing constraint makes the household problem infeasible)")
+  if (!is.finite(b_n) || b_n <= 0)
+    stop("b_n (N replacement rate) must be > 0 (zero income at the ",
+         "borrowing constraint makes the household problem infeasible)")
+
+  prod <- hank_income_rouwenhorst(rho = rho, sigma = sigma, n = n)
+  n    <- prod$n
+  Pi_e <- prod$Pi
+  pi_e <- prod$pi
+
+  ## Combined transition at arbitrary rates: employment OUTER, productivity
+  ## INNER. Closes over the FIXED productivity chain Pi_e -- only the
+  ## employment margin responds to the aggregate inputs.
+  Pi_fn <- function(f_ue, s_eu, p_un, p_nu, f_ne = 0, s_en = 0) {
+    .hank_check_eun_rates(f_ue, s_eu, p_un, p_nu, f_ne, s_en, prefix = "Pi_fn: ")
+    kronecker(.hank_pi_m3(f_ue, s_eu, p_un, p_nu, f_ne, s_en), Pi_e)
+  }
+
+  Pi <- Pi_fn(f_ue, s_eu, p_un, p_nu, f_ne, s_en)
+
+  ## Stationary employment-margin shares -- see the roxygen note above on why
+  ## the p_un = p_nu = f_ne = s_en = 0 restriction is special-cased.
+  degenerate <- p_un == 0 && p_nu == 0 && f_ne == 0 && s_en == 0
+  pi_m <- if (degenerate) {
+    u <- s_eu / (s_eu + f_ue)
+    c(1 - u, u, 0)
+  } else {
+    .hank_stationary(.hank_pi_m3(f_ue, s_eu, p_un, p_nu, f_ne, s_en))
+  }
+  pi <- as.numeric(kronecker(pi_m, pi_e))
+
+  list(e = c(prod$e, b_ui * prod$e, b_n * prod$e), Pi = Pi, pi = pi,
+       Pi_fn = Pi_fn, shares = setNames(pi_m, c("E", "U", "N")),
+       idx_E = seq_len(n), idx_U = n + seq_len(n), idx_N = 2L * n + seq_len(n),
+       e_prod = prod$e, Pi_e = Pi_e, pi_e = pi_e,
+       f_ue = f_ue, s_eu = s_eu, p_un = p_un, p_nu = p_nu,
+       f_ne = f_ne, s_en = s_en, b_ui = b_ui, b_n = b_n,
+       rho = rho, sigma = sigma, n = n, n_m = 3L,
+       method = "rouwenhorst_employment3")
+}
+
+
+# =============================================================================
 # Non-Gaussian innovation presets (analytic mean/var/skew/ex-kurt)
 # =============================================================================
 

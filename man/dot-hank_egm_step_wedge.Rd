@@ -13,7 +13,8 @@
   beta,
   eis,
   Pi,
-  amin = a_grid[1L]
+  amin = a_grid[1L],
+  coh_extra = NULL
 )
 }
 \description{

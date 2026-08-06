@@ -947,12 +947,12 @@ hank_mixture_sbc <- function(emu, n_rep, prior = NULL, sampler = "grid",
 
   structure(
     list(pit = pit_mat, ranks = rank_mat, truth = truth_mat, post_mean = postmean_mat,
-         post_conc = post_conc, uniformity = sbc_uniformity_test(rank_mat, n_bins = NULL),
+         post_conc = post_conc, uniformity = sbc_uniformity_test(rank_mat, L = L_ranks - 1L, n_bins = NULL),
          ## JOINT test-quantity PITs/ranks + their own uniformity verdict. These
          ## bite on (centre, spread) DEPENDENCE errors the marginal `uniformity`
          ## is blind to; treat them as an ADDITIONAL calibration gate.
          pit_tq = pit_tq, ranks_tq = rank_tq,
-         uniformity_tq = sbc_uniformity_test(rank_tq, n_bins = NULL),
+         uniformity_tq = sbc_uniformity_test(rank_tq, L = L_ranks - 1L, n_bins = NULL),
          n_rep = n_rep, box = box, sampler = sampler, channels = channels, N = N, T_data = T_data,
          rw_scale = rw_scale, me_var = ME_VAR, rw_metric = rw_metric),
     class = c("hank_mixture_sbc", "dynhr_sbc"))

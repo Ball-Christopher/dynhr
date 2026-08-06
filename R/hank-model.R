@@ -399,6 +399,39 @@ hank_model <- function(blocks, unknowns, targets, exogenous, ss, T_h) {
     }
   }
 
+  ## Fail loud on structural singularity: an unknown whose H_U column is
+  ## identically zero (moves no target) or a target whose H_U row is
+  ## identically zero (responds to no unknown) makes the GE Newton solve
+  ## (.hank_ge_factor/.hank_ge_solve) singular. Check the raw per-(target,
+  ## unknown) blocks in G BEFORE packing, so the offending name is known;
+  ## exact-zero test only (no tolerance: these are structural, not numerical).
+  for (u in unknowns) {
+    moves_a_target <- FALSE
+    for (t in targets) {
+      blk <- G[[t]][[u]]
+      if (!is.null(blk) && any(blk != 0)) { moves_a_target <- TRUE; break }
+    }
+    if (!moves_a_target)
+      stop("hank_model: unknown '", u, "' moves no target (its Jacobian ",
+           "column is identically zero); the GE system is singular. Check ",
+           "the block wiring: does '", u, "' actually feed, directly or ",
+           "through the DAG, into a block that produces one of the ",
+           "targets (", paste(targets, collapse = ", "), ")?")
+  }
+  for (t in targets) {
+    responds_to_an_unknown <- FALSE
+    for (u in unknowns) {
+      blk <- G[[t]][[u]]
+      if (!is.null(blk) && any(blk != 0)) { responds_to_an_unknown <- TRUE; break }
+    }
+    if (!responds_to_an_unknown)
+      stop("hank_model: target '", t, "' responds to no unknown (its ",
+           "Jacobian row is identically zero); the GE system is singular. ",
+           "Check the block wiring: does the block producing '", t, "' ",
+           "actually depend, directly or through the DAG, on one of the ",
+           "unknowns (", paste(unknowns, collapse = ", "), ")?")
+  }
+
   ## Pack H_U = d(targets)/d(unknowns), H_Z = d(targets)/d(exogenous).
   pack <- function(cols) {
     M <- matrix(0, T_h * length(targets), T_h * length(cols))
@@ -811,11 +844,13 @@ hank_model_irf <- function(model, dZ) {
 #'
 #' Companion to \code{\link{hank_model_irf}}: instead of propagating the GE
 #' solution to scalar aggregate variables via \code{model$G}, propagates it to
-#' the full cross-sectional distribution response of every \code{"het"} (and
-#' \code{"het_mixture"}) block in the model, via that block's distribution
-#' Jacobian (\code{\link{hank_het_dist_jacobian}}, or for a mixture block
-#' \code{\link{hank_mixture_dist_jacobian}} -- the omega-weighted sum of the
-#' per-type distribution Jacobians on the types' shared grid).
+#' the full cross-sectional distribution response of every \code{"het"},
+#' \code{"het2"}, \code{"het3"} (and \code{"het_mixture"}) block in the model,
+#' via that block's distribution Jacobian (\code{\link{hank_het_dist_jacobian}}
+#' for \code{"het"}, \code{\link{hank_het2_dist_jacobian}} for \code{"het2"},
+#' \code{\link{hank_het3_dist_jacobian}} for \code{"het3"}, or for a mixture
+#' block \code{\link{hank_mixture_dist_jacobian}} -- the omega-weighted sum of
+#' the per-type distribution Jacobians on the types' shared grid).
 #'
 #' Reuses the identical \code{dU = -H_U^{-1} H_Z\, dZ} GE solve as
 #' \code{hank_model_irf} (via the shared internal \code{.hank_irf_dsrc}), so
@@ -847,6 +882,14 @@ hank_model_irf <- function(model, dZ) {
 #'   with more than one it is an error, since the intent would be ambiguous.
 #'   Note the contrast with \code{\link{hank_ks_linear_irf}}, which takes a
 #'   bare vector and returns \code{d}-prefixed names.
+#' @param ... Forwarded to \code{\link{hank_het2_dist_jacobian}} for any
+#'   \code{"het2"}-kind block (e.g. \code{delta_in}, \code{delta_va},
+#'   \code{delta_d}, \code{backend}, \code{threads}). Without this, the het2
+#'   arm always used the factory's default finite-difference deltas, with no
+#'   way to tighten them -- e.g. a \code{theta_coll} dist-IRF was stuck at
+#'   only ~1e-3 accuracy (adversarial review, one-liner #2). Ignored by the
+#'   \code{"het"}/\code{"het3"}/\code{"het_mixture"} arms, which have no
+#'   tunable FD deltas exposed here.
 #'
 #' @return A list with:
 #'   \item{dD}{Named list, one entry per \code{"het"}-kind block in
@@ -857,7 +900,7 @@ hank_model_irf <- function(model, dZ) {
 #'     returned internally by \code{\link{hank_model_irf}} -- exposed here so
 #'     callers can confirm the two functions solved the identical GE system.}
 #' @export
-hank_model_dist_irf <- function(model, dZ) {
+hank_model_dist_irf <- function(model, dZ, ...) {
   T_h <- model$T_h
   dsrc <- .hank_irf_dsrc(model, dZ)
 
@@ -905,6 +948,15 @@ hank_model_dist_irf <- function(model, dZ) {
       JD <- hank_het_dist_jacobian(blk$block, T_h, inputs = blk$inputs)
       n_cell <- blk$block$n_e * blk$block$n_a
       dD[[blk$name]] <- contract_dist(JD, blk$inputs, n_cell)
+    } else if (identical(blk$kind, "het2")) {
+      ## Like "het3" (single block, no pooling-across-types ambiguity): every
+      ## het2 block has its own well-defined joint (e, b, a) cell space.
+      ## `...` forwards FD-delta/backend/threads tuning (one-liner #2,
+      ## adversarial review): without it this arm was pinned to the
+      ## factory's default deltas with no way to tighten accuracy.
+      JD <- hank_het2_dist_jacobian(blk$block, T_h, inputs = blk$inputs, ...)
+      n_cell <- length(blk$block$D)
+      dD[[blk$name]] <- contract_dist(JD, blk$inputs, n_cell)
     } else if (identical(blk$kind, "het_mixture")) {
       ## The pooled mixture distribution is only well-defined on a SHARED
       ## (e, a) cell space (all blk$blocks sharing a_grid/Pi/e -- see
@@ -919,6 +971,14 @@ hank_model_dist_irf <- function(model, dZ) {
         n_cell <- blk$blocks[[1L]]$n_e * blk$blocks[[1L]]$n_a
         dD[[blk$name]] <- contract_dist(JD_mix, blk$inputs, n_cell)
       }
+    } else if (identical(blk$kind, "het3")) {
+      ## Unlike het_mixture, a "het3" block is a SINGLE block (no pooling
+      ## across heterogeneous types sharing a grid), so there is no
+      ## same_income-style ambiguity to guard against here -- every het3
+      ## block has its own well-defined joint (e, d, f, a) cell space.
+      JD <- hank_het3_dist_jacobian(blk$block, T_h, inputs = blk$inputs)
+      n_cell <- length(blk$block$D)
+      dD[[blk$name]] <- contract_dist(JD, blk$inputs, n_cell)
     }
   }
 

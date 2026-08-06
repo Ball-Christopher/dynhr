@@ -170,7 +170,8 @@ hank_het3_jacobian_nd <- function(block,T_h,inputs=NULL,outputs=.hank3_jac_outpu
 }
 
 .hank_curly_sweep3 <- function(block, T_h, input, outputs,
-                               delta_in, delta_v, delta_d, threads = NULL) {
+                               delta_in, delta_v, delta_d, threads = NULL,
+                               backend = getOption("dynhr.hank3_backend", "cpp")) {
   D_ss <- block$D
   n_cell <- length(D_ss)
   state_dim <- dim(block$d)
@@ -187,15 +188,36 @@ hank_het3_jacobian_nd <- function(block,T_h,inputs=NULL,outputs=.hank3_jac_outpu
     .hank_forward_legs3(block, step_p, step_m, scale, Pi_p, Pi_m)
   }
   one_step <- function(Vd, Vf, Va, prices, Pi = block$Pi) {
-    .hank_egm3_step(
-      block$d_grid, block$f_grid, block$a_grid,
-      prices$w * block$e + prices$Tr * .hank_block_omega(block), Pi,
-      prices$rd, prices$rf, prices$ra,
-      block$beta, block$eis,
-      block$chi0, block$chi1, block$chi2,
-      block$phi0, block$phi1, block$phi2,
-      Vd, Vf, Va, prices$px, threads
-    )
+    if (identical(backend, "cpp")) {
+      .hank_egm3_step(
+        block$d_grid, block$f_grid, block$a_grid,
+        prices$w * block$e + prices$Tr * .hank_block_omega(block), Pi,
+        prices$rd, prices$rf, prices$ra,
+        block$beta, block$eis,
+        block$chi0, block$chi1, block$chi2,
+        block$phi0, block$phi1, block$phi2,
+        Vd, Vf, Va, prices$px, threads
+      )
+    } else {
+      ## backend = "R": .hank_egm3_step() unconditionally routes to the
+      ## COMPILED kernel (hank_egm3_step_cpp) whenever the block is not the
+      ## singleton-f reduction, ignoring dynhr.hank3_backend entirely -- so
+      ## the s >= 2 per-step loop below (the "documented pure-R diagnostic
+      ## path") silently ran the compiled step even under
+      ## options(dynhr.hank3_backend = "R") (#10, adversarial review). Call
+      ## .hank_egm3_step_r() directly instead, which threads `backend`
+      ## through to hank_egm3_solve()'s own R implementation (capped at 250
+      ## states, same as every other R-backend three-asset path).
+      .hank_egm3_step_r(
+        block$d_grid, block$f_grid, block$a_grid,
+        prices$w * block$e + prices$Tr * .hank_block_omega(block), Pi,
+        prices$rd, prices$rf, prices$ra,
+        block$beta, block$eis,
+        block$chi0, block$chi1, block$chi2,
+        block$phi0, block$phi1, block$phi2,
+        Vd, Vf, Va, prices$px, backend = backend
+      )
+    }
   }
   record <- function(step_p, step_m, scale, s, curlyY, curlyD,
                      Pi_p = block$Pi, Pi_m = block$Pi) {
@@ -281,6 +303,54 @@ hank_het3_jacobian_nd <- function(block,T_h,inputs=NULL,outputs=.hank3_jac_outpu
   dVf <- first$dVf
   dVa <- first$dVa
 
+  ## FUSED COMPILED SWEEP. hank_curly_sweep3_cpp() runs the whole s = 2..T_h
+  ## recursion -- both EGM step legs per date, record()'s differencing and
+  ## aggregation, and the curly-D leg accumulation -- in one compiled call
+  ## under ONE worker pool, instead of ~13 interpreted n_cell passes plus two
+  ## pool spawns per date. It reuses the step and forward-legs kernel bodies
+  ## (egm3_expect/egm3_run_tasks/forward_legs3_core), so the arithmetic is the
+  ## same operations in the same order and the contract is BIT-IDENTITY with
+  ## the loop below, which test-hank-jacobian3-fused.R asserts with
+  ## expect_identical().
+  ##
+  ## GATE. The singleton-f reduction routes .hank_egm3_step to the two-asset
+  ## reduction solver (see R/hank-egm3.R), which the fused kernel does not
+  ## implement -- it must FALL THROUGH to the loop below, like the two-asset
+  ## sweep's collateral gate. The s = 1 term above stays in R for every path:
+  ## that is where the input-type (price vs Pi) dispatch lives.
+  ## options(dynhr.hank3_fused_sweep = FALSE) is the escape hatch that forces
+  ## the per-step loop back on with everything else unchanged -- the
+  ## equivalence tests use it, and it is the first thing to try if a
+  ## three-asset Jacobian ever looks wrong.
+  ## `identical(backend, "cpp")` mirrors the two-asset gate
+  ## (R/hank-jacobian2.R's `use_fused <- identical(backend, "cpp") && ...`):
+  ## the fused kernel IS the compiled backend, so it must not run under
+  ## options(dynhr.hank3_backend = "R") (#10, adversarial review) -- that
+  ## falls through to the per-step loop below, which now itself honours
+  ## `backend` via `one_step()`.
+  use_fused <- identical(backend, "cpp") && T_h >= 2L &&
+    length(block$f_grid) > 1L &&
+    isTRUE(getOption("dynhr.hank3_fused_sweep", TRUE))
+  if (use_fused) {
+    fuse_outputs <- intersect(outputs, c("D", "F", "A", "C", "CHI", "PHI"))
+    ## The internal "Y" output is identically zero at s >= 2 (record() only
+    ## sets it at the shock date for w/Tr), so curlyY$Y keeps its zero
+    ## initialization; the compiled sweep carries the variable output set.
+    fs <- hank_curly_sweep3_cpp(
+      block$Vd, block$Vf, block$Va, dVd, dVf, dVa,
+      block$d_grid, block$f_grid, block$a_grid,
+      prices$w * block$e + prices$Tr * .hank_block_omega(block), block$Pi,
+      prices$rd, prices$rf, prices$ra, block$beta, block$eis,
+      block$chi0, block$chi1, block$chi2,
+      block$phi0, block$phi1, block$phi2, prices$px,
+      block$D, fuse_outputs, delta_v, T_h,
+      hank_resolve_threads(threads))
+    tail <- seq_len(T_h - 1L) + 1L
+    for (o in fuse_outputs) curlyY[[o]][tail] <- fs$curlyY[[o]]
+    curlyD[, tail] <- fs$curlyD
+    return(list(curlyY = curlyY, curlyD = curlyD))
+  }
+
   if (T_h >= 2L) for (s in 2L:T_h) {
     # All three marginal values describe one perturbation direction.  A single
     # shared scale is essential: scaling them separately changes that direction.
@@ -356,6 +426,13 @@ hank_het3_jacobian_nd <- function(block,T_h,inputs=NULL,outputs=.hank3_jac_outpu
 #'   (curly-D) response now differences the actual plus/minus policy legs at
 #'   their generating \code{delta_in} or propagated-value step, so it does not
 #'   construct a second \code{delta_d} perturbation.
+#' @param backend Character: \code{"cpp"} (default, from
+#'   \code{getOption("dynhr.hank3_backend")}) or \code{"R"} for the pure-R
+#'   diagnostic path (capped at 250 states per \code{\link{hank_egm3_solve}}).
+#'   Mirrors \code{\link{hank_het2_jacobian}}'s \code{backend} argument: under
+#'   \code{"R"} the fused compiled sweep is skipped (it IS the compiled
+#'   backend), and the per-step \code{s >= 2} loop also routes every backward
+#'   step through the R implementation, not just the \code{s = 1} term.
 #'
 #' @return Nested list \code{J[[output]][[input]]}, each a \code{T_h x T_h}
 #'   matrix with \code{[t, s] = dO_t/dI_s}. (The date-0 response vectors are
@@ -377,7 +454,9 @@ hank_het3_jacobian <- function(block, T_h,
                                inputs = NULL,
                                outputs = .hank3_jac_outputs,
                                delta_in = 1e-5, delta_v = 1e-6,
-                               delta_d = 1e-6, threads = NULL) {
+                               delta_d = 1e-6, threads = NULL,
+                               backend = getOption("dynhr.hank3_backend", "cpp")) {
+  backend <- match.arg(backend, c("cpp", "R"))
   if (!inherits(block, "hank_het3_block"))
     stop("hank_het3_jacobian: block must be hank_het3_block")
   if (!is.numeric(T_h) || length(T_h) != 1L || T_h < 1 || !is.finite(T_h))
@@ -431,39 +510,56 @@ hank_het3_jacobian <- function(block, T_h,
   J <- setNames(lapply(work_outputs, function(output)
     setNames(lapply(inputs, function(input) matrix(0, T_h, T_h)), inputs)),
     work_outputs)
-  for (input in inputs) {
-    # Exact zero column on the reduction; see .hank3_px_is_inert.
-    if (input == "px" && .hank3_px_is_inert(block)) next
-    sweep <- .hank_curly_sweep3(
-      block, T_h, input, work_outputs, delta_in, delta_v, delta_d, threads
-    )
+
+  # Exact-zero columns on the reduction are never swept; see .hank3_px_is_inert.
+  valid_inputs <- inputs[!(inputs == "px" & .hank3_px_is_inert(block))]
+
+  ## E-HOISTING. The expectation stream E_s = Lambda^s y depends only on
+  ## (block, output policy) -- NOT on the input being differentiated -- so
+  ## the streaming loop below was regenerating the identical E_s sequence
+  ## once per input, n_inputs times over. When every input's curlyD (n_cell
+  ## x T_h) fits in memory SIMULTANEOUSLY, run every input's backward sweep
+  ## first, then loop outputs on the OUTSIDE and generate each E block ONCE,
+  ## crossprod-ing it against every input's curlyD in turn. Above the memory
+  ## budget (`getOption("dynhr.hank3_jac_e_hoist_bytes", 2e9)`), fall back to
+  ## the original per-input streaming path unchanged -- that is the only path
+  ## that works at the paper's 1.29M-state scale, where holding every input's
+  ## curlyD at once is not an option.
+  ##
+  ## Bit-identity is the contract: the hoisted path performs the SAME
+  ## per-(input, output) crossprod(curlyD, E_block) calls, in the same block
+  ## widths and the same sequential E_s generation order, as the streaming
+  ## path -- only the loop nesting changes, never any accumulation's
+  ## association. E_s is a pure function of (block, output), so which input's
+  ## loop it happens to be generated under cannot change its bits.
+  n_cell <- length(block$D)
+  e_hoist_bytes <- getOption("dynhr.hank3_jac_e_hoist_bytes", 2e9)
+  use_hoist <- length(valid_inputs) > 0L &&
+    as.numeric(length(valid_inputs)) * n_cell * T_h * 8 <= e_hoist_bytes
+
+  .assemble_jacobian <- function(fake_news) {
+    jacobian <- matrix(0, T_h, T_h)
+    jacobian[1L, ] <- fake_news[1L, ]
+    if (T_h >= 2L) for (t in 2L:T_h) {
+      jacobian[t, 1L] <- fake_news[t, 1L]
+      jacobian[t, 2L:T_h] <-
+        jacobian[t - 1L, 1L:(T_h - 1L)] + fake_news[t, 2L:T_h]
+    }
+    jacobian
+  }
+
+  if (use_hoist) {
+    sweeps <- setNames(lapply(valid_inputs, function(input)
+      .hank_curly_sweep3(block, T_h, input, work_outputs,
+                         delta_in, delta_v, delta_d, threads, backend)),
+      valid_inputs)
     for (output in work_outputs) {
-      fake_news <- matrix(0, T_h, T_h)
-      fake_news[1L, ] <- sweep$curlyY[[output]]
-      # Stream E_s = Lambda^s y rather than retaining T full state vectors for
-      # every output, but multiply in COLUMN BLOCKS.
-      #
-      # One row at a time, `crossprod(curlyD, expectation)` is a dgemv that
-      # streams the whole n_cell x T curlyD for EVERY period, so the assembly
-      # moves n_cell*T^2*8 bytes and is purely bandwidth-bound. Buffering B
-      # expectation vectors and issuing one crossprod(curlyD, E_block) is the
-      # SAME arithmetic, but reads curlyD once per block -- traffic falls by a
-      # factor of B, and a dgemm is compute-bound and BLAS-threaded where a
-      # dgemv is not. Measured 16x at B=32 and 27x at B=128 on the assembly
-      # itself (n_cell = 322,560, T = 400).
-      #
-      # This is the O(T^2) term, and it is invisible until T is large: 0.14% of
-      # a T=20 Jacobian, but 34% of a projected T=400 one -- a share that ROSE
-      # when the policy step was threaded, because that cut the linear term ~4x.
-      #
-      # The expectations are still generated strictly sequentially, so nothing
-      # about the recursion changes; only B of them are held at once. Results
-      # agree with the column-at-a-time form to BLAS accumulation order
-      # (~1e-13 relative), not bitwise -- an unavoidable consequence of letting
-      # the BLAS choose its summation order, and far inside every gate here.
+      fake_news <- setNames(
+        lapply(valid_inputs, function(i) matrix(0, T_h, T_h)), valid_inputs)
+      for (input in valid_inputs)
+        fake_news[[input]][1L, ] <- sweeps[[input]]$curlyY[[output]]
       expectation <- .hank3_arr_to_vec(output_policy[[output]])
       if (T_h >= 2L) {
-        n_cell <- length(expectation)
         blk_w <- .hank3_fn_block(n_cell)
         t <- 2L
         while (t <= T_h) {
@@ -473,20 +569,64 @@ hank_het3_jacobian <- function(block, T_h,
             E[, j] <- expectation
             expectation <- .hank_forward_apply3(block, expectation)
           }
-          ## crossprod gives T_h x nb; column j is the fake-news row for
-          ## period t + j - 1.
-          fake_news[t:(t + nb - 1L), ] <- t(crossprod(sweep$curlyD, E))
+          for (input in valid_inputs)
+            fake_news[[input]][t:(t + nb - 1L), ] <-
+              t(crossprod(sweeps[[input]]$curlyD, E))
           t <- t + nb
         }
       }
-      jacobian <- matrix(0, T_h, T_h)
-      jacobian[1L, ] <- fake_news[1L, ]
-      if (T_h >= 2L) for (t in 2L:T_h) {
-        jacobian[t, 1L] <- fake_news[t, 1L]
-        jacobian[t, 2L:T_h] <-
-          jacobian[t - 1L, 1L:(T_h - 1L)] + fake_news[t, 2L:T_h]
+      for (input in valid_inputs)
+        J[[output]][[input]] <- .assemble_jacobian(fake_news[[input]])
+    }
+  } else {
+    for (input in valid_inputs) {
+      sweep <- .hank_curly_sweep3(
+        block, T_h, input, work_outputs, delta_in, delta_v, delta_d, threads,
+        backend
+      )
+      for (output in work_outputs) {
+        fake_news <- matrix(0, T_h, T_h)
+        fake_news[1L, ] <- sweep$curlyY[[output]]
+        # Stream E_s = Lambda^s y rather than retaining T full state vectors for
+        # every output, but multiply in COLUMN BLOCKS.
+        #
+        # One row at a time, `crossprod(curlyD, expectation)` is a dgemv that
+        # streams the whole n_cell x T curlyD for EVERY period, so the assembly
+        # moves n_cell*T^2*8 bytes and is purely bandwidth-bound. Buffering B
+        # expectation vectors and issuing one crossprod(curlyD, E_block) is the
+        # SAME arithmetic, but reads curlyD once per block -- traffic falls by a
+        # factor of B, and a dgemm is compute-bound and BLAS-threaded where a
+        # dgemv is not. Measured 16x at B=32 and 27x at B=128 on the assembly
+        # itself (n_cell = 322,560, T = 400).
+        #
+        # This is the O(T^2) term, and it is invisible until T is large: 0.14% of
+        # a T=20 Jacobian, but 34% of a projected T=400 one -- a share that ROSE
+        # when the policy step was threaded, because that cut the linear term ~4x.
+        #
+        # The expectations are still generated strictly sequentially, so nothing
+        # about the recursion changes; only B of them are held at once. Results
+        # agree with the column-at-a-time form to BLAS accumulation order
+        # (~1e-13 relative), not bitwise -- an unavoidable consequence of letting
+        # the BLAS choose its summation order, and far inside every gate here.
+        expectation <- .hank3_arr_to_vec(output_policy[[output]])
+        if (T_h >= 2L) {
+          blk_w <- .hank3_fn_block(n_cell)
+          t <- 2L
+          while (t <= T_h) {
+            nb <- min(blk_w, T_h - t + 1L)
+            E <- matrix(0, n_cell, nb)
+            for (j in seq_len(nb)) {
+              E[, j] <- expectation
+              expectation <- .hank_forward_apply3(block, expectation)
+            }
+            ## crossprod gives T_h x nb; column j is the fake-news row for
+            ## period t + j - 1.
+            fake_news[t:(t + nb - 1L), ] <- t(crossprod(sweep$curlyD, E))
+            t <- t + nb
+          }
+        }
+        J[[output]][[input]] <- .assemble_jacobian(fake_news)
       }
-      J[[output]][[input]] <- jacobian
     }
   }
   if (budget_close) {

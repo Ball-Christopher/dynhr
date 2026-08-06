@@ -13,12 +13,12 @@ hank_ar_score_weights_cpp <- function(Sidx, Sinv, v, n_g) {
     .Call(`_dynhr_hank_ar_score_weights_cpp`, Sidx, Sinv, v, n_g)
 }
 
-hank_egm_step_cpp <- function(Va_p_, a_grid_, y_, r, beta, eis, Pi_, amin) {
-    .Call(`_dynhr_hank_egm_step_cpp`, Va_p_, a_grid_, y_, r, beta, eis, Pi_, amin)
+hank_egm_step_cpp <- function(Va_p_, a_grid_, y_, r, beta, eis, Pi_, amin, coh_extra_ = NULL) {
+    .Call(`_dynhr_hank_egm_step_cpp`, Va_p_, a_grid_, y_, r, beta, eis, Pi_, amin, coh_extra_)
 }
 
-hank_egm_solve_cpp <- function(a_grid_, y_, r, beta, eis, Pi_, amin, tol, maxit, Va_init_ = NULL) {
-    .Call(`_dynhr_hank_egm_solve_cpp`, a_grid_, y_, r, beta, eis, Pi_, amin, tol, maxit, Va_init_)
+hank_egm_solve_cpp <- function(a_grid_, y_, r, beta, eis, Pi_, amin, tol, maxit, Va_init_ = NULL, coh_extra_ = NULL) {
+    .Call(`_dynhr_hank_egm_solve_cpp`, a_grid_, y_, r, beta, eis, Pi_, amin, tol, maxit, Va_init_, coh_extra_)
 }
 
 hank_stationary_dist_cpp <- function(a_pol_, a_grid_, Pi_, tol, maxit) {
@@ -59,6 +59,10 @@ hank_egm3_step_cpp <- function(Vd_, Vf_, Va_, dg_, fg_, ag_, y_, Pi_, rd, rf, ra
 
 hank_egm3_solve_cpp <- function(Vd, Vf, Va, dg, fg, ag, y, Pi, rd, rf, ra, beta, eis, chi0, chi1, chi2, phi0, phi1, phi2, tol, maxit, relax, px = 1.0, threads = 1L) {
     .Call(`_dynhr_hank_egm3_solve_cpp`, Vd, Vf, Va, dg, fg, ag, y, Pi, rd, rf, ra, beta, eis, chi0, chi1, chi2, phi0, phi1, phi2, tol, maxit, relax, px, threads)
+}
+
+hank_curly_sweep3_cpp <- function(Vd_ss_, Vf_ss_, Va_ss_, dVd0_, dVf0_, dVa0_, dg_, fg_, ag_, y_, Pi_, rd, rf, ra, beta, eis, chi0, chi1, chi2, phi0, phi1, phi2, px, D_ss_, outputs, delta_v, T_h, threads = 1L) {
+    .Call(`_dynhr_hank_curly_sweep3_cpp`, Vd_ss_, Vf_ss_, Va_ss_, dVd0_, dVf0_, dVa0_, dg_, fg_, ag_, y_, Pi_, rd, rf, ra, beta, eis, chi0, chi1, chi2, phi0, phi1, phi2, px, D_ss_, outputs, delta_v, T_h, threads)
 }
 
 hank_fnv1a64_cpp <- function(x) {
@@ -174,8 +178,8 @@ tpf_propagate_particles <- function(particles, shocks, hx, hu, hxx, hxu, huu, hs
     .Call(`_dynhr_tpf_propagate_particles`, particles, shocks, hx, hu, hxx, hxu, huu, hss)
 }
 
-tpf_run_period_cpp <- function(particles, y_t, L_e, hx, hu, hxx, hxu, huu, hss, ZZ, DD, d_obs, ghss_obs, me_variance, ess_target, n_mh, mh_scale, max_stages, U_normals = NULL, U_resample = NULL, U_mid = NULL, U_mutation = NULL) {
-    .Call(`_dynhr_tpf_run_period_cpp`, particles, y_t, L_e, hx, hu, hxx, hxu, huu, hss, ZZ, DD, d_obs, ghss_obs, me_variance, ess_target, n_mh, mh_scale, max_stages, U_normals, U_resample, U_mid, U_mutation)
+tpf_run_period_cpp <- function(particles, y_t, L_e, hx, hu, hxx, hxu, huu, hss, ZZ, DD, d_obs, ghss_obs, hxx_obs, hxu_obs, huu_obs, me_variance, ess_target, n_mh, mh_scale, max_stages, U_normals = NULL, U_resample = NULL, U_mid = NULL, U_mutation = NULL) {
+    .Call(`_dynhr_tpf_run_period_cpp`, particles, y_t, L_e, hx, hu, hxx, hxu, huu, hss, ZZ, DD, d_obs, ghss_obs, hxx_obs, hxu_obs, huu_obs, me_variance, ess_target, n_mh, mh_scale, max_stages, U_normals, U_resample, U_mid, U_mutation)
 }
 
 tpf_log_weights <- function(particles, y_t, ZZ, DD, shocks, d_obs, ghss_obs, me_variance, phi) {

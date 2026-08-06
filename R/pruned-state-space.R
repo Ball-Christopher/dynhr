@@ -250,23 +250,57 @@ pruned_ss_moments <- function(pss, n_ar = 5L) {
 ## eigmin(F_0) = 1 + me/eigmin, loadings = |eigenvector|), or NULL when the
 ## me=0 recursion is not evaluable.
 ## ---------------------------------------------------------------------------
+## Session memo for the detector: the result is a pure function of its
+## inputs, and callers that leave me_floor_check = TRUE on a per-call path
+## (e.g. kalman_filter called directly in a loop with me_variance > 0) would
+## otherwise re-pay the full Riccati iteration on every call — measured at
+## ~13x the cost of the small-model KF sweep itself (2026-08-05 perf-gate
+## regression, introduced 7b2f217). Keyed on the full numeric content, so a
+## hit is exact; bounded so a rogue per-draw caller cannot grow it without
+## limit. Requires the optional 'digest' package; without it the detector
+## simply recomputes (pre-memo behavior).
+.me_floor_memo <- new.env(parent = emptyenv())
+
 .pruned_me_floor_ratio <- function(Tlin, ZZ, QQ, HH_model, SS, Sxi0,
                                    me_variance, n_iter = 150L) {
+  key <- NULL
+  if (requireNamespace("digest", quietly = TRUE)) {
+    key <- digest::digest(list(Tlin, ZZ, QQ, HH_model, SS, Sxi0,
+                               me_variance, n_iter))
+    hit <- get0(key, envir = .me_floor_memo, inherits = FALSE)
+    if (!is.null(hit)) return(if (identical(hit, list())) NULL else hit)
+  }
   P <- Sxi0
+  res <- NULL
   for (k in seq_len(n_iter)) {
     Fm <- ZZ %*% P %*% t(ZZ) + HH_model
     Fi <- tryCatch(solve(Fm), error = function(e) NULL)
-    if (is.null(Fi)) return(NULL)
+    if (is.null(Fi)) { P <- NULL; break }
     M <- Tlin %*% P %*% t(ZZ) + SS
-    P <- Tlin %*% P %*% t(Tlin) + QQ - M %*% Fi %*% t(M)
-    P <- (P + t(P)) * 0.5
+    P_new <- Tlin %*% P %*% t(Tlin) + QQ - M %*% Fi %*% t(M)
+    P_new <- (P_new + t(P_new)) * 0.5
+    ## Converged-to-steady-state early exit: the detector only needs the
+    ## fixed-point F, and stable systems typically converge in far fewer
+    ## than n_iter steps.
+    done <- max(abs(P_new - P)) <= 1e-12 * max(1, max(abs(P_new)))
+    P <- P_new
+    if (done) break
   }
-  F0 <- ZZ %*% P %*% t(ZZ) + HH_model
-  eg <- eigen((F0 + t(F0)) * 0.5, symmetric = TRUE)
-  emin <- min(eg$values)
-  if (!is.finite(emin) || emin <= 0) return(NULL)
-  list(ratio    = 1 + me_variance / emin,
-       loadings = abs(eg$vectors[, which.min(eg$values)]))
+  if (!is.null(P)) {
+    F0 <- ZZ %*% P %*% t(ZZ) + HH_model
+    eg <- eigen((F0 + t(F0)) * 0.5, symmetric = TRUE)
+    emin <- min(eg$values)
+    if (is.finite(emin) && emin > 0)
+      res <- list(ratio    = 1 + me_variance / emin,
+                  loadings = abs(eg$vectors[, which.min(eg$values)]))
+  }
+  if (!is.null(key)) {
+    if (length(ls(.me_floor_memo, all.names = TRUE)) >= 64L)
+      rm(list = ls(.me_floor_memo, all.names = TRUE), envir = .me_floor_memo)
+    ## list() is the memo sentinel for a NULL (not-evaluable) result.
+    assign(key, if (is.null(res)) list() else res, envir = .me_floor_memo)
+  }
+  res
 }
 
 .warn_me_floor_lock <- function(chk, obs_vars, me_variance, threshold = 1.5) {

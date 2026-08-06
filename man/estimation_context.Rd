@@ -66,7 +66,11 @@ environments -- see \code{\link{validate_context}}.}
 Typical keys: \code{n_particles}, \code{ess_target}, \code{n_mh},
 \code{seed}, \code{cpm_rho_u} (CPM AR(1) correlation, default \code{NULL}
 = disabled; set to a value in (0, 1) to enable the correlated
-pseudo-marginal RWMH sampler -- see \code{rwmh_cpm}).}
+pseudo-marginal RWMH sampler -- see \code{rwmh_cpm}). \code{cpm_rho_u}
+is a routing signal only (not a factory argument); when set,
+\code{make_log_posterior}'s \code{"tpf"} branch pins
+\code{burn_in_init = 0L} unless the caller already set it explicitly,
+since the CPM \code{U_list} slot layout has no burn-in slots.}
 
 \item{obc_options}{Named list of options for the OBC PKF path
 (\code{likelihood = "pkf"}).  Reserved keys: \code{max_inner},
@@ -117,8 +121,9 @@ multivariate Student-t per-period log-likelihood.  Required when
 
 \item{pruned_order}{Integer, \code{2L} (default) or \code{3L}.  Selects
 the AFVRR pruned state-space order used by \code{make_log_posterior}
-when \code{likelihood = "pruned"} (order-2 vs order-3 augmented state).
-Only meaningful when \code{likelihood = "pruned"}; setting
+when \code{likelihood = "pruned"} (order-2 vs order-3 augmented state)
+or \code{likelihood = "tpf"} (order-2 vs order-3 particle state).
+Only meaningful for those two likelihoods; setting
 \code{pruned_order = 3L} with any other likelihood is an error.}
 }
 \value{

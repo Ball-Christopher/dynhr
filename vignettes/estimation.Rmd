@@ -7,12 +7,18 @@ vignette: >
   %\VignetteEncoding{UTF-8}
 ---
 
-```{r setup, include = FALSE}
+```{r setup, include = FALSE, purl = FALSE}
 knitr::opts_chunk$set(
   collapse = TRUE,
   comment  = "#>",
   eval     = FALSE   # estimation is slow; show code without running
 )
+## These chunks are deliberately illustrative -- they refer to YOUR data file
+## and YOUR estimation output, so they cannot run standalone. `eval = FALSE`
+## alone is not enough: R CMD check also RUNS the tangled code, which
+## knitr::purl() emits whatever `eval` says. Hence `purl = FALSE` in every
+## chunk HEADER -- it cannot be set here, because during tangling knitr never
+## evaluates this chunk.
 ```
 
 ## Overview
@@ -47,7 +53,7 @@ end;
 
 Extract the prior specification in R:
 
-```{r priors}
+```{r priors, purl = FALSE}
 library(dynhr)
 mod    <- system.file("extdata", "models", "nk_hs2016.mod", package = "dynhr")
 model  <- parse_mod(mod, verbose = FALSE)
@@ -62,7 +68,7 @@ print(priors)
 
 ## 2  Build the log-posterior
 
-```{r posterior}
+```{r posterior, purl = FALSE}
 compiled <- compile_model(model, verbose = FALSE)
 
 # Observed data (T × n_obs matrix; column names must match obs vars in model)
@@ -113,7 +119,7 @@ Instead of the standard Gaussian (Kalman) likelihood, pass
 against the data (Mutschler 2015).  This is particularly useful
 when the data exhibit non-Gaussian features:
 
-```{r cumulant, eval = FALSE}
+```{r cumulant, eval = FALSE, purl = FALSE}
 log_post_cumulant <- make_posterior(model, data = Y,
   prior_spec   = priors,
   obs_vars     = c("YGR", "INFL", "INT"),
@@ -131,7 +137,7 @@ and the individual cumulant functions `compute_third_cumulant()` and
 
 ## 3  Find the posterior mode
 
-```{r mode}
+```{r mode, purl = FALSE}
 mode <- find_mode(
   log_post_fn = log_post,
   theta_init  = theta0,
@@ -191,11 +197,34 @@ performance-optimal choice depends on model size:
 
 Both can be set per call or globally via `dynhr_set_options()`.
 
+#### Exact-Hessian curvature, model evidence, and weak identification
+
+The analytic Hessian is exported directly as `posterior_hessian()`, with four
+methods for its second-order term — `t2_method = "loop"`, `"contract_once"`,
+`"hvp_solution"`, and `"adjoint_solution"`. The last two never form the
+state-space second derivative; `"adjoint_solution"` is exact and
+finite-difference-free (it reuses the solution adjoint). Its inverse is the
+Laplace posterior covariance, and `laplace_log_marglik()` turns the mode plus
+that Hessian into a Laplace estimate of the log marginal likelihood (a cheap
+model-comparison score that does not need SMC):
+
+```{r hessian-curvature, eval = FALSE, purl = FALSE}
+H  <- posterior_hessian(log_post, mode$theta_mode, t2_method = "adjoint_solution")
+lm <- laplace_log_marglik(log_post, mode$theta_mode, hessian = H)
+```
+
+On weakly-identified or ill-conditioned posteriors, `check_hessian_conditioning()`
+flags near-flat directions before you trust the mode covariance,
+`fd_safe_hessian()` returns a positive-definite fallback, and `profile_ci()`
+builds profile-likelihood confidence intervals that remain valid when the
+quadratic (Wald) approximation does not. `run_estimation_passport()` bundles
+these into a one-call pre-flight report for an estimation problem.
+
 ---
 
 ## 4  RWMH sampling
 
-```{r rwmh}
+```{r rwmh, purl = FALSE}
 # Scale the Hessian-based proposal
 n_par      <- length(mode$theta_mode)
 Sigma_prop <- mode$V_mode * (2.38^2 / n_par)
@@ -226,7 +255,7 @@ dispatch with Gelman--Rubin convergence diagnostics.
 SMC is a particle filter over the parameter space.  It does not require
 a mode estimate and provides a free log-marginal-likelihood estimate:
 
-```{r smc}
+```{r smc, purl = FALSE}
 chains_smc <- smc(
   log_post_fn = log_post,
   prior_spec  = priors,
@@ -237,13 +266,21 @@ print(chains_smc)
 cat("log p(Y|M):", chains_smc$log_marginal_lik, "\n")
 ```
 
+When the likelihood itself is a noisy-but-unbiased particle-filter estimate
+(the tempered particle filter, `likelihood = "tpf"`, or the SV-on-shocks
+Rao-Blackwellised filter, `"sv_rbpf"`), `dynhr_smc2()` runs SMC^2: an outer
+theta-tempering SMC around an inner particle filter, using pseudo-marginal
+(PMMH-style) mutation moves so the final-stage marginal is still the exact
+posterior. See `?dynhr_smc2` and `vignette("sbc-matrix")` for which
+sampler/likelihood pairs are certified.
+
 ---
 
 ## 6  NUTS
 
 NUTS adapts its step size and mass matrix automatically:
 
-```{r nuts}
+```{r nuts, purl = FALSE}
 chains_nuts <- nuts(
   log_post_fn = log_post,
   theta0      = mode$theta_mode,
@@ -262,7 +299,7 @@ should have zero divergences.
 
 All of the above in \(<30\) lines:
 
-```{r onecall}
+```{r onecall, purl = FALSE}
 result <- run_full_estimation(
   mod_file    = "nk_hs2016.mod",
   data        = Y,
@@ -308,7 +345,7 @@ where `"hessian"` recovered it fully). It errors unless you set
 
 After any sampler:
 
-```{r diag}
+```{r diag, purl = FALSE}
 # Run the 30-diagnostic battery (D1–D30)
 diags <- run_diagnostics(
   model    = model,
@@ -319,6 +356,15 @@ diags <- run_diagnostics(
 
 # Write a structured report
 write_report(diags, file = "output/report.md")
+```
+
+For a quick per-parameter chain summary without the full battery, call
+`chain_diagnostics()` directly on a draws matrix — it returns split-R-hat,
+bulk/tail effective sample size, and Monte-Carlo standard errors:
+
+```{r chain-diag, eval = FALSE, purl = FALSE}
+cd <- chain_diagnostics(result$chains$chain)   # n_draws x n_par (or a chain list)
+print(cd)                                       # rhat, ess_bulk, ess_tail, mcse
 ```
 
 The diagnostic suite covers pre-estimation identification (D1–D4, D19–D26),
@@ -357,7 +403,7 @@ and scales naturally to OBC problems.
 
 Both can be called from `run_full_estimation(..., run_ramsey = TRUE)`:
 
-```{r ramsey, eval = FALSE}
+```{r ramsey, eval = FALSE, purl = FALSE}
 result_ramsey <- ramsey_model(model, compiled, params,
                                planner_objective = "log(c)",
                                order = 1L, verbose = TRUE)
@@ -369,7 +415,7 @@ print(result_ramsey)
 `osr()` optimises the coefficients of a pre-specified policy rule to
 minimise the unconditional variance of target variables, using CMA-ES:
 
-```{r osr, eval = FALSE}
+```{r osr, eval = FALSE, purl = FALSE}
 osr_result <- osr(model, free_params = c(phi_pi = 1.5, phi_y = 0.5),
                    loss_vars = c("pi", "y_gap"),
                    loss_weights = c(pi = 1, y_gap = 0.5))
@@ -380,7 +426,7 @@ osr_result <- osr(model, free_params = c(phi_pi = 1.5, phi_y = 0.5),
 `discretionary_policy()` computes the Markov-perfect equilibrium under
 discretion via Riccati fixed-point iteration:
 
-```{r disc, eval = FALSE}
+```{r disc, eval = FALSE, purl = FALSE}
 disc_result <- discretionary_policy(model,
                                      policy_instrument = "i",
                                      loss_vars = c("pi", "y_gap"))
@@ -409,7 +455,7 @@ approach: given IRFs to a policy instrument, compute the optimal
 instrument deviation that minimises a quadratic loss subject to the
 IRF-based transmission:
 
-```{r opp, eval = FALSE}
+```{r opp, eval = FALSE, purl = FALSE}
 opp_result <- opp_sufficient_stats(model,
                                     target_vars = c("pi", "y_gap"),
                                     loss_weights = c(pi = 1, y_gap = 0.5))
@@ -431,7 +477,7 @@ available; otherwise D18 remains informational.
 
 ## 10  Saving and loading chains
 
-```{r save}
+```{r save, purl = FALSE}
 saveRDS(result$chains, "output/chains.rds")
 chains <- readRDS("output/chains.rds")
 

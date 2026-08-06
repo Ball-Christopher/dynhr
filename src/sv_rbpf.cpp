@@ -70,6 +70,9 @@ double sv_rbpf_loglik_cpp(const arma::mat& Y,        // n_obs x T
   arma::uvec idx(N);
 
   double loglik = 0.0;
+  bool warned_all_fail = false;   // once-per-call: distinguish "true zero
+                                   // likelihood" from "linear algebra failed
+                                   // for every particle in a period"
 
   for (int t = 0; t < n_T; ++t) {
     // -- propagate volatility (bootstrap proposal), R draw order ------------
@@ -101,7 +104,25 @@ double sv_rbpf_loglik_cpp(const arma::mat& Y,        // n_obs x T
         P_new.slice(i) = Pi;
         continue;
       }
-      arma::mat Fi = arma::inv_sympd(Ft);
+      // Non-throwing 2-arg form: chol() succeeding does not guarantee
+      // inv_sympd() succeeds (different LAPACK paths disagree right at the
+      // PD boundary — the 0.9.0.0001 KF-kernel crash class). Rather than
+      // degrade a particle we already have a valid Cholesky factor for,
+      // recover Fi from Fc directly: arma::chol(Fc, Ft) returns Fc UPPER
+      // triangular with Ft = Fc.t() * Fc, so Ft^{-1} = Rinv * Rinv.t()
+      // where Rinv = inv(trimatu(Fc)) = Fc^{-1}. Only fall back to the
+      // weight-0 path if THAT also fails (near-singular Fc).
+      arma::mat Fi;
+      if (!arma::inv_sympd(Fi, Ft)) {
+        arma::mat Rinv;
+        if (!arma::inv(Rinv, arma::trimatu(Fc))) {
+          ll_t(i) = neg_inf;
+          s_new.col(i) = s.col(i);
+          P_new.slice(i) = Pi;
+          continue;
+        }
+        Fi = Rinv * Rinv.t();
+      }
       double ldf = 2.0 * arma::accu(arma::log(Fc.diag()));
 
       arma::vec v = y_t - ZZ * s.col(i) - d;
@@ -125,7 +146,17 @@ double sv_rbpf_loglik_cpp(const arma::mat& Y,        // n_obs x T
 
     // -- log-mean-exp increment ----------------------------------------------
     double m = ll_t.max();
-    if (!std::isfinite(m)) return neg_inf;
+    if (!std::isfinite(m)) {
+      if (!warned_all_fail) {
+        warned_all_fail = true;
+        Rcpp::warning("sv_rbpf_loglik_cpp: all %d particles failed at period "
+                       "%d (non-PD forecast covariance or non-finite "
+                       "likelihood for every particle) -- returning -Inf. "
+                       "This may indicate linear-algebra failure rather than "
+                       "a genuine zero-likelihood region.", N, t + 1);
+      }
+      return neg_inf;
+    }
     arma::vec w_un = arma::exp(ll_t - m);
     loglik += m + std::log(arma::mean(w_un));
 

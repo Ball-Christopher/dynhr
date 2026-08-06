@@ -33,17 +33,22 @@
 #' the kink treatment.
 #' @keywords internal
 .hank_egm_step_wedge <- function(Va_p, a_grid, y, r_plus, r_minus,
-                                 beta, eis, Pi, amin = a_grid[1L]) {
+                                 beta, eis, Pi, amin = a_grid[1L],
+                                 coh_extra = NULL) {
   n_e <- length(y); n_a <- length(a_grid)
   tiny <- 1e-12
   Wb <- pmax(beta * (Pi %*% Va_p), tiny)         # over choices a'
   c_endo <- Wb^(-eis)
   x <- c_endo + matrix(a_grid, n_e, n_a, byrow = TRUE)   # resources needed
   ## piecewise inversion of the kinked coh: b >= 0 iff x - y >= 0
+  ## (coh_extra is a beginning-of-period (e,a) quantity -- like the symmetric
+  ## kernel, it enters only the ACTUAL coh below, never this endogenous-grid
+  ## inversion, which is indexed by the CHOICE a', not the current state.)
   gap <- x - y
   a_endo <- ifelse(gap >= 0, gap / (1 + r_plus), gap / (1 + r_minus))
   r_state <- ifelse(a_grid < 0, r_minus, r_plus)          # today's rate by state
   coh <- matrix((1 + r_state) * a_grid, n_e, n_a, byrow = TRUE) + y
+  if (!is.null(coh_extra)) coh <- coh + coh_extra
   a_pol <- matrix(0, n_e, n_a); c_pol <- a_pol
   for (e in seq_len(n_e)) {
     ap <- .hank_interp1(a_endo[e, ], a_grid, a_grid)
@@ -51,7 +56,15 @@
     a_pol[e, ] <- ap
     c_pol[e, ] <- coh[e, ] - ap                            # exact budget
   }
-  c_pol <- pmax(c_pol, tiny)
+  c_pol_raw <- c_pol
+  if (!is.null(coh_extra) && any(c_pol_raw <= tiny))
+    .hank_egm_warn_once(
+      "coh_extra_floor_wedge",
+      "hank_egm (wedge): a transition-path evaluation with a matrix ",
+      "'Tr_incidence' (Tier 2) drove cash-on-hand to the EGM tiny-floor ",
+      "(1e-12) region at some (e, a) point. This warning fires at most ",
+      "once per session.")
+  c_pol <- pmax(c_pol_raw, tiny)
   uc <- c_pol^(-1 / eis)
   Va <- matrix(1 + r_state, n_e, n_a, byrow = TRUE) * uc   # envelope, state rate
   list(Va = Va, a = a_pol, c = c_pol)
@@ -68,17 +81,18 @@
 #' @keywords internal
 .hank_egm_solve_wedge <- function(a_grid, y, r_plus, r_minus, beta, eis, Pi,
                                   amin = a_grid[1L], tol = 1e-11,
-                                  maxit = 5000L, Va_init = NULL) {
+                                  maxit = 5000L, Va_init = NULL,
+                                  coh_extra = NULL) {
   if (!is.numeric(r_minus) || length(r_minus) != 1L || !is.finite(r_minus))
     stop(".hank_egm_solve_wedge: 'r_minus' must be a finite scalar.")
   base <- hank_egm_solve(a_grid, y = y, r = r_plus, beta = beta, eis = eis,
                          Pi = Pi, amin = amin, tol = tol, maxit = maxit,
-                         Va_init = Va_init)
+                         Va_init = Va_init, coh_extra = coh_extra)
   Va <- base$Va
   converged <- FALSE; it <- 0L; a_old <- NULL; step <- NULL
   for (it in seq_len(as.integer(maxit))) {
     step <- .hank_egm_step_wedge(Va, a_grid, y, r_plus, r_minus, beta, eis,
-                                 Pi, amin = amin)
+                                 Pi, amin = amin, coh_extra = coh_extra)
     Va <- step$Va
     if (!is.null(a_old)) {
       d <- max(abs(step$a - a_old))

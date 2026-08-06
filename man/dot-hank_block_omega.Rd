@@ -12,6 +12,10 @@ them as uniform-incidence rather than erroring. Returns a length-\code{n_e}
 vector of ones in that case, and since \code{Tr * 1} is bit-identical to
 \code{Tr} in IEEE arithmetic the default path is byte-for-byte the
 pre-incidence behaviour (the same argument \code{\link{.hank_block_tr}}
-relies on for \code{y + 0}).
+relies on for \code{y + 0}). On a Tier-2 block this returns the stored
+\code{n_e x n_a} MATRIX unchanged (see \code{\link{hank_het_block}}'s
+\code{Tr_incidence} doc); callers that need a length-\code{n_e} vector
+either check \code{is.matrix()} first or go through
+\code{\link{.hank_income_extra}}, which dispatches on it.
 }
 \keyword{internal}

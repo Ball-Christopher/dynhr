@@ -15,7 +15,8 @@
   amin = a_grid[1L],
   tol = 1e-11,
   maxit = 5000L,
-  Va_init = NULL
+  Va_init = NULL,
+  coh_extra = NULL
 )
 }
 \description{

@@ -88,22 +88,25 @@ arma::mat tpf_propagate_particles(
 
   if (hxu_nonzero) {
     // kron_ex: (n_e * n_s) x N where column i = e[:,i] kron x1[:,i]
-    // hxu cols: (state FAST, exo SLOW) -> matching Kronecker is e %x% x1
-    // kronecker(e, x1)[j + k*n_e] = e[j] * x1[k]  (j fast = exo, k slow = state)
-    // Wait -- per the R comment in solve-perturbation-order2.R line 911:
-    //   hxu cols are (state FAST, exo SLOW) so matching vector is (e %x% x1)
-    //   giving rows (exo SLOW, state FAST)
-    // In R: kron_ex[, i] <- kronecker(shocks[, i], x1[, i])
-    // R kronecker(a,b)[j + k*length(a)] = a[j]*b[k]  (j fast=a, k slow=b)
-    // So kronecker(e, x1)[j + k*n_e] = e[j] * x1[k]   row idx j + k*n_e
-    // => element (j + k*n_e, i) = e[j,i] * x1[k,i]
+    // hxu cols: (state FAST, exo SLOW) -> matching Kronecker is e %x% x1.
+    //
+    // 2026-08-04 obs-tensor-fix session fix (PRE-EXISTING bug, found while
+    // adding the R-vs-C++ obs-tensor parity test on rbc2shock, a 2-shock
+    // model): R's kronecker(a,b) has `a` SLOW (outer) and `b` FAST (inner)
+    // -- verified empirically, e.g. kronecker(c(10,20), c(1,2,3)) ==
+    // c(10,20,30, 20,40,60) == a[1]*b, a[2]*b concatenated. So
+    // kronecker(e, x1)[j + k*n_s] = e[k] * x1[j]  (j FAST over x1, k SLOW
+    // over e). The code below previously had e FAST / x1 SLOW with an
+    // n_e-strided index -- the WRONG layout whenever n_e != n_s (invisible
+    // on the single-shock fixtures that exercised this kernel before).
+    // R reference: .tpf_propagate_R's `kron_ex[, i] <- kronecker(shocks[, i], x1[, i])`.
     arma::mat kron_ex(n_e * n_s, N);
     for (arma::uword i = 0; i < N; ++i) {
       const arma::vec& ei  = shocks.col(i);
       const arma::vec& xi  = x1.col(i);
-      for (arma::uword k = 0; k < n_s; ++k) {
-        for (arma::uword j = 0; j < n_e; ++j) {
-          kron_ex(j + k * n_e, i) = ei(j) * xi(k);   // e FAST, x1 SLOW
+      for (arma::uword k = 0; k < n_e; ++k) {
+        for (arma::uword j = 0; j < n_s; ++j) {
+          kron_ex(j + k * n_s, i) = ei(k) * xi(j);   // x1 FAST, e SLOW
         }
       }
     }
@@ -268,7 +271,35 @@ static double next_phi_cpp(const arma::vec& log_liks, double phi_curr,
   return lo;
 }
 
+// Helper: per-column Kronecker product, R convention verified empirically
+// (kronecker(a,b) with length(a)=2, length(b)=3 gives a[1]*b, a[2]*b
+// concatenated -- i.e. A is SLOW (outer), B is FAST (inner)):
+//   out[j + i*nb, col] = A[i,col] * B[j,col]   (j in [0,nb), i in [0,na))
+// This is the SAME convention .tpf_propagate_R's kron_ex etc. rely on via
+// literal kronecker() calls; it matters (produces a different result than
+// the A-fast/B-slow layout) whenever nA != nB, e.g. kron(shocks, x1).
+static arma::mat kron_cols_2(const arma::mat& A, const arma::mat& B) {
+  const arma::uword na = A.n_rows, nb = B.n_rows, N = A.n_cols;
+  arma::mat out(na * nb, N);
+  for (arma::uword c = 0; c < N; ++c) {
+    for (arma::uword i = 0; i < na; ++i) {
+      for (arma::uword j = 0; j < nb; ++j) {
+        out(j + i * nb, c) = A(i, c) * B(j, c);
+      }
+    }
+  }
+  return out;
+}
+
 // Helper: inline log-weights kernel (avoids a separate Rcpp round-trip)
+//
+// 2026-08-04 obs-tensor fix: the observation mean also carries the
+// quadratic terms in (x1_prev, e_t) that simulate_model_order2's observable
+// reconstruction keeps -- 0.5*hxx_obs(x1 kron x1) + hxu_obs(e kron x1) +
+// 0.5*huu_obs(e kron e) -- mirroring R/tpf-likelihood.R's .tpf_log_weights_R.
+// hxx_obs/hxu_obs/huu_obs are all-zero matrices (never NULL) when the model
+// has no nonlinear obs tensors, so the added terms are exact zeros and the
+// LINEAR-model nesting stays bit-identical.
 static arma::vec tpf_lw_inline(
     const arma::mat& particles,
     const arma::vec& y_t,
@@ -278,7 +309,10 @@ static arma::vec tpf_lw_inline(
     const arma::vec& d_obs,
     const arma::vec& ghss_obs,
     double me_variance,
-    double phi
+    double phi,
+    const arma::mat& hxx_obs,
+    const arma::mat& hxu_obs,
+    const arma::mat& huu_obs
 ) {
   const arma::uword n_s  = ZZ.n_cols;
   const arma::uword n_obs = ZZ.n_rows;
@@ -288,6 +322,14 @@ static arma::vec tpf_lw_inline(
   arma::mat x2 = particles.rows(n_s, 2 * n_s - 1);
 
   arma::mat fitted = ZZ * (x1 + x2) + DD * shocks;
+
+  const bool hxx_obs_nz = arma::any(arma::vectorise(arma::abs(hxx_obs)) > 0.0);
+  const bool hxu_obs_nz = arma::any(arma::vectorise(arma::abs(hxu_obs)) > 0.0);
+  const bool huu_obs_nz = arma::any(arma::vectorise(arma::abs(huu_obs)) > 0.0);
+  if (hxx_obs_nz) fitted += 0.5 * hxx_obs * kron_cols_2(x1, x1);
+  if (hxu_obs_nz) fitted += hxu_obs * kron_cols_2(shocks, x1);
+  if (huu_obs_nz) fitted += 0.5 * huu_obs * kron_cols_2(shocks, shocks);
+
   arma::vec offset = d_obs + ghss_obs;
   fitted.each_col() += offset;
 
@@ -323,6 +365,9 @@ List tpf_run_period_cpp(
     const arma::mat DD,            // n_obs x n_e
     const arma::vec d_obs,         // n_obs
     const arma::vec ghss_obs,      // n_obs
+    const arma::mat hxx_obs,       // n_obs x (n_s*n_s), obs-row slice of ghxx
+    const arma::mat hxu_obs,       // n_obs x (n_s*n_e), obs-row slice of ghxu
+    const arma::mat huu_obs,       // n_obs x (n_e*n_e), obs-row slice of ghuu
     double          me_variance,   // > 0
     double          ess_target,    // default 0.5
     int             n_mh,          // mutation steps (default 1)
@@ -363,7 +408,8 @@ List tpf_run_period_cpp(
   arma::mat shocks = L_e * z_mat;  // n_e x N (theta-dependent, materialized)
 
   arma::vec log_liks = tpf_lw_inline(
-      particles, y_t, ZZ, DD, shocks, d_obs, ghss_obs, me_variance, 1.0);
+      particles, y_t, ZZ, DD, shocks, d_obs, ghss_obs, me_variance, 1.0,
+      hxx_obs, hxu_obs, huu_obs);
 
   // ---- Step 2: adaptive phi tempering loop ---------------------------------
   // CPM: extract pre-drawn z for the phi=1 resampling uniform.
@@ -492,23 +538,16 @@ List tpf_run_period_cpp(
     }
 
     // ---- RWMH mutation (Invariant B: only immediately after resample) ------
+    // Herbst & Schorfheide (2019): mutate ONLY the period-t shock e_t with
+    // the ancestor state s_{t-1} FIXED. An independence proposal e' ~
+    // N(0, Sigma_e) (the shock prior, via L_e below) has acceptance ratio
+    // exactly phi_curr * (loglik(e') - loglik(e)) -- the formula already in
+    // use here. Moving the state s_{t-1} in a random walk (the old
+    // behaviour) drops the filtering density p(s_{t-1}|Y_{1:t-1}) that
+    // lives only in the resampled cloud, breaking invariance and biasing
+    // the likelihood estimate upward. z_s is still drawn/consumed below
+    // (RNG/CPM stream compatibility) but is deliberately unused.
     if (resampled && n_mh > 0 && N > 1) {
-
-      // Cloud covariance of state component (weights = 1/N after resample)
-      arma::mat parts_T = particles.t();           // N x n_2s
-      arma::rowvec w_bar = w_norm.t() * parts_T;  // 1 x n_2s (weighted mean)
-      arma::mat parts_c  = parts_T.each_row() - w_bar;  // centred, N x n_2s
-      // Weighted scatter: Sigma = (parts_c .* w_norm)' * parts_c
-      arma::mat Sigma_hat = (parts_c.each_col() % w_norm).t() * parts_c;
-      Sigma_hat += 1e-8 * arma::eye<arma::mat>(n_2s, n_2s);
-
-      // Cholesky of proposal; fallback to small diagonal on failure
-      arma::mat L_prop(n_2s, n_2s, arma::fill::zeros);
-      bool chol_ok = arma::chol(L_prop,
-                                mh_scale * mh_scale * Sigma_hat, "lower");
-      if (!chol_ok) {
-        L_prop = (mh_scale * 0.01) * arma::eye<arma::mat>(n_2s, n_2s);
-      }
 
       // Per-particle RWMH loop
       // Option A: consume mutation noise from U_mutation buffer when supplied.
@@ -526,7 +565,8 @@ List tpf_run_period_cpp(
         arma::mat e_mat(e_i.memptr(), n_e,  1, false);
         double tlp_i = phi_curr *
             tpf_lw_inline(s_mat, y_t, ZZ, DD, e_mat,
-                           d_obs, ghss_obs, me_variance, 1.0)(0);
+                           d_obs, ghss_obs, me_variance, 1.0,
+                           hxx_obs, hxu_obs, huu_obs)(0);
 
         for (int step = 0; step < n_mh; ++step) {
           // Column index into U_mutation for (stage, step, particle i)
@@ -562,14 +602,17 @@ List tpf_run_period_cpp(
             log_u = std::log(Rcpp::as<double>(Rcpp::runif(1, 0.0, 1.0)));
           }
 
-          arma::vec s_prop = s_i + L_prop * z_sv;
+          // Ancestor state fixed (H&S 2019); z_sv drawn above but unused --
+          // keeps the mutation-buffer layout / RNG stream bit-identical.
+          arma::vec s_prop = s_i;
           arma::vec e_prop = L_e * z_ev;
 
           arma::mat sp_mat(s_prop.memptr(), n_2s, 1, false);
           arma::mat ep_mat(e_prop.memptr(), n_e,  1, false);
           double tlp_p = phi_curr *
               tpf_lw_inline(sp_mat, y_t, ZZ, DD, ep_mat,
-                             d_obs, ghss_obs, me_variance, 1.0)(0);
+                             d_obs, ghss_obs, me_variance, 1.0,
+                             hxx_obs, hxu_obs, huu_obs)(0);
 
           if (std::isfinite(tlp_p) && log_u < tlp_p - tlp_i) {
             s_i   = s_prop;
@@ -584,7 +627,8 @@ List tpf_run_period_cpp(
 
       // Recompute full log-likelihoods after mutation
       log_liks = tpf_lw_inline(particles, y_t, ZZ, DD, shocks,
-                                d_obs, ghss_obs, me_variance, 1.0);
+                                d_obs, ghss_obs, me_variance, 1.0,
+                                hxx_obs, hxu_obs, huu_obs);
       log_w.fill(0.0);   // reset to uniform: temper from phi_curr next iter
     }
   }  // end phi loop

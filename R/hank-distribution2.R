@@ -294,3 +294,272 @@ hank_forward_operator2 <- function(b_pol, a_pol, b_grid, a_grid, Pi) {
     .hank_forward_push2(sol$b_N, sol$a_N, b_grid, a_grid, Pi, (1 - Pv) * Dv,
                         backend = backend)
 }
+
+
+#' Sequence-space DISTRIBUTION Jacobian of the two-asset block via the
+#' fake-news algorithm
+#'
+#' Two-asset counterpart of \code{\link{hank_het_dist_jacobian}} (one-asset)
+#' and \code{\link{hank_het3_dist_jacobian}} (three-asset): extends
+#' \code{\link{hank_het2_jacobian}}'s fake-news algorithm to expose the full
+#' distributional response \eqn{J^D[t, s, ] = dD_t/dI_s} (the change in the
+#' \code{(n_e*n_b*n_a)}-vector cross-sectional distribution at date \code{t}
+#' induced by an anticipated shock to aggregate input \code{i} at date
+#' \code{s}), instead of aggregating it into scalar outputs \code{B}/\code{A}/
+#' \code{C}/\code{CHI}.
+#'
+#' Reuses the identical backward sweep (\code{\link{.hank_curly_sweep2}},
+#' hence \code{curlyD}) as \code{\link{hank_het2_jacobian}}. Distributions
+#' push forward under the transpose of the steady-state joint Young operator;
+#' \code{.hank_forward_push2} already IS that transpose contracted
+#' matrix-free (its documentation states the convention: distributions push
+#' forward as \code{t(Lambda) \%*\% d}), so, unlike the three-asset sibling's
+#' \code{.hank_forward_apply3(..., transpose = TRUE)}, no separate transpose
+#' flag is needed here -- calling \code{.hank_forward_push2()} directly on the
+#' steady-state policies IS the distribution-push direction, by construction
+#' of that function. The distribution fake-news matrix cumulates by
+#' repeatedly applying that push to \code{curlyD[, s]}, rather than by
+#' dotting against an expectation vector (the aggregate-output equivalent of
+#' that projection, used by \code{\link{hank_het2_jacobian}} via
+#' \code{block$Lambda \%*\% E}, the untransposed direction).
+#'
+#' TIMING: exactly as for the one- and three-asset blocks, \code{D_t} is the
+#' distribution ENTERING period \code{t} (a predetermined state), so
+#' \code{D_1 = D_ss} always and row \code{t = 1} of \code{J^D} is identically
+#' zero for every shock date \code{s}. \code{curlyD[, s]} is the response of
+#' the policy USED in period \code{s} (\code{s = 1} is the direct current-
+#' period shock; \code{s >= 2} anticipation terms propagate via the joint
+#' \code{(Vb, Va)} derivative -- see \code{\link{.hank_curly_sweep2}}), which
+#' the forward operator turns into a distribution change one calendar period
+#' later, at \code{t = s + 1}. So the whole cumulation is the aggregate-
+#' Jacobian recursion (\code{\link{hank_het2_jacobian}}'s diagonal
+#' cumulation) shifted down by one row.
+#'
+#' Unlike the three-asset block's singleton-\code{f_grid} reduction (whose
+#' \code{px} column is an exact zero, see \code{.hank3_px_is_inert}), the
+#' two-asset block has no analogous EXACT-ZERO aggregate input. It DOES have
+#' one that needs different sweep plumbing: \code{theta_coll} (the collateral
+#' coordinate). The AGGREGATE Jacobian's shared backward sweep
+#' (\code{\link{.hank_curly_sweep2}}) applies a \code{dD1} coordinate-rebasing
+#' correction at \code{s = 2} that is tuned to cancel correctly only once
+#' CONTRACTED against a steady output policy -- exactly what
+#' \code{\link{hank_het2_jacobian}}'s aggregation does (its own
+#' \code{theta_coll} column is validated to machine-ND precision). The raw,
+#' uncontracted per-cell distribution response is measurably wrong at the
+#' own-shock diagonal if it reuses that same corrected term (2026-07-31
+#' finding). Fixed 2026-08-05 by having \code{.hank_curly_sweep2} additionally
+#' expose \code{curlyD_raw}, an UNCORRECTED counterpart that omits the
+#' contraction-only cancellation; this function uses \code{curlyD_raw} for
+#' \code{"theta_coll"} (identical to \code{curlyD} for every other input, so
+#' the fix is zero-cost and bit-identical elsewhere). See
+#' \code{\link{.hank_curly_sweep2}}'s \code{@return} for the derivation and
+#' \code{test-hank-theta-coll-jacobian.R} for the FN-vs-ND oracle.
+#'
+#' @inheritParams hank_het2_jacobian
+#' @param inputs Character subset of \code{c("rb", "ra", "w", "Tr",
+#'   "theta_coll")} plus the block's transition-probability inputs, or
+#'   \code{NULL} (default) for \code{c("rb", "ra", "w")}.
+#'
+#' @return Named list \code{JD[[input]]}, each a 3-D array of dimension
+#'   \code{T_h x T_h x (n_e*n_b*n_a)} with \code{JD[[i]][t, s, ] = dD_t/dI_s}.
+#' @seealso \code{\link{hank_het2_dist_jacobian_nd}} (the numerical oracle
+#'   this is validated against), \code{\link{hank_het_dist_jacobian}}
+#'   (one-asset), \code{\link{hank_het3_dist_jacobian}} (three-asset),
+#'   \code{\link{hank_het2_jacobian}} (the aggregate two-asset Jacobian
+#'   sharing this function's backward sweep)
+#' @examples
+#' inc <- hank_income_rouwenhorst(0.9, 0.7, 2)
+#' blk <- hank_het2_block(hank_asset_grid(40, 8, 0), hank_asset_grid(60, 6, 0),
+#'                        inc$Pi, inc$e, beta = 0.95, eis = 0.5,
+#'                        rb = 0.005, ra = 0.02, w = 1, chi0 = 0.25,
+#'                        chi1 = 6.5, chi2 = 2, n_k = 8L)
+#' JD <- hank_het2_dist_jacobian(blk, T_h = 3, inputs = c("rb", "w"))
+#' dim(JD$rb)
+#' @export
+hank_het2_dist_jacobian <- function(block, T_h,
+                                    inputs = NULL,
+                                    delta_in = 1e-5, delta_va = 1e-6,
+                                    delta_d = 1e-6,
+                                    backend = getOption("dynhr.hank_backend",
+                                                        "cpp"),
+                                    threads = NULL) {
+  if (!inherits(block, "hank_het2_block"))
+    stop("hank_het2_dist_jacobian: block must be hank_het2_block")
+  if (!is.numeric(T_h) || length(T_h) != 1L || T_h < 1 || !is.finite(T_h))
+    stop("hank_het2_dist_jacobian: T_h must be positive")
+  backend <- match.arg(backend, c("R", "cpp"))
+  threads <- hank_resolve_threads(threads)
+  if (is.null(inputs)) inputs <- c("rb", "ra", "w")
+  inputs <- .hank_het2_check_inputs(block, inputs)
+
+  n_cell <- length(block$D)
+  P <- function(x) .hank_forward_push2(block$b, block$a, block$b_grid,
+                                       block$a_grid, block$Pi, x,
+                                       backend = backend)
+
+  JD <- setNames(lapply(inputs, function(i) array(0, c(T_h, T_h, n_cell))),
+                inputs)
+  if (T_h < 2L) {
+    ## row t=1 (D_ss, fixed) is the only row -- all-zero EXCEPT theta_coll's
+    ## JD[1, 1, ] = dD1 (see the theta_coll-only note below).
+    if ("theta_coll" %in% inputs) {
+      sweep <- .hank_curly_sweep2(block, T_h, "theta_coll", character(0),
+                                  delta_in, delta_va, delta_d,
+                                  backend = backend, threads = threads)
+      JD[["theta_coll"]][1L, 1L, ] <- sweep$dD1
+    }
+    return(JD)
+  }
+
+  for (i in inputs) {
+    ## --- Step 1: backward sweep -> curlyD[, s] (curlyY not needed here) ---
+    sweep  <- .hank_curly_sweep2(block, T_h, i, character(0),
+                                 delta_in, delta_va, delta_d,
+                                 backend = backend, threads = threads)
+    ## theta_coll (D1 lift, 2026-08-05): TWO roles need TWO different sweep
+    ## terms at column s = 2, because the "- dD1" correction in sweep$curlyD
+    ## cancels a double count that only appears once the s=2 column is ADDED
+    ## to a prior row -- and row t = 2 (the base row, filled directly with no
+    ## addition) is not that; only tt >= 3's cumulation
+    ## (JD[tt,s,] = JD[tt-1,s-1,] + FD[tt][,s]) is.
+    ##   - curlyD_direct: fills JD[2, s, ] directly (no addition) -> needs the
+    ##     UNCORRECTED sweep$curlyD_raw, confirmed against ND to ~1e-6.
+    ##   - curlyD_seed: seeds the P-push recursion that builds FD[[3]],
+    ##     FD[[4]], ... for tt >= 3 -> needs the CORRECTED sweep$curlyD (same
+    ##     one hank_het2_jacobian's aggregate cumulation uses), because
+    ##     JD[tt,s,] for tt >= 3 ADDS JD[tt-1,s-1,] (which, at s=2, is
+    ##     JD[2,1,] = curlyD[,1], already carrying its own dD1-derived
+    ##     contribution) on top of the pushed s=2 term -- using the raw
+    ##     (uncorrected) s=2 term there double-counts, exactly the bookkeeping
+    ##     .hank_curly_sweep2's Roxygen documents for the aggregate case,
+    ##     which turns out to recur here too. For every other input
+    ##     curlyD_direct == curlyD_seed == sweep$curlyD bit-for-bit (no cost,
+    ##     no behavior change).
+    curlyD_direct <- if (i == "theta_coll") sweep$curlyD_raw else sweep$curlyD
+    curlyD_seed   <- sweep$curlyD
+
+    ## theta_coll only: row t = 1 is NOT the fixed D_ss zero row every other
+    ## input has. An unanticipated shock at s = 1 re-expresses D_1 itself in
+    ## the shifted gap coordinate x = b + theta_1*a, so JD[1, 1, ] = dD1 --
+    ## the same raw date-1 coordinate-rebasing vector .hank_curly_sweep2
+    ## folds (y-weighted) into curlyY[[o]][1] for the aggregate Jacobian.
+    ## Every other (t, s) in row 1 stays zero: only the CONTEMPORANEOUS shock
+    ## touches the entering distribution (confirmed against
+    ## hank_het2_dist_jacobian_nd).
+    if (i == "theta_coll") JD[[i]][1L, 1L, ] <- sweep$dD1
+
+    ## --- Step 3: distribution fake-news F^D, indexed by CALENDAR date t ---
+    ## FD[[2]][, s] = curlyD_seed[, s]  (SEED for propagation only; row t=2
+    ##                                    of JD is filled from curlyD_direct
+    ##                                    below, not from FD[[2]])
+    ## FD[[t]][, s] = P(FD[[t-1]][, s])   for t >= 3
+    ## (FD[[1]] would be t=1, always zero -- omitted; loop starts at t=2.)
+    FD <- vector("list", T_h)
+    FD[[2L]] <- curlyD_seed
+    for (tt in seq_len(T_h - 2L) + 2L) {              # tt = 3 .. T_h, empty if T_h < 3
+      prev <- FD[[tt - 1L]]
+      cur  <- matrix(0, n_cell, T_h)
+      for (s in seq_len(T_h)) cur[, s] <- P(prev[, s])
+      FD[[tt]] <- cur
+    }
+
+    ## --- Step 4: diagonal cumulation, vector-valued per (t, s) ---
+    ## Mirrors hank_het2_jacobian's aggregate assembly exactly, just shifted
+    ## down one row (t=1 row is the fixed, unresponsive D_ss and stays
+    ## all-zero; the recursion proper starts at t=2).
+    JD[[i]][2L, 1L, ] <- curlyD_direct[, 1L]          # JD[2, 1, ] = curlyD_direct[, 1]
+    for (s in seq_len(T_h - 1L) + 1L)                 # s = 2 .. T_h
+      JD[[i]][2L, s, ] <- curlyD_direct[, s]          # JD[2,s,]=curlyD_direct[,s] (t-1=1 row is 0)
+    for (tt in seq_len(T_h - 2L) + 2L) {               # tt = 3 .. T_h, empty if T_h < 3
+      JD[[i]][tt, 1L, ] <- FD[[tt]][, 1L]             # JD[t, 1, ] = FD[t][, 1]
+      for (s in seq_len(T_h - 1L) + 1L) {              # s = 2 .. T_h
+        JD[[i]][tt, s, ] <- JD[[i]][tt - 1L, s - 1L, ] + FD[[tt]][, s]
+      }
+    }
+  }
+  JD
+}
+
+
+#' Brute-force numerical-differentiation DISTRIBUTION Jacobian of the
+#' two-asset block
+#'
+#' Reference sequence-space distribution Jacobian \eqn{J^D[t,s,] = dD_t/dI_s}
+#' for the two-asset block, computed exactly like
+#' \code{\link{hank_het2_jacobian_nd}} but keeping the full \code{Dpath}
+#' (already returned unconditionally by \code{\link{hank_td2_nonlinear}})
+#' instead of aggregating it into \code{B}/\code{A}/\code{C}/\code{CHI}.
+#' Used to validate \code{\link{hank_het2_dist_jacobian}}.
+#'
+#' @inheritParams hank_het2_jacobian_nd
+#' @param inputs Character subset of \code{c("rb", "ra", "w", "Tr",
+#'   "theta_coll")} plus the block's transition-probability inputs, or
+#'   \code{NULL} (default) for \code{c("rb", "ra", "w")}. This brute-force
+#'   oracle computes the true \code{dD} response for ANY admissible input by
+#'   perturbing and re-solving, which is what validates
+#'   \code{\link{hank_het2_dist_jacobian}}'s fake-news columns
+#'   (\code{"theta_coll"} included, since the 2026-08-05 date-0 lift).
+#'
+#' @return Named list \code{JD_nd[[input]]}, each a 3-D array of dimension
+#'   \code{T_h x T_h x (n_e*n_b*n_a)} with \code{JD_nd[[i]][t, s, ] =
+#'   dD_t/dI_s} (central difference).
+#' @seealso \code{\link{hank_het2_dist_jacobian}} (the fake-news distribution
+#'   Jacobian this validates), \code{\link{hank_het_dist_jacobian_nd}}
+#'   (one-asset), \code{\link{hank_het3_dist_jacobian_nd}} (three-asset)
+#' @examples
+#' inc <- hank_income_rouwenhorst(0.9, 0.7, 2)
+#' blk <- hank_het2_block(hank_asset_grid(40, 8, 0), hank_asset_grid(60, 6, 0),
+#'                        inc$Pi, inc$e, beta = 0.95, eis = 0.5,
+#'                        rb = 0.005, ra = 0.02, w = 1, chi0 = 0.25,
+#'                        chi1 = 6.5, chi2 = 2, n_k = 8L)
+#' JD_nd <- hank_het2_dist_jacobian_nd(blk, T_h = 3, inputs = c("rb", "w"),
+#'                                    delta = 3e-6)
+#' dim(JD_nd$rb)
+#' @export
+hank_het2_dist_jacobian_nd <- function(block, T_h, inputs = NULL,
+                                       delta = 1e-5,
+                                       backend = getOption("dynhr.hank_backend",
+                                                           "cpp"),
+                                       threads = NULL) {
+  if (!inherits(block, "hank_het2_block"))
+    stop("hank_het2_dist_jacobian_nd: block must be hank_het2_block")
+  if (!is.numeric(T_h) || length(T_h) != 1L || T_h < 1 || !is.finite(T_h))
+    stop("hank_het2_dist_jacobian_nd: T_h must be positive")
+  backend <- match.arg(backend, c("R", "cpp"))
+  threads <- hank_resolve_threads(threads)
+  if (is.null(inputs)) inputs <- c("rb", "ra", "w")
+  inputs <- .hank_het2_check_inputs(block, inputs)
+
+  n_cell <- length(block$D)
+  base <- list(rb = rep(block$rb, T_h), ra = rep(block$ra, T_h),
+              w = rep(block$w, T_h), Tr = rep(.hank_block_tr(block), T_h),
+              theta_coll = rep(if (is.null(block$theta_coll)) 0
+                               else block$theta_coll, T_h))
+
+  run <- function(p, pi_paths) hank_td2_nonlinear(
+    block, rb_path = p$rb, ra_path = p$ra, w_path = p$w, T_h = T_h,
+    pi_input_paths = pi_paths, Tr_path = p$Tr, theta_path = p$theta_coll,
+    backend = backend, threads = threads)
+
+  JD_nd <- setNames(lapply(inputs, function(i) array(0, c(T_h, T_h, n_cell))),
+                    inputs)
+  for (i in inputs) {
+    is_pi <- !(i %in% c("rb", "ra", "w", "Tr", "theta_coll"))
+    for (s in seq_len(T_h)) {
+      p <- m <- base; pip <- pim <- NULL
+      if (is_pi) {
+        x0 <- rep(block$Pi_inputs[[i]], T_h)
+        xp <- x0; xp[s] <- xp[s] + delta
+        xm <- x0; xm[s] <- xm[s] - delta
+        pip <- setNames(list(xp), i); pim <- setNames(list(xm), i)
+      } else {
+        p[[i]][s] <- p[[i]][s] + delta
+        m[[i]][s] <- m[[i]][s] - delta
+      }
+      op <- run(p, pip); om <- run(m, pim)
+      dD <- (op$Dpath - om$Dpath) / (2 * delta)   # (n_cell x T_h), col t
+      for (tt in seq_len(T_h)) JD_nd[[i]][tt, s, ] <- dD[, tt]
+    }
+  }
+  JD_nd
+}

@@ -23,7 +23,12 @@ built with \code{Pi_fn}/\code{Pi_inputs}, the block's named
 transition-probability inputs (\code{names(block$Pi_inputs)}, e.g.
 \code{"f"}, \code{"s"} from \code{\link{hank_employment_income}}).}
 
-\item{outputs}{Character subset of \code{c("A", "C")}.}
+\item{outputs}{Character subset of \code{c("A", "C")}, plus, for a block
+carrying \code{idx_E}/\code{idx_U}/\code{idx_N} index vectors (see
+\code{\link{hank_employment_income3}}), the state outputs \code{"E"} /
+\code{"U"} / \code{"N"} and the gross-flow outputs \code{"F_eu"} /
+\code{"F_ue"} / \code{"F_un"} / \code{"F_nu"} / \code{"F_ne"} /
+\code{"F_en"}.}
 
 \item{delta}{Numeric FD step for the input perturbation.}
 }

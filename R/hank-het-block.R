@@ -68,25 +68,44 @@
 #'   wedge. Reserved as a \code{Pi_fn} input name, so a transition function
 #'   may respond to it.
 #' @param Tr_incidence Incidence weight \eqn{\omega} distributing \code{Tr}
-#'   across the idiosyncratic income states: household in state \code{i}
-#'   receives \code{Tr * omega[i]}. \code{NULL} (default) is the uniform rule
-#'   \code{omega == 1}, byte-for-byte identical to the pre-incidence
-#'   household. Otherwise a finite numeric vector of length \code{length(e)},
-#'   normalised here to \eqn{\sum_e \bar\pi_e \omega_e = 1} against the
-#'   \code{Pi}-invariant distribution \eqn{\bar\pi}, so that \code{Tr} always
-#'   means the per-capita transfer and the aggregate outlay is exactly
-#'   \code{Tr}. See \code{\link{hank_incidence_earnings}} for the
-#'   earnings-proportional rule.
-#'
-#'   The weight is indexed by the income state ONLY, never by assets. That is
-#'   what makes the aggregate outlay exactly \code{Tr} in every period of a
-#'   transition, not just at the steady state: the \code{e}-marginal of the
-#'   distribution is invariant under the forward operator (\code{e} is an
-#'   exogenous Markov chain and the steady-state marginal is already
-#'   \code{Pi}-invariant), so \eqn{\sum_i D_{t,i} \omega_i \equiv 1} for all
-#'   \code{t}. An asset-indexed weight would NOT have this property -- the
-#'   outlay would drift with the wealth distribution, breaking any accounting
-#'   closure written on \code{Tr} -- and is deliberately not supported.
+#'   across households: household in idiosyncratic state \code{(e, a)}
+#'   receives \code{Tr * omega(e, a)}. Two forms are accepted:
+#'   \describe{
+#'     \item{\code{NULL} or a length-\code{length(e)} vector (Tier 1)}{The
+#'       uniform rule (\code{NULL}, \code{omega == 1}) or any income-state-only
+#'       weight, byte-for-byte identical to the pre-incidence household when
+#'       uniform. Normalised here to \eqn{\sum_e \bar\pi_e \omega_e = 1}
+#'       against the \code{Pi}-invariant distribution \eqn{\bar\pi}, so
+#'       \code{Tr} always means the per-capita transfer and the aggregate
+#'       outlay is exactly \code{Tr} at every date of a transition (the
+#'       \code{e}-marginal of the distribution is invariant under the forward
+#'       operator: \code{e} is an exogenous Markov chain and the steady-state
+#'       marginal is already \code{Pi}-invariant, so
+#'       \eqn{\sum_i D_{t,i} \omega_i \equiv 1} for all \code{t}). See
+#'       \code{\link{hank_incidence_earnings}} for the earnings-proportional
+#'       rule.}
+#'     \item{A finite numeric \code{length(e) x length(a_grid)} matrix
+#'       (Tier 2)}{An \code{(e, a)}-varying incidence rule, e.g.
+#'       wealth-proportional. \code{omega} MUST be a function of the
+#'       BEGINNING-of-period state only (indexed by the current grid, never
+#'       \eqn{a'}): \code{Tr * omega(e, a)} then enters cash on hand
+#'       additively without touching the marginal return to saving, so the
+#'       Euler equation is undisturbed. Unlike the vector form, a matrix
+#'       \code{omega} is taken AS SUPPLIED -- it is NOT normalised, because
+#'       that would be circular (\code{D_ss} depends on the household policy,
+#'       which depends on \code{omega}); the realised aggregate outlay is
+#'       instead reported on the returned block as \code{Omega_ss} (see
+#'       Value), and its date-\code{t} counterpart is available as the
+#'       \code{"Omega"} het-block output (\code{\link{hank_het_jacobian}}).
+#'       Because a non-uniform \code{omega} can push \code{w*e + Tr*omega(e,a)}
+#'       toward or through zero in a low-\code{e}/low-\code{a} corner, the
+#'       steady-state solve here ASSERTS strictly positive cash on hand at
+#'       every \code{(e, a)} grid point (hard error, naming the offending
+#'       corner and the sign of \code{Tr}, if violated); a transition-path
+#'       evaluation that later drives cash on hand into the EGM tiny-floor
+#'       region instead WARNS, once per session (see
+#'       \code{\link{.hank_egm_step}}).}
+#'   }
 #' @param Va_init Optional \code{n_e x n_a} initial marginal value, passed
 #'   straight through to \code{\link{hank_egm_solve}} (and to the wedge
 #'   solver's symmetric starting solve). \code{NULL} (default) uses that
@@ -109,7 +128,11 @@
 #'   \code{D} (vector) and forward operator \code{Lambda}, aggregate
 #'   steady-state outputs \code{A}, \code{C}, the borrowing constraint
 #'   \code{amin}, the calibration, (when supplied) \code{Pi_fn} /
-#'   \code{Pi_inputs}, and the run metadata
+#'   \code{Pi_inputs}, \code{Omega_ss} (the realised steady-state transfer
+#'   outlay per unit of \code{Tr}, \code{sum(D * Tr_incidence)}; exactly
+#'   \code{1} to numerical precision for the Tier-1 vector/uniform form, and
+#'   the genuine -- possibly drifting-along-a-transition -- outlay for a
+#'   Tier-2 matrix \code{Tr_incidence}), and the run metadata
 #'   \code{\link{hank_het_manifest}} reads:
 #'   \describe{
 #'     \item{\code{backend}}{The backend that ACTUALLY ran: the
@@ -151,21 +174,46 @@ hank_het_block <- function(a_grid, Pi, e, beta, eis, r, w,
   if (!is.numeric(Tr) || length(Tr) != 1L || !is.finite(Tr))
     stop("hank_het_block: 'Tr' must be a finite numeric scalar (the ",
          "lump-sum transfer; 0 restores the transfer-free household).")
-  omega <- .hank_normalize_incidence(Tr_incidence, e, Pi, "hank_het_block")
+  omega <- .hank_normalize_incidence(Tr_incidence, e, Pi, "hank_het_block",
+                                     n_a = length(a_grid))
   if (is.null(amin)) amin <- a_grid[1L]
   .hank_check_pi_fn(Pi_fn, Pi_inputs, Pi,
                     reserved = c("r", "w", "Tr", "r_minus"),
                     caller = "hank_het_block")
-  y  <- w * e + Tr * omega
+  inc       <- .hank_income_extra(w, e, Tr, omega)
+  y         <- inc$y
+  coh_extra <- inc$coh_extra
+  if (!is.null(coh_extra)) {
+    ## Tier 2 economic guard: strictly positive cash on hand at the SS solve
+    ## (spec "Two economic points" -- see the Tr_incidence doc). A negative or
+    ## zero corner would otherwise be silently absorbed by the EGM tiny-floor
+    ## (see .hank_egm_step), so this fails loudly INSTEAD, naming the corner
+    ## and the sign of Tr.
+    coh_ss <- (1 + r) * matrix(a_grid, length(e), length(a_grid),
+                               byrow = TRUE) + y + coh_extra
+    if (any(coh_ss <= 0)) {
+      bad <- which(coh_ss <= 0, arr.ind = TRUE)[1L, ]
+      stop("hank_het_block: cash-on-hand is non-positive (",
+           format(coh_ss[bad[1L], bad[2L]]), ") at (e = ", bad[1L],
+           ", a_grid[", bad[2L], "] = ", format(a_grid[bad[2L]]),
+           ") under the supplied matrix 'Tr_incidence' with Tr = ",
+           format(Tr), " (", if (Tr < 0) "negative" else "non-negative",
+           "). A wealth-/state-proportional incidence rule combined with ",
+           "this Tr drives that household's beginning-of-period income to ",
+           "zero or below. Reduce |Tr| or adjust the incidence weight in ",
+           "the offending (e, a) corner.", call. = FALSE)
+    }
+  }
   t0_solve <- proc.time()[["elapsed"]]
   hh <- if (is.null(r_minus))
     hank_egm_solve(a_grid, y = y, r = r, beta = beta, eis = eis, Pi = Pi,
                    tol = tol, maxit = maxit, amin = amin, backend = backend,
-                   Va_init = Va_init)
+                   Va_init = Va_init, coh_extra = coh_extra)
   else
     .hank_egm_solve_wedge(a_grid, y = y, r_plus = r, r_minus = r_minus,
                           beta = beta, eis = eis, Pi = Pi, amin = amin,
-                          tol = tol, maxit = maxit, Va_init = Va_init)
+                          tol = tol, maxit = maxit, Va_init = Va_init,
+                          coh_extra = coh_extra)
   elapsed_solve <- proc.time()[["elapsed"]] - t0_solve
   if (!hh$converged)
     warning("hank_het_block: household EGM did not converge at steady state")
@@ -188,9 +236,18 @@ hank_het_block <- function(a_grid, Pi, e, beta, eis, r, w,
   ## so a wedge block ran the R backend whatever `backend` said -- recording
   ## the argument here would misreport the run.
   backend_used <- if (is.null(r_minus)) hh$backend else "R"
+  ## Realised steady-state outlay, sum(D * omega): exactly 1 (to numerical
+  ## precision) for the normalised Tier-1 vector/uniform form -- an
+  ## independent sanity echo of the "outlay invariant" the normalisation is
+  ## FOR -- and the genuine (possibly < 1 or > 1) Tier-2 outlay otherwise
+  ## (spec item 2: reported rather than forced to 1, since forcing it would
+  ## require normalising against the circular D_ss).
+  omega_full <- if (is.matrix(omega)) omega else matrix(omega, length(e),
+                                                         length(a_grid))
   structure(
     list(a_grid = a_grid, Pi = Pi, e = e, beta = beta, eis = eis,
          r = r, w = w, Tr = Tr, Tr_incidence = omega,
+         Omega_ss = hank_aggregate(D, omega_full),
          r_minus = r_minus, amin = amin,
          a = hh$a, c = hh$c, Va = hh$Va,
          Lambda = Lam, D = D,
@@ -291,15 +348,43 @@ hank_het_block <- function(a_grid, Pi, e, beta, eis, r, w,
   if (is.null(Pi)) Pi <- block$Pi
   if (is.null(Tr)) Tr <- .hank_block_tr(block)
   if (is.null(r_minus)) r_minus <- block$r_minus     # NULL for symmetric blocks
-  y <- w * block$e + Tr * .hank_block_omega(block)
+  inc <- .hank_income_extra(w, block$e, Tr, .hank_block_omega(block))
   if (is.null(r_minus))
-    .hank_egm_step(Va_p, block$a_grid, y = y, r = r,
+    .hank_egm_step(Va_p, block$a_grid, y = inc$y, r = r,
                    beta = block$beta, eis = block$eis, Pi = Pi,
-                   amin = amin)
+                   amin = amin, coh_extra = inc$coh_extra)
   else
-    .hank_egm_step_wedge(Va_p, block$a_grid, y = y,
+    .hank_egm_step_wedge(Va_p, block$a_grid, y = inc$y,
                          r_plus = r, r_minus = r_minus, beta = block$beta,
-                         eis = block$eis, Pi = Pi, amin = amin)
+                         eis = block$eis, Pi = Pi, amin = amin,
+                         coh_extra = inc$coh_extra)
+}
+
+
+#' Split incidence-weighted income into a per-\code{e} vector and an optional
+#' \code{coh_extra} matrix
+#'
+#' Shared by \code{\link{hank_het_block}} (steady state) and
+#' \code{\link{.hank_block_step}} (nonlinear transitions / the fake-news
+#' sweep): the Tier-1 vector incidence rule folds \code{Tr * omega} into the
+#' per-\code{e} income vector \code{y} exactly as before this function
+#' existed (so that path is bit-identical); the Tier-2 matrix rule instead
+#' keeps \code{y = w*e} and returns \code{Tr * omega} as a separate
+#' \code{n_e x n_a} \code{coh_extra} matrix, additive on cash on hand (see
+#' \code{\link{.hank_egm_step}}).
+#'
+#' @param w Numeric scalar wage.
+#' @param e Numeric length-\code{n_e} income-state levels.
+#' @param Tr Numeric scalar transfer.
+#' @param omega Length-\code{n_e} vector or \code{n_e x n_a} matrix incidence
+#'   weight (as stored on the block / returned by
+#'   \code{\link{.hank_normalize_incidence}}).
+#' @return List with \code{y} (length-\code{n_e}) and \code{coh_extra}
+#'   (\code{n_e x n_a} matrix, or \code{NULL} for the Tier-1 form).
+#' @keywords internal
+.hank_income_extra <- function(w, e, Tr, omega) {
+  if (is.matrix(omega)) list(y = w * e, coh_extra = Tr * omega)
+  else list(y = w * e + Tr * omega, coh_extra = NULL)
 }
 
 
@@ -326,7 +411,11 @@ hank_het_block <- function(a_grid, Pi, e, beta, eis, r, w,
 #' vector of ones in that case, and since \code{Tr * 1} is bit-identical to
 #' \code{Tr} in IEEE arithmetic the default path is byte-for-byte the
 #' pre-incidence behaviour (the same argument \code{\link{.hank_block_tr}}
-#' relies on for \code{y + 0}).
+#' relies on for \code{y + 0}). On a Tier-2 block this returns the stored
+#' \code{n_e x n_a} MATRIX unchanged (see \code{\link{hank_het_block}}'s
+#' \code{Tr_incidence} doc); callers that need a length-\code{n_e} vector
+#' either check \code{is.matrix()} first or go through
+#' \code{\link{.hank_income_extra}}, which dispatches on it.
 #' @keywords internal
 .hank_block_omega <- function(block) {
   om <- block[["Tr_incidence", exact = TRUE]]
@@ -337,34 +426,66 @@ hank_het_block <- function(a_grid, Pi, e, beta, eis, r, w,
 #' Validate and normalise a transfer incidence weight
 #'
 #' Shared by \code{\link{hank_het_block}} and any caller needing the same
-#' contract. \code{NULL} yields the uniform rule. A supplied weight is scaled
-#' so that \eqn{\sum_e \bar\pi_e \omega_e = 1}, where \eqn{\bar\pi} is the
-#' invariant distribution of \code{Pi}.
+#' contract. \code{NULL} yields the uniform rule. A vector weight (Tier 1) is
+#' scaled so that \eqn{\sum_e \bar\pi_e \omega_e = 1}, where \eqn{\bar\pi} is
+#' the invariant distribution of \code{Pi}. A matrix weight (Tier 2,
+#' \code{n_e x n_a}, when \code{n_a} is supplied) is validated but returned
+#' AS-IS, deliberately not normalised (see the \code{Tr_incidence}
+#' documentation on \code{\link{hank_het_block}}: normalising an
+#' asset-dependent weight against \code{D_ss} would be circular).
 #'
-#' Normalising against \eqn{\bar\pi} rather than against the steady-state
-#' joint distribution \code{D} is what keeps this NON-CIRCULAR: \eqn{\bar\pi}
-#' is a property of \code{Pi} alone, available before the household problem is
-#' solved, whereas \code{D} depends on the policy which depends on
-#' \code{omega}. The two agree exactly, because the \code{e}-marginal of
-#' \code{D} IS \eqn{\bar\pi} at any stationary distribution.
+#' Normalising the VECTOR form against \eqn{\bar\pi} rather than against the
+#' steady-state joint distribution \code{D} is what keeps that path
+#' NON-CIRCULAR: \eqn{\bar\pi} is a property of \code{Pi} alone, available
+#' before the household problem is solved, whereas \code{D} depends on the
+#' policy which depends on \code{omega}. The two agree exactly, because the
+#' \code{e}-marginal of \code{D} IS \eqn{\bar\pi} at any stationary
+#' distribution. No such non-circular anchor exists for an \code{a}-dependent
+#' weight, which is exactly why the matrix form is left unnormalised instead.
 #'
-#' @param omega \code{NULL} (uniform) or a finite numeric length-\code{n_e}
-#'   weight.
+#' @param omega \code{NULL} (uniform), a finite numeric length-\code{n_e}
+#'   vector weight, or (when \code{n_a} is supplied) a finite numeric
+#'   \code{n_e x n_a} matrix weight.
 #' @param e Income-state grid (its length sets \code{n_e}).
 #' @param Pi Income transition matrix.
 #' @param who Calling function name, for error messages.
-#' @return Numeric length-\code{n_e} normalised weight.
+#' @param n_a Asset-grid length. \code{NULL} (default) means "no matrix form
+#'   available here"; a matrix \code{omega} is then always a validation error
+#'   (a caller that cannot make sense of a matrix incidence should not have
+#'   to special-case that itself).
+#' @return Numeric length-\code{n_e} normalised weight (Tier 1), or the
+#'   validated \code{n_e x n_a} matrix unchanged (Tier 2).
 #' @keywords internal
-.hank_normalize_incidence <- function(omega, e, Pi, who = "hank_het_block") {
+.hank_normalize_incidence <- function(omega, e, Pi, who = "hank_het_block",
+                                      n_a = NULL) {
   n_e <- length(e)
   if (is.null(omega)) return(rep(1, n_e))
+  if (is.matrix(omega)) {
+    if (is.null(n_a))
+      stop(who, ": a matrix 'Tr_incidence' is not supported here (no ",
+           "asset-grid length available to validate against).")
+    if (!is.numeric(omega) || nrow(omega) != n_e || ncol(omega) != n_a ||
+        !all(is.finite(omega)))
+      stop(who, ": a matrix 'Tr_incidence' must be a finite numeric ",
+           n_e, " x ", n_a, " (n_e x n_a) matrix of beginning-of-period ",
+           "(e, a) incidence weights (got ",
+           if (is.numeric(omega))
+             paste0(nrow(omega), " x ", ncol(omega)) else class(omega)[1L],
+           ").")
+    ## Tier 2: NOT normalised (see the roxygen note above) -- returned as
+    ## supplied; the realised outlay is reported as Omega_ss on the block.
+    return(omega)
+  }
   if (!is.numeric(omega) || length(omega) != n_e || !all(is.finite(omega)))
     stop(who, ": 'Tr_incidence' must be NULL (uniform) or a finite numeric ",
          "vector of length length(e) = ", n_e, " (got ",
          if (is.numeric(omega)) paste0("length ", length(omega)) else
            class(omega)[1L], "). Incidence is indexed by the INCOME state ",
          "only -- an asset-indexed weight is not supported, because its ",
-         "aggregate outlay would drift along a transition.")
+         "aggregate outlay would drift along a transition. Pass an ", n_e,
+         " x n_a MATRIX (Tier 2) if you deliberately want an (e, a)-varying ",
+         "rule; it is not normalised and its realised outlay is reported as ",
+         "Omega_ss, not forced to 1.")
   pi_bar <- .hank_stationary(Pi)
   scale  <- sum(pi_bar * omega)
   if (!is.finite(scale) || abs(scale) < 1e-12)

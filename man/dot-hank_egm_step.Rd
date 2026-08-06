@@ -4,7 +4,17 @@
 \alias{.hank_egm_step}
 \title{One EGM backward step}
 \usage{
-.hank_egm_step(Va_p, a_grid, y, r, beta, eis, Pi, amin = NULL)
+.hank_egm_step(
+  Va_p,
+  a_grid,
+  y,
+  r,
+  beta,
+  eis,
+  Pi,
+  amin = NULL,
+  coh_extra = NULL
+)
 }
 \arguments{
 \item{Va_p}{Numeric \code{n_e x n_a} matrix: next-period marginal value of
@@ -26,6 +36,18 @@ assets, \eqn{V_a(a', e')}, rows = income states, cols = asset gridpoints.}
 Must satisfy \code{amin >= a_grid[1]} (the grid cannot represent assets
 below its floor). Defaults to \code{a_grid[1L]} (\code{NULL} resolves to
 the grid floor), matching the historical hardcoded behavior.}
+
+\item{coh_extra}{Optional \code{n_e x n_a} numeric matrix, ADDITIVE on cash
+on hand at the FIXED (beginning-of-period) grid, i.e. \code{coh(e,a) <-
+coh(e,a) + coh_extra(e,a)}, entering only the actual-coh side of the
+interpolation (never the endogenous-grid side, which is a function of
+the CHOICE \eqn{a'}, not of the current state). \code{NULL} (default)
+is a pure no-op -- bit-identical to the pre-Tier-2 kernel -- and is how a
+matrix (asset-dependent) \code{Tr_incidence} on
+\code{\link{hank_het_block}} enters the household problem; see that
+constructor's Tier-2 documentation. When supplied, a warning fires
+ONCE PER SESSION if it drives \eqn{coh - a'} to the EGM tiny-floor
+region (see the transient-NaN guard below).}
 }
 \value{
 A list with \code{Va} (updated marginal value), \code{a} (savings

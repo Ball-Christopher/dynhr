@@ -47,7 +47,6 @@
 ^graphify-out$
 
 # Untracked/generated artefacts that must not enter R CMD build
-^\.codex(/|$)
 ^references(/|$)
 ^inst/extdata/models/.*/Output(/|$)
 ^inst/extdata/models/.*/model/bytecode(/|$)

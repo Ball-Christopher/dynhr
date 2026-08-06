@@ -12,7 +12,8 @@ hank_het3_jacobian(
   delta_in = 1e-05,
   delta_v = 1e-06,
   delta_d = 1e-06,
-  threads = NULL
+  threads = NULL,
+  backend = getOption("dynhr.hank3_backend", "cpp")
 )
 }
 \arguments{
@@ -62,6 +63,14 @@ the sweep dominates the Jacobian). \code{NULL} (the default) resolves via
 default, exactly as \code{\link{hank_egm3_solve}} does; \code{1} forces
 the serial path. The compiled step is BIT-IDENTICAL at every thread count,
 so this is a throughput knob and never a source of numerical difference.}
+
+\item{backend}{Character: \code{"cpp"} (default, from
+\code{getOption("dynhr.hank3_backend")}) or \code{"R"} for the pure-R
+diagnostic path (capped at 250 states per \code{\link{hank_egm3_solve}}).
+Mirrors \code{\link{hank_het2_jacobian}}'s \code{backend} argument: under
+\code{"R"} the fused compiled sweep is skipped (it IS the compiled
+backend), and the per-step \code{s >= 2} loop also routes every backward
+step through the R implementation, not just the \code{s = 1} term.}
 }
 \value{
 Nested list \code{J[[output]][[input]]}, each a \code{T_h x T_h}

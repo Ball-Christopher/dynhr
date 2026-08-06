@@ -110,7 +110,8 @@ Can also be set globally via
 \item{student_df}{Positive finite scalar: degrees of freedom for
 \code{likelihood = "student_t"}. Ignored by the other likelihoods.}
 
-\item{pruned_order}{For \code{likelihood = "pruned"}: the perturbation order
+\item{pruned_order}{For \code{likelihood = "pruned"} or \code{"tpf"}: the
+perturbation order
 of the AFVRR pruned state space, \code{2L} (default) or \code{3L}. Order 3
 uses \code{pruned_ss_loglik3} (skewness/kurtosis content via the cubic
 augmented state). Ignored for other likelihoods.}

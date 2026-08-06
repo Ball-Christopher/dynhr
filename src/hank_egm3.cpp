@@ -9,6 +9,8 @@
 #include <array>
 #include <functional>
 #include <atomic>
+#include <barrier>
+#include <memory>
 #include <thread>
 #include <string>
 #include <vector>
@@ -29,10 +31,11 @@ struct Lottery3 {
   double plo, phi;
 };
 
-static inline Lottery3 lottery3(const NumericVector& grid, double z) {
-  const int n = grid.size();
+// Raw-pointer form so the same lottery serves both the exported entry points
+// (which hold NumericVectors) and the fused sweep's plain-memory buffers.
+static inline Lottery3 lottery3(const double* grid, int n, double z) {
   if (n == 1) return Lottery3{0, 0, 1.0, 0.0};
-  int lo = std::upper_bound(grid.begin(), grid.end(), z) - grid.begin() - 1;
+  int lo = std::upper_bound(grid, grid + n, z) - grid - 1;
   if (lo < 0) lo = 0;
   if (lo > n - 2) lo = n - 2;
   double p = (grid[lo + 1] - z) / (grid[lo + 1] - grid[lo]);
@@ -67,9 +70,9 @@ NumericVector hank_forward_apply3_cpp(NumericVector d_pol,
         for (int a = 0; a < na; ++a) {
           const std::size_t po = pidx3(e,d,f,a,ne,nd,nf);
           const std::size_t from = sidx3(e,d,f,a,nd,nf,na);
-          Lottery3 ld = lottery3(d_grid, d_pol[po]);
-          Lottery3 lf = lottery3(f_grid, f_pol[po]);
-          Lottery3 la = lottery3(a_grid, a_pol[po]);
+          Lottery3 ld = lottery3(d_grid.begin(), (int)d_grid.size(), d_pol[po]);
+          Lottery3 lf = lottery3(f_grid.begin(), (int)f_grid.size(), f_pol[po]);
+          Lottery3 la = lottery3(a_grid.begin(), (int)a_grid.size(), a_pol[po]);
           const int di[2] = {ld.lo, ld.hi}; const double dw[2] = {ld.plo, ld.phi};
           const int fi[2] = {lf.lo, lf.hi}; const double fw[2] = {lf.plo, lf.phi};
           const int ai[2] = {la.lo, la.hi}; const double aw[2] = {la.plo, la.phi};
@@ -147,12 +150,12 @@ NumericVector hank_forward_direction3_cpp(NumericVector d_pol,
         for (int a = 0; a < na; ++a) {
           const std::size_t po = pidx3(e,d,f,a,ne,nd,nf);
           const std::size_t from = sidx3(e,d,f,a,nd,nf,na);
-          Lottery3 ldp = lottery3(d_grid, d_pol[po] + delta * dd[po]);
-          Lottery3 lfp = lottery3(f_grid, f_pol[po] + delta * df[po]);
-          Lottery3 lap = lottery3(a_grid, a_pol[po] + delta * da[po]);
-          Lottery3 ldm = lottery3(d_grid, d_pol[po] - delta * dd[po]);
-          Lottery3 lfm = lottery3(f_grid, f_pol[po] - delta * df[po]);
-          Lottery3 lam = lottery3(a_grid, a_pol[po] - delta * da[po]);
+          Lottery3 ldp = lottery3(d_grid.begin(), (int)d_grid.size(), d_pol[po] + delta * dd[po]);
+          Lottery3 lfp = lottery3(f_grid.begin(), (int)f_grid.size(), f_pol[po] + delta * df[po]);
+          Lottery3 lap = lottery3(a_grid.begin(), (int)a_grid.size(), a_pol[po] + delta * da[po]);
+          Lottery3 ldm = lottery3(d_grid.begin(), (int)d_grid.size(), d_pol[po] - delta * dd[po]);
+          Lottery3 lfm = lottery3(f_grid.begin(), (int)f_grid.size(), f_pol[po] - delta * df[po]);
+          Lottery3 lam = lottery3(a_grid.begin(), (int)a_grid.size(), a_pol[po] - delta * da[po]);
           const int dpi[2] = {ldp.lo, ldp.hi}; const double dpw[2] = {ldp.plo, ldp.phi};
           const int fpi[2] = {lfp.lo, lfp.hi}; const double fpw[2] = {lfp.plo, lfp.phi};
           const int api[2] = {lap.lo, lap.hi}; const double apw[2] = {lap.plo, lap.phi};
@@ -204,6 +207,88 @@ NumericVector hank_forward_direction3_cpp(NumericVector d_pol,
   return out;
 }
 
+// Shared body of hank_forward_legs3_cpp(), on raw memory so the fused sweep
+// (hank_curly_sweep3_cpp) can run the SAME accumulation on its plain buffers.
+// `out` must be zero-initialized by the caller (both callers hand freshly
+// allocated R memory, which is). The exact-zero contracts live HERE and only
+// here: the bitwise Pi_plus == Pi_minus `joint` flag, and the coincident-
+// destination `bp * (wp - wm)` branch -- see the comments inside, and do not
+// duplicate this loop anywhere else.
+static void forward_legs3_core(const double* d_plus, const double* f_plus,
+                               const double* a_plus, const double* d_minus,
+                               const double* f_minus, const double* a_minus,
+                               const double* dg, int ndg,
+                               const double* fg, int nfg,
+                               const double* ag, int nag,
+                               const double* Pip, const double* Pim,
+                               int ne, int nd, int nf, int na,
+                               const double* dist, double step, double* out) {
+  bool joint = false;
+  for (int i = 0; i < ne && !joint; ++i)
+    for (int j = 0; j < ne; ++j)
+      if (Pip[i + (std::size_t)ne * j] != Pim[i + (std::size_t)ne * j]) {
+        joint = true; break;
+      }
+
+  const double scale = 0.5 / step;
+  for (int e = 0; e < ne; ++e)
+    for (int d = 0; d < nd; ++d)
+      for (int f = 0; f < nf; ++f)
+        for (int a = 0; a < na; ++a) {
+          const std::size_t po = pidx3(e,d,f,a,ne,nd,nf);
+          const std::size_t from = sidx3(e,d,f,a,nd,nf,na);
+          Lottery3 ldp = lottery3(dg, ndg, d_plus[po]);
+          Lottery3 lfp = lottery3(fg, nfg, f_plus[po]);
+          Lottery3 lap = lottery3(ag, nag, a_plus[po]);
+          Lottery3 ldm = lottery3(dg, ndg, d_minus[po]);
+          Lottery3 lfm = lottery3(fg, nfg, f_minus[po]);
+          Lottery3 lam = lottery3(ag, nag, a_minus[po]);
+          const int dpi[2] = {ldp.lo, ldp.hi};
+          const double dpw[2] = {ldp.plo, ldp.phi};
+          const int fpi[2] = {lfp.lo, lfp.hi};
+          const double fpw[2] = {lfp.plo, lfp.phi};
+          const int api[2] = {lap.lo, lap.hi};
+          const double apw[2] = {lap.plo, lap.phi};
+          const int dmi[2] = {ldm.lo, ldm.hi};
+          const double dmw[2] = {ldm.plo, ldm.phi};
+          const int fmi[2] = {lfm.lo, lfm.hi};
+          const double fmw[2] = {lfm.plo, lfm.phi};
+          const int ami[2] = {lam.lo, lam.hi};
+          const double amw[2] = {lam.plo, lam.phi};
+          const double mass = dist[from] * scale;
+          for (int ep = 0; ep < ne; ++ep)
+            for (int jd = 0; jd < 2; ++jd)
+              for (int jf = 0; jf < 2; ++jf)
+                for (int ja = 0; ja < 2; ++ja) {
+                  const double bp = mass * Pip[e + (std::size_t)ne * ep];
+                  const double bm = mass * Pim[e + (std::size_t)ne * ep];
+                  const double wp = dpw[jd] * fpw[jf] * apw[ja];
+                  const double wm = dmw[jd] * fmw[jf] * amw[ja];
+                  const std::size_t top =
+                    sidx3(ep,dpi[jd],fpi[jf],api[ja],nd,nf,na);
+                  const std::size_t tom =
+                    sidx3(ep,dmi[jd],fmi[jf],ami[ja],nd,nf,na);
+                  // Combine coincident destinations before accumulation, which
+                  // preserves exact structural zeros (notably singleton f).
+                  // With a SHARED transition matrix, bp * (wp - wm) cancels
+                  // exactly; bp*wp - bm*wm would let the compiler contract one
+                  // product into an FMA and leave a ~1e-17 residue that the
+                  // 0.5/step scale amplifies. With genuinely different Pi legs
+                  // the factoring would instead cancel the direct-Pi term to
+                  // zero wherever destinations coincide -- exactly the term a
+                  // transition-probability column is made of. Both branches
+                  // are load-bearing; see hank_forward_direction3_cpp.
+                  if (top == tom) {
+                    out[top] += joint ? (bp * wp - bm * wm)
+                                      : (bp * (wp - wm));
+                  } else {
+                    if (wp != 0.0) out[top] += bp * wp;
+                    if (wm != 0.0) out[tom] -= bm * wm;
+                  }
+                }
+        }
+}
+
 // Apply the central difference of two ACTUAL policy/transition legs of the
 // transposed Young operator to a distribution. Unlike
 // hank_forward_direction3_cpp(), this does not reconstruct a symmetric pair
@@ -246,59 +331,14 @@ NumericVector hank_forward_legs3_cpp(NumericVector d_plus,
       Pi_minus.nrow() != ne || Pi_minus.ncol() != ne)
     stop("hank_forward_legs3_cpp: Pi legs must be n_e x n_e");
 
-  bool joint = false;
-  for (int i = 0; i < ne && !joint; ++i)
-    for (int j = 0; j < ne; ++j)
-      if (Pi_plus(i, j) != Pi_minus(i, j)) { joint = true; break; }
-
   NumericVector out(N);
-  const double scale = 0.5 / step;
-  for (int e = 0; e < ne; ++e)
-    for (int d = 0; d < nd; ++d)
-      for (int f = 0; f < nf; ++f)
-        for (int a = 0; a < na; ++a) {
-          const std::size_t po = pidx3(e,d,f,a,ne,nd,nf);
-          const std::size_t from = sidx3(e,d,f,a,nd,nf,na);
-          Lottery3 ldp = lottery3(d_grid, d_plus[po]);
-          Lottery3 lfp = lottery3(f_grid, f_plus[po]);
-          Lottery3 lap = lottery3(a_grid, a_plus[po]);
-          Lottery3 ldm = lottery3(d_grid, d_minus[po]);
-          Lottery3 lfm = lottery3(f_grid, f_minus[po]);
-          Lottery3 lam = lottery3(a_grid, a_minus[po]);
-          const int dpi[2] = {ldp.lo, ldp.hi};
-          const double dpw[2] = {ldp.plo, ldp.phi};
-          const int fpi[2] = {lfp.lo, lfp.hi};
-          const double fpw[2] = {lfp.plo, lfp.phi};
-          const int api[2] = {lap.lo, lap.hi};
-          const double apw[2] = {lap.plo, lap.phi};
-          const int dmi[2] = {ldm.lo, ldm.hi};
-          const double dmw[2] = {ldm.plo, ldm.phi};
-          const int fmi[2] = {lfm.lo, lfm.hi};
-          const double fmw[2] = {lfm.plo, lfm.phi};
-          const int ami[2] = {lam.lo, lam.hi};
-          const double amw[2] = {lam.plo, lam.phi};
-          const double mass = dist[from] * scale;
-          for (int ep = 0; ep < ne; ++ep)
-            for (int jd = 0; jd < 2; ++jd)
-              for (int jf = 0; jf < 2; ++jf)
-                for (int ja = 0; ja < 2; ++ja) {
-                  const double bp = mass * Pi_plus(e,ep);
-                  const double bm = mass * Pi_minus(e,ep);
-                  const double wp = dpw[jd] * fpw[jf] * apw[ja];
-                  const double wm = dmw[jd] * fmw[jf] * amw[ja];
-                  const std::size_t top =
-                    sidx3(ep,dpi[jd],fpi[jf],api[ja],nd,nf,na);
-                  const std::size_t tom =
-                    sidx3(ep,dmi[jd],fmi[jf],ami[ja],nd,nf,na);
-                  if (top == tom) {
-                    out[top] += joint ? (bp * wp - bm * wm)
-                                      : (bp * (wp - wm));
-                  } else {
-                    if (wp != 0.0) out[top] += bp * wp;
-                    if (wm != 0.0) out[tom] -= bm * wm;
-                  }
-                }
-        }
+  forward_legs3_core(d_plus.begin(), f_plus.begin(), a_plus.begin(),
+                     d_minus.begin(), f_minus.begin(), a_minus.begin(),
+                     d_grid.begin(), (int)d_grid.size(),
+                     f_grid.begin(), (int)f_grid.size(),
+                     a_grid.begin(), (int)a_grid.size(),
+                     Pi_plus.begin(), Pi_minus.begin(),
+                     ne, nd, nf, na, dist.begin(), step, out.begin());
   return out;
 }
 
@@ -531,11 +571,65 @@ static int egm3_triple(const Egm3Ctx& X, int e, int f0, int a0,
   return 0;
 }
 
+// Expectation contraction (main thread only; fills the Ed/Ef/Ea slabs the
+// triples read). Extracted verbatim from hank_egm3_step_cpp so the fused
+// sweep runs the SAME computation -- Pi is column-major with Pi(e, ep) =
+// Pi[e + ne*ep], exactly as NumericMatrix indexes it.
+static void egm3_expect(const double* Vd, const double* Vf, const double* Va,
+                        const double* Pi, int ne, int nd, int nf, int na,
+                        double* Ed, double* Ef, double* Ea) {
+  for(int e=0;e<ne;++e)for(int d=0;d<nd;++d)for(int f=0;f<nf;++f)for(int a=0;a<na;++a){
+    const std::size_t o=pidx3(e,d,f,a,ne,nd,nf); double vd=0,vf=0,va=0;
+    for(int ep=0;ep<ne;++ep){const std::size_t op=pidx3(ep,d,f,a,ne,nd,nf);
+      vd+=Pi[e+(std::size_t)ne*ep]*Vd[op];vf+=Pi[e+(std::size_t)ne*ep]*Vf[op];va+=Pi[e+(std::size_t)ne*ep]*Va[op];}
+    Ed[o]=vd;Ef[o]=vf;Ea[o]=va;
+  }
+}
+
+// The triple loop over a contiguous task range. Shared by the per-call
+// spawn path (hank_egm3_step_cpp) and the persistent pool (Egm3Pool): each
+// task writes a disjoint pidx3(e, ., f0, a0) slice, so output is bit-identical
+// for ANY partition of [0, ntask) and any thread count. First failure wins;
+// the losers' codes are discarded, which is fine because any one of them is
+// enough to abort the step.
+static void egm3_run_tasks(const Egm3Ctx& X, std::size_t lo_t, std::size_t hi_t,
+                           std::atomic<int>& err,
+                           std::atomic<std::size_t>& err_task) {
+  const int nd=X.nd,nf=X.nf,na=X.na;
+  std::vector<double> de(nd),fe(nd),ae(nd),ce(nd);   // per-worker scratch
+  for(std::size_t t=lo_t;t<hi_t;++t){
+    if(err.load(std::memory_order_relaxed)) return;  // abandon early
+    const int a0=(int)(t%(std::size_t)na);
+    const int f0=(int)((t/(std::size_t)na)%(std::size_t)nf);
+    const int e=(int)(t/((std::size_t)na*(std::size_t)nf));
+    const int s=egm3_triple(X,e,f0,a0,de,fe,ae,ce);
+    if(s){int expect=0;
+      if(err.compare_exchange_strong(expect,s)) err_task.store(t);
+      return;}
+  }
+}
+
+// Errors are raised on the MAIN thread, after every worker has joined. The
+// message text is the step's regardless of which entry point ran it, so the
+// fused sweep fails exactly like the per-step R loop it replaces.
+static void egm3_raise(int e_code, std::size_t t, int nf, int na) {
+  const int a0=(int)(t%(std::size_t)na);
+  const int f0=(int)((t/(std::size_t)na)%(std::size_t)nf);
+  const int e=(int)(t/((std::size_t)na*(std::size_t)nf));
+  if(e_code==1)
+    stop("hank_egm3_step_cpp: non-monotone endogenous liquid grid at "
+         "(e=%d, f=%d, a=%d)",e+1,f0+1,a0+1);
+  stop("hank_egm3_step_cpp: no active-set candidate satisfies joint KKT "
+       "conditions at (e=%d, f=%d, a=%d)",e+1,f0+1,a0+1);
+}
+
 // One compiled three-asset EGM backward step. The R implementation remains
 // the oracle and owns validation/default initialization.
 //
 // `threads` is resolved in R (see hank_resolve_threads); <= 1 runs the
 // serial path, which is the code the parallel path must reproduce bit for bit.
+// A bare step call pays ONE thread spawn/join per call; the fused sweep below
+// holds one pool across all its steps instead.
 // [[Rcpp::export]]
 List hank_egm3_step_cpp(NumericVector Vd_, NumericVector Vf_, NumericVector Va_,
                         NumericVector dg_, NumericVector fg_, NumericVector ag_,
@@ -548,11 +642,8 @@ List hank_egm3_step_cpp(NumericVector Vd_, NumericVector Vf_, NumericVector Va_,
   const std::size_t N=(std::size_t)ne*nd*nf*na;
   const double *dg=dg_.begin(),*fg=fg_.begin(),*ag=ag_.begin(),*y=y_.begin();
   std::vector<double> Ed(N),Ef(N),Ea(N);
-  for(int e=0;e<ne;++e)for(int d=0;d<nd;++d)for(int f=0;f<nf;++f)for(int a=0;a<na;++a){
-    const std::size_t o=pidx3(e,d,f,a,ne,nd,nf); double vd=0,vf=0,va=0;
-    for(int ep=0;ep<ne;++ep){const std::size_t op=pidx3(ep,d,f,a,ne,nd,nf);vd+=Pi_(e,ep)*Vd_[op];vf+=Pi_(e,ep)*Vf_[op];va+=Pi_(e,ep)*Va_[op];}
-    Ed[o]=vd;Ef[o]=vf;Ea[o]=va;
-  }
+  egm3_expect(Vd_.begin(),Vf_.begin(),Va_.begin(),Pi_.begin(),
+              ne,nd,nf,na,Ed.data(),Ef.data(),Ea.data());
   NumericVector D(N),F(N),A(N),C(N),Chi(N),Phi(N),Vdn(N),Vfn(N),Van(N);
   Egm3Ctx X{dg,fg,ag,y,Ed.data(),Ef.data(),Ea.data(),ne,nd,nf,na,
             rd,rf,ra,px,beta,eis,chi0,chi1,chi2,phi0,phi1,phi2,
@@ -562,51 +653,26 @@ List hank_egm3_step_cpp(NumericVector Vd_, NumericVector Vf_, NumericVector Va_,
 
   const std::size_t ntask=(std::size_t)ne*nf*na;
   const int nthr=std::max(1,std::min(threads,(int)ntask));
-  // First failure wins; the losers' codes are discarded, which is fine because
-  // any one of them is enough to abort the step.
   std::atomic<int> err(0); std::atomic<std::size_t> err_task(0);
 
-  auto run_range=[&](std::size_t lo_t,std::size_t hi_t){
-    std::vector<double> de(nd),fe(nd),ae(nd),ce(nd);   // per-worker scratch
-    for(std::size_t t=lo_t;t<hi_t;++t){
-      if(err.load(std::memory_order_relaxed)) return;  // abandon early
-      const int a0=(int)(t%(std::size_t)na);
-      const int f0=(int)((t/(std::size_t)na)%(std::size_t)nf);
-      const int e=(int)(t/((std::size_t)na*(std::size_t)nf));
-      const int s=egm3_triple(X,e,f0,a0,de,fe,ae,ce);
-      if(s){int expect=0;
-        if(err.compare_exchange_strong(expect,s)) err_task.store(t);
-        return;}
-    }
-  };
-
   if(nthr<=1){
-    run_range(0,ntask);
+    egm3_run_tasks(X,0,ntask,err,err_task);
   } else {
     std::vector<std::thread> pool; pool.reserve(nthr-1);
     const std::size_t chunk=(ntask+nthr-1)/nthr;
     for(int k=1;k<nthr;++k){
       const std::size_t lo_t=std::min(ntask,(std::size_t)k*chunk);
       const std::size_t hi_t=std::min(ntask,lo_t+chunk);
-      if(lo_t<hi_t) pool.emplace_back(run_range,lo_t,hi_t);
+      if(lo_t<hi_t)
+        pool.emplace_back([&X,lo_t,hi_t,&err,&err_task]{
+          egm3_run_tasks(X,lo_t,hi_t,err,err_task);});
     }
-    run_range(0,std::min(ntask,chunk));               // main thread takes chunk 0
+    egm3_run_tasks(X,0,std::min(ntask,chunk),err,err_task); // main takes chunk 0
     for(auto& th: pool) th.join();
   }
 
-  // Errors are raised HERE, on the main thread, after every worker has joined.
   const int e_code=err.load();
-  if(e_code){
-    const std::size_t t=err_task.load();
-    const int a0=(int)(t%(std::size_t)na);
-    const int f0=(int)((t/(std::size_t)na)%(std::size_t)nf);
-    const int e=(int)(t/((std::size_t)na*(std::size_t)nf));
-    if(e_code==1)
-      stop("hank_egm3_step_cpp: non-monotone endogenous liquid grid at "
-           "(e=%d, f=%d, a=%d)",e+1,f0+1,a0+1);
-    stop("hank_egm3_step_cpp: no active-set candidate satisfies joint KKT "
-         "conditions at (e=%d, f=%d, a=%d)",e+1,f0+1,a0+1);
-  }
+  if(e_code) egm3_raise(e_code,err_task.load(),nf,na);
 
   IntegerVector dims=IntegerVector::create(ne,nd,nf,na);for(auto v:{D,F,A,C,Chi,Phi,Vdn,Vfn,Van})v.attr("dim")=dims;
   return List::create(_["d"]=D,_["f"]=F,_["a"]=A,_["c"]=C,_["chi"]=Chi,_["phi"]=Phi,
@@ -662,4 +728,294 @@ List hank_egm3_solve_cpp(NumericVector Vd, NumericVector Vf, NumericVector Va,
   step["converged"]=ok;step["last_value_gap"]=gap;step["last_policy_gap"]=pol_gap;
   step["step_status"]=step_status;step["step_error"]=step_error;
   return step;
+}
+
+// ---------------------------------------------------------------------------
+// FUSED BACKWARD SWEEP for the three-asset fake-news Jacobian.
+//
+// Ports the s = 2 .. T_h anticipation loop of R .hank_curly_sweep3() (see
+// R/hank-jacobian3.R) so the WHOLE recursion -- both EGM step legs per date,
+// the differencing/aggregation record() does, and the curly-D leg
+// accumulation -- runs in one compiled call under ONE worker pool. The
+// two-asset analogue is hank_curly_sweep2_cpp() in src/hank_egm2.cpp; this
+// follows the same discipline (persistent pool parked on a std::barrier;
+// FMA-pinned axpy; exact-max shared scale) and, like it, REUSES the step and
+// forward-legs kernels (egm3_expect / egm3_run_tasks / forward_legs3_core)
+// rather than re-implementing any accumulation.
+// ---------------------------------------------------------------------------
+
+// Persistent worker pool over the triple tasks. Spawned ONCE per fused sweep
+// and held across every date and both FD legs; workers park on the barrier
+// between steps. Partition and per-task arithmetic are egm3_run_tasks', so
+// output is bit-identical to the per-call spawn path at every thread count
+// (disjoint writes, no cross-thread reductions).
+class Egm3Pool {
+ public:
+  Egm3Pool(const Egm3Ctx* ctx, std::size_t ntask, int nthr,
+           std::atomic<int>* err, std::atomic<std::size_t>* err_task)
+    : ctx_(ctx), ntask_(ntask), nthr_(nthr),
+      chunk_((ntask + nthr - 1) / nthr), err_(err), err_task_(err_task),
+      bar_((std::ptrdiff_t)nthr), done_(false) {
+    pool_.reserve(nthr - 1);
+    for (int w = 1; w < nthr; ++w)
+      pool_.emplace_back([this, w] { this->worker(w); });
+  }
+  // Run one backward step's triple loop. The caller must have refilled the
+  // context's Ed/Ef/Ea slabs first (egm3_expect, main thread).
+  void run_step() {
+    err_->store(0);                  // workers are parked; no race with this
+    bar_.arrive_and_wait();          // release the workers into the tasks
+    run_chunk(0);                    // main thread takes chunk 0
+    bar_.arrive_and_wait();          // workers park at the top barrier again
+  }
+  // Releases and joins the workers. Runs on the normal path AND during stack
+  // unwinding if the main thread throws between steps (egm3_raise), so a
+  // worker can never outlive the buffers it points at.
+  ~Egm3Pool() {
+    done_.store(true, std::memory_order_release);
+    bar_.arrive_and_wait();
+    for (auto& t : pool_) t.join();
+  }
+  Egm3Pool(const Egm3Pool&) = delete;
+  Egm3Pool& operator=(const Egm3Pool&) = delete;
+
+ private:
+  void run_chunk(int w) {
+    const std::size_t lo = std::min(ntask_, (std::size_t)w * chunk_);
+    const std::size_t hi = std::min(ntask_, lo + chunk_);
+    if (lo < hi) egm3_run_tasks(*ctx_, lo, hi, *err_, *err_task_);
+  }
+  void worker(int w) {
+    for (;;) {
+      bar_.arrive_and_wait();
+      if (done_.load(std::memory_order_acquire)) return;
+      run_chunk(w);
+      bar_.arrive_and_wait();
+    }
+  }
+  const Egm3Ctx* ctx_;
+  std::size_t ntask_;
+  int nthr_;
+  std::size_t chunk_;
+  std::atomic<int>* err_;
+  std::atomic<std::size_t>* err_task_;
+  std::barrier<> bar_;
+  std::atomic<bool> done_;
+  std::vector<std::thread> pool_;
+};
+
+// Bit-identical port of R's `V_ss + h * dV` (see egm2_axpy_exact in
+// src/hank_egm2.cpp for the full story). The multiply and the add must round
+// SEPARATELY, exactly as R rounds them: clang's default -ffp-contract=on is
+// licensed to fuse this very expression, moving the perturbed argument by
+// 1 ULP, which the sweep's 1/(2h) amplification then COMPOUNDS date after
+// date because dVd/dVf/dVa feed the next step. `volatile` on the intermediate
+// product pins the rounding regardless of the contraction default. Passing -h
+// reproduces R's `V_ss - h * dV` exactly: negation is exact, so v + (-(h*d))
+// and v - (h*d) round identically.
+static inline void egm3_axpy_exact(const double* v, double h, const double* d,
+                                   double* out, std::size_t n) {
+  for (std::size_t t = 0; t < n; ++t) {
+    volatile double p = h * d[t];
+    out[t] = v[t] + p;
+  }
+}
+
+// Port of R's `max(1, max(abs(dVd)), max(abs(dVf)), max(abs(dVa)))`,
+// NaN-propagating like R's max(). max() is exact (pure comparison), so
+// flattening the nested maxima into one running maximum cannot change the
+// result by even a ULP -- and it MUST not: this REDUCTION feeds the shared FD
+// scale h that every later date inherits, so any reassociation would compound
+// down the sweep. The three arrays are scanned in the same order R evaluates
+// them.
+static inline double egm3_sweep_scale(const double* dvd, const double* dvf,
+                                      const double* dva, std::size_t n) {
+  double m = 1.0;
+  bool nan_seen = false;
+  const double* arrs[3] = {dvd, dvf, dva};
+  for (int k = 0; k < 3; ++k)
+    for (std::size_t t = 0; t < n; ++t) {
+      double u = std::fabs(arrs[k][t]);
+      if (ISNAN(u)) { nan_seen = true; continue; }
+      if (u > m) m = u;
+    }
+  return nan_seen ? R_NaN : m;
+}
+
+// Fused s = 2 .. T_h backward sweep (compiled).
+//
+// Vd_ss_/Vf_ss_/Va_ss_ are the steady-state marginals; dVd0_/dVf0_/dVa0_ the
+// s = 1 directional derivatives the R caller has already computed (the s = 1
+// term itself -- the input perturbation, including any Pi legs -- stays in R,
+// where the input-type dispatch lives). D_ss_ is the stationary distribution
+// in state order. `outputs` is the REQUESTED aggregate set (any subset of
+// D/F/A/C/CHI/PHI; the internal "Y" is identically zero at s >= 2 and is left
+// to the R side's zero initialization) -- the swept set is variable and must
+// never be hardcoded here.
+//
+// Per date: shared scale h from (dVd, dVf, dVa); two EGM step legs through
+// the SAME egm3_expect + egm3_run_tasks bodies as hank_egm3_step_cpp; central
+// differences formed with the denominator 2*h computed ONCE as R does;
+// aggregation against D_ss in state order with a long-double accumulator
+// (matching R's sum()); and the curly-D column through forward_legs3_core on
+// the ACTUAL legs, Pi_p = Pi_m = Pi (so the `joint` flag is false and every
+// exact-zero contract of that kernel holds by construction).
+//
+// Returns curlyY (named list over the requested outputs, each length
+// T_h - 1, entry j = date s = j + 1... i.e. dates 2..T_h) and curlyD
+// (n_cell x (T_h - 1)), which the R driver splices into its own s = 1 column.
+// [[Rcpp::export]]
+List hank_curly_sweep3_cpp(NumericVector Vd_ss_, NumericVector Vf_ss_,
+                           NumericVector Va_ss_, NumericVector dVd0_,
+                           NumericVector dVf0_, NumericVector dVa0_,
+                           NumericVector dg_, NumericVector fg_,
+                           NumericVector ag_, NumericVector y_,
+                           NumericMatrix Pi_, double rd, double rf, double ra,
+                           double beta, double eis, double chi0, double chi1,
+                           double chi2, double phi0, double phi1, double phi2,
+                           double px, NumericVector D_ss_,
+                           CharacterVector outputs, double delta_v, int T_h,
+                           int threads = 1) {
+  IntegerVector dm = Vd_ss_.attr("dim");
+  if (dm.size() != 4) stop("hank_curly_sweep3_cpp: Vd needs four dimensions");
+  const int ne = dm[0], nd = dm[1], nf = dm[2], na = dm[3];
+  const std::size_t N = (std::size_t)ne * nd * nf * na;
+  if ((std::size_t)Vf_ss_.size() != N || (std::size_t)Va_ss_.size() != N ||
+      (std::size_t)dVd0_.size() != N || (std::size_t)dVf0_.size() != N ||
+      (std::size_t)dVa0_.size() != N || (std::size_t)D_ss_.size() != N)
+    stop("hank_curly_sweep3_cpp: state arrays have wrong length");
+  if (Pi_.nrow() != ne || Pi_.ncol() != ne)
+    stop("hank_curly_sweep3_cpp: Pi must be n_e x n_e");
+  if (T_h < 2) stop("hank_curly_sweep3_cpp: T_h must be >= 2");
+  const int S = T_h - 1;                      // dates s = 2 .. T_h
+
+  bool want[6] = {false, false, false, false, false, false};
+  static const char* nm[6] = {"D", "F", "A", "C", "CHI", "PHI"};
+  for (int i = 0; i < outputs.size(); ++i) {
+    const std::string o = as<std::string>(outputs[i]);
+    for (int k = 0; k < 6; ++k) if (o == nm[k]) want[k] = true;
+  }
+
+  const double *dg = dg_.begin(), *fg = fg_.begin(), *ag = ag_.begin();
+  const double *dss = D_ss_.begin();
+
+  // Step working set: perturbed inputs, expectation slabs, step outputs.
+  std::vector<double> vdp(N), vfp(N), vap(N), Ed(N), Ef(N), Ea(N);
+  std::vector<double> D(N), F(N), A(N), C(N), Chi(N), Phi(N),
+                      Vdn(N), Vfn(N), Van(N);
+  // +h leg outputs, held while the -h leg overwrites the context buffers.
+  std::vector<double> d_p(N), f_p(N), a_p(N), c_p(N), chi_p(N), phi_p(N),
+                      Vd_p(N), Vf_p(N), Va_p(N);
+  std::vector<double> dVd(dVd0_.begin(), dVd0_.end());
+  std::vector<double> dVf(dVf0_.begin(), dVf0_.end());
+  std::vector<double> dVa(dVa0_.begin(), dVa0_.end());
+
+  Egm3Ctx X{dg, fg, ag, y_.begin(), Ed.data(), Ef.data(), Ea.data(),
+            ne, nd, nf, na,
+            rd, rf, ra, px, beta, eis, chi0, chi1, chi2, phi0, phi1, phi2,
+            D.data(), F.data(), A.data(), C.data(), Chi.data(), Phi.data(),
+            Vdn.data(), Vfn.data(), Van.data()};
+
+  const std::size_t ntask = (std::size_t)ne * nf * na;
+  const int nthr = std::max(1, std::min(threads, (int)ntask));
+  std::atomic<int> err(0); std::atomic<std::size_t> err_task(0);
+  // Spawned ONCE, held across all dates and both legs -- the whole point.
+  std::unique_ptr<Egm3Pool> pool;
+  if (nthr > 1) pool.reset(new Egm3Pool(&X, ntask, nthr, &err, &err_task));
+  auto run_leg = [&](const double* vd, const double* vf, const double* va) {
+    egm3_expect(vd, vf, va, Pi_.begin(), ne, nd, nf, na,
+                Ed.data(), Ef.data(), Ea.data());
+    if (pool) { pool->run_step(); }
+    else { err.store(0); egm3_run_tasks(X, 0, ntask, err, err_task); }
+    const int e_code = err.load();
+    if (e_code) {
+      const std::size_t t = err_task.load();
+      pool.reset();                   // join before longjmp-ing out
+      egm3_raise(e_code, t, nf, na);
+    }
+  };
+
+  NumericMatrix curlyD((int)N, S);
+  std::vector<NumericVector> cy(6);
+  for (int k = 0; k < 6; ++k) if (want[k]) cy[k] = NumericVector(S);
+
+  for (int s = 0; s < S; ++s) {
+    // One SHARED scale for all three marginal values: they describe a single
+    // perturbation direction, and scaling them separately would change it.
+    const double h = delta_v / egm3_sweep_scale(dVd.data(), dVf.data(),
+                                                dVa.data(), N);
+    // --- +h leg ------------------------------------------------------------
+    egm3_axpy_exact(Vd_ss_.begin(), h, dVd.data(), vdp.data(), N);
+    egm3_axpy_exact(Vf_ss_.begin(), h, dVf.data(), vfp.data(), N);
+    egm3_axpy_exact(Va_ss_.begin(), h, dVa.data(), vap.data(), N);
+    run_leg(vdp.data(), vfp.data(), vap.data());
+    std::copy(D.begin(), D.end(), d_p.begin());
+    std::copy(F.begin(), F.end(), f_p.begin());
+    std::copy(A.begin(), A.end(), a_p.begin());
+    std::copy(C.begin(), C.end(), c_p.begin());
+    std::copy(Chi.begin(), Chi.end(), chi_p.begin());
+    std::copy(Phi.begin(), Phi.end(), phi_p.begin());
+    std::copy(Vdn.begin(), Vdn.end(), Vd_p.begin());
+    std::copy(Vfn.begin(), Vfn.end(), Vf_p.begin());
+    std::copy(Van.begin(), Van.end(), Va_p.begin());
+
+    // --- -h leg (leaves its outputs in the context buffers) ----------------
+    egm3_axpy_exact(Vd_ss_.begin(), -h, dVd.data(), vdp.data(), N);
+    egm3_axpy_exact(Vf_ss_.begin(), -h, dVf.data(), vfp.data(), N);
+    egm3_axpy_exact(Va_ss_.begin(), -h, dVa.data(), vap.data(), N);
+    run_leg(vdp.data(), vfp.data(), vap.data());
+
+    // --- record(): differences + aggregation, denominator formed ONCE -----
+    // Aggregation replicates R's sum(D_ss * .hank3_arr_to_vec(dx)) exactly:
+    // walk the STATE order (a fastest, then f, d, e -- the arr_to_vec
+    // permutation), round each product to double (the named temporary is
+    // volatile so no FMA can fuse it into the add), and accumulate in long
+    // double, which is what R's sum() does internally (LDOUBLE). CHI/PHI are
+    // differenced as the KERNEL reports them -- never re-derived from da/df,
+    // which would drop the Psi2 term (see R/hank-jacobian3.R record()).
+    const double den = 2.0 * h;
+    long double aD = 0, aF = 0, aA = 0, aC = 0, aCHI = 0, aPHI = 0;
+    std::size_t from = 0;
+    for (int e = 0; e < ne; ++e)
+      for (int d = 0; d < nd; ++d)
+        for (int f = 0; f < nf; ++f)
+          for (int a = 0; a < na; ++a, ++from) {
+            const std::size_t po = pidx3(e, d, f, a, ne, nd, nf);
+            const double w = dss[from];
+            if (want[0]) { volatile double p = w * ((d_p[po]   - D[po])   / den); aD   += p; }
+            if (want[1]) { volatile double p = w * ((f_p[po]   - F[po])   / den); aF   += p; }
+            if (want[2]) { volatile double p = w * ((a_p[po]   - A[po])   / den); aA   += p; }
+            if (want[3]) { volatile double p = w * ((c_p[po]   - C[po])   / den); aC   += p; }
+            if (want[4]) { volatile double p = w * ((chi_p[po] - Chi[po]) / den); aCHI += p; }
+            if (want[5]) { volatile double p = w * ((phi_p[po] - Phi[po]) / den); aPHI += p; }
+          }
+    if (want[0]) cy[0][s] = (double)aD;
+    if (want[1]) cy[1][s] = (double)aF;
+    if (want[2]) cy[2][s] = (double)aA;
+    if (want[3]) cy[3][s] = (double)aC;
+    if (want[4]) cy[4][s] = (double)aCHI;
+    if (want[5]) cy[5][s] = (double)aPHI;
+
+    // curly-D from the ACTUAL legs through the shared forward-legs kernel;
+    // Pi_p == Pi_m == Pi, so `joint` is false and the exact-zero branch runs.
+    // The NumericMatrix column is freshly zeroed, as the core requires.
+    forward_legs3_core(d_p.data(), f_p.data(), a_p.data(),
+                       D.data(), F.data(), A.data(),
+                       dg, (int)dg_.size(), fg, (int)fg_.size(),
+                       ag, (int)ag_.size(),
+                       Pi_.begin(), Pi_.begin(),
+                       ne, nd, nf, na, dss, h, &curlyD(0, s));
+
+    // --- next date's direction --------------------------------------------
+    for (std::size_t t = 0; t < N; ++t) {
+      dVd[t] = (Vd_p[t] - Vdn[t]) / den;
+      dVf[t] = (Vf_p[t] - Vfn[t]) / den;
+      dVa[t] = (Va_p[t] - Van[t]) / den;
+    }
+  }
+  pool.reset();   // join before anything else touches X
+
+  List curlyY;
+  for (int k = 0; k < 6; ++k) if (want[k]) curlyY[nm[k]] = cy[k];
+  return List::create(_["curlyY"] = curlyY, _["curlyD"] = curlyD);
 }

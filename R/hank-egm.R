@@ -61,12 +61,24 @@
 #'   Must satisfy \code{amin >= a_grid[1]} (the grid cannot represent assets
 #'   below its floor). Defaults to \code{a_grid[1L]} (\code{NULL} resolves to
 #'   the grid floor), matching the historical hardcoded behavior.
+#' @param coh_extra Optional \code{n_e x n_a} numeric matrix, ADDITIVE on cash
+#'   on hand at the FIXED (beginning-of-period) grid, i.e. \code{coh(e,a) <-
+#'   coh(e,a) + coh_extra(e,a)}, entering only the actual-coh side of the
+#'   interpolation (never the endogenous-grid side, which is a function of
+#'   the CHOICE \eqn{a'}, not of the current state). \code{NULL} (default)
+#'   is a pure no-op -- bit-identical to the pre-Tier-2 kernel -- and is how a
+#'   matrix (asset-dependent) \code{Tr_incidence} on
+#'   \code{\link{hank_het_block}} enters the household problem; see that
+#'   constructor's Tier-2 documentation. When supplied, a warning fires
+#'   ONCE PER SESSION if it drives \eqn{coh - a'} to the EGM tiny-floor
+#'   region (see the transient-NaN guard below).
 #'
 #' @return A list with \code{Va} (updated marginal value), \code{a} (savings
 #'   policy \eqn{a'(a,e)}), and \code{c} (consumption policy), each
 #'   \code{n_e x n_a}.
 #' @keywords internal
-.hank_egm_step <- function(Va_p, a_grid, y, r, beta, eis, Pi, amin = NULL) {
+.hank_egm_step <- function(Va_p, a_grid, y, r, beta, eis, Pi, amin = NULL,
+                           coh_extra = NULL) {
   n_e <- nrow(Va_p); n_a <- ncol(Va_p)
   if (is.null(amin)) amin <- a_grid[1L]
   if (amin < a_grid[1L])
@@ -105,8 +117,9 @@
   ## Endogenous cash-on-hand that rationalizes choosing a': coh = c + a'.
   coh_endog <- c_endog + matrix(a_grid, n_e, n_a, byrow = TRUE)
 
-  ## Actual cash-on-hand on the fixed grid: (1+r) a + y(e).
+  ## Actual cash-on-hand on the fixed grid: (1+r) a + y(e) [+ coh_extra(e,a)].
   coh <- (1 + r) * matrix(a_grid, n_e, n_a, byrow = TRUE) + y
+  if (!is.null(coh_extra)) coh <- coh + coh_extra   ## Tier 2: (e,a) incidence
 
   a_pol <- matrix(0, n_e, n_a)
   for (e in seq_len(n_e)) {
@@ -119,9 +132,34 @@
   ## Floor consumption before the envelope power (same transient-NaN guard as
   ## above; a no-op wherever coh - a_pol > 0, i.e. always at the fixed point and
   ## for amin >= 0, so converged / non-negative-amin results are byte-identical).
-  c_pol <- pmax(coh - a_pol, tiny)
+  c_pol_raw <- coh - a_pol
+  ## Only checked when coh_extra is present (Tier 2), so the NULL/vector
+  ## incidence path is a strict no-op here -- no new work, no new warning.
+  if (!is.null(coh_extra) && any(c_pol_raw <= tiny))
+    .hank_egm_warn_once(
+      "coh_extra_floor",
+      "hank_egm: a transition-path evaluation with a matrix 'Tr_incidence' ",
+      "(Tier 2, asset-dependent incidence) drove cash-on-hand to the EGM ",
+      "tiny-floor (1e-12) region at some (e, a) point -- consumption there ",
+      "is being floored rather than reflecting the true budget. This ",
+      "warning fires at most once per session; if unexpected, check the ",
+      "sign/magnitude of 'Tr' against the incidence weight in that corner.")
+  c_pol <- pmax(c_pol_raw, tiny)
   Va    <- (1 + r) * c_pol^(-1 / eis)              # envelope condition
   list(Va = Va, a = a_pol, c = c_pol)
+}
+
+
+## Package-private store for one-time warnings (avoids transition/Jacobian
+## sweep warning spam -- the same pattern as .cumulant_warn_once).
+.hank_egm_warn_env <- new.env(parent = emptyenv())
+
+#' Emit a warning at most once per session, keyed by \code{key}.
+#' @keywords internal
+.hank_egm_warn_once <- function(key, ...) {
+  if (isTRUE(.hank_egm_warn_env[[key]])) return(invisible(NULL))
+  .hank_egm_warn_env[[key]] <- TRUE
+  warning(paste0(...), call. = FALSE)
 }
 
 
@@ -183,11 +221,15 @@
 #' hh  <- hank_egm_solve(a, y = inc$e, r = 0.01, beta = 0.96,
 #'                       eis = 1, Pi = inc$Pi)
 #' hh$converged
+#' @param coh_extra Optional \code{n_e x n_a} numeric matrix, additive on cash
+#'   on hand; see \code{\link{.hank_egm_step}}. \code{NULL} (default) is a
+#'   pure no-op on both backends.
 #' @export
 hank_egm_solve <- function(a_grid, y, r, beta, eis, Pi,
                            tol = 1e-11, maxit = 5000L, Va_init = NULL,
                            amin = NULL,
-                           backend = getOption("dynhr.hank_backend", "cpp")) {
+                           backend = getOption("dynhr.hank_backend", "cpp"),
+                           coh_extra = NULL) {
   backend <- match.arg(backend, c("R", "cpp"))
   n_e <- length(y); n_a <- length(a_grid)
   ## Shared Markov contract (same validator as hank_forward_operator, so all
@@ -239,7 +281,7 @@ hank_egm_solve <- function(a_grid, y, r, beta, eis, Pi,
     ## so the cpp path never needs its own default-Va formula to keep in
     ## sync with the R one.
     res <- hank_egm_solve_cpp(a_grid, y, r, beta, eis, Pi, amin, tol,
-                              as.integer(maxit), Va)
+                              as.integer(maxit), Va, coh_extra)
     return(list(Va = res$Va, a = res$a, c = res$c,
                 iterations = as.integer(res$iterations),
                 converged = as.logical(res$converged),
@@ -265,7 +307,8 @@ hank_egm_solve <- function(a_grid, y, r, beta, eis, Pi,
   policy_gap <- NA_real_; value_gap <- NA_real_
   for (it in seq_len(maxit)) {
     Va_prev <- Va
-    step <- .hank_egm_step(Va, a_grid, y, r, beta, eis, Pi, amin = amin)
+    step <- .hank_egm_step(Va, a_grid, y, r, beta, eis, Pi, amin = amin,
+                           coh_extra = coh_extra)
     Va   <- step$Va
     value_gap  <- max(abs(Va - Va_prev))
     policy_gap <- max(abs(step$a - a_old))

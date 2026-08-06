@@ -40,7 +40,30 @@ one of the block's transition-probability inputs).}
 }
 \value{
 List with \code{curlyY} (named list over \code{outputs}, each
-  length-\code{T_h}) and \code{curlyD} (\code{n_cell x T_h}).
+  length-\code{T_h}), \code{curlyD} (\code{n_cell x T_h}, the
+  AGGREGATE-tuned distributional term -- see the \code{"theta only"}
+  section below), and \code{curlyD_raw} (\code{n_cell x T_h}), the
+  UNCORRECTED counterpart. For every input other than \code{"theta_coll"}
+  the two are identical (same object, no extra cost). For
+  \code{"theta_coll"} they differ only at column \code{s = 2}: \code{curlyD}
+  there subtracts the un-pushed \code{dD1} coordinate-rebasing vector so
+  that, once CONTRACTED against a steady output policy, the aggregate
+  diagonal cumulation (\code{\link{hank_het2_jacobian}}) does not double-
+  count the \code{dD1}-weighted term already folded into
+  \code{curlyY[[o]][1]}. \code{curlyD_raw} omits that subtraction, since a
+  raw (uncontracted) per-cell distribution response never sees that
+  aggregate-side double count in the first place -- it is the physically
+  correct translation-invariant date-0 (i.e. one-period-ahead-of-shock)
+  term for a VECTOR-valued distribution Jacobian
+  (\code{\link{hank_het2_dist_jacobian}}). The return list also carries
+  \code{dD1}, the RAW (un-pushed, un-contracted) date-1 coordinate-
+  rebasing vector computed in the \code{"theta only"} section below
+  (\code{NULL} for every input other than \code{"theta_coll"}): the
+  distribution Jacobian's row \code{t = 1} is otherwise always zero (a
+  fixed predetermined state), but under \code{"theta_coll"} an
+  UNANTICIPATED shock at \code{s = 1} re-expresses \eqn{D_1} itself in the
+  shifted gap coordinate, so \code{JD[1, 1, ] = dD1} exactly (confirmed
+  against \code{\link{hank_het2_dist_jacobian_nd}}).
 }
 \description{
 Two-asset counterpart of \code{\link{.hank_curly_sweep}}: curly-Y (per-output

@@ -142,10 +142,24 @@ extract_prior_spec <- function(model, verbose = TRUE) {
 ## Normalise a distribution name to canonical form: lower-case, trimmed, with
 ## Dynare's `_pdf` suffix stripped ("beta_pdf" / "Beta" / "beta " all -> "beta").
 ## Shared by validate_prior_spec(), log_prior(), log_prior_density() and the
-## analytic-gradient prior score so they accept the same forms. extract_prior_spec()
-## already strips _pdf, but specs hand-built and passed straight to the evaluators
-## (tests, user code) may carry the raw Dynare name.
-.normalize_dist <- function(d) sub("_pdf$", "", tolower(trimws(as.character(d))))
+## analytic-gradient prior score so they accept the same forms.
+## extract_prior_spec() emits already-canonical names, but specs hand-built and
+## passed straight to the evaluators (tests, user code) may carry the raw
+## Dynare name.
+##
+## HOT-PATH NOTE (2026-08-05, Windows benchmark diagnosis): this used to call
+## trimws(), whose internal perl = TRUE sub() costs ~200us PER CALL on some
+## Windows builds (vs single-digit us on macOS) -- and log_prior() called it
+## once per parameter per posterior evaluation, dominating dynhr_benchmark()
+## there. Two defenses now: (1) the fast path below returns already-canonical
+## input untouched with no regex at all (the extract_prior_spec() case, i.e.
+## every in-package caller); (2) the slow path avoids trimws in favor of a
+## single non-perl gsub. Keep both properties if editing.
+.normalize_dist <- function(d) {
+  d <- as.character(d)
+  if (all(d %in% .dynhr_prior_dists())) return(d)
+  sub("_pdf$", "", tolower(gsub("^[ \t\r\n]+|[ \t\r\n]+$", "", d)))
+}
 
 #' Validate a prior_spec data.frame, failing loud on a malformed / typo'd spec
 #'

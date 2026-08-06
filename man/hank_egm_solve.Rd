@@ -15,7 +15,8 @@ hank_egm_solve(
   maxit = 5000L,
   Va_init = NULL,
   amin = NULL,
-  backend = getOption("dynhr.hank_backend", "cpp")
+  backend = getOption("dynhr.hank_backend", "cpp"),
+  coh_extra = NULL
 )
 }
 \arguments{
@@ -56,6 +57,10 @@ remains available by passing \code{backend = "R"} or setting
 \code{options(dynhr.hank_backend = "R")} globally. Input validation and
 the feasibility (\code{min_coh}) pre-check run in this R wrapper
 regardless of backend, so error messages are unaffected by the choice.}
+
+\item{coh_extra}{Optional \code{n_e x n_a} numeric matrix, additive on cash
+on hand; see \code{\link{.hank_egm_step}}. \code{NULL} (default) is a
+pure no-op on both backends.}
 }
 \value{
 A list with converged \code{Va}, \code{a} (savings policy), \code{c}

@@ -775,9 +775,12 @@ kalman_filter <- function(Y, dr, model, params, obs_vars,
   ## "negligible" me_variance floor can still dwarf the smallest eigenvalue
   ## of the model-implied (ME-free) steady-state innovation covariance when
   ## some linear combination of observables is nearly perfectly predictable.
-  ## Reuses the stationary Lyapunov P0 as Sxi0 -- cheap relative to a KF
-  ## sweep, but still skipped unless a caller actually opts in (per-draw
-  ## callers latch this to TRUE only once per closure; see make_log_posterior).
+  ## Reuses the stationary Lyapunov P0 as Sxi0. Per-draw closures latch this
+  ## to TRUE only once (see make_log_posterior); direct calls run it every
+  ## time, but the detector memoizes on system content, so repeated calls on
+  ## an unchanged system cost only the Lyapunov solve + a hash (the
+  ## un-memoized Riccati was ~13x a small-model KF sweep; kf_rbc_standard
+  ## perf-gate regression, 2026-08-05).
   if (me_variance > 0 && isTRUE(me_floor_check)) {
     Sxi0_chk <- tryCatch(solve_lyapunov(TT, QQ), error = function(e) NULL)
     if (!is.null(Sxi0_chk) && all(is.finite(Sxi0_chk))) {

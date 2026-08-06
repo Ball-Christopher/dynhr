@@ -190,7 +190,30 @@ hank_het2_jacobian_nd <- function(block, T_h,
 #' @param backend Character \code{"cpp"}/\code{"R"} backward-step backend.
 #' @param threads Resolved integer worker count for the compiled backend.
 #' @return List with \code{curlyY} (named list over \code{outputs}, each
-#'   length-\code{T_h}) and \code{curlyD} (\code{n_cell x T_h}).
+#'   length-\code{T_h}), \code{curlyD} (\code{n_cell x T_h}, the
+#'   AGGREGATE-tuned distributional term -- see the \code{"theta only"}
+#'   section below), and \code{curlyD_raw} (\code{n_cell x T_h}), the
+#'   UNCORRECTED counterpart. For every input other than \code{"theta_coll"}
+#'   the two are identical (same object, no extra cost). For
+#'   \code{"theta_coll"} they differ only at column \code{s = 2}: \code{curlyD}
+#'   there subtracts the un-pushed \code{dD1} coordinate-rebasing vector so
+#'   that, once CONTRACTED against a steady output policy, the aggregate
+#'   diagonal cumulation (\code{\link{hank_het2_jacobian}}) does not double-
+#'   count the \code{dD1}-weighted term already folded into
+#'   \code{curlyY[[o]][1]}. \code{curlyD_raw} omits that subtraction, since a
+#'   raw (uncontracted) per-cell distribution response never sees that
+#'   aggregate-side double count in the first place -- it is the physically
+#'   correct translation-invariant date-0 (i.e. one-period-ahead-of-shock)
+#'   term for a VECTOR-valued distribution Jacobian
+#'   (\code{\link{hank_het2_dist_jacobian}}). The return list also carries
+#'   \code{dD1}, the RAW (un-pushed, un-contracted) date-1 coordinate-
+#'   rebasing vector computed in the \code{"theta only"} section below
+#'   (\code{NULL} for every input other than \code{"theta_coll"}): the
+#'   distribution Jacobian's row \code{t = 1} is otherwise always zero (a
+#'   fixed predetermined state), but under \code{"theta_coll"} an
+#'   UNANTICIPATED shock at \code{s = 1} re-expresses \eqn{D_1} itself in the
+#'   shifted gap coordinate, so \code{JD[1, 1, ] = dD1} exactly (confirmed
+#'   against \code{\link{hank_het2_dist_jacobian_nd}}).
 #' @keywords internal
 .hank_curly_sweep2 <- function(block, T_h, i, outputs,
                                delta_in, delta_va, delta_d,
@@ -238,6 +261,10 @@ hank_het2_jacobian_nd <- function(block, T_h,
 
   curlyY <- setNames(lapply(outputs, function(o) numeric(T_h)), outputs)
   curlyD <- matrix(0, n_cell, T_h)
+  dD1 <- NULL   # set below only for i == "theta_coll"; see @return
+  ## curlyD_raw (the UNCORRECTED counterpart, see the Roxygen @return above)
+  ## is assembled after the sweep below, bit-identical to curlyD except at
+  ## theta_coll's s = 2 column.
 
   ## --- s = 1: the direct input shock at the current date --------------------
   px <- list(rb = block$rb, ra = block$ra, w = block$w,
@@ -365,7 +392,11 @@ hank_het2_jacobian_nd <- function(block, T_h,
       if ("CHI" %in% outputs) curlyY[["CHI"]][s] <- agg(as_arr(fs$dCHI[, j]))
       curlyD[, s] <- curlyD_from_pol(dB, dA)
     }
-    return(list(curlyY = curlyY, curlyD = curlyD))
+    ## Fused path never handles theta_coll (use_fused requires i != "theta_coll"
+    ## and th == 0), so curlyD_raw is trivially identical to curlyD and dD1
+    ## stays NULL here.
+    return(list(curlyY = curlyY, curlyD = curlyD, curlyD_raw = curlyD,
+               dD1 = NULL))
   }
 
   for (s in seq_len(T_h - 1L) + 1L) {
@@ -403,12 +434,23 @@ hank_het2_jacobian_nd <- function(block, T_h,
     ## cancel out of F[2,2] = J[2,2] - J[1,1], or it double-counts (measured:
     ## it inflated every diagonal J[t,t], t >= 2, by the same constant
     ## sum(dD1 . a_ss)). Subtracting dD1 here is that cancellation.
-    curlyD[, s] <- if (i == "theta_coll" && s == 2L)
-      curlyD_from_pol(dB + a_ss, dA) - dD1 else curlyD_from_pol(dB, dA)
+    if (i == "theta_coll" && s == 2L) {
+      ## Uncorrected date-0 (one-period-ahead-of-shock) term: the raw forward
+      ## push of the arrival-shifted policy, WITHOUT the aggregate-only dD1
+      ## cancellation (see the @return note on curlyD_raw above).
+      raw2 <- curlyD_from_pol(dB + a_ss, dA)
+      curlyD[, s] <- raw2 - dD1
+    } else {
+      curlyD[, s] <- curlyD_from_pol(dB, dA)
+    }
     dVb_prev <- dVb; dVa_prev <- dVa
   }
+  ## curlyD_raw is bit-identical to curlyD except at theta_coll's s = 2
+  ## column, where it keeps the uncorrected raw2 term computed above.
+  curlyD_raw <- curlyD
+  if (i == "theta_coll" && T_h >= 2L) curlyD_raw[, 2L] <- raw2
 
-  list(curlyY = curlyY, curlyD = curlyD)
+  list(curlyY = curlyY, curlyD = curlyD, curlyD_raw = curlyD_raw, dD1 = dD1)
 }
 
 

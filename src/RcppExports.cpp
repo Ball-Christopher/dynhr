@@ -53,8 +53,8 @@ BEGIN_RCPP
 END_RCPP
 }
 // hank_egm_step_cpp
-List hank_egm_step_cpp(NumericMatrix Va_p_, NumericVector a_grid_, NumericVector y_, double r, double beta, double eis, NumericMatrix Pi_, double amin);
-RcppExport SEXP _dynhr_hank_egm_step_cpp(SEXP Va_p_SEXP, SEXP a_grid_SEXP, SEXP y_SEXP, SEXP rSEXP, SEXP betaSEXP, SEXP eisSEXP, SEXP Pi_SEXP, SEXP aminSEXP) {
+List hank_egm_step_cpp(NumericMatrix Va_p_, NumericVector a_grid_, NumericVector y_, double r, double beta, double eis, NumericMatrix Pi_, double amin, Nullable<NumericMatrix> coh_extra_);
+RcppExport SEXP _dynhr_hank_egm_step_cpp(SEXP Va_p_SEXP, SEXP a_grid_SEXP, SEXP y_SEXP, SEXP rSEXP, SEXP betaSEXP, SEXP eisSEXP, SEXP Pi_SEXP, SEXP aminSEXP, SEXP coh_extra_SEXP) {
 BEGIN_RCPP
     Rcpp::RObject rcpp_result_gen;
     Rcpp::RNGScope rcpp_rngScope_gen;
@@ -66,13 +66,14 @@ BEGIN_RCPP
     Rcpp::traits::input_parameter< double >::type eis(eisSEXP);
     Rcpp::traits::input_parameter< NumericMatrix >::type Pi_(Pi_SEXP);
     Rcpp::traits::input_parameter< double >::type amin(aminSEXP);
-    rcpp_result_gen = Rcpp::wrap(hank_egm_step_cpp(Va_p_, a_grid_, y_, r, beta, eis, Pi_, amin));
+    Rcpp::traits::input_parameter< Nullable<NumericMatrix> >::type coh_extra_(coh_extra_SEXP);
+    rcpp_result_gen = Rcpp::wrap(hank_egm_step_cpp(Va_p_, a_grid_, y_, r, beta, eis, Pi_, amin, coh_extra_));
     return rcpp_result_gen;
 END_RCPP
 }
 // hank_egm_solve_cpp
-List hank_egm_solve_cpp(NumericVector a_grid_, NumericVector y_, double r, double beta, double eis, NumericMatrix Pi_, double amin, double tol, int maxit, Nullable<NumericMatrix> Va_init_);
-RcppExport SEXP _dynhr_hank_egm_solve_cpp(SEXP a_grid_SEXP, SEXP y_SEXP, SEXP rSEXP, SEXP betaSEXP, SEXP eisSEXP, SEXP Pi_SEXP, SEXP aminSEXP, SEXP tolSEXP, SEXP maxitSEXP, SEXP Va_init_SEXP) {
+List hank_egm_solve_cpp(NumericVector a_grid_, NumericVector y_, double r, double beta, double eis, NumericMatrix Pi_, double amin, double tol, int maxit, Nullable<NumericMatrix> Va_init_, Nullable<NumericMatrix> coh_extra_);
+RcppExport SEXP _dynhr_hank_egm_solve_cpp(SEXP a_grid_SEXP, SEXP y_SEXP, SEXP rSEXP, SEXP betaSEXP, SEXP eisSEXP, SEXP Pi_SEXP, SEXP aminSEXP, SEXP tolSEXP, SEXP maxitSEXP, SEXP Va_init_SEXP, SEXP coh_extra_SEXP) {
 BEGIN_RCPP
     Rcpp::RObject rcpp_result_gen;
     Rcpp::RNGScope rcpp_rngScope_gen;
@@ -86,7 +87,8 @@ BEGIN_RCPP
     Rcpp::traits::input_parameter< double >::type tol(tolSEXP);
     Rcpp::traits::input_parameter< int >::type maxit(maxitSEXP);
     Rcpp::traits::input_parameter< Nullable<NumericMatrix> >::type Va_init_(Va_init_SEXP);
-    rcpp_result_gen = Rcpp::wrap(hank_egm_solve_cpp(a_grid_, y_, r, beta, eis, Pi_, amin, tol, maxit, Va_init_));
+    Rcpp::traits::input_parameter< Nullable<NumericMatrix> >::type coh_extra_(coh_extra_SEXP);
+    rcpp_result_gen = Rcpp::wrap(hank_egm_solve_cpp(a_grid_, y_, r, beta, eis, Pi_, amin, tol, maxit, Va_init_, coh_extra_));
     return rcpp_result_gen;
 END_RCPP
 }
@@ -334,6 +336,44 @@ BEGIN_RCPP
     Rcpp::traits::input_parameter< double >::type px(pxSEXP);
     Rcpp::traits::input_parameter< int >::type threads(threadsSEXP);
     rcpp_result_gen = Rcpp::wrap(hank_egm3_solve_cpp(Vd, Vf, Va, dg, fg, ag, y, Pi, rd, rf, ra, beta, eis, chi0, chi1, chi2, phi0, phi1, phi2, tol, maxit, relax, px, threads));
+    return rcpp_result_gen;
+END_RCPP
+}
+// hank_curly_sweep3_cpp
+List hank_curly_sweep3_cpp(NumericVector Vd_ss_, NumericVector Vf_ss_, NumericVector Va_ss_, NumericVector dVd0_, NumericVector dVf0_, NumericVector dVa0_, NumericVector dg_, NumericVector fg_, NumericVector ag_, NumericVector y_, NumericMatrix Pi_, double rd, double rf, double ra, double beta, double eis, double chi0, double chi1, double chi2, double phi0, double phi1, double phi2, double px, NumericVector D_ss_, CharacterVector outputs, double delta_v, int T_h, int threads);
+RcppExport SEXP _dynhr_hank_curly_sweep3_cpp(SEXP Vd_ss_SEXP, SEXP Vf_ss_SEXP, SEXP Va_ss_SEXP, SEXP dVd0_SEXP, SEXP dVf0_SEXP, SEXP dVa0_SEXP, SEXP dg_SEXP, SEXP fg_SEXP, SEXP ag_SEXP, SEXP y_SEXP, SEXP Pi_SEXP, SEXP rdSEXP, SEXP rfSEXP, SEXP raSEXP, SEXP betaSEXP, SEXP eisSEXP, SEXP chi0SEXP, SEXP chi1SEXP, SEXP chi2SEXP, SEXP phi0SEXP, SEXP phi1SEXP, SEXP phi2SEXP, SEXP pxSEXP, SEXP D_ss_SEXP, SEXP outputsSEXP, SEXP delta_vSEXP, SEXP T_hSEXP, SEXP threadsSEXP) {
+BEGIN_RCPP
+    Rcpp::RObject rcpp_result_gen;
+    Rcpp::RNGScope rcpp_rngScope_gen;
+    Rcpp::traits::input_parameter< NumericVector >::type Vd_ss_(Vd_ss_SEXP);
+    Rcpp::traits::input_parameter< NumericVector >::type Vf_ss_(Vf_ss_SEXP);
+    Rcpp::traits::input_parameter< NumericVector >::type Va_ss_(Va_ss_SEXP);
+    Rcpp::traits::input_parameter< NumericVector >::type dVd0_(dVd0_SEXP);
+    Rcpp::traits::input_parameter< NumericVector >::type dVf0_(dVf0_SEXP);
+    Rcpp::traits::input_parameter< NumericVector >::type dVa0_(dVa0_SEXP);
+    Rcpp::traits::input_parameter< NumericVector >::type dg_(dg_SEXP);
+    Rcpp::traits::input_parameter< NumericVector >::type fg_(fg_SEXP);
+    Rcpp::traits::input_parameter< NumericVector >::type ag_(ag_SEXP);
+    Rcpp::traits::input_parameter< NumericVector >::type y_(y_SEXP);
+    Rcpp::traits::input_parameter< NumericMatrix >::type Pi_(Pi_SEXP);
+    Rcpp::traits::input_parameter< double >::type rd(rdSEXP);
+    Rcpp::traits::input_parameter< double >::type rf(rfSEXP);
+    Rcpp::traits::input_parameter< double >::type ra(raSEXP);
+    Rcpp::traits::input_parameter< double >::type beta(betaSEXP);
+    Rcpp::traits::input_parameter< double >::type eis(eisSEXP);
+    Rcpp::traits::input_parameter< double >::type chi0(chi0SEXP);
+    Rcpp::traits::input_parameter< double >::type chi1(chi1SEXP);
+    Rcpp::traits::input_parameter< double >::type chi2(chi2SEXP);
+    Rcpp::traits::input_parameter< double >::type phi0(phi0SEXP);
+    Rcpp::traits::input_parameter< double >::type phi1(phi1SEXP);
+    Rcpp::traits::input_parameter< double >::type phi2(phi2SEXP);
+    Rcpp::traits::input_parameter< double >::type px(pxSEXP);
+    Rcpp::traits::input_parameter< NumericVector >::type D_ss_(D_ss_SEXP);
+    Rcpp::traits::input_parameter< CharacterVector >::type outputs(outputsSEXP);
+    Rcpp::traits::input_parameter< double >::type delta_v(delta_vSEXP);
+    Rcpp::traits::input_parameter< int >::type T_h(T_hSEXP);
+    Rcpp::traits::input_parameter< int >::type threads(threadsSEXP);
+    rcpp_result_gen = Rcpp::wrap(hank_curly_sweep3_cpp(Vd_ss_, Vf_ss_, Va_ss_, dVd0_, dVf0_, dVa0_, dg_, fg_, ag_, y_, Pi_, rd, rf, ra, beta, eis, chi0, chi1, chi2, phi0, phi1, phi2, px, D_ss_, outputs, delta_v, T_h, threads));
     return rcpp_result_gen;
 END_RCPP
 }
@@ -720,8 +760,8 @@ BEGIN_RCPP
 END_RCPP
 }
 // tpf_run_period_cpp
-List tpf_run_period_cpp(arma::mat particles, const arma::vec y_t, const arma::mat L_e, const arma::mat hx, const arma::mat hu, const arma::mat hxx, const arma::mat hxu, const arma::mat huu, const arma::vec hss, const arma::mat ZZ, const arma::mat DD, const arma::vec d_obs, const arma::vec ghss_obs, double me_variance, double ess_target, int n_mh, double mh_scale, int max_stages, Rcpp::Nullable<arma::mat> U_normals, Rcpp::Nullable<double> U_resample, Rcpp::Nullable<arma::vec> U_mid, Rcpp::Nullable<arma::mat> U_mutation);
-RcppExport SEXP _dynhr_tpf_run_period_cpp(SEXP particlesSEXP, SEXP y_tSEXP, SEXP L_eSEXP, SEXP hxSEXP, SEXP huSEXP, SEXP hxxSEXP, SEXP hxuSEXP, SEXP huuSEXP, SEXP hssSEXP, SEXP ZZSEXP, SEXP DDSEXP, SEXP d_obsSEXP, SEXP ghss_obsSEXP, SEXP me_varianceSEXP, SEXP ess_targetSEXP, SEXP n_mhSEXP, SEXP mh_scaleSEXP, SEXP max_stagesSEXP, SEXP U_normalsSEXP, SEXP U_resampleSEXP, SEXP U_midSEXP, SEXP U_mutationSEXP) {
+List tpf_run_period_cpp(arma::mat particles, const arma::vec y_t, const arma::mat L_e, const arma::mat hx, const arma::mat hu, const arma::mat hxx, const arma::mat hxu, const arma::mat huu, const arma::vec hss, const arma::mat ZZ, const arma::mat DD, const arma::vec d_obs, const arma::vec ghss_obs, const arma::mat hxx_obs, const arma::mat hxu_obs, const arma::mat huu_obs, double me_variance, double ess_target, int n_mh, double mh_scale, int max_stages, Rcpp::Nullable<arma::mat> U_normals, Rcpp::Nullable<double> U_resample, Rcpp::Nullable<arma::vec> U_mid, Rcpp::Nullable<arma::mat> U_mutation);
+RcppExport SEXP _dynhr_tpf_run_period_cpp(SEXP particlesSEXP, SEXP y_tSEXP, SEXP L_eSEXP, SEXP hxSEXP, SEXP huSEXP, SEXP hxxSEXP, SEXP hxuSEXP, SEXP huuSEXP, SEXP hssSEXP, SEXP ZZSEXP, SEXP DDSEXP, SEXP d_obsSEXP, SEXP ghss_obsSEXP, SEXP hxx_obsSEXP, SEXP hxu_obsSEXP, SEXP huu_obsSEXP, SEXP me_varianceSEXP, SEXP ess_targetSEXP, SEXP n_mhSEXP, SEXP mh_scaleSEXP, SEXP max_stagesSEXP, SEXP U_normalsSEXP, SEXP U_resampleSEXP, SEXP U_midSEXP, SEXP U_mutationSEXP) {
 BEGIN_RCPP
     Rcpp::RObject rcpp_result_gen;
     Rcpp::RNGScope rcpp_rngScope_gen;
@@ -738,6 +778,9 @@ BEGIN_RCPP
     Rcpp::traits::input_parameter< const arma::mat >::type DD(DDSEXP);
     Rcpp::traits::input_parameter< const arma::vec >::type d_obs(d_obsSEXP);
     Rcpp::traits::input_parameter< const arma::vec >::type ghss_obs(ghss_obsSEXP);
+    Rcpp::traits::input_parameter< const arma::mat >::type hxx_obs(hxx_obsSEXP);
+    Rcpp::traits::input_parameter< const arma::mat >::type hxu_obs(hxu_obsSEXP);
+    Rcpp::traits::input_parameter< const arma::mat >::type huu_obs(huu_obsSEXP);
     Rcpp::traits::input_parameter< double >::type me_variance(me_varianceSEXP);
     Rcpp::traits::input_parameter< double >::type ess_target(ess_targetSEXP);
     Rcpp::traits::input_parameter< int >::type n_mh(n_mhSEXP);
@@ -747,7 +790,7 @@ BEGIN_RCPP
     Rcpp::traits::input_parameter< Rcpp::Nullable<double> >::type U_resample(U_resampleSEXP);
     Rcpp::traits::input_parameter< Rcpp::Nullable<arma::vec> >::type U_mid(U_midSEXP);
     Rcpp::traits::input_parameter< Rcpp::Nullable<arma::mat> >::type U_mutation(U_mutationSEXP);
-    rcpp_result_gen = Rcpp::wrap(tpf_run_period_cpp(particles, y_t, L_e, hx, hu, hxx, hxu, huu, hss, ZZ, DD, d_obs, ghss_obs, me_variance, ess_target, n_mh, mh_scale, max_stages, U_normals, U_resample, U_mid, U_mutation));
+    rcpp_result_gen = Rcpp::wrap(tpf_run_period_cpp(particles, y_t, L_e, hx, hu, hxx, hxu, huu, hss, ZZ, DD, d_obs, ghss_obs, hxx_obs, hxu_obs, huu_obs, me_variance, ess_target, n_mh, mh_scale, max_stages, U_normals, U_resample, U_mid, U_mutation));
     return rcpp_result_gen;
 END_RCPP
 }
@@ -775,8 +818,8 @@ static const R_CallMethodDef CallEntries[] = {
     {"_dynhr_fdb_compose_folded_cpp", (DL_FUNC) &_dynhr_fdb_compose_folded_cpp, 5},
     {"_dynhr_hank_ar_slab_adjoint_psi_cpp", (DL_FUNC) &_dynhr_hank_ar_slab_adjoint_psi_cpp, 2},
     {"_dynhr_hank_ar_score_weights_cpp", (DL_FUNC) &_dynhr_hank_ar_score_weights_cpp, 4},
-    {"_dynhr_hank_egm_step_cpp", (DL_FUNC) &_dynhr_hank_egm_step_cpp, 8},
-    {"_dynhr_hank_egm_solve_cpp", (DL_FUNC) &_dynhr_hank_egm_solve_cpp, 10},
+    {"_dynhr_hank_egm_step_cpp", (DL_FUNC) &_dynhr_hank_egm_step_cpp, 9},
+    {"_dynhr_hank_egm_solve_cpp", (DL_FUNC) &_dynhr_hank_egm_solve_cpp, 11},
     {"_dynhr_hank_stationary_dist_cpp", (DL_FUNC) &_dynhr_hank_stationary_dist_cpp, 5},
     {"_dynhr_hank_stationary_dist_lambda_cpp", (DL_FUNC) &_dynhr_hank_stationary_dist_lambda_cpp, 7},
     {"_dynhr_hank_egm2_step_cpp", (DL_FUNC) &_dynhr_hank_egm2_step_cpp, 16},
@@ -787,6 +830,7 @@ static const R_CallMethodDef CallEntries[] = {
     {"_dynhr_hank_forward_legs3_cpp", (DL_FUNC) &_dynhr_hank_forward_legs3_cpp, 13},
     {"_dynhr_hank_egm3_step_cpp", (DL_FUNC) &_dynhr_hank_egm3_step_cpp, 21},
     {"_dynhr_hank_egm3_solve_cpp", (DL_FUNC) &_dynhr_hank_egm3_solve_cpp, 24},
+    {"_dynhr_hank_curly_sweep3_cpp", (DL_FUNC) &_dynhr_hank_curly_sweep3_cpp, 28},
     {"_dynhr_hank_fnv1a64_cpp", (DL_FUNC) &_dynhr_hank_fnv1a64_cpp, 1},
     {"_dynhr_hank_forward_push2_scatter_cpp", (DL_FUNC) &_dynhr_hank_forward_push2_scatter_cpp, 8},
     {"_dynhr_eval_jac_tape_cpp", (DL_FUNC) &_dynhr_eval_jac_tape_cpp, 11},
@@ -806,7 +850,7 @@ static const R_CallMethodDef CallEntries[] = {
     {"_dynhr_qr_static_transform_cpp", (DL_FUNC) &_dynhr_qr_static_transform_cpp, 5},
     {"_dynhr_sv_rbpf_loglik_cpp", (DL_FUNC) &_dynhr_sv_rbpf_loglik_cpp, 14},
     {"_dynhr_tpf_propagate_particles", (DL_FUNC) &_dynhr_tpf_propagate_particles, 8},
-    {"_dynhr_tpf_run_period_cpp", (DL_FUNC) &_dynhr_tpf_run_period_cpp, 22},
+    {"_dynhr_tpf_run_period_cpp", (DL_FUNC) &_dynhr_tpf_run_period_cpp, 25},
     {"_dynhr_tpf_log_weights", (DL_FUNC) &_dynhr_tpf_log_weights, 9},
     {NULL, NULL, 0}
 };

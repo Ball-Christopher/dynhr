@@ -87,6 +87,164 @@
 }
 
 
+## =============================================================================
+## E/U/N state and gross-flow OUTPUTS (three-state households, e.g.
+## hank_employment_income3): indicator/flow aggregates over the employment
+## margin, selectable in hank_het_jacobian()/hank_het_jacobian_nd() alongside
+## "A"/"C". A block opts in by carrying idx_E/idx_U/idx_N index vectors (the
+## combined-state row ranges hank_employment_income3() returns) -- attach them
+## post-hoc if the constructor did not (hank_het_block() itself is untouched
+## by this feature).
+##
+## MATH: for a state output ("E"/"U"/"N") the aggregate O_t = <D_t, y> uses a
+## FIXED indicator vector y (1 on the state's rows, tiled across the asset
+## grid, 0 elsewhere) that does not depend on the household POLICY at all, so
+## curlyY (the date-0/F[0,s] row) is identically zero for every input -- the
+## whole response runs through the standard curlyD/expectation-vector
+## machinery already in .hank_curly_sweep()/hank_het_jacobian(), unchanged.
+##
+## For a flow output ("F_xy") O_t = <D_t, g_xy(Pi_t)> with g_xy(Pi)[i] =
+## 1{i in X} * rowSum_{j in Y} Pi[i, j] -- gross mass moving X -> Y in period
+## t. This has the SAME distribution-propagation part as a state output
+## (using g_xy(Pi_ss), a fixed vector, as the E-vector seed), PLUS a
+## CONTEMPORANEOUS product-rule term whenever the differentiated input is one
+## of the block's Pi-rate inputs: Pi_t is perturbed only at the shock date
+## t = s, which changes g_xy(Pi_s) directly (not through the distribution),
+## adding a DIAGONAL correction <D_ss, dg_xy/drate> to every J[s, s] (the same
+## scalar at every date, since to first order the distribution entering any
+## date s is still D_ss along an isolated single-date anticipated shock).
+## =============================================================================
+
+#' Fixed indicator vector for a het-block employment-margin STATE output
+#' @keywords internal
+.hank_het_state_indicator <- function(idx, n_e, n_a) {
+  m <- matrix(0, n_e, n_a)
+  m[idx, ] <- 1
+  .hank_mat_to_vec(m)
+}
+
+
+#' Gross-flow vector g_XY(Pi): mass-per-source-state moving X -> Y under Pi
+#' @keywords internal
+.hank_het_flow_vector <- function(idx_X, idx_Y, Pi, n_e, n_a) {
+  m <- matrix(0, n_e, n_a)
+  m[idx_X, ] <- rowSums(Pi[idx_X, idx_Y, drop = FALSE])
+  .hank_mat_to_vec(m)
+}
+
+
+#' Named (fromIdxField, toIdxField) pairs for the six E/U/N gross-flow outputs
+#' @keywords internal
+.hank_het_flow_pairs <- list(
+  F_eu = c("idx_E", "idx_U"), F_ue = c("idx_U", "idx_E"),
+  F_un = c("idx_U", "idx_N"), F_nu = c("idx_N", "idx_U"),
+  F_ne = c("idx_N", "idx_E"), F_en = c("idx_E", "idx_N")
+)
+.hank_het_state_output_names <- c("E", "U", "N")
+
+
+#' Is a het-block output name a flow ("F_xy") output?
+#' @keywords internal
+.hank_het_is_flow_output <- function(o) o %in% names(.hank_het_flow_pairs)
+
+
+#' Validate requested het-block Jacobian OUTPUTS
+#'
+#' Extends \code{c("A", "C")} with the state outputs \code{"E"}/\code{"U"}/
+#' \code{"N"} and the gross-flow outputs \code{"F_eu"}/\code{"F_ue"}/
+#' \code{"F_un"}/\code{"F_nu"}/\code{"F_ne"}/\code{"F_en"}, each available
+#' only when \code{block} carries the corresponding \code{idx_E}/\code{idx_U}/
+#' \code{idx_N} index vectors (see \code{\link{hank_employment_income3}}), and
+#' with \code{"Omega"} -- the distribution-weighted aggregate of the block's
+#' OWN transfer-incidence weight, \code{hank_aggregate(D_t, Tr_incidence)} --
+#' available whenever \code{block} carries a \code{Tr_incidence} field (every
+#' block built by \code{\link{hank_het_block}} does, Tier 1 or Tier 2; see
+#' that constructor's \code{Tr_incidence} doc). \code{"Omega"} is what the
+#' fiscal outlay \code{Tr_t * Omega_t} is written on when the incidence is
+#' \code{(e, a)}-varying and so the outlay is not identically \code{Tr_t}
+#' (Tier 2's \code{Omega_ss} is this same quantity's steady-state value).
+#'
+#' @param block A \code{\link{hank_het_block}}.
+#' @param outputs Character vector of requested outputs.
+#' @return \code{outputs}, validated.
+#' @keywords internal
+.hank_het_check_outputs <- function(block, outputs) {
+  have <- function(f) !is.null(block[[f]])
+  allowed <- c("A", "C")
+  if (have("Tr_incidence")) allowed <- c(allowed, "Omega")
+  for (s in .hank_het_state_output_names)
+    if (have(paste0("idx_", s))) allowed <- c(allowed, s)
+  for (fo in names(.hank_het_flow_pairs)) {
+    idxs <- .hank_het_flow_pairs[[fo]]
+    if (have(idxs[1L]) && have(idxs[2L])) allowed <- c(allowed, fo)
+  }
+  bad <- setdiff(outputs, allowed)
+  if (length(bad))
+    stop("unsupported het-block output(s) ",
+         paste0("'", bad, "'", collapse = ", "),
+         "; this block supports ",
+         paste0("'", allowed, "'", collapse = ", "),
+         if (!have("idx_E") || !have("idx_U") || !have("idx_N"))
+           paste0(" (attach 'idx_E'/'idx_U'/'idx_N' combined-state index ",
+                  "vectors, e.g. from hank_employment_income3(), to enable ",
+                  "state/flow outputs)")
+         else "", ".")
+  outputs
+}
+
+
+#' Fixed \code{n_e x n_a} incidence weight, flattened to distribution order
+#'
+#' The "y" vector for the \code{"Omega"} het-block output: the block's OWN
+#' \code{Tr_incidence}, expanded to a full \code{n_e x n_a} matrix if it is
+#' still the Tier-1 length-\code{n_e} vector form (constant across the asset
+#' dimension, matching the broadcast \code{.hank_income_extra} relies on),
+#' and flattened row-major to line up with the distribution.
+#' @keywords internal
+.hank_het_omega_vector <- function(block) {
+  om <- block$Tr_incidence
+  om_full <- if (is.matrix(om)) om else matrix(om, block$n_e, block$n_a)
+  .hank_mat_to_vec(om_full)
+}
+
+
+#' Fixed "y" vector for a het-block state/flow/Omega OUTPUT at a given Pi
+#'
+#' \code{o} must be one of the non-"A"/"C" names \code{\link{.hank_het_check_outputs}}
+#' allows for \code{block} ("Omega", a state name, or a flow name); dispatches
+#' to \code{\link{.hank_het_omega_vector}}, \code{\link{.hank_het_state_indicator}}
+#' or \code{\link{.hank_het_flow_vector}}. Like the state outputs, "Omega"'s
+#' vector is FIXED (does not depend on the household policy), so it slots into
+#' the same curlyY = 0 machinery -- see the file-header math note.
+#' @keywords internal
+.hank_het_output_vector <- function(block, o, Pi = block$Pi) {
+  if (o == "Omega") return(.hank_het_omega_vector(block))
+  if (o %in% .hank_het_state_output_names)
+    return(.hank_het_state_indicator(block[[paste0("idx_", o)]],
+                                     block$n_e, block$n_a))
+  pr <- .hank_het_flow_pairs[[o]]
+  .hank_het_flow_vector(block[[pr[1L]]], block[[pr[2L]]], Pi,
+                        block$n_e, block$n_a)
+}
+
+
+#' Diagonal (contemporaneous) flow correction for a Pi-rate input
+#'
+#' The product-rule term \code{<D_ss, dg_XY/d(rate)>} (central FD), added to
+#' every \code{J[s, s]} entry of a flow output's Jacobian w.r.t. a
+#' transition-probability input -- see the file-header math note.
+#' @keywords internal
+.hank_het_flow_diag_correction <- function(block, o, i, delta_in) {
+  pr <- .hank_het_flow_pairs[[o]]
+  idx_X <- block[[pr[1L]]]; idx_Y <- block[[pr[2L]]]
+  g_p <- .hank_het_flow_vector(idx_X, idx_Y, .hank_pi_perturb(block, i, +delta_in),
+                               block$n_e, block$n_a)
+  g_m <- .hank_het_flow_vector(idx_X, idx_Y, .hank_pi_perturb(block, i, -delta_in),
+                               block$n_e, block$n_a)
+  hank_aggregate(block$D, (g_p - g_m) / (2 * delta_in))
+}
+
+
 #' Transition matrix at a perturbed transition-probability input
 #'
 #' Evaluates \code{block$Pi_fn} with input \code{i} displaced by \code{delta}
@@ -113,7 +271,12 @@
 #'   built with \code{Pi_fn}/\code{Pi_inputs}, the block's named
 #'   transition-probability inputs (\code{names(block$Pi_inputs)}, e.g.
 #'   \code{"f"}, \code{"s"} from \code{\link{hank_employment_income}}).
-#' @param outputs Character subset of \code{c("A", "C")}.
+#' @param outputs Character subset of \code{c("A", "C")}, plus, for a block
+#'   carrying \code{idx_E}/\code{idx_U}/\code{idx_N} index vectors (see
+#'   \code{\link{hank_employment_income3}}), the state outputs \code{"E"} /
+#'   \code{"U"} / \code{"N"} and the gross-flow outputs \code{"F_eu"} /
+#'   \code{"F_ue"} / \code{"F_un"} / \code{"F_nu"} / \code{"F_ne"} /
+#'   \code{"F_en"}.
 #' @param delta Numeric FD step for the input perturbation.
 #'
 #' @return Nested list \code{J[[output]][[input]]}, each a \code{T x T} matrix
@@ -124,8 +287,23 @@ hank_het_jacobian_nd <- function(block, T_h,
                                  outputs = c("A", "C"),
                                  delta = 1e-5) {
   inputs  <- .hank_het_check_inputs(block, inputs)
-  outputs <- match.arg(outputs, several.ok = TRUE)
+  outputs <- .hank_het_check_outputs(block, outputs)
   r0 <- rep(block$r, T_h); w0 <- rep(block$w, T_h)
+  extra <- setdiff(outputs, c("A", "C"))
+
+  ## State/flow output PATH from a hank_td_nonlinear() result: Dpath is
+  ## returned unconditionally; the per-period Pi_t needed for flow outputs is
+  ## rebuilt with the SAME .hank_pi_path() helper hank_td_nonlinear() used
+  ## internally, so this stays consistent with whichever pi_input_paths (if
+  ## any) drove that particular run.
+  .extra_paths <- function(out, pip) {
+    if (!length(extra)) return(list())
+    Pi_path <- .hank_pi_path(block, pip, T_h)
+    setNames(lapply(extra, function(o) vapply(seq_len(T_h), function(t) {
+      Pi_t <- if (is.null(Pi_path)) block$Pi else Pi_path[[t]]
+      hank_aggregate(out$Dpath[, t], .hank_het_output_vector(block, o, Pi_t))
+    }, numeric(1))), extra)
+  }
 
   J <- setNames(lapply(outputs, function(o)
     setNames(lapply(inputs, function(i) matrix(0, T_h, T_h)), inputs)), outputs)
@@ -161,8 +339,13 @@ hank_het_jacobian_nd <- function(block, T_h,
       out_m <- hank_td_nonlinear(block, r_path = rm, w_path = wm, T_h = T_h,
                                  pi_input_paths = pip_m, Tr_path = Trm,
                                  r_minus_path = rmm)
-      for (o in outputs)
-        J[[o]][[i]][, s] <- (out_p[[o]] - out_m[[o]]) / (2 * delta)
+      ext_p <- .extra_paths(out_p, pip_p)
+      ext_m <- .extra_paths(out_m, pip_m)
+      for (o in outputs) {
+        vp <- if (o %in% c("A", "C")) out_p[[o]] else ext_p[[o]]
+        vm <- if (o %in% c("A", "C")) out_m[[o]] else ext_m[[o]]
+        J[[o]][[i]][, s] <- (vp - vm) / (2 * delta)
+      }
     }
   }
   J
@@ -375,12 +558,18 @@ hank_het_jacobian <- function(block, T_h,
                               delta_in = 1e-5, delta_va = 1e-6,
                               delta_d = 1e-6) {
   inputs  <- .hank_het_check_inputs(block, inputs)
-  outputs <- match.arg(outputs, several.ok = TRUE)
+  outputs <- .hank_het_check_outputs(block, outputs)
   Lam <- block$Lambda
 
   ## --- Step 2: expectation vectors E_s = Lambda^s y^o, s = 0 .. T-1 ---
-  y_out <- list(A = .hank_mat_to_vec(block$a),   # per-agent savings
-                C = .hank_mat_to_vec(block$c))   # per-agent consumption
+  ## "A"/"C" seed on the per-agent policy (unchanged); state ("E"/"U"/"N")
+  ## and flow ("F_xy") outputs seed on a FIXED steady-state indicator/flow
+  ## vector -- see the file-header math note above .hank_het_state_indicator.
+  y_out <- setNames(lapply(outputs, function(o) {
+    if (o == "A") .hank_mat_to_vec(block$a)        # per-agent savings
+    else if (o == "C") .hank_mat_to_vec(block$c)   # per-agent consumption
+    else .hank_het_output_vector(block, o)         # state/flow indicator
+  }), outputs)
   Elist <- setNames(vector("list", length(outputs)), outputs)
   for (o in outputs) {
     E <- vector("list", T_h)
@@ -416,6 +605,13 @@ hank_het_jacobian <- function(block, T_h,
         Jm[tt, 1L] <- Fm[tt, 1L]
         ## Body only runs when T_h >= 2, so the 2L:T_h slices are in range here.
         Jm[tt, 2L:T_h] <- Jm[tt - 1L, 1L:(T_h - 1L)] + Fm[tt, 2L:T_h]
+      }
+      ## Flow outputs get an extra CONTEMPORANEOUS product-rule term for
+      ## Pi-rate inputs: Pi_t is perturbed only at the shock date t = s,
+      ## which moves g_XY(Pi_s) directly -- see the file-header math note.
+      if (.hank_het_is_flow_output(o) && i %in% names(block$Pi_inputs)) {
+        corr <- .hank_het_flow_diag_correction(block, o, i, delta_in)
+        diag(Jm) <- diag(Jm) + corr
       }
       J[[o]][[i]] <- Jm
     }

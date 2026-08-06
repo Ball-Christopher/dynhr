@@ -73,8 +73,6 @@ tests/testthat/testthat-problems.rds
 /test_batch1.log
 /test_solver.log
 
-# Untracked root-level artefacts (codex workspace, reference PDFs, cookies)
-.codex/
 references/
 cookies.txt
 AGENTS.md

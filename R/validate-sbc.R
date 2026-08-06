@@ -277,6 +277,15 @@ sbc_draws_from_dime <- function(dime_result, L_target) {
 #' @param ranks_mat \code{n_repl x d} integer matrix of SBC ranks (one row
 #'   per replication, one column per parameter), each entry in
 #'   \code{0:L'}. Column names are taken as parameter names.
+#' @param L Integer: the TRUE rank support \code{L'} (ranks live in
+#'   \code{0:L}), e.g. the harness's actual kept-draw count
+#'   (\code{thin_L}/\code{L_effective}). \code{NULL} (default) falls back to
+#'   \code{max(ranks_mat)} with a warning -- inferring the support from the
+#'   OBSERVED ranks is WRONG whenever the top rank never appears by chance
+#'   (e.g. no replication's kept draws all landed above theta*), which
+#'   silently narrows the bins and can hide a real miscalibration signal.
+#'   Callers that know their harness's rank support should always pass it
+#'   explicitly.
 #' @param n_bins    Number of histogram bins. Default: a divisor-friendly
 #'   choice, \code{min(20, floor(n_repl / 5))}, with a floor of 2.
 #' @param draws     Optional: a list of per-replication chain matrices (or a
@@ -302,7 +311,7 @@ sbc_draws_from_dime <- function(dime_result, L_target) {
 #'       \code{NULL} if \code{draws} was not supplied.}
 #'   }
 #' @noRd
-sbc_uniformity_test <- function(ranks_mat, n_bins = NULL, draws = NULL) {
+sbc_uniformity_test <- function(ranks_mat, L = NULL, n_bins = NULL, draws = NULL) {
   if (is.null(dim(ranks_mat))) ranks_mat <- matrix(ranks_mat, ncol = 1)
   n_repl <- nrow(ranks_mat)
   d      <- ncol(ranks_mat)
@@ -322,8 +331,34 @@ sbc_uniformity_test <- function(ranks_mat, n_bins = NULL, draws = NULL) {
   n_bins <- as.integer(n_bins)
   if (n_bins < 2L) stop("sbc_uniformity_test: n_bins must be >= 2.")
 
-  L_plus1 <- max(ranks_mat, na.rm = TRUE) + 1L  ## L' + 1
-  L_eff   <- L_plus1 - 1L                       ## L'
+  ## True rank support L' (#7 one-liner, adversarial review): inferring it
+  ## from max(ranks_mat) is wrong whenever the top rank never appears by
+  ## chance -- silently narrowing the bins and potentially hiding a real
+  ## miscalibration signal. Callers that know their harness's rank support
+  ## (thin_L / L_effective / the kept-draw count) should pass it via `L`.
+  if (is.null(L)) {
+    warning("sbc_uniformity_test: `L` (true rank support) not supplied -- ",
+            "inferring L = max(ranks_mat) from the OBSERVED ranks. This is ",
+            "WRONG whenever the top rank never appears by chance (no ",
+            "replication's kept draws happened to land above theta*), which ",
+            "silently narrows the bins and can hide a real miscalibration ",
+            "signal. Pass the harness's actual rank support explicitly via ",
+            "the `L` argument.", call. = FALSE)
+    L_eff <- max(ranks_mat, na.rm = TRUE)         ## L' (observed fallback)
+  } else {
+    if (!is.numeric(L) || length(L) != 1L || !is.finite(L) || L < 0 ||
+        L != as.integer(L)) {
+      stop("sbc_uniformity_test: `L` must be a non-negative integer scalar ",
+           "(the true rank support; ranks live in 0:L).")
+    }
+    L_eff <- as.integer(L)
+    if (max(ranks_mat, na.rm = TRUE) > L_eff) {
+      stop("sbc_uniformity_test: an observed rank (", max(ranks_mat, na.rm = TRUE),
+           ") exceeds the supplied `L` (", L_eff, ") -- check that `L` matches ",
+           "the harness's actual rank support.")
+    }
+  }
+  L_plus1 <- L_eff + 1L                         ## L' + 1
 
   ## Degenerate case: every observed rank is identical (e.g. L' == 0, or a
   ## tiny n_repl that happened to land on one bucket) -- the exact-binning
@@ -386,11 +421,25 @@ sbc_uniformity_test <- function(ranks_mat, n_bins = NULL, draws = NULL) {
     mean_rank_z <- (mean(ranks_j) / L_eff - 0.5) * sqrt(12 * n_repl)
 
     ## tail_asym_z: one-sided tail excess (large |z|) vs. a symmetric
-    ## U-shape (z ~ 0, caught by chisq instead).
+    ## U-shape (z ~ 0, caught by chisq instead). The first/last bins need
+    ## NOT hold the same number of integer ranks (floor-binning of L'+1
+    ## ranks into n_bins), so the raw difference n_top - n_bottom has a
+    ## NONZERO null mean whenever the edge bin widths differ -- with
+    ## thin_L = 25 and n_bins = 20 the null mean is approx -1.6 z-units,
+    ## enough to flip perfectly uniform ranks to "suspect"/"miscalibrated"
+    ## (caught 2026-08-04 by an exact-likelihood SBC design oracle; the
+    ## chisq path was always width-exact via expected_exact). Center by the
+    ## exact expected counts and scale by the binomial-difference sd.
     n_bottom <- counts[1L]
     n_top    <- counts[n_bins]
-    tail_asym_z <- if ((n_top + n_bottom) == 0) 0 else
-      (n_top - n_bottom) / sqrt(n_top + n_bottom)
+    e_bottom <- expected_exact[1L]
+    e_top    <- expected_exact[n_bins]
+    p_bottom <- bin_widths[1L] / L_plus1
+    p_top    <- bin_widths[n_bins] / L_plus1
+    var_diff <- n_repl * (p_top * (1 - p_top) + p_bottom * (1 - p_bottom) +
+                            2 * p_top * p_bottom)
+    tail_asym_z <- if (var_diff <= 0) 0 else
+      ((n_top - e_top) - (n_bottom - e_bottom)) / sqrt(var_diff)
 
     ## extreme_frac: saturated ranks (rank == 0 or L'), symptom of ESS << L'.
     extreme_frac <- mean(ranks_j == 0L | ranks_j == L_eff)
@@ -554,8 +603,8 @@ print.dynhr_sbc_uniformity <- function(x, ...) {
   band_df <- data.frame(ymin = band[1], ymax = band[2])
 
   col_band <- "#CCCCCC"
-  col_bar  <- if (exists("dynhr_colours", mode = "list")) {
-    tryCatch(dynhr_colours$mid_blue %||% "#1B7CB6", error = function(e) "#1B7CB6")
+  col_bar  <- if (exists("rbnz_colours", mode = "list")) {
+    tryCatch(rbnz_colours$mid_blue %||% "#1B7CB6", error = function(e) "#1B7CB6")
   } else {
     "#1B7CB6"
   }
@@ -1307,8 +1356,13 @@ dynhr_sbc <- function(model, obs_vars, T_obs = 100L, n_replications = 50L,
   }
   rownames(ranks) <- NULL
 
+  ## L_effective was already captured above from the first successful
+  ## replication's res$L_effective (the harness's own known rank support) --
+  ## pass it through explicitly rather than letting sbc_uniformity_test fall
+  ## back to inferring it from the observed ranks (#7 one-liner, adversarial
+  ## review).
   uniformity <- if (nrow(ranks) > 0) {
-    sbc_uniformity_test(ranks)
+    sbc_uniformity_test(ranks, L = L_effective)
   } else {
     NULL
   }

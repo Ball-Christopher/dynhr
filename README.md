@@ -11,9 +11,9 @@ pure R (with optional Rcpp/Armadillo acceleration):
   sequence-space Jacobians (`hank_ks_steady()`, `hank_het_jacobian()`), a
   discount-heterogeneity mixture economy (`hank_mixture_ks_model()`), a joint
   posterior over macro / cross-sectional-level / cross-sectional-response
-  channels (`hank_mixture_joint_logpost()`, with exact-grid or Laplace posterior
-  routes and SBC certification), and consumption-equivalent welfare
-  (`hank_welfare_posterior()`). See `vignette("hank")`.
+  channels (`hank_mixture_joint_logpost()`, with exact-grid or Laplace
+  posterior routes and SBC certification), and consumption-equivalent welfare
+  (`hank_welfare_posterior()`).
 - **Filtering & smoothing** — Kalman filter (standard, Chandrasekhar, DARE
   oracle) and smoother, plus a piecewise Kalman filter for occasionally-binding
   constraints. (The default filter adds **no** measurement-error variance
@@ -25,7 +25,8 @@ pure R (with optional Rcpp/Armadillo acceleration):
   free adjoint second-order terms, `laplace_log_marglik()`, `profile_ci()`).
 - **Stochastic volatility on shocks** — declare AR(1) log-variance processes on
   any subset of a model's shocks (`stochastic_volatility()`) and estimate them
-  with a Rao-Blackwellised particle filter (`make_log_posterior_sv_rbpf()`).
+  with a Rao-Blackwellised particle filter (`make_log_posterior_sv_rbpf()`),
+  SBC-certified via `sv_rbpf_sbc()`.
 - **Benchmarking** — `dynhr_benchmark()` runs a fixed Smets-Wouters (2007)
   estimation workload across a sweep of core counts and reports normalised
   throughputs plus full system information, so two machines can be compared.
@@ -36,10 +37,9 @@ pure R (with optional Rcpp/Armadillo acceleration):
   (`chain_diagnostics()`) and Blanchard–Kahn determinacy distance
   (`bk_distance()`).
 
-The solver and filter are validated against **Dynare 7.0** and **Dynare.jl**,
-and the high-order sigma terms against a closed-form ground-truth model. The
-parity test suite and its fixtures are maintained separately from this released
-package.
+A parity test suite validates the solver and filter against **Dynare 7.0** and
+**Dynare.jl** golden files, and the high-order sigma terms against a closed-form
+ground-truth model.
 
 ## Install
 
@@ -57,8 +57,78 @@ still works.)
 The package compiles a small amount of C++ (`src/`, via Rcpp + RcppArmadillo,
 using the C++20 standard); a C++ toolchain is required to install from
 source — on Windows that means **Rtools43 or newer** (i.e. R >= 4.3), on
-macOS the Xcode command-line tools. Julia is **optional** and only needed for
-the Dynare.jl interop.
+macOS the Xcode command-line tools. Julia, Dynare, and Octave are **optional**
+and only needed to regenerate parity goldens.
+
+### Build configuration that affects PERFORMANCE (and reproducibility)
+
+dynhr supplies no compiler flags of its own. `src/Makevars` is a single line —
+`PKG_LIBS = $(LAPACK_LIBS) $(BLAS_LIBS) $(FLIBS)` — so optimisation level, BLAS
+and LAPACK all come from **your R installation's** configuration, not from the
+package. That makes a few otherwise-invisible choices matter, especially if you
+are timing the heterogeneous-agent (HANK) routines or comparing runs across
+machines.
+
+**1. `devtools::load_all()` compiles at `-O0`. Never benchmark on it.**
+This is the single most common way to get badly wrong numbers from this
+package: `load_all()` builds unoptimised objects into `src/`, and they *persist*
+and can be picked up by a subsequent install. A HANK Jacobian measured this way
+has been observed ~6x slower than the same code installed normally. Before any
+timing, and after any `load_all()`:
+
+```sh
+R CMD INSTALL --preclean .   # --preclean is what discards the -O0 objects
+```
+
+`R CMD config CXX20FLAGS` should show `-O2` (the R default). Correctness is
+unaffected either way — only speed.
+
+**2. Check which BLAS you are actually linked against.** On macOS, R can be
+configured to use Apple's Accelerate (vecLib) instead of the reference BLAS,
+which is substantially faster for the dense linear algebra in the solvers and
+Kalman filters. It is a symlink, and it is easy not to know which one you have:
+
+```sh
+ls -l "$(R RHOME)/lib/libRblas.dylib"      # -> libRblas.vecLib.dylib if Accelerate
+otool -L "$(R RHOME)/library/dynhr/libs/dynhr.so" | grep -i accelerate
+```
+
+On Linux the analogue is whether R is linked against OpenBLAS/MKL or the
+reference BLAS (`sessionInfo()` reports it). Two builds of *identical* dynhr
+source can differ severalfold in wall time on this alone, so state it when
+reporting timings.
+
+**3. macOS arm64 needs a gfortran whose runtime matches R's `FLIBS`.**
+R 4.6 arm64 expects gfortran 14.2 (`/opt/gfortran`); a mismatched one produces
+link errors or, worse, a package that loads but misbehaves. `otool -L` on the
+installed `.so` should show `libgfortran.5.dylib` from that prefix.
+
+**4. Build and check in a UTF-8 locale** (`LANG=en_US.UTF-8 LC_ALL=en_US.UTF-8`),
+or `R CMD build`/`check` can fail on encoded characters in the sources.
+
+**5. Worker threads for the compiled HANK kernels** are resolved as: an explicit
+`threads` argument, then `getOption("dynhr.hank_threads")`, then a
+machine-derived default. Output is **bit-identical at every thread count** — it
+is purely a throughput knob. Two things worth knowing: `R CMD check` sets
+`_R_CHECK_LIMIT_CORES_`, which clamps the resolved count to 2 (so a "slow" gate
+run may simply be running two-wide); and the machine-derived default is tuned
+for the three-asset kernel, so on **two-asset** problems an explicit smaller
+count is often faster than the default. To see what a long run actually
+resolved to:
+
+```r
+options(dynhr.hank_report_threads = TRUE)   # reports on CHANGE, not per call
+```
+
+**6. Reproducing a specific build.** An installed dynhr records the commit it
+was built from in `inst/GIT_COMMIT`: line 1 is the 40-hex SHA, line 2 is
+`version: <DESCRIPTION Version>`, so commit-and-version agreement can be checked
+from the installed files alone, with no git and no network.
+`hank_het3_manifest()` surfaces it as `git_commit` for run manifests.
+
+```r
+readLines(system.file("GIT_COMMIT", package = "dynhr"))
+```
 
 ## Quick start
 
@@ -83,7 +153,18 @@ dr3      <- solve_perturbation(mod, compiled, steady$values,
 ```
 
 End-to-end Bayesian estimation (mode-finding + sampling + diagnostics) is driven
-by `run_full_estimation()`.
+by `run_full_estimation()`. See the vignettes for worked examples.
+
+## Vignettes
+
+- `vignette("dynhr")` — getting started
+- `vignette("solving")` — steady state, perturbation, IRFs, moments, Kalman
+- `vignette("estimation")` — priors, mode-finding, MCMC/SMC/NUTS, exact-Hessian curvature
+- `vignette("hank")` — heterogeneous-agent (HANK) solving, mixture estimation, welfare
+- `vignette("diagnostics")` — the diagnostic battery and custom expectations
+- `vignette("mod-conversion")` — Dynare `.mod` compatibility notes
+- `vignette("mod-syntax")` — dynhr `.mod` syntax reference
+- `vignette("sbc-matrix")` — the SBC (Simulation-Based Calibration) coverage matrix
 
 ## Where things are
 
@@ -91,19 +172,11 @@ by `run_full_estimation()`.
 - `src/` — Rcpp/Armadillo backends (folded Faà-di-Bruno compose, Kalman steady
   state, sparse MCP solve), each with a pure-R fallback toggled by
   `options(dynhr.use_rcpp = )`
-- `inst/extdata/models/` — a few reference DSGE models used by the examples,
-  plus the Smets-Wouters (2007) model, data and published mode that
-  `dynhr_benchmark()` runs (provenance and licensing in `sw2007_SOURCE.md`)
-- `inst/templates/` — report templates for the diagnostic battery
-
-## A note on AI and reliability
-
-AI tools were used extensively in the development of this package. The code has
-been tested thoroughly throughout development, but it remains **experimental**
-and may contain errors — **use at your own risk**, and validate results against
-a trusted reference for any consequential use. `dynhr` is part of the author's
-ongoing experimentation with AI-assisted development tools, and feedback and bug
-reports are welcome.
+- `inst/extdata/models/` — reference DSGE models for examples and tests
+- `inst/extdata/golden/` — Dynare/Dynare.jl reference outputs for parity tests
+- `inst/pipelines/` — full estimation pipeline scripts
+- `inst/julia/`, `inst/octave/` — scripts that regenerate golden files
+- `tests/testthat/` — unit and parity tests
 
 ## Reference: capability map and function index
 
@@ -163,7 +236,9 @@ used from this page alone.
   `"nelder"`, `"jade"`, `"combined"`.
 - Samplers: `mcmc()` (random-walk Metropolis), `smc()` (sequential Monte Carlo,
   returns a log-marginal-likelihood estimate), `nuts()` (plus MALA / HMC / CHEES
-  through `run_full_estimation`).
+  through `run_full_estimation`), `dynhr_smc2()` (SMC^2: outer theta-tempering
+  around an inner noisy-but-unbiased particle-filter likelihood — `tpf` or
+  `sv_rbpf`).
 - `run_full_estimation(...)` — one-call pipeline (mode → sample → diagnostics),
   multi-chain with Gelman–Rubin convergence.
 
@@ -183,9 +258,19 @@ used from this page alone.
 ### Heterogeneous agents (HANK)
 - Household / income: `hank_income_rouwenhorst()`, `hank_asset_grid()`,
   `hank_egm_solve()`, `hank_stationary_dist()`, `hank_mpc()`.
+- Employment margin: `hank_employment_income()` (two-state E/U) and
+  `hank_employment_income3()` (three-state E/U/N, with a separate
+  not-in-labour-force state and its own job-finding/separation rates).
+- Income incidence for a heterogeneous block: `hank_incidence_earnings()`
+  (normalises an income profile against a block's grid/transition matrix).
 - GE & sequence-space Jacobians: `hank_ks_steady()`, `hank_ks_model()`,
   `hank_het_jacobian()`, `hank_td_nonlinear()` (global nonlinear transition),
   `hank_reiter_statespace()` (finite Reiter linearisation).
+- Distribution Jacobians (perturbation of the cross-sectional distribution
+  itself): `hank_het_dist_jacobian()` / `hank_het2_dist_jacobian()` /
+  `hank_het3_dist_jacobian()` (one/two/three-asset), each with a
+  `_nd()` finite-difference check counterpart, plus
+  `hank_mixture_dist_jacobian()` for the mixture economy.
 - Discount-heterogeneity mixture economy: `hank_mixture_ks_steady()`,
   `hank_mixture_ks_assemble()`, `hank_mixture_ks_model()`,
   `hank_mixture_agg_irf()`.
@@ -196,13 +281,6 @@ used from this page alone.
   approximation (`hank_mixture_laplace()`), not a diagonal random-walk sampler.
   `hank_mixture_emulator()` is a distribution-agnostic surrogate;
   `hank_mixture_sbc()` ships simulation-based-calibration certification.
-- Multi-asset households: liquid/illiquid two-asset blocks (`hank_het2_block()`,
-  `hank_het2_jacobian()`, `hank_td2_nonlinear()`) and a three-asset block with
-  domestic, foreign and illiquid claims plus per-asset adjustment costs
-  (`hank_het3_block()`, `hank_het3_jacobian()`, `hank_td3_nonlinear()`). Both
-  carry an exact numerical-differentiation oracle (`*_jacobian_nd()`) and a
-  reproducibility fingerprint / manifest (`hank_het3_fingerprint()`,
-  `hank_het3_manifest()`).
 - Welfare: `hank_welfare_posterior()`, `hank_cev()`, `hank_value_transition()`,
   `hank_welfare_channels()`, `hank_mixture_welfare_pool()`.
 - Identification result baked into the tools: in a mixture economy the discount
@@ -213,7 +291,8 @@ used from this page alone.
 - Ramsey: `ramsey_model()` (augmented FOC system, Bodenstein–Guerrieri),
   `ramsey_nn1()` ((n, n+1) approximation, Gross–Hansen), `ramsey_obc_pf()` /
   `ramsey_obc_pwlinear()` (with OBC), `ramsey_regime_deterministic()` /
-  `ramsey_regime_independent()` (regime-dependent).
+  `ramsey_regime_independent()` (regime-dependent: deterministic switch /
+  Markov-switching).
 - `osr()` — optimal simple rules; `discretionary_policy()` — Markov-perfect
   discretion; `nash_ramsey_cooperative()` / `nash_ramsey_openloop()` — policy
   games.
@@ -227,15 +306,6 @@ used from this page alone.
   narrative), rendered by `write_report()`.
 - Standalone helpers: `chain_diagnostics()`, `bk_distance()`,
   `kf_innovation_diagnostics()`, `solution_pencil_spectrum()`.
-
-### Benchmarking
-- `dynhr_benchmark()` — run a fixed Smets-Wouters (2007) estimation workload
-  (36 estimated parameters, 7 observables, 160 quarters) through random-walk
-  Metropolis at a sweep of core counts. Reports per-chain and aggregate
-  throughputs, all normalised per draw or per second so runs with different
-  draw counts stay comparable, plus a workload fingerprint.
-- `dynhr_system_info()` — CPU, RAM, OS, R build and the BLAS/LAPACK actually
-  linked. Two benchmark results are only comparable if these agree.
 
 ### Cookbook
 

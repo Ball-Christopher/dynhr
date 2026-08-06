@@ -63,7 +63,11 @@
 #'   Typical keys: \code{n_particles}, \code{ess_target}, \code{n_mh},
 #'   \code{seed}, \code{cpm_rho_u} (CPM AR(1) correlation, default \code{NULL}
 #'   = disabled; set to a value in (0, 1) to enable the correlated
-#'   pseudo-marginal RWMH sampler -- see \code{rwmh_cpm}).
+#'   pseudo-marginal RWMH sampler -- see \code{rwmh_cpm}). \code{cpm_rho_u}
+#'   is a routing signal only (not a factory argument); when set,
+#'   \code{make_log_posterior}'s \code{"tpf"} branch pins
+#'   \code{burn_in_init = 0L} unless the caller already set it explicitly,
+#'   since the CPM \code{U_list} slot layout has no burn-in slots.
 #' @param obc_options  Named list of options for the OBC PKF path
 #'   (\code{likelihood = "pkf"}).  Reserved keys: \code{max_inner},
 #'   \code{proposal} (for PPF; \code{"bootstrap"} or \code{"copf"}),
@@ -105,8 +109,9 @@
 #'   \code{likelihood = "student_t"}, ignored otherwise.
 #' @param pruned_order  Integer, \code{2L} (default) or \code{3L}.  Selects
 #'   the AFVRR pruned state-space order used by \code{make_log_posterior}
-#'   when \code{likelihood = "pruned"} (order-2 vs order-3 augmented state).
-#'   Only meaningful when \code{likelihood = "pruned"}; setting
+#'   when \code{likelihood = "pruned"} (order-2 vs order-3 augmented state)
+#'   or \code{likelihood = "tpf"} (order-2 vs order-3 particle state).
+#'   Only meaningful for those two likelihoods; setting
 #'   \code{pruned_order = 3L} with any other likelihood is an error.
 #' @return An object of class \code{"dynhr_estimation_context"}.
 #' @seealso \code{\link{validate_context}}, \code{ctx_from_mode_result}
@@ -184,17 +189,18 @@ estimation_context <- function(
   }
 
   ## Validation: pruned_order must be 2 or 3, and is only meaningful when
-  ## likelihood == "pruned" (fail loud rather than silently ignoring it).
+  ## likelihood is "pruned" (order-3 Gaussian pruned-KF) or "tpf" (order-3
+  ## pruned-state TPF) -- fail loud rather than silently ignoring it.
   if (!is.numeric(pruned_order) || length(pruned_order) != 1L ||
       !is.finite(pruned_order) || pruned_order != as.integer(pruned_order) ||
       !(as.integer(pruned_order) %in% c(2L, 3L))) {
     stop("estimation_context: pruned_order must be 2 or 3.", call. = FALSE)
   }
   pruned_order <- as.integer(pruned_order)
-  if (pruned_order == 3L && !identical(likelihood, "pruned")) {
+  if (pruned_order == 3L && !(likelihood %in% c("pruned", "tpf"))) {
     stop("estimation_context: pruned_order = 3L is only meaningful when ",
-         "likelihood = \"pruned\" (got likelihood = \"", likelihood, "\").",
-         call. = FALSE)
+         "likelihood = \"pruned\" or \"tpf\" (got likelihood = \"",
+         likelihood, "\").", call. = FALSE)
   }
 
   ## Validation: tpf requires me_variance > 0

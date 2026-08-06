@@ -4,7 +4,7 @@
 \alias{hank_model_dist_irf}
 \title{Linear GE DISTRIBUTION impulse response from a general sequence-space model}
 \usage{
-hank_model_dist_irf(model, dZ)
+hank_model_dist_irf(model, dZ, ...)
 }
 \arguments{
 \item{model}{A \code{\link{hank_model}}.}
@@ -15,6 +15,15 @@ model with exactly one exogenous a bare numeric vector is also accepted;
 with more than one it is an error, since the intent would be ambiguous.
 Note the contrast with \code{\link{hank_ks_linear_irf}}, which takes a
 bare vector and returns \code{d}-prefixed names.}
+
+\item{...}{Forwarded to \code{\link{hank_het2_dist_jacobian}} for any
+\code{"het2"}-kind block (e.g. \code{delta_in}, \code{delta_va},
+\code{delta_d}, \code{backend}, \code{threads}). Without this, the het2
+arm always used the factory's default finite-difference deltas, with no
+way to tighten them -- e.g. a \code{theta_coll} dist-IRF was stuck at
+only ~1e-3 accuracy (adversarial review, one-liner #2). Ignored by the
+\code{"het"}/\code{"het3"}/\code{"het_mixture"} arms, which have no
+tunable FD deltas exposed here.}
 }
 \value{
 A list with:
@@ -29,11 +38,13 @@ A list with:
 \description{
 Companion to \code{\link{hank_model_irf}}: instead of propagating the GE
 solution to scalar aggregate variables via \code{model$G}, propagates it to
-the full cross-sectional distribution response of every \code{"het"} (and
-\code{"het_mixture"}) block in the model, via that block's distribution
-Jacobian (\code{\link{hank_het_dist_jacobian}}, or for a mixture block
-\code{\link{hank_mixture_dist_jacobian}} -- the omega-weighted sum of the
-per-type distribution Jacobians on the types' shared grid).
+the full cross-sectional distribution response of every \code{"het"},
+\code{"het2"}, \code{"het3"} (and \code{"het_mixture"}) block in the model,
+via that block's distribution Jacobian (\code{\link{hank_het_dist_jacobian}}
+for \code{"het"}, \code{\link{hank_het2_dist_jacobian}} for \code{"het2"},
+\code{\link{hank_het3_dist_jacobian}} for \code{"het3"}, or for a mixture
+block \code{\link{hank_mixture_dist_jacobian}} -- the omega-weighted sum of
+the per-type distribution Jacobians on the types' shared grid).
 }
 \details{
 Reuses the identical \code{dU = -H_U^{-1} H_Z\, dZ} GE solve as

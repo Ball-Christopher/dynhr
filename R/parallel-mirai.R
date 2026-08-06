@@ -1459,6 +1459,14 @@ run_mode_mirai <- function(
 #' @return invisibly NULL.
 #' @noRd
 .smc_pool_setup <- function(n_cores) {
+  ## Pin BLAS/OpenMP threads to 1 for the daemons (env inherited at spawn;
+  ## restored on exit so the host session is untouched). Without this an
+  ## OpenBLAS R (common on Windows/Linux) runs multi-threaded BLAS inside
+  ## EVERY daemon -> n_cores x blas_threads oversubscription. dynhr's
+  ## matrices are too small for threaded BLAS to help even single-daemon
+  ## (see the perf-bottleneck profile), so 1 is the right pin, not a tune.
+  .restore_blas <- .mirai_pin_blas_threads()
+  on.exit(.restore_blas(), add = TRUE)
   mirai::daemons(n_cores)
   mirai::everywhere({ suppressMessages(library(dynhr)) })[]  # collect: see .mirai_pool_init
   invisible(NULL)

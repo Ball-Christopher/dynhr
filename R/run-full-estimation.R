@@ -570,7 +570,20 @@ run_full_estimation <- function(
       ## Build a seed=NULL version of the TPF closure for variance measurement.
       ## CRITICAL (Landmine 1): seed MUST be NULL so each evaluation draws
       ## different RNG streams; non-NULL seed makes the PF deterministic (SD=0).
-      pf_tpf_args <- modifyList(tpf_options, list(seed = NULL))
+      ## tpf_options is a user-facing bag that also carries non-factory keys
+      ## consumed elsewhere (pmcmc_preflight_K/pmcmc_preflight_skip read just
+      ## above; cpm_rho_u read downstream by run_posterior_estimation's CPM
+      ## routing -- see R/posterior.R's own strip-before-dispatch comment).
+      ## make_log_posterior_tpf() has no `...` to swallow those, so filter to
+      ## its own formals first (mirrors R/smc2.R's .smc2_tpf_allow pattern)
+      ## before merging in the forced seed = NULL.
+      .rfe_tpf_factory_allow <- setdiff(
+        names(formals(make_log_posterior_tpf)),
+        c("model", "data", "prior_spec", "obs_vars", "compiled",
+          "me_variance", "system_priors"))
+      pf_tpf_args <- modifyList(
+        tpf_options[intersect(names(tpf_options), .rfe_tpf_factory_allow)],
+        list(seed = NULL))
       pf_log_post_fn <- do.call(
         make_log_posterior_tpf,
         c(list(model       = model,

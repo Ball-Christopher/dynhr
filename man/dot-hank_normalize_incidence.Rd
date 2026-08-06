@@ -4,33 +4,46 @@
 \alias{.hank_normalize_incidence}
 \title{Validate and normalise a transfer incidence weight}
 \usage{
-.hank_normalize_incidence(omega, e, Pi, who = "hank_het_block")
+.hank_normalize_incidence(omega, e, Pi, who = "hank_het_block", n_a = NULL)
 }
 \arguments{
-\item{omega}{\code{NULL} (uniform) or a finite numeric length-\code{n_e}
-weight.}
+\item{omega}{\code{NULL} (uniform), a finite numeric length-\code{n_e}
+vector weight, or (when \code{n_a} is supplied) a finite numeric
+\code{n_e x n_a} matrix weight.}
 
 \item{e}{Income-state grid (its length sets \code{n_e}).}
 
 \item{Pi}{Income transition matrix.}
 
 \item{who}{Calling function name, for error messages.}
+
+\item{n_a}{Asset-grid length. \code{NULL} (default) means "no matrix form
+available here"; a matrix \code{omega} is then always a validation error
+(a caller that cannot make sense of a matrix incidence should not have
+to special-case that itself).}
 }
 \value{
-Numeric length-\code{n_e} normalised weight.
+Numeric length-\code{n_e} normalised weight (Tier 1), or the
+  validated \code{n_e x n_a} matrix unchanged (Tier 2).
 }
 \description{
 Shared by \code{\link{hank_het_block}} and any caller needing the same
-contract. \code{NULL} yields the uniform rule. A supplied weight is scaled
-so that \eqn{\sum_e \bar\pi_e \omega_e = 1}, where \eqn{\bar\pi} is the
-invariant distribution of \code{Pi}.
+contract. \code{NULL} yields the uniform rule. A vector weight (Tier 1) is
+scaled so that \eqn{\sum_e \bar\pi_e \omega_e = 1}, where \eqn{\bar\pi} is
+the invariant distribution of \code{Pi}. A matrix weight (Tier 2,
+\code{n_e x n_a}, when \code{n_a} is supplied) is validated but returned
+AS-IS, deliberately not normalised (see the \code{Tr_incidence}
+documentation on \code{\link{hank_het_block}}: normalising an
+asset-dependent weight against \code{D_ss} would be circular).
 }
 \details{
-Normalising against \eqn{\bar\pi} rather than against the steady-state
-joint distribution \code{D} is what keeps this NON-CIRCULAR: \eqn{\bar\pi}
-is a property of \code{Pi} alone, available before the household problem is
-solved, whereas \code{D} depends on the policy which depends on
-\code{omega}. The two agree exactly, because the \code{e}-marginal of
-\code{D} IS \eqn{\bar\pi} at any stationary distribution.
+Normalising the VECTOR form against \eqn{\bar\pi} rather than against the
+steady-state joint distribution \code{D} is what keeps that path
+NON-CIRCULAR: \eqn{\bar\pi} is a property of \code{Pi} alone, available
+before the household problem is solved, whereas \code{D} depends on the
+policy which depends on \code{omega}. The two agree exactly, because the
+\code{e}-marginal of \code{D} IS \eqn{\bar\pi} at any stationary
+distribution. No such non-circular anchor exists for an \code{a}-dependent
+weight, which is exactly why the matrix form is left unnormalised instead.
 }
 \keyword{internal}

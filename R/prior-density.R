@@ -110,10 +110,24 @@ log_prior_density <- function(x, dist, p1, p2, p3 = -Inf, p4 = Inf) {
 #' @return Scalar log-prior (finite, or -Inf if any parameter is out of bounds)
 #' @export
 log_prior <- function(theta, prior_spec) {
+  ## Hoist the data.frame column extractions and the distribution-name
+  ## normalization out of the per-parameter loop: this function runs once
+  ## per posterior evaluation, so per-row `$` dispatch and (especially)
+  ## per-row .normalize_dist() are hot -- the latter's old trimws() cost
+  ## ~200us/call on some Windows builds and dominated dynhr_benchmark()
+  ## there (2026-08-05 diagnosis; see .normalize_dist's hot-path note).
+  spec_name  <- prior_spec$name
+  spec_dist  <- .normalize_dist(prior_spec$distribution)
+  spec_p1    <- prior_spec$p1
+  spec_p2    <- prior_spec$p2
+  spec_lower <- prior_spec$lower
+  spec_upper <- prior_spec$upper
+  theta_nms  <- names(theta)
+
   lp <- 0
-  for (i in seq_len(nrow(prior_spec))) {
-    nm <- prior_spec$name[i]
-    if (!(nm %in% names(theta))) next
+  for (i in seq_along(spec_name)) {
+    nm <- spec_name[i]
+    if (!(nm %in% theta_nms)) next
     x  <- theta[nm]
 
     ## Non-finite parameter values (NA/NaN/Inf, e.g. from a diverged HMC
@@ -121,14 +135,14 @@ log_prior <- function(theta, prior_spec) {
     ## return -Inf rather than letting `x < lo` evaluate to NA and crash.
     if (!is.finite(x)) return(-Inf)
 
-    lo <- prior_spec$lower[i]
-    hi <- prior_spec$upper[i]
+    lo <- spec_lower[i]
+    hi <- spec_upper[i]
     if (!is.na(lo) && x < lo) return(-Inf)
     if (!is.na(hi) && x > hi) return(-Inf)
 
-    dist <- .normalize_dist(prior_spec$distribution[i])
-    p1   <- prior_spec$p1[i]
-    p2   <- prior_spec$p2[i]
+    dist <- spec_dist[i]
+    p1   <- spec_p1[i]
+    p2   <- spec_p2[i]
 
     ll <- switch(dist,
       "inv_gamma" =, "inv_gamma1" = .lp_ig1(x, p1, p2),

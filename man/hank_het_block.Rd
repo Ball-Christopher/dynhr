@@ -77,25 +77,44 @@ feeds (name it \code{"Tr"} in the DAG; \code{T} itself is avoided because
 it is \code{TRUE} in R).}
 
 \item{Tr_incidence}{Incidence weight \eqn{\omega} distributing \code{Tr}
-  across the idiosyncratic income states: household in state \code{i}
-  receives \code{Tr * omega[i]}. \code{NULL} (default) is the uniform rule
-  \code{omega == 1}, byte-for-byte identical to the pre-incidence
-  household. Otherwise a finite numeric vector of length \code{length(e)},
-  normalised here to \eqn{\sum_e \bar\pi_e \omega_e = 1} against the
-  \code{Pi}-invariant distribution \eqn{\bar\pi}, so that \code{Tr} always
-  means the per-capita transfer and the aggregate outlay is exactly
-  \code{Tr}. See \code{\link{hank_incidence_earnings}} for the
-  earnings-proportional rule.
-
-  The weight is indexed by the income state ONLY, never by assets. That is
-  what makes the aggregate outlay exactly \code{Tr} in every period of a
-  transition, not just at the steady state: the \code{e}-marginal of the
-  distribution is invariant under the forward operator (\code{e} is an
-  exogenous Markov chain and the steady-state marginal is already
-  \code{Pi}-invariant), so \eqn{\sum_i D_{t,i} \omega_i \equiv 1} for all
-  \code{t}. An asset-indexed weight would NOT have this property -- the
-  outlay would drift with the wealth distribution, breaking any accounting
-  closure written on \code{Tr} -- and is deliberately not supported.}
+across households: household in idiosyncratic state \code{(e, a)}
+receives \code{Tr * omega(e, a)}. Two forms are accepted:
+\describe{
+  \item{\code{NULL} or a length-\code{length(e)} vector (Tier 1)}{The
+    uniform rule (\code{NULL}, \code{omega == 1}) or any income-state-only
+    weight, byte-for-byte identical to the pre-incidence household when
+    uniform. Normalised here to \eqn{\sum_e \bar\pi_e \omega_e = 1}
+    against the \code{Pi}-invariant distribution \eqn{\bar\pi}, so
+    \code{Tr} always means the per-capita transfer and the aggregate
+    outlay is exactly \code{Tr} at every date of a transition (the
+    \code{e}-marginal of the distribution is invariant under the forward
+    operator: \code{e} is an exogenous Markov chain and the steady-state
+    marginal is already \code{Pi}-invariant, so
+    \eqn{\sum_i D_{t,i} \omega_i \equiv 1} for all \code{t}). See
+    \code{\link{hank_incidence_earnings}} for the earnings-proportional
+    rule.}
+  \item{A finite numeric \code{length(e) x length(a_grid)} matrix
+    (Tier 2)}{An \code{(e, a)}-varying incidence rule, e.g.
+    wealth-proportional. \code{omega} MUST be a function of the
+    BEGINNING-of-period state only (indexed by the current grid, never
+    \eqn{a'}): \code{Tr * omega(e, a)} then enters cash on hand
+    additively without touching the marginal return to saving, so the
+    Euler equation is undisturbed. Unlike the vector form, a matrix
+    \code{omega} is taken AS SUPPLIED -- it is NOT normalised, because
+    that would be circular (\code{D_ss} depends on the household policy,
+    which depends on \code{omega}); the realised aggregate outlay is
+    instead reported on the returned block as \code{Omega_ss} (see
+    Value), and its date-\code{t} counterpart is available as the
+    \code{"Omega"} het-block output (\code{\link{hank_het_jacobian}}).
+    Because a non-uniform \code{omega} can push \code{w*e + Tr*omega(e,a)}
+    toward or through zero in a low-\code{e}/low-\code{a} corner, the
+    steady-state solve here ASSERTS strictly positive cash on hand at
+    every \code{(e, a)} grid point (hard error, naming the offending
+    corner and the sign of \code{Tr}, if violated); a transition-path
+    evaluation that later drives cash on hand into the EGM tiny-floor
+    region instead WARNS, once per session (see
+    \code{\link{.hank_egm_step}}).}
+}}
 
 \item{r_minus}{Borrowing rate applied on \code{a < 0}. \code{NULL} (the
 default) is the SYMMETRIC household, in which borrowers and savers both
@@ -114,7 +133,11 @@ An object of class \code{hank_het_block} with the steady-state
   \code{D} (vector) and forward operator \code{Lambda}, aggregate
   steady-state outputs \code{A}, \code{C}, the borrowing constraint
   \code{amin}, the calibration, (when supplied) \code{Pi_fn} /
-  \code{Pi_inputs}, and the run metadata
+  \code{Pi_inputs}, \code{Omega_ss} (the realised steady-state transfer
+  outlay per unit of \code{Tr}, \code{sum(D * Tr_incidence)}; exactly
+  \code{1} to numerical precision for the Tier-1 vector/uniform form, and
+  the genuine -- possibly drifting-along-a-transition -- outlay for a
+  Tier-2 matrix \code{Tr_incidence}), and the run metadata
   \code{\link{hank_het_manifest}} reads:
   \describe{
     \item{\code{backend}}{The backend that ACTUALLY ran: the

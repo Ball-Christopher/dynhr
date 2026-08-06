@@ -64,12 +64,25 @@ static inline int clamped_lower_idx0(const double *x, int n, double xq) {
 // [[Rcpp::export]]
 List hank_egm_step_cpp(NumericMatrix Va_p_, NumericVector a_grid_,
                         NumericVector y_, double r, double beta, double eis,
-                        NumericMatrix Pi_, double amin) {
+                        NumericMatrix Pi_, double amin,
+                        Nullable<NumericMatrix> coh_extra_ = R_NilValue) {
   int n_e = Va_p_.nrow(), n_a = Va_p_.ncol();
   arma::mat Va_p(Va_p_.begin(), n_e, n_a, false);
   arma::mat Pi(Pi_.begin(), n_e, n_e, false);
   arma::vec a_grid(a_grid_.begin(), n_a, false);
   arma::vec y(y_.begin(), n_e, false);
+
+  // Tier 2: optional additive (e,a) incidence matrix on cash-on-hand, at the
+  // FIXED (beginning-of-period) grid only -- see the R doc on .hank_egm_step
+  // / hank_het_block's Tr_incidence. Empty/NULL is a strict no-op, so the
+  // Tier-1 vector-incidence and no-incidence paths (y already carries any
+  // e-indexed transfer) are bit-identical to before this parameter existed.
+  bool has_extra = coh_extra_.isNotNull();
+  arma::mat coh_extra;
+  if (has_extra) {
+    NumericMatrix ce(coh_extra_);
+    coh_extra = arma::mat(ce.begin(), n_e, n_a, false);
+  }
 
   const double tiny = 1e-12;
   double inv_eis = 1.0 / eis;
@@ -88,7 +101,8 @@ List hank_egm_step_cpp(NumericMatrix Va_p_, NumericVector a_grid_,
   for (int e = 0; e < n_e; e++)
     for (int a = 0; a < n_a; a++) {
       coh_endog(e, a) = c_endog(e, a) + a_grid(a);
-      coh(e, a)       = (1.0 + r) * a_grid(a) + y(e);
+      coh(e, a)       = (1.0 + r) * a_grid(a) + y(e) +
+                         (has_extra ? coh_extra(e, a) : 0.0);
     }
 
   arma::mat a_pol(n_e, n_a);
@@ -129,13 +143,22 @@ List hank_egm_step_cpp(NumericMatrix Va_p_, NumericVector a_grid_,
 List hank_egm_solve_cpp(NumericVector a_grid_, NumericVector y_, double r,
                          double beta, double eis, NumericMatrix Pi_,
                          double amin, double tol, int maxit,
-                         Nullable<NumericMatrix> Va_init_ = R_NilValue) {
+                         Nullable<NumericMatrix> Va_init_ = R_NilValue,
+                         Nullable<NumericMatrix> coh_extra_ = R_NilValue) {
   int n_e = y_.size(), n_a = a_grid_.size();
   arma::mat Pi(Pi_.begin(), n_e, n_e, false);
   arma::vec a_grid(a_grid_.begin(), n_a, false);
   arma::vec y(y_.begin(), n_e, false);
   const double tiny = 1e-12;
   double inv_eis = 1.0 / eis;
+
+  // Tier 2: see hank_egm_step_cpp -- empty/NULL is a strict no-op.
+  bool has_extra = coh_extra_.isNotNull();
+  arma::mat coh_extra;
+  if (has_extra) {
+    NumericMatrix ce(coh_extra_);
+    coh_extra = arma::mat(ce.begin(), n_e, n_a, false);
+  }
 
   arma::mat Va(n_e, n_a);
   if (Va_init_.isNotNull()) {
@@ -168,7 +191,8 @@ List hank_egm_solve_cpp(NumericVector a_grid_, NumericVector y_, double r,
         double v = std::pow(Wa(e, a), -eis);
         c_endog(e, a) = v < tiny ? tiny : v;
         coh_endog(e, a) = c_endog(e, a) + a_grid(a);
-        coh(e, a) = (1.0 + r) * a_grid(a) + y(e);
+        coh(e, a) = (1.0 + r) * a_grid(a) + y(e) +
+                    (has_extra ? coh_extra(e, a) : 0.0);
       }
 
     for (int e = 0; e < n_e; e++) {

@@ -376,19 +376,32 @@ run_mode_finding <- function(solved,
       max_inner   = max_inner
     )
   } else {
-    log_post_fn <- make_log_posterior(
-      model, data, priors, obs_vars, compiled,
-      me_variance        = me_variance,
-      likelihood         = likelihood,
-      pruned_order       = pruned_order,
-      lik_init           = posterior_options$lik_init %||% "auto",
-      me_extra           = me_extra,
-      shock_scale        = shock_scale_mat,
-      freq_band          = freq_band,
-      system_priors      = posterior_options$system_priors %||% NULL,
-      infeasible_penalty = posterior_options$infeasible_penalty %||% NULL,
-      ...
-    )
+    ## CPM routing (v1 limitation, documented on make_log_posterior_tpf's
+    ## `burn_in_init` @param): when posterior_options$tpf_options$cpm_rho_u is
+    ## set, run_posterior_estimation() will later dispatch this closure to
+    ## rwmh_cpm(), which calls it with a non-NULL U_list on every step after
+    ## the priming call. burn_in_init > 0 hard-errors against a supplied
+    ## U_list (the CPM slot layout has no burn-in slots), so this is the
+    ## build site that must pin burn_in_init = 0L for that case -- unless the
+    ## caller already passed burn_in_init explicitly via `...`.
+    .mf_dots <- list(...)
+    .cpm_rho_u <- posterior_options$tpf_options$cpm_rho_u %||% NULL
+    if (identical(likelihood, "tpf") && !is.null(.cpm_rho_u) &&
+        is.null(.mf_dots$burn_in_init)) {
+      .mf_dots$burn_in_init <- 0L
+    }
+    log_post_fn <- do.call(make_log_posterior,
+      c(list(model, data, priors, obs_vars, compiled,
+             me_variance        = me_variance,
+             likelihood         = likelihood,
+             pruned_order       = pruned_order,
+             lik_init           = posterior_options$lik_init %||% "auto",
+             me_extra           = me_extra,
+             shock_scale        = shock_scale_mat,
+             freq_band          = freq_band,
+             system_priors      = posterior_options$system_priors %||% NULL,
+             infeasible_penalty = posterior_options$infeasible_penalty %||% NULL),
+        .mf_dots))
   }
 
   # -------------------------------------------------------------------
@@ -823,9 +836,9 @@ run_mode_finding <- function(solved,
     tpf_options   = posterior_options$tpf_options %||% list(),
     obc_specs     = obc_specs,
     student_df    = dots_$student_df %||% NULL,
-    ## pruned_order=3 is only valid with likelihood="pruned"; the OBC branch
-    ## rewrites the ctx likelihood, so fall back to the default there.
-    pruned_order  = if (identical(mode_ctx_likelihood, "pruned")) pruned_order else 2L
+    ## pruned_order=3 is only valid with likelihood="pruned" or "tpf"; the
+    ## OBC branch rewrites the ctx likelihood, so fall back to the default there.
+    pruned_order  = if (mode_ctx_likelihood %in% c("pruned", "tpf")) pruned_order else 2L
   )
   if (!is.null(plan)) mode_ctx$plan <- plan
 
