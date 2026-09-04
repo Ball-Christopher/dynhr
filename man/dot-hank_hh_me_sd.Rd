@@ -2,11 +2,11 @@
 % Please edit documentation in R/hank-panel.R
 \name{.hank_hh_me_sd}
 \alias{.hank_hh_me_sd}
-\title{Normalize \code{me_var} to a named per-\code{obs_spec} standard-deviation vector}
+\title{Normalize \code{me_variance} to a named per-\code{obs_spec} standard-deviation vector}
 \usage{
-.hank_hh_me_sd(me_var, obs_spec)
+.hank_hh_me_sd(me_variance, obs_spec)
 }
 \description{
-Normalize \code{me_var} to a named per-\code{obs_spec} standard-deviation vector
+Normalize \code{me_variance} to a named per-\code{obs_spec} standard-deviation vector
 }
 \keyword{internal}

@@ -221,6 +221,28 @@
 #'     short-run and long-run restrictions. \emph{Norges Bank Working Paper}.
 #'   Levintal, O. (2017). Fifth-order perturbation solution of DSGE models.
 #'     \emph{Journal of Economic Dynamics and Control}, 80, 1-16.
+#' @seealso \code{\link{compile_model}}, \code{\link{solve_steady}},
+#'   \code{\link{compute_irfs}}, \code{\link{simulate_model}},
+#'   \code{\link{bk_distance}}
+#' @examples
+#' model    <- parse_mod(system.file("extdata/models/rbc.mod",
+#'                                   package = "dynhr"), verbose = FALSE)
+#' compiled <- compile_model(model, verbose = FALSE)
+#' steady   <- solve_steady(compiled, model$param_values,
+#'                          endo_names = model$var_names,
+#'                          exo_names  = model$varexo_names, verbose = FALSE)
+#'
+#' dr <- solve_perturbation(model, compiled, steady$values,
+#'                          model$param_values, verbose = FALSE)
+#' dr$bk_satisfied            # TRUE when Blanchard-Kahn holds
+#' dim(dr$ghx)                # state transition
+#' dim(dr$ghu)                # shock impact (unit shocks; excludes Sigma_e)
+#'
+#' ## Order 2 needs a model compiled to at least that order
+#' compiled2 <- compile_model(model, max_order = 2L, verbose = FALSE)
+#' dr2 <- solve_perturbation(model, compiled2, steady$values,
+#'                           model$param_values, order = 2L, verbose = FALSE)
+#' class(dr2)
 #' @export
 solve_perturbation <- function(model, compiled, ss, params, verbose = FALSE,
                                order = 1L, Sigma_e = NULL, h = NULL,
@@ -961,8 +983,12 @@ solve_perturbation_fast <- function(model, compiled, ss, params,
     T11 <- T_mat[1:n_minus, 1:n_minus, drop = FALSE]
     S11 <- S_mat[1:n_minus, 1:n_minus, drop = FALSE]
 
-    Z11_inv <- .safe_inv(Z11)
-    T11_inv <- .safe_inv(T11)
+    ## Rank truncation here means the QZ blocks are numerically singular, so
+    ## `g_minus_y` below is built from a PSEUDO-inverse rather than an inverse
+    ## -- the returned rule is then only one of infinitely many solutions, yet
+    ## `bk_satisfied` stays TRUE. Warn (once per solve) instead of hiding it.
+    Z11_inv <- .safe_inv(Z11, warn_label = "solve_perturbation: QZ block Z11")
+    T11_inv <- .safe_inv(T11, warn_label = "solve_perturbation: QZ block T11")
 
     g_minus_y <- Re(Z11 %*% T11_inv %*% S11 %*% Z11_inv)
 
@@ -1037,7 +1063,11 @@ solve_perturbation_fast <- function(model, compiled, ss, params,
   # Step 7: Recover static variable responses
   # ------------------------------------------------------------------
   if (n_s > 0 && n_minus > 0) {
-    R_inv <- .safe_inv(R_block)
+    ## Same caveat as the QZ blocks above: a truncated R_block means the
+    ## static-variable block is numerically singular and ghx_s is a
+    ## least-norm, not the unique, solution.
+    R_inv <- .safe_inv(R_block,
+                       warn_label = "solve_perturbation: static block R_block")
     if (n_plus > 0) {
       gpy_gmy <- g_plus_y %*% g_minus_y
     } else {

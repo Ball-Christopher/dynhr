@@ -28,6 +28,21 @@ A \code{\link{dynhr_chains}} object.  The \code{$n_divergent}
 Runs NUTS with dual-averaging step-size adaptation and optional diagonal
 mass-matrix adaptation.  Returns a \code{\link{dynhr_chains}} object.
 }
+\examples{
+## NUTS needs a gradient; without an analytic one it finite-differences the
+## target, so on a real DSGE posterior prefer make_posterior_grad(). Here a
+## cheap analytic target keeps the example fast.
+log_post <- function(theta) {
+  ll <- -0.5 * sum(((theta - c(0.5, -0.2)) / c(1, 0.5))^2)
+  list(logpost = ll, loglik = ll, logprior = 0)
+}
+
+set.seed(1)
+chains <- nuts(log_post, theta0 = c(a = 0, b = 0),
+               n_draws = 200L, n_warmup = 200L, verbose = FALSE)
+chains$n_divergent          # 0 in a well-tuned run
+summary(chains)
+}
 \references{
 Hoffman, M. D., & Gelman, A. (2014). The No-U-Turn sampler: Adaptively
     setting path lengths in Hamiltonian Monte Carlo.
@@ -36,5 +51,6 @@ Hoffman, M. D., & Gelman, A. (2014). The No-U-Turn sampler: Adaptively
     In \emph{Handbook of Markov Chain Monte Carlo}. Chapman & Hall/CRC.
 }
 \seealso{
-\code{\link{mcmc}}, \code{\link{smc}}, \code{\link{find_mode}}
+\code{\link{mcmc}}, \code{\link{smc}}, \code{\link{find_mode}},
+  \code{\link{dm_sample}}
 }

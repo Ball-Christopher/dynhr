@@ -8,7 +8,7 @@
 ##   conceptual order.  Diverging plots use Paul Tol "sunset"; sequential use
 ##   cividis (viridis option "E").
 ##
-## The visual style follows the RBNZ v3 ggplot tools (clean minimal panels,
+## The visual style is clean minimal panels,
 ## bottom legend, horizontal x-axis line, no y axis line, dotted horizontal
 ## gridlines) but with Source Sans 3 / Source Serif Pro fonts and the Tol
 ## palettes above.
@@ -405,6 +405,25 @@ scale_colour_dynhr_vibrant <- function(..., na.value = dynhr_na_colour) {
 #' @export
 scale_color_dynhr_vibrant <- scale_colour_dynhr_vibrant
 
+#' Discrete fill scale using Paul Tol vibrant in dynhr order
+#'
+#' The fill counterpart of \code{\link{scale_colour_dynhr_vibrant}}, so a plot
+#' that maps the same factor to both \code{colour} and \code{fill} can use one
+#' palette for both.  If there are more levels than the 6 vibrant colours, the
+#' palette is interpolated in Lab space.
+#' @param ... Passed to \code{ggplot2::discrete_scale}.
+#' @param na.value Fill for NA values (default: Tol pale grey).
+#' @export
+scale_fill_dynhr_vibrant <- function(..., na.value = dynhr_na_fill) {
+  if (!requireNamespace("ggplot2", quietly = TRUE)) stop("ggplot2 required.")
+  ggplot2::discrete_scale(
+    aesthetics = "fill",
+    palette    = .dynhr_palette_fun(dynhr_palette_vibrant),
+    na.value   = na.value,
+    ...
+  )
+}
+
 #' Discrete fill scale using Paul Tol light in dynhr order
 #'
 #' If there are more levels than the 6 light colours, the palette is
@@ -421,6 +440,29 @@ scale_fill_dynhr_light <- function(..., na.value = dynhr_na_fill) {
     ...
   )
 }
+
+#' Discrete line/colour scale using Paul Tol light in dynhr order
+#'
+#' The colour counterpart of \code{\link{scale_fill_dynhr_light}} -- the pale
+#' palette used for area fills, available on the \code{colour} aesthetic so an
+#' outline can match its fill.  If there are more levels than the 6 light
+#' colours, the palette is interpolated in Lab space.
+#' @param ... Passed to \code{ggplot2::discrete_scale}.
+#' @param na.value Colour for NA values (default: Tol grey).
+#' @export
+scale_colour_dynhr_light <- function(..., na.value = dynhr_na_colour) {
+  if (!requireNamespace("ggplot2", quietly = TRUE)) stop("ggplot2 required.")
+  ggplot2::discrete_scale(
+    aesthetics = "colour",
+    palette    = .dynhr_palette_fun(dynhr_palette_light),
+    na.value   = na.value,
+    ...
+  )
+}
+
+#' @rdname scale_colour_dynhr_light
+#' @export
+scale_color_dynhr_light <- scale_colour_dynhr_light
 
 #' Diverging colour scale using Paul Tol sunset (continuous)
 #' @param midpoint Numeric midpoint (default 0).
@@ -480,6 +522,10 @@ scale_fill_dynhr_cividis <- function(..., na.value = dynhr_na_fill) {
 #' @param ... Arguments passed to \code{\link{scale_colour_dynhr_vibrant}}.
 #' @export
 scale_colour_dynhr <- function(...) scale_colour_dynhr_vibrant(...)
+
+#' @rdname scale_colour_dynhr
+#' @export
+scale_color_dynhr <- scale_colour_dynhr
 
 #' Legacy: fill scale -- now Tol light in dynhr order
 #' @param ... Arguments passed to \code{\link{scale_fill_dynhr_light}}.

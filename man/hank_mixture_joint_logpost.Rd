@@ -7,7 +7,7 @@ beta-mixture}
 \usage{
 hank_mixture_joint_logpost(
   theta,
-  Y = NULL,
+  data = NULL,
   dD_hat = NULL,
   metric = NULL,
   config,
@@ -25,7 +25,7 @@ case it OVERRIDES \code{config$omega} for this evaluation (e.g. when a
 sampler is also exploring the mixture weight); if \code{theta$omega} is
 \code{NULL}, \code{config$omega} is used.}
 
-\item{Y}{\code{T_data x length(config$observables)} matrix of demeaned
+\item{data}{\code{T_data x length(config$observables)} matrix of demeaned
 macro observations, as expected by \code{\link{hank_mixture_kf_loglik}}
 / \code{\link{hank_kalman_loglik}}; \code{NULL} (default) disables the
 macro channel.}
@@ -147,7 +147,7 @@ shared mixture general-equilibrium steady state
 \describe{
   \item{macro}{the structural macro Kalman-filter log-likelihood
     (\code{\link{hank_mixture_kf_loglik}}) on an observed aggregate time
-    series \code{Y}; active iff \code{Y} is supplied.}
+    series \code{data}; active iff \code{data} is supplied.}
   \item{level}{the grid-invariant functional LEVEL log-likelihood
     (\code{\link{hank_reweight_functional_loss}} against
     \code{\link{hank_reweight_level_metric}}) of a SINGLE stationary

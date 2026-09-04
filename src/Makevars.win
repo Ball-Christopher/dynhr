@@ -2,6 +2,11 @@
 ## Without this line some Windows toolchains fall back to C++17 and fail on
 ## <barrier>.
 CXX_STD = CXX20
+## No -pthread here, unlike src/Makevars: Rtools' GCC links winpthreads
+## implicitly, so std::thread works out of the box and the flag would only be
+## noise. The Unix Makevars needs it because glibc < 2.34 splits the pthread
+## symbols into a separate library and std::thread's constructor throws at run
+## time without them.
 ## -lpsapi: Windows-only, for GetProcessMemoryInfo() in src/proc_rss.cpp
 ## (.hank_peak_rss(), A8 run-manifest metadata). This file is used ONLY on
 ## Windows builds, so it cannot affect macOS/Linux link flags.

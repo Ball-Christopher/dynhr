@@ -6,12 +6,11 @@
 \usage{
 make_log_posterior_hank(
   model,
-  Y,
-  observables,
+  data,
+  obs_vars,
   q = NULL,
-  me_var = 0,
+  me_variance = 0,
   likelihood = c("kalman", "exact_ar"),
-  me_sd = NULL,
   prior_rho_mean = 0.5,
   prior_rho_sd = 0.3,
   prior_sigma_sd = 0.05,
@@ -22,16 +21,25 @@ make_log_posterior_hank(
 \arguments{
 \item{model}{A \code{\link{hank_model}}.}
 
-\item{Y}{\code{T_data x n_obs} matrix of demeaned observations.}
+\item{data}{\code{T_data x n_obs} matrix of demeaned observations.}
 
-\item{observables}{Character vector of observable names (see
+\item{obs_vars}{Character vector of observable names (see
 \code{\link{hank_state_space}}).}
 
 \item{q}{Optional truncation horizon passed to \code{\link{hank_state_space}}
 (\code{likelihood = "kalman"}) or \code{\link{hank_loglik_ar}}
 (\code{likelihood = "exact_ar"}).}
 
-\item{me_var}{Measurement-error variance (see \code{\link{hank_kalman_loglik}}).}
+\item{me_variance}{Measurement-error VARIANCE, scalar or length-\code{n_obs}
+(see \code{\link{hank_kalman_loglik}}). Both \code{likelihood} options
+read the SAME argument, so they always describe the same measurement
+error: the exact-AR branch passes it straight to
+\code{\link{hank_loglik_ar}}. Before 0.9.2.0003 this function took a
+variance \code{me_var} AND an independently-overridable standard
+deviation \code{me_sd} (defaulting to \code{sqrt(me_var)}); the two
+were collapsed into this one argument, so a caller that used to pass a
+\code{me_sd} different from \code{sqrt(me_var)} must now pass
+\code{me_sd^2} here and accept that the Kalman branch sees it too.}
 
 \item{likelihood}{\code{"kalman"} (default) runs the Kalman filter on the
 truncated-MA companion form (\code{\link{hank_kalman_loglik}});
@@ -44,11 +52,6 @@ values (see the representability bound in \code{\link{hank_loglik_ar}}:
 A draw whose likelihood evaluation fails (e.g. a non-positive-definite
 stacked covariance at extreme \code{rho}) is rejected with
 \code{logpost = -Inf} rather than erroring the chain.}
-
-\item{me_sd}{Per-observable measurement-error standard deviation for
-\code{likelihood = "exact_ar"} (scalar or length-\code{n_obs}); default
-\code{sqrt(me_var)}, so the two likelihood options describe the same
-measurement error unless overridden.}
 
 \item{prior_rho_mean, prior_rho_sd}{Named numeric vectors (by shock name) or
 scalars (recycled) giving the Normal prior mean/sd for each shock's

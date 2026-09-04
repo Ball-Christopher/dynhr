@@ -195,7 +195,15 @@ List kf_adjoint_uni_cpp(const arma::mat& Y,
     B_store[t]  = B;
 
     s = TT * s + K * v;
-    P = sym(A * P * A.t() + B * Sigma_e * B.t());
+    {
+      // TRUE measurement-noise law (F3-D): P' += K me_o K'.
+      arma::mat P_raw = A * P * A.t() + B * Sigma_e * B.t();
+      if (me_variance != 0.0) {
+        const arma::mat KKt = K * K.t();
+        P_raw += me_variance * KKt;
+      }
+      P = sym(P_raw);
+    }
   }
 
   if (!ok) {
@@ -276,6 +284,12 @@ List kf_adjoint_uni_cpp(const arma::mat& Y,
     // ---- Step 2: s_t = TT s_prev + K v ------------------------------------
     G_TT  += bar_s * s_prev.t();
     arma::mat bar_K     = bar_s * v.t();
+    // Adjoint of the ME Joseph term P_t += K me_o K' (me_o is DATA):
+    // d tr(bar_P K me K') / dK = 2 me bar_P K.
+    if (me_variance != 0.0) {
+      const arma::mat BPK = bar_P * K;
+      bar_K += 2.0 * me_variance * BPK;
+    }
     arma::vec bar_v     = K.t() * bar_s;
     arma::vec bar_s_prev = TT.t() * bar_s;
 

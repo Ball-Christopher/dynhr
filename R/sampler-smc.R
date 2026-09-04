@@ -8,11 +8,9 @@
 ## Diagnostics: smc_summary, smc_plot_diagnostics
 ## --------------------------------------------------------------------------
 
-.smc_log_sum_exp <- function(x) {
-  mx <- max(x)
-  if (!is.finite(mx)) return(-Inf)
-  mx + log(sum(exp(x - mx)))
-}
+## Back-compat alias: the stable log-sum-exp lives once in R/solve-helpers.R
+## as .logsumexp().  Kept because tests and inst/scripts call it by name.
+.smc_log_sum_exp <- function(x) .logsumexp(x)
 
 
 #' Effective sample size from log weights

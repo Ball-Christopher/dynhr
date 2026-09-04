@@ -5,13 +5,13 @@
 \title{Score of the exact-AR likelihood w.r.t. STRUCTURAL model parameters}
 \usage{
 hank_loglik_ar_structural_grad(
-  Y,
+  data,
   model_fn,
   theta,
-  observables,
+  obs_vars,
   rho,
   sigma,
-  me_sd = 0,
+  me_variance = 0,
   q = NULL,
   dtheta_fn = NULL,
   verify = TRUE,
@@ -26,7 +26,7 @@ hank_loglik_ar_structural_grad(
 )
 }
 \arguments{
-\item{Y}{\code{T_data x n_obs} matrix of demeaned observations.}
+\item{data}{\code{T_data x n_obs} matrix of demeaned observations.}
 
 \item{model_fn}{\code{function(theta)} returning a \code{\link{hank_model}}
 at the structural parameter vector \code{theta}. May be \code{NULL} only
@@ -36,16 +36,18 @@ that would otherwise call it.}
 
 \item{theta}{Named numeric vector of structural parameters.}
 
-\item{observables}{Character vector of observable names, in the column order
-of \code{Y}.}
+\item{obs_vars}{Character vector of observable names, in the column order
+of \code{data}.}
 
 \item{rho, sigma}{Named numeric vectors of per-shock persistence and
 innovation sd, held FIXED here (their own scores come from
 \code{\link{hank_loglik_ar_grad}}).}
 
-\item{me_sd}{Measurement-error standard deviation: scalar (recycled) or
+\item{me_variance}{Measurement-error VARIANCE: scalar (recycled) or
 length-\code{n_obs} vector.  Default 0 (allowed only if the observation
-set is non-singular).}
+set is non-singular).  Renamed from the pre-0.9.2.0003 \code{me_sd},
+which took a standard deviation: pass \code{me_sd^2} for the same
+likelihood.}
 
 \item{q}{Number of quasi-differenced MA terms retained per shock (default:
 \code{ss$q} for a state-space object, else all rows of \code{Theta}).}
@@ -68,7 +70,7 @@ is \code{NULL} and no prebuilt base is supplied.}
 by \code{verify}).}
 
 \item{cache}{Optional environment (\code{new.env()}) reused across calls
-with the same \code{Y} shape and missing-data pattern.  Two
+with the same \code{data} shape and missing-data pattern.  Two
 exactness-preserving layers (a cache hit returns identical floats to
 the uncached path): per-shock unscaled autocovariance slabs keyed on
 \code{(rho, q, Theta)} -- so a one-coordinate optimizer/gradient
@@ -93,7 +95,7 @@ used instead of calling \code{model_fn(theta)} for the base
 
 \item{Theta_list}{Optional prebuilt named list of \code{T_h x n_obs} MA
 coefficient matrices at \code{theta} (what
-\code{model_fn(theta)} would produce for \code{observables} under
+\code{model_fn(theta)} would produce for \code{obs_vars} under
 \code{rho}), used instead of \code{model} / \code{model_fn}.}
 
 \item{score}{Optional precomputed kernel adjoint: the list returned by

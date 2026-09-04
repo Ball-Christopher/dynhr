@@ -12,7 +12,8 @@ diag_prior_sensitivity(
   me_variance = 0,
   threshold = 0.5,
   n_iter = 500L,
-  verbose = TRUE
+  verbose = TRUE,
+  meta = NULL
 )
 }
 \arguments{
@@ -35,6 +36,9 @@ magnitude is flagged).}
 a rough comparison.}
 
 \item{verbose}{Print progress messages.}
+
+\item{meta}{Optional [diag_meta()] list applied to the plots
+(model name, sample size); `NULL` derives a default from the model.}
 }
 \value{
 A \code{dynhr_diagnostic} list.

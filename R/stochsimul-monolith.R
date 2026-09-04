@@ -325,6 +325,15 @@ compute_irfs <- function(dr, model, n_periods = 40L, shock_size = 1, params = NU
 #'   \code{burn_in = 0}. \code{NULL} starts at the steady state.
 #' @return Matrix (n_periods x n_endo) when \code{n_replications = 1};
 #'   3-D array (n_periods x n_endo x n_replications) when \code{> 1}.
+#'
+#'   The values are \strong{deviations from the steady state}; the same paths
+#'   in LEVELS are attached as \code{attr(., "levels")}. Every filtering and
+#'   smoothing entry point -- \code{\link{kalman_filter}},
+#'   \code{\link{kalman_smoother}}, \code{\link{forecast_backtest}},
+#'   \code{\link{realtime_decomposition}} -- takes LEVELS and subtracts the
+#'   model's steady state itself, so feed them
+#'   \code{attr(sim, "levels")[, obs_vars]}, not the raw return value, unless
+#'   the observables' steady states are zero.
 #' @export
 simulate_model <- function(dr, n_periods = 200L, shocks = NULL,
                            n_replications = 1L, model = NULL,
@@ -462,83 +471,12 @@ simulate_model <- function(dr, n_periods = 200L, shocks = NULL,
 ## 3. THEORETICAL MOMENTS (Lyapunov equation)
 ## ============================================================================
 
-#' Solve the discrete Lyapunov equation X = A X A' + B
-#'
-#' Uses the doubling algorithm for efficiency.
-#'
-#' @param A Square matrix
-#' @param B Symmetric positive semi-definite matrix
-#' @param max_iter Maximum iterations
-#' @param tol Convergence tolerance
-#' @return Solution matrix X
-#' @export
-solve_lyapunov <- function(A, B, max_iter = 500L, tol = 1e-14) {
-  n <- nrow(A)
-
-  ## Fast path: if B is all zeros, solution is zero
-  if (all(B == 0)) return(matrix(0, n, n))
-
-  ## Doubling algorithm
-  X <- B
-  A_pow <- A
-  converged <- FALSE
-  for (iter in seq_len(max_iter)) {
-    X_new <- X + A_pow %*% X %*% t(A_pow)
-    if (any(!is.finite(X_new))) break
-    diff <- max(abs(X_new - X))
-    if (!is.finite(diff)) break
-    ## RELATIVE convergence: a near-unit root gives a huge stationary covariance
-    ## (entries ~ 1/(1-rho^2)), so the per-step increment can never fall below an
-    ## ABSOLUTE 1e-14 (it plateaus at ~max|X| * machine-eps). An absolute test
-    ## therefore never converges for near-unit-root systems -> the loop runs all
-    ## max_iter steps and falls through to the O(n^6) kronecker solve (~0.5 s for
-    ## n = 37). Scaling by max|X| makes it converge in the proper ~log2(mixing)
-    ## steps for ANY stable A. (Harmless for well-damped A where max|X| ~ O(1).)
-    if (diff < tol * max(1, max(abs(X_new)))) { converged <- TRUE; break }
-    A_pow <- A_pow %*% A_pow
-    if (any(!is.finite(A_pow))) break
-    X <- X_new
-  }
-  if (converged) return(X)
-
-  ## Stability gate before the O(n^6) vec/kronecker fallback.
-  ##
-  ## The discrete Lyapunov equation X = A X A' + B has a finite (PSD) solution
-  ## only when A is stable (spectral radius < 1). The doubling loop above only
-  ## fails to converge when A has a unit/explosive root: A^k does not decay, so
-  ## the stationary covariance diverges and NO valid X exists. In that case the
-  ## kronecker fallback is doubly bad -- it spends O(n^6) solving an (n^2 x n^2)
-  ## system (e.g. ~0.5 s for n = 37) AND, because M = I - A (x) A is only
-  ## *near*-singular for an explosive root (rcond just above machine-eps, so the
-  ## guard below misses it), it returns a garbage non-PSD X instead of NaN.
-  ##
-  ## A cheap eigenvalue check (~0.2 ms for n = 37) short-circuits this: signal
-  ## non-stationarity with NaN (the same contract as the singular-M guard
-  ## below), letting the caller fall back to the exact-diffuse Kalman init /
-  ## simulation-based moments. This is the dominant hot path when an estimation
-  ## sampler probes BK-boundary draws whose decision rule is near-explosive
-  ## (verified on NZSIM: ~473 ms/eval of wasted kronecker solves).
-  if (max(Mod(eigen(A, only.values = TRUE)$values)) >= 1)
-    return(matrix(NaN, n, n))
-
-  ## Fallback: vec method  vec(X) = (I - A (x) A)^{-1} vec(B)
-  I_n2 <- diag(n^2)
-  AkA <- kronecker(A, A)
-  M <- I_n2 - AkA
-  # Check for singular system (unit roots from NN1 placeholders, etc.)
-  if (rcond(M) < .Machine$double.eps) {
-    # Return a matrix with NaN to signal non-stationarity; caller can
-    # fall back to simulation-based welfare.
-    # Unit root detected (e.g. NN1 placeholder equations). Not an error;
-    # the caller can fall back to simulation-based computations.
-    if (getOption("dynhr.warn_lyapunov", FALSE)) {
-      warning("solve_lyapunov: system is singular (unit root detected). Returning NaN.")
-    }
-    return(matrix(NaN, n, n))
-  }
-  x_vec <- solve(M, as.vector(B))
-  matrix(x_vec, nrow = n, ncol = n)
-}
+## NOTE (D2, 2026-09-02): solve_lyapunov() used to live here.  It is now the
+## package's SINGLE discrete-Lyapunov solver and lives in R/solve-helpers.R
+## (together with the `.solve_lyapunov()` alias that R/backend-monolith.R used
+## to define separately).  Do not re-add a local copy: the near-unit-root
+## relative-tolerance / stability-gate / NaN contract only exists in one place
+## on purpose.
 
 ## ---------------------------------------------------------------------------
 ## M2: stationary-subspace projection via the modal (eigen) decomposition.
@@ -1595,8 +1533,12 @@ print_moments <- function(moments, model = NULL) {
   cat(strrep("-", 70), "\n\n")
 }
 
-#' Print decision rules
-#' @noRd
+#' Print first-order decision rules
+#'
+#' @param x A `DecisionRules` object from [solve_perturbation()].
+#' @param ... Ignored.
+#' @return `x`, invisibly.
+#' @export
 print.DecisionRules <- function(x, ...) {
   cat("=== Decision Rules (first order) ===\n")
   cat("State variables:", paste(x$state_vars, collapse = ", "), "\n")
@@ -1615,43 +1557,13 @@ print.DecisionRules <- function(x, ...) {
   invisible(x)
 }
 
-#' Plot impulse response functions
+
+#' Print a stoch_simul result
 #'
-#' @param irfs IRFCollection from compute_irfs
-#' @param vars Character vector of variables to plot (NULL = all)
-#' @param shocks Character vector of shocks to plot (NULL = all)
-#' @param ncol Number of columns in plot grid
-#' @noRd
-plot_irfs <- function(irfs, vars = NULL, shocks = NULL, ncol = 3L) {
-  endo <- attr(irfs, "endo_names")
-  exo  <- attr(irfs, "exo_names")
-  n_periods <- attr(irfs, "n_periods")
-
-  if (is.null(vars)) vars <- endo
-  if (is.null(shocks)) shocks <- exo
-
-  for (shock_name in shocks) {
-    irf_mat <- irfs[[shock_name]]
-    if (is.null(irf_mat)) next
-
-    plot_vars <- intersect(vars, colnames(irf_mat))
-    if (length(plot_vars) == 0) next
-
-    nrow_plot <- ceiling(length(plot_vars) / ncol)
-    par(mfrow = c(nrow_plot, ncol), mar = c(3, 3, 2, 1))
-    for (v in plot_vars) {
-      plot(seq_len(n_periods), irf_mat[, v], type = "l",
-           main = paste(v, "<-", shock_name),
-           xlab = "", ylab = "", col = "steelblue", lwd = 2)
-      abline(h = 0, lty = 2, col = "grey60")
-    }
-  }
-  par(mfrow = c(1, 1))
-  invisible(irfs)
-}
-
-#' Print summary for StochSimulResult
-#' @noRd
+#' @param x A `StochSimulResult` object from [stoch_simul()], [compute_irfs()] or [compute_moments()].
+#' @param ... Ignored.
+#' @return `x`, invisibly.
+#' @export
 print.StochSimulResult <- function(x, ...) {
   cat("=== stoch_simul Results ===\n")
   cat("Endogenous vars:", length(x$dr$endo_names), "\n")

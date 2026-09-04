@@ -20,7 +20,7 @@
 ## (A_L+fp)*g = -Phi  (k=0).
 ##
 ## Reuses the deterministic symbolic machinery: .build_combined_policy_derivs,
-## .dense_derivs_to_triplets, .fdb_compose, .build_F_triplets, .build_dy_ss_o2,
+## .dense_derivs_to_triplets, .build_F_triplets, .build_dy_ss_o2,
 ## .multiset_perms.
 ## --------------------------------------------------------------------------
 

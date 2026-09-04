@@ -7,7 +7,7 @@
 estimation_context(
   me_variance = 0,
   likelihood = c("gaussian", "cumulant", "whittle", "tpf", "pskf", "student_t", "pkf",
-    "ppf", "copf", "pruned", "sv_rbpf"),
+    "ppf", "copf", "pruned", "sv_rbpf", "global_pf"),
   lik_init = "auto",
   me_extra = NULL,
   shock_scale = NULL,
@@ -21,6 +21,7 @@ estimation_context(
   sample_start = NULL,
   ms_spec = NULL,
   ms_struct_spec = NULL,
+  ms_collapse = c("gpb2", "gpb3"),
   student_df = NULL,
   pruned_order = 2L
 )
@@ -114,6 +115,16 @@ regime-specific decision rules, then evaluates the likelihood via
 \code{\link{ms_kim_filter_struct}}.  Incompatible with \code{ms_spec},
 \code{me_extra}, \code{shock_scale}, and analytic gradient.  Default
 \code{NULL} (non-structural-MS path).}
+
+\item{ms_collapse}{Character; GPB collapse depth for the Markov-switching
+likelihood, forwarded to \code{\link{ms_kim_filter}} /
+\code{\link{ms_kim_filter_struct}}: \code{"gpb2"} (default, Kim's
+filter) or \code{"gpb3"} (collapse on the last TWO regimes; about
+\code{n_regimes} times the cost per period, and exact wherever GPB(2)'s
+error is entirely the one-period collapse).  Meaningful only when
+\code{ms_spec} or \code{ms_struct_spec} is supplied; supplying
+\code{"gpb3"} without either is an error.  Diagnose the need for it with
+\code{ms_kim_filter(..., return_collapse_diag = TRUE)$collapse_max}.}
 
 \item{student_df}{Positive finite scalar; degrees of freedom for the
 multivariate Student-t per-period log-likelihood.  Required when

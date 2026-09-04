@@ -15,13 +15,28 @@
 //
 // Per-particle failure (non-PD forecast covariance) => weight 0 for that
 // particle; a fully infeasible cloud => -Inf, matching the R reference.
+//
+// MEASUREMENT ERROR (F4-A, 2026-09-04): me_diag is TRUE i.i.d. observation
+// noise, not an F-only regulariser -- it enters Ft AND the Joseph term
+// (Pn += K diag(me) K'), exactly as R/kf-step.R and kalman_filter() do.
+//
+// RETURN CONTRACT (B5, 2026-09-02): a LIST, not a bare double --
+//   $loglik      scalar log-likelihood (-Inf on a fully infeasible cloud)
+//   $fail_period 1-based period at which EVERY particle failed, or 0.
+// The all-particles-failed diagnostic used to be an Rcpp::warning() raised
+// from inside this kernel. Under options(warn = 2) R promotes a warning to an
+// error, and R's error mechanism is a longjmp: it unwinds PAST every C++
+// destructor on the stack, so any RNGScope/Armadillo cleanup between here and
+// the .Call boundary is skipped (a stale .Random.seed, leaked buffers) --
+// precisely on the runs a user asked to be strict. The kernel therefore only
+// REPORTS the period; R/sv-rbpf.R raises the warning after the call returns.
 // ---------------------------------------------------------------------------
 
 #include <RcppArmadillo.h>
 // [[Rcpp::depends(RcppArmadillo)]]
 
 // [[Rcpp::export]]
-double sv_rbpf_loglik_cpp(const arma::mat& Y,        // n_obs x T
+Rcpp::List sv_rbpf_loglik_cpp(const arma::mat& Y,        // n_obs x T
                           const arma::mat& TT,       // n_s x n_s
                           const arma::mat& ZZ,       // n_obs x n_s
                           const arma::mat& RR,       // n_s x n_e
@@ -44,6 +59,9 @@ double sv_rbpf_loglik_cpp(const arma::mat& Y,        // n_obs x T
   const int N     = n_particles;
   const double neg_inf = -std::numeric_limits<double>::infinity();
   const double ll_const = -0.5 * n_obs * std::log(2.0 * M_PI);
+  // A few ulps of headroom for the Joseph cancellation snap below; the same
+  // 8 * .Machine$double.eps R/kf-step.R uses.
+  const double eps_c = 8.0 * std::numeric_limits<double>::epsilon();
 
   arma::uvec sv_idx = sv_idx1 - 1;             // 0-based
 
@@ -70,9 +88,6 @@ double sv_rbpf_loglik_cpp(const arma::mat& Y,        // n_obs x T
   arma::uvec idx(N);
 
   double loglik = 0.0;
-  bool warned_all_fail = false;   // once-per-call: distinguish "true zero
-                                   // likelihood" from "linear algebra failed
-                                   // for every particle in a period"
 
   for (int t = 0; t < n_T; ++t) {
     // -- propagate volatility (bootstrap proposal), R draw order ------------
@@ -97,7 +112,27 @@ double sv_rbpf_loglik_cpp(const arma::mat& Y,        // n_obs x T
       if (has_me) Ft += ME;
       Ft = 0.5 * (Ft + Ft.t());
 
+      // NON-FINITE GUARD (F4-A follow-up). An extreme volatility particle can
+      // overflow exp(h/2) to +Inf (the SBC's inv_gamma sigma_eta prior has a
+      // heavy tail), and Se = Inf then produces NaN in HH = DD Se DD' wherever
+      // DD has a structural zero (0 * Inf). Symmetrising does NOT remove a
+      // NaN, and arma::is_symmetric() compares entries with exact !=, which is
+      // ALWAYS true for NaN -- so arma::chol() printed
+      //   "warning: chol(): given matrix is not symmetric"
+      // to stderr before correctly returning false. The likelihood was never
+      // wrong (the particle takes the weight-0 path either way); the warning
+      // was pure stderr noise, unsuppressable from R, that surfaced ~5 times
+      // in the R = 100 SBC certification. Fail the particle BEFORE chol sees
+      // the matrix -- the same point at which R/kf-step.R's
+      // tryCatch(chol(Ft)) fails ("the leading minor of order 1 is not
+      // positive"), so R/C++ parity is unchanged.
       arma::mat Fc;
+      if (!Ft.is_finite()) {                   // NaN/Inf: weight 0, carry state
+        ll_t(i) = neg_inf;
+        s_new.col(i) = s.col(i);
+        P_new.slice(i) = Pi;
+        continue;
+      }
       if (!arma::chol(Fc, Ft)) {               // non-PD: weight 0, carry state
         ll_t(i) = neg_inf;
         s_new.col(i) = s.col(i);
@@ -138,24 +173,55 @@ double sv_rbpf_loglik_cpp(const arma::mat& Y,        // n_obs x T
 
       arma::mat K = (TT * PZ + SS) * Fi;
       s_new.col(i) = TT * s.col(i) + K * v;
-      arma::mat TmKZ = TT - K * ZZ;
-      arma::mat RmKD = RR - K * DD;
+      arma::mat KZ = K * ZZ;
+      arma::mat KD = K * DD;
+      arma::mat TmKZ = TT - KZ;
+      arma::mat RmKD = RR - KD;
+      // CANCELLATION SNAP (see R/kf-step.R for the full argument). On a
+      // perfectly-observed step K = I exactly, so both Joseph factors are
+      // exactly zero and P' = 0. In floating point they come out at ~1 ulp of
+      // the terms that cancelled and P' is rounding noise squared, which the
+      // next period's F^-1 amplifies without limit. Ft and its Cholesky
+      // factor are BIT-IDENTICAL to R's here (same LAPACK dpotrf); the one
+      // ulp that separated the two implementations entered through
+      // arma::inv_sympd() vs R's chol2inv(), became a 100%-relative
+      // difference in TT - K ZZ, and ended as a factor 2-4 in a |ll| ~ 1e30
+      // particle weight past the SV volatility overflow point. Snapping an
+      // entry that is within a few ulps of the magnitudes that formed it
+      // replaces noise with the value it approximates, and both
+      // implementations snap to the same exact zero.
+      for (arma::uword c = 0; c < TmKZ.n_cols; ++c)
+        for (arma::uword r = 0; r < TmKZ.n_rows; ++r)
+          if (std::abs(TmKZ(r, c)) <=
+              eps_c * std::max(std::abs(TT(r, c)), std::abs(KZ(r, c))))
+            TmKZ(r, c) = 0.0;
+      for (arma::uword c = 0; c < RmKD.n_cols; ++c)
+        for (arma::uword r = 0; r < RmKD.n_rows; ++r)
+          if (std::abs(RmKD(r, c)) <=
+              eps_c * std::max(std::abs(RR(r, c)), std::abs(KD(r, c))))
+            RmKD(r, c) = 0.0;
       arma::mat Pn = TmKZ * Pi * TmKZ.t() + RmKD * Se * RmKD.t();
+      // TRUE i.i.d. measurement-noise law (F4-A): y_t = ZZ x_t + DD e_t + u_t
+      // with Var(u_t) = diag(me_diag) requires Pn += K diag(me_diag) K' for
+      // ANY gain K. Before F4-A me_diag entered Ft only (an F-regulariser),
+      // which made the RB-PF disagree with kalman_filter(method =
+      // "univariate") -- and with R/kf-step.R -- by O(me_variance).
+      if (has_me) Pn += K * ME * K.t();
+      // Symmetrised on the way out (as R/kf-step.R:142 does), so the Pi that
+      // feeds next period's Ft is exactly symmetric -- 0.5*(A + A.t()) is
+      // bit-exact in IEEE-754 because addition is commutative. The Joseph and
+      // K ME K' terms therefore cannot be the source of an asymmetric chol
+      // argument; only a NaN can be, which the guard above catches.
       P_new.slice(i) = 0.5 * (Pn + Pn.t());
     }
 
     // -- log-mean-exp increment ----------------------------------------------
     double m = ll_t.max();
     if (!std::isfinite(m)) {
-      if (!warned_all_fail) {
-        warned_all_fail = true;
-        Rcpp::warning("sv_rbpf_loglik_cpp: all %d particles failed at period "
-                       "%d (non-PD forecast covariance or non-finite "
-                       "likelihood for every particle) -- returning -Inf. "
-                       "This may indicate linear-algebra failure rather than "
-                       "a genuine zero-likelihood region.", N, t + 1);
-      }
-      return neg_inf;
+      // Every particle infeasible: report the period and stop. The R wrapper
+      // turns fail_period > 0 into the warning this used to raise here.
+      return Rcpp::List::create(Rcpp::_["loglik"]      = neg_inf,
+                                Rcpp::_["fail_period"] = t + 1);
     }
     arma::vec w_un = arma::exp(ll_t - m);
     loglik += m + std::log(arma::mean(w_un));
@@ -179,5 +245,6 @@ double sv_rbpf_loglik_cpp(const arma::mat& Y,        // n_obs x T
     h = h_res;
   }
 
-  return loglik;
+  return Rcpp::List::create(Rcpp::_["loglik"]      = loglik,
+                            Rcpp::_["fail_period"] = 0);
 }

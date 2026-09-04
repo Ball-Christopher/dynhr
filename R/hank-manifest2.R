@@ -219,6 +219,7 @@ print.hank_het2_manifest <- function(x, ...) {
 #'                        beta = 0.95, eis = 0.5, rb = 0.005, ra = 0.02,
 #'                        w = 1, n_k = 8L)
 #' hank_het2_fingerprint(blk)
+#' @keywords internal
 #' @export
 hank_het2_fingerprint <- function(block, n = 16L) {
   if (!inherits(block, "hank_het2_block"))

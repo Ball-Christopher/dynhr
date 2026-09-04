@@ -43,7 +43,7 @@
 #' nonzero lag-1 autocorrelation well before they are visible in the raw
 #' log-likelihood.
 #'
-#' @param Y observation matrix (\code{n_obs x T}), or a data frame /
+#' @param data observation matrix (\code{n_obs x T}), or a data frame /
 #'   numeric vector coercible to one; \code{NA} marks a missing observation
 #'   at that observable/period (see Details).
 #' @param dr decision rule (output of \code{\link{solve_perturbation}}).
@@ -92,7 +92,7 @@
 #'     of individual z-stats with \code{|z| > 4}, a conservative multiple-
 #'     comparisons-aware threshold).}
 #'   \item{z}{the \code{n_obs x T} matrix of standardized innovations
-#'     (\code{NA} where \code{Y} was missing).}
+#'     (\code{NA} where \code{data} was missing).}
 #' }
 #'
 #' @examples
@@ -122,7 +122,7 @@
 #' diag$by_obs
 #' }
 #' @export
-kf_innovation_diagnostics <- function(Y, dr, model, params, obs_vars,
+kf_innovation_diagnostics <- function(data, dr, model, params, obs_vars,
                                       lik_init = c("stationary", "diffuse"),
                                       me_variance = 0) {
   lik_init <- match.arg(lik_init)
@@ -157,16 +157,16 @@ kf_innovation_diagnostics <- function(Y, dr, model, params, obs_vars,
   SS      <- RR %*% Sigma_e %*% t(DD)
   me_diag <- me_variance * diag(n_obs)
 
-  if (is.null(dim(Y))) Y <- matrix(Y, nrow = n_obs)
-  Y <- as.matrix(Y)
-  if (nrow(Y) != n_obs) Y <- t(Y)
-  if (nrow(Y) != n_obs)
+  if (is.null(dim(data))) data <- matrix(data, nrow = n_obs)
+  data <- as.matrix(data)
+  if (nrow(data) != n_obs) data <- t(data)
+  if (nrow(data) != n_obs)
     stop(sprintf("kf_innovation_diagnostics: Y must have %d rows/cols ",
                  "matching obs_vars; got %d x %d.",
-                 n_obs, nrow(Y), ncol(Y)), call. = FALSE)
-  n_T <- ncol(Y)
+                 n_obs, nrow(data), ncol(data)), call. = FALSE)
+  n_T <- ncol(data)
 
-  Y_minus_d <- Y - d
+  Y_minus_d <- data - d
 
   P0 <- solve_lyapunov(TT, QQ)
   if (anyNA(P0))

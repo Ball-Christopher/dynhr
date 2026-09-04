@@ -35,3 +35,4 @@ Reference Jacobian by central differences of
 \seealso{
 \code{\link{hank_het2d_jacobian}}
 }
+\keyword{internal}

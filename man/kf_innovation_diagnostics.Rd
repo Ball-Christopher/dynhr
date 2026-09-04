@@ -5,7 +5,7 @@
 \title{Kalman-filter innovation whiteness diagnostics}
 \usage{
 kf_innovation_diagnostics(
-  Y,
+  data,
   dr,
   model,
   params,
@@ -15,7 +15,7 @@ kf_innovation_diagnostics(
 )
 }
 \arguments{
-\item{Y}{observation matrix (\code{n_obs x T}), or a data frame /
+\item{data}{observation matrix (\code{n_obs x T}), or a data frame /
 numeric vector coercible to one; \code{NA} marks a missing observation
 at that observable/period (see Details).}
 
@@ -54,7 +54,7 @@ A list with class \code{"kf_innovation_diagnostics"}:
     of individual z-stats with \code{|z| > 4}, a conservative multiple-
     comparisons-aware threshold).}
   \item{z}{the \code{n_obs x T} matrix of standardized innovations
-    (\code{NA} where \code{Y} was missing).}
+    (\code{NA} where \code{data} was missing).}
 }
 }
 \description{

@@ -436,9 +436,9 @@ d28_regime_switching_identification <- function(regime_defs,
     theta_full <- theta_base
     theta_full[names(theta)] <- theta
     {
-      dr_new <- .stoch_simul_internal_d28(model, theta_full, dr_order = 1L)
+      dr_new <- .stoch_simul_internal_diag(model, theta_full, dr_order = 1L)
       if (is.null(dr_new) || is.null(dr_new$ghx)) return(NULL)
-      moments <- .compute_moments_from_dr(dr_new, model = model, params = theta_full)
+      moments <- .moments_from_dr(dr_new, model = model, params = theta_full)
       if (is.null(moments)) return(NULL)
       acf_y_diag <- if (length(dim(moments$acf_y)) == 3L) {
         diag(moments$acf_y[, , 1])
@@ -477,36 +477,4 @@ d28_regime_switching_identification <- function(regime_defs,
     pi <- pi_new
   }
   pi / sum(pi)
-}
-
-
-#' Internal stoch_simul wrapper for D28 helper
-#' @noRd
-.stoch_simul_internal_d28 <- function(model, params, dr_order = 1L) {
-  {
-    compiled <- compile_model(model, verbose = FALSE)
-    if (is.null(compiled)) return(NULL)
-    ss <- solve_steady(compiled, params = params, verbose = FALSE)
-    if (is.null(ss) || !isTRUE(ss$converged)) return(NULL)
-    dr <- solve_perturbation(model, compiled, ss$values, params, order = dr_order, verbose = FALSE)
-    dr
-  }
-}
-
-
-#' Compute model-implied moments from decision rules (D28-specific)
-#' @param dr   DecisionRules object
-#' @return List with $sigma_y, $acf_y, or NULL
-#' @noRd
-.compute_moments_from_dr <- function(dr, model = NULL, params = NULL) {
-  if (!is.null(model)) {
-    moments <- compute_moments(dr, model, params = params)
-  } else {
-    moments <- compute_moments(dr)
-  }
-  if (!is.list(moments) || is.null(moments$var_cov)) return(NULL)
-  list(
-    sigma_y = moments$var_cov,
-    acf_y = if (!is.null(moments$autocorr)) moments$autocorr else NULL
-  )
 }

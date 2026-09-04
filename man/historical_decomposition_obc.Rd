@@ -8,7 +8,10 @@ historical_decomposition_obc(
   smoothed_shocks,
   regime_path,
   regime_cache,
-  dr_slack
+  dr_slack,
+  s0 = NULL,
+  shock_groups = NULL,
+  model = NULL
 )
 }
 \arguments{
@@ -21,14 +24,27 @@ historical_decomposition_obc(
 c_full stored (populated by obc_ensure_policy)}
 
 \item{dr_slack}{Slack-regime DecisionRules}
+
+\item{s0}{Numeric length-n_state smoothed initial state, or
+NULL (zero). State ordering is
+\code{dr_slack$state_idx}.}
+
+\item{shock_groups}{Optional named list grouping shocks (see
+\code{\link{historical_decomposition}}). The
+\code{constraint} and \code{initial} components are
+never grouped.}
+
+\item{model}{Optional parsed model, used only as the fallback
+source of \code{shock_groups}.}
 }
 \value{
 List with:
-  $contributions  Named list of n_endo x T matrices, one per shock plus
-                  $constraint for the binding-constant contribution
+  $contributions  Named list of n_endo x T matrices, one per shock (or
+                  group) plus $constraint for the binding-constant
+                  contribution and $initial for the initial condition
   $total          n_endo x T matrix: sum of all contributions
   $endo_names     Character vector
-  $exo_names      Character vector (including "constraint" as last element)
+  $exo_names      Character vector (with "constraint", "initial" last)
 }
 \description{
 Decomposes the path of ALL endogenous variables into contributions from
@@ -51,7 +67,16 @@ Summing all contributions reconstructs the smoothed endogenous path
 
   \eqn{\sum_j x_t^{(j)} + x_t^{(c)} = ghx_t \cdot s_{t-1} + ghu_t \cdot \varepsilon_t + c\_full_t}
 
-Note on initial conditions: the recursion starts from s = 0, so for periods
-near t = 1 the total may differ slightly from the smoothed path. For most
-samples this is negligible beyond the first few observations.
+Initial conditions: the per-shock recursions start from s = 0, so on their
+own they miss the effect of a smoothed initial state \eqn{s_{0|T} \neq 0}.
+The \code{"initial"} component supplies it -- the shock-free, intercept-free
+trajectory started at \code{s0} and propagated with the SAME regime-specific
+transition matrices along \code{regime_path}:
+
+  \eqn{s_t^{(0)} = TT_t \cdot s_{t-1}^{(0)}, \quad
+       x_t^{(0)} = ghx_t \cdot s_{t-1}^{(0)}}
+
+With \code{s0} supplied the adding-up is exact at every t, not just once
+the initial condition has decayed. \code{s0 = NULL} (the default) leaves it
+identically zero, i.e. the pre-0.9.2 output.
 }

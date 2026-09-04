@@ -158,12 +158,6 @@ hank_het3_manifest <- function(x, peak_rss = TRUE) {
 }
 
 
-## Historic name for the shared Pi_inputs label; see
-## `.hank_transition_inputs_label()` in R/hank-manifest-common.R.
-.hank3_transition_inputs_label <- function(Pi_inputs)
-  .hank_transition_inputs_label(Pi_inputs)
-
-
 #' Coerce a three-asset run manifest to one data-frame row
 #'
 #' Flattens a \code{\link{hank_het3_manifest}} into exactly one row of

@@ -14,6 +14,7 @@ make_log_posterior_pskf_order2(
   system_priors = NULL,
   cut_tol = 0.01,
   max_q = 5L,
+  power = NULL,
   ...
 )
 }
@@ -36,6 +37,13 @@ make_log_posterior_pskf_order2(
 
 \item{max_q}{Hard cap on the retained skew dimension (default 5, the
 Miwa-exact Phi_q range).}
+
+\item{power}{Power-posterior exponent applied to the LIKELIHOOD only
+(prior and system priors stay untempered). \code{NULL} (default) resolves
+the \code{power_posterior} package option ONCE, at factory time, so every
+draw evaluated by the returned closure uses the same tempering -- an
+option flipped mid-chain can no longer silently change the target
+distribution between draws.}
 
 \item{...}{Ignored (interface compatibility).}
 }

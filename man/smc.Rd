@@ -28,6 +28,22 @@ Runs SMC with adaptive likelihood tempering.  No mode estimate is required;
 particles are initialised from the prior.  Returns a
 \code{\link{dynhr_chains}} object.
 }
+\examples{
+model    <- parse_mod(system.file("extdata/models/nk_demo.mod",
+                                  package = "dynhr"), verbose = FALSE)
+compiled <- compile_model(model, verbose = FALSE)
+priors   <- prior_spec(model)
+obs_vars <- c("ygr", "infl", "intr")
+Y <- as.matrix(read.csv(system.file("extdata/models/nk_demo_data.csv",
+                                    package = "dynhr"))[, obs_vars])
+log_post <- make_posterior(model, data = Y, prior_spec = priors,
+                           obs_vars = obs_vars, compiled = compiled)
+
+set.seed(1)
+## n_particles = 100 keeps the example quick; use 2000+ in practice
+chains <- smc(log_post, priors, n_particles = 100L, verbose = FALSE)
+chains$log_marginal_lik
+}
 \references{
 Herbst, E. P., & Schorfheide, F. (2015). \emph{Bayesian Estimation of
     DSGE Models}. Princeton University Press. Chapter 10 (SMC).
@@ -35,5 +51,5 @@ Herbst, E. P., & Schorfheide, F. (2015). \emph{Bayesian Estimation of
     \emph{Biometrika}, 89(3), 539-552.
 }
 \seealso{
-\code{\link{mcmc}}, \code{\link{nuts}}
+\code{\link{mcmc}}, \code{\link{nuts}}, \code{\link{dm_sample}}
 }

@@ -4,20 +4,20 @@
 \alias{hank_reiter_kalman_loglik}
 \title{Kalman log-likelihood of aggregate data on a Reiter state space}
 \usage{
-hank_reiter_kalman_loglik(Y, rss, observables = "A", me_var = 0)
+hank_reiter_kalman_loglik(data, rss, obs_vars = "A", me_variance = 0)
 }
 \arguments{
-\item{Y}{\code{T x n_obs} matrix of DEMEANED observations (deviations from
-steady state), columns in the order of \code{observables}.}
+\item{data}{\code{T x n_obs} matrix of DEMEANED observations (deviations from
+steady state), columns in the order of \code{obs_vars}.}
 
 \item{rss}{A \code{hank_reiter_ss} (build with \code{drop_dist_coord = TRUE};
 the Lyapunov initialization requires a strictly stable \code{T}).}
 
-\item{observables}{Which observation rows to use (subset of
+\item{obs_vars}{Which observation rows to use (subset of
 \code{rss$obs_names}).}
 
-\item{me_var}{Measurement-error variance added to each observable (needed
-when \code{length(observables) > 1}: one structural shock, so more than
+\item{me_variance}{Measurement-error variance added to each observable (needed
+when \code{length(obs_vars) > 1}: one structural shock, so more than
 one observable is stochastically singular without it).}
 }
 \value{

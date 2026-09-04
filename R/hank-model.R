@@ -449,7 +449,7 @@ hank_model <- function(blocks, unknowns, targets, exogenous, ss, T_h) {
                  unknowns = unknowns, targets = targets,
                  exogenous = exogenous, T_h = T_h, block_order = ord,
                  blocks = blocks, ss = ss),
-            class = "hank_model")
+            class = c("hank_model", "hank_block"))
 }
 
 

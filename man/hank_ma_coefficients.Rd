@@ -4,7 +4,7 @@
 \alias{hank_ma_coefficients}
 \title{Moving-average coefficients of aggregate observables (TFP innovation)}
 \usage{
-hank_ma_coefficients(ks, rho_z, T_h, observables = c("Y", "C"), ge = NULL)
+hank_ma_coefficients(ks, rho_z, T_h, obs_vars = c("Y", "C"), ge = NULL)
 }
 \arguments{
 \item{ks}{A \code{\link{hank_ks_steady}} steady state.}
@@ -13,13 +13,13 @@ hank_ma_coefficients(ks, rho_z, T_h, observables = c("Y", "C"), ge = NULL)
 
 \item{T_h}{Integer horizon (number of MA terms).}
 
-\item{observables}{Character subset of \code{c("Y","C","K","r","w")}.}
+\item{obs_vars}{Character subset of \code{c("Y","C","K","r","w")}.}
 
 \item{ge}{Optional precomputed \code{\link{hank_ks_ge_jacobian}}.}
 }
 \value{
 A \code{T_h x n_obs} matrix of MA coefficients (columns named by
-  \code{observables}).
+  \code{obs_vars}).
 }
 \description{
 Computes the impulse responses of the chosen aggregate observables to a unit

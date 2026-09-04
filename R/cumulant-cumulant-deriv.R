@@ -299,18 +299,11 @@ cumulant_moment_derivs_3_4 <- function(dr2, model, params, o2d, obs_idx,
       next
     }
 
-    ## Subset d_c3_obs to observable rows/cols (mirrors .cumulant_loglik)
-    ## c3_obs_only[a, dst_col] <- c3_model_raw[a, src_col]
-    ##   where src_col = (obs_idx[a]-1)*n_endo + obs_idx[b], dst_col = (a-1)*n_obs + b
-    d_c3_obs_raw <- d_c3_obs_full[obs_idx, , drop = FALSE]   # n_obs × n_endo^2
-    d_c3_obs_sub <- matrix(0, n_obs, n_obs * n_obs)
-    for (a in seq_len(n_obs)) {
-      for (b in seq_len(n_obs)) {
-        src_col <- (obs_idx[a] - 1L) * n_endo + obs_idx[b]
-        dst_col <- (a - 1L) * n_obs + b
-        d_c3_obs_sub[a, dst_col] <- d_c3_obs_raw[a, src_col]
-      }
-    }
+    ## Subset d_c3_obs to observable rows AND (j,k) columns, exactly the
+    ## projection `.cumulant_loglik()` / `.build_moment_vector()` apply to the
+    ## forward c3 (E4-B: this used to be a for(a)/for(b) loop that kept only
+    ## the (i,i,k) slice, so d(moment)/d(theta) was zero off that slice).
+    d_c3_obs_sub <- .project_c3_obs(d_c3_obs_full, obs_idx, n_endo)
 
     ## ---- Order 4 ----
     d_c4_obs_full <- tryCatch(
@@ -373,16 +366,6 @@ cumulant_moment_derivs_3_4 <- function(dr2, model, params, o2d, obs_idx,
 ## the operator hx^{⊗3} applied to the SOLUTION C3 (the "I" part has no hx).
 ## ---------------------------------------------------------------------------
 
-#' Apply (I - hx^{⊗3})' to a tensor given as an n_s x n_s^2 matrix.
-#' Uses (hx^{⊗3})' = (hx')^{⊗3}: transpose each mode, i.e. apply t(hx) to
-#' mode 1 (left-multiply) and t(hx) ⊗ t(hx) to modes 2,3 (via .apply_kron2).
-#' @noRd
-.tensor_lyap3_apply_T <- function(hx, X) {
-  ## (hx^{⊗3}) X : mode1 hx %*% X ; modes 2,3 via .apply_kron2(hx, .)
-  HX <- hx %*% X
-  HX <- .apply_kron2(hx, HX)
-  X - HX          # (I - hx^{⊗3}) X  ; for transpose pass hx = t(hx0)
-}
 
 #' Reverse-mode adjoint of .solve_third_cross_cumulant (core linear solve).
 #'
@@ -515,16 +498,26 @@ cumulant_moment_derivs_3_4 <- function(dr2, model, params, o2d, obs_idx,
 #' Given cotangent bar_P (n x n) on the solution P (== Sigma_x), returns
 #'   bar_Q  (n x n): dL/dQ,  solving the transposed Lyapunov bar_Q = A' bar_Q A + bar_P
 #'   bar_A  (n x n): dL/dA = (bar_Q + bar_Q') A P     (P symmetric)
+#'
+#' Returns NULL when the transposed Lyapunov has no stationary solution
+#' (spectral radius of A >= 1, or a singular I - kron(A', A')). Per
+#' `.solve_lyapunov`'s contract that case is signalled by an all-NaN matrix
+#' and NOT by a condition, so `tryCatch(..., error = )` does not catch it: the
+#' finiteness of the result must be TESTED, or a non-stationary draw silently
+#' produces a NaN gradient. Callers mirror the adjoint-KF siblings
+#' (`R/gradient-adjoint-{kf,ss,uni}.R`): NULL here => an all-NA gradient.
 #' @noRd
 .lyap_solve_adjoint <- function(A, P, bar_P) {
   n <- nrow(A)
   if (n == 0L) return(list(bar_Q = matrix(0, 0, 0), bar_A = matrix(0, 0, 0)))
   ## bar_Q solves M' vec(bar_Q) = vec(bar_P) with M = I - kron(A, A);
   ## M' = I - kron(A', A'), i.e. the Lyapunov with A -> A'.
-  bar_Q <- .solve_lyapunov(t(A), bar_P)
+  bar_Q <- tryCatch(.solve_lyapunov(t(A), bar_P), error = function(e) NULL)
+  if (is.null(bar_Q) || !all(is.finite(bar_Q))) return(NULL)
   ## dP = A dP A' + (dA P A' + A P dA' + dQ); adjoint wrt A:
   ##   bar_A = (bar_Q + t(bar_Q)) A P   (using P = P')
   bar_A <- (bar_Q + t(bar_Q)) %*% A %*% P
+  if (!all(is.finite(bar_A))) return(NULL)
   list(bar_Q = bar_Q, bar_A = bar_A)
 }
 

@@ -4,7 +4,18 @@
 \alias{mcmc}
 \title{Random Walk Metropolis-Hastings sampler}
 \usage{
-mcmc(log_post_fn, theta0, Sigma_prop, n_draws = 2000L, n_warmup = 1000L, ...)
+mcmc(
+  log_post_fn,
+  theta0,
+  Sigma_prop,
+  n_draws = 2000L,
+  n_warmup = 1000L,
+  checkpoint_dir = NULL,
+  resume = FALSE,
+  flush_every = 1000L,
+  screen_fn = NULL,
+  ...
+)
 }
 \arguments{
 \item{log_post_fn}{Log-posterior closure from \code{\link{make_posterior}}}
@@ -19,8 +30,49 @@ scale by \eqn{2.38^2 / n_p} when using the mode Hessian}
 \item{n_warmup}{Warmup draws for adaptive tuning, then discarded
 (default 1000)}
 
+\item{checkpoint_dir}{Optional directory for streaming checkpoints. When
+set, draws are streamed to per-chain files in \code{flush_every}-row
+chunks and a restart state (position, proposal scale and covariance,
+acceptance count, and -- crucially -- \code{.Random.seed}) is saved
+after every flush, so an interrupted run loses at most one flush
+window.}
+
+\item{resume}{Logical (default \code{FALSE}). With
+\code{checkpoint_dir} set, continue the saved run in that directory
+instead of starting fresh: pass a larger \code{n_draws} to extend a
+finished chain. The continuation is \emph{bit-identical} to having run
+the larger \code{n_draws} in one process (exact RNG and adaptation
+restore). Keep \code{n_warmup} at its original value: the saved warmup
+length governs the retained-draw split, while \code{n_warmup} still
+enters the total draw target \code{n_draws + n_warmup}. A checkpoint
+written under a different parameter configuration is refused. For bespoke samplers outside
+\code{mcmc()}, the same contract is available via
+\code{\link{mcmc_chain_state}} / \code{\link{mcmc_chain_restore}}.}
+
+\item{flush_every}{Rows per checkpoint flush (default 1000; only used
+with \code{checkpoint_dir}).}
+
+\item{screen_fn}{Optional CHEAP log-posterior closure over the same
+parameters (e.g. an order-1 Kalman posterior when \code{log_post_fn} is
+an order-2 pruned or particle-filter posterior). When supplied, the
+sampler switches to \strong{delayed acceptance} (Christen & Fox 2005):
+each proposal is first accept/rejected against \code{screen_fn}, and only
+a survivor pays for an evaluation of \code{log_post_fn}, which is then
+accepted with the screen-corrected ratio
+\eqn{[\pi(\theta')/\pi(\theta)] \cdot [c(\theta)/c(\theta')]}. The chain
+targets \code{log_post_fn} \emph{exactly} however biased the screen is;
+a bad screen costs efficiency only. \code{screen_fn} must be
+deterministic in \eqn{\theta} (verified at \code{theta0}). The returned
+object gains \code{$screen_rate} (share of proposals killed by the
+screen) and \code{$n_expensive} (evaluations of \code{log_post_fn}).
+Pass \code{pseudo_marginal = TRUE} through \code{...} when
+\code{log_post_fn} is a particle filter: the sampler then refuses a
+fixed-seed closure and runs the PMCMC variance preflight.}
+
 \item{...}{Additional arguments forwarded to the internal sampler:
-\code{scale}, \code{target_rate}, \code{adapt_every}, \code{verbose}}
+\code{scale}, \code{target_rate}, \code{adapt_every}, \code{verbose}
+(and, with \code{screen_fn}, \code{pseudo_marginal},
+\code{preflight_K}, \code{adapt_cov})}
 }
 \value{
 A \code{\link{dynhr_chains}} object whose \code{$chain} slot is the
@@ -32,6 +84,21 @@ Runs RWMH-MCMC with adaptive proposal scaling and returns a
 from \code{\link{find_mode}} with the scaled inverse-Hessian as
 \code{Sigma_prop}.
 }
+\examples{
+## Any function(theta) -> list(logpost, loglik, logprior) is a valid target;
+## in practice it comes from make_posterior().
+log_post <- function(theta) {
+  ll <- -0.5 * sum(((theta - c(0.5, -0.2)) / c(1, 0.5))^2)
+  list(logpost = ll, loglik = ll, logprior = 0)
+}
+
+set.seed(1)
+chains <- mcmc(log_post, theta0 = c(a = 0, b = 0),
+               Sigma_prop = diag(c(1, 0.25)),
+               n_draws = 500L, n_warmup = 200L, verbose = FALSE)
+chains
+summary(chains)
+}
 \references{
 Metropolis, N., Rosenbluth, A. W., Rosenbluth, M. N., Teller, A. H., &
     Teller, E. (1953). Equation of state calculations by fast computing
@@ -42,5 +109,7 @@ Metropolis, N., Rosenbluth, A. W., Rosenbluth, M. N., Teller, A. H., &
     \emph{Bayesian Data Analysis} (3rd ed.). Chapman & Hall/CRC.
 }
 \seealso{
-\code{\link{smc}}, \code{\link{nuts}}, \code{\link{find_mode}}
+\code{\link{smc}}, \code{\link{nuts}}, \code{\link{find_mode}},
+  \code{\link{mcmc_chain_state}}, \code{\link{dm_sample}} (the
+  pipeline-object equivalent)
 }

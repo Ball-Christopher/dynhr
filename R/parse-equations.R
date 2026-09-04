@@ -56,6 +56,30 @@ ast_local_variable <- function(name) {
 }
 
 
+#' Operator precedence of an AST node, matching new_expr_parser()'s grammar
+#'
+#' relational (1) < additive (2) < multiplicative (3) < unary (4) <
+#' power (5) < atoms (100).  A NEGATIVE numeric literal behaves like a unary
+#' expression when it is re-parsed (`-0.5 ^ 2` parses as `-(0.5^2)`), so it is
+#' given the unary precedence rather than the atom precedence.
+#'
+#' @param node An AST node.
+#' @return Integer precedence.
+#' @noRd
+.ast_op_prec <- function(node) {
+  switch(node$type,
+         "number"  = if (isTRUE(node$value < 0)) 4L else 100L,
+         "binop"   = switch(node$op,
+                            "<" = 1L, ">" = 1L, "<=" = 1L, ">=" = 1L,
+                            "+" = 2L, "-" = 2L,
+                            "*" = 3L, "/" = 3L,
+                            "^" = 5L,
+                            1L),
+         "unaryop" = 4L,
+         100L)
+}
+
+
 #' Convert an AST node to a human-readable mathematical string
 #'
 #' @param node An AST node (list with $type).
@@ -83,15 +107,22 @@ ast_to_string <- function(node) {
            paste0("#", node$name)
          },
          "binop" = {
+           ## Parenthesise by PRECEDENCE and ASSOCIATIVITY, not by a spot
+           ## check on +/- alone: `a - (b - c)` and `a / (b * c)` need parens
+           ## on the right operand or the string re-parses to a DIFFERENT
+           ## expression, and `(a^b)^c` needs them on the left because `^` is
+           ## right-associative.  (ramsey-augment-mod.R writes .mod text
+           ## through this function, so a missing pair is a wrong model.)
            left_str  <- ast_to_string(node$left)
            right_str <- ast_to_string(node$right)
-           if (node$op %in% c("*", "/", "^")) {
-             if (node$left$type == "binop" && node$left$op %in% c("+", "-"))
-               left_str <- paste0("(", left_str, ")")
-             if (node$right$type == "binop" && node$right$op %in% c("+", "-"))
-               right_str <- paste0("(", right_str, ")")
-           }
-           if (node$op == "^" && node$right$type == "binop")
+           p  <- .ast_op_prec(node)
+           lp <- .ast_op_prec(node$left)
+           rp <- .ast_op_prec(node$right)
+           if (lp < p || (lp == p &&
+                          node$op %in% c("^", "<", ">", "<=", ">=")))
+             left_str <- paste0("(", left_str, ")")
+           if (rp < p || (rp == p && node$op %in% c("-", "/", "<", ">",
+                                                    "<=", ">=")))
              right_str <- paste0("(", right_str, ")")
            paste0(left_str, " ", node$op, " ", right_str)
          },

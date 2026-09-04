@@ -52,7 +52,7 @@
 #' beta-mixture calibration \code{eta = (betas, omega)}: solves the mixture
 #' steady state and GE model at \code{eta}, converts it to a truncated-MA
 #' state space, and evaluates dynhr's Gaussian Kalman filter on the observed
-#' aggregate time series \code{Y}. Unlike \code{\link{hank_macro_loss}}'s
+#' aggregate time series \code{data}. Unlike \code{\link{hank_macro_loss}}'s
 #' noiseless-IRF-moment proxy (Phase-1 Wave-1), this is a genuine Gaussian
 #' likelihood over a STOCHASTIC time series of finite length, integrating
 #' over the shock's own realization via the state-space recursion -- the
@@ -62,7 +62,7 @@
 #' single exogenous shock (\code{n_obs = 2 > n_shock = 1} for the default
 #' \code{observables = c("C","K")}), the model-implied observation covariance
 #' is rank-\code{n_shock} and thus singular whenever \code{n_obs > n_shock}.
-#' \code{me_var > 0} is therefore \strong{required} in that regime (as in
+#' \code{me_variance > 0} is therefore \strong{required} in that regime (as in
 #' \code{\link{hank_kalman_loglik}}'s own singularity note) -- it is not
 #' optional measurement-error realism here, it is what keeps the observation
 #' covariance non-singular so the Gaussian density is well-defined.
@@ -70,10 +70,10 @@
 #' @param betas Numeric length-K vector of discount factors, one per mixture
 #'   type (see \code{\link{hank_mixture_ks_steady}}).
 #' @param omega Numeric length-K mixture weights, non-negative, summing to 1.
-#' @param Y \code{T_data x length(observables)} matrix of demeaned
-#'   observations, columns in the order of \code{observables} (as expected by
+#' @param data \code{T_data x length(observables)} matrix of demeaned
+#'   observations, columns in the order of \code{obs_vars} (as expected by
 #'   \code{\link{hank_kalman_loglik}}).
-#' @param observables Character vector of observable names produced by the
+#' @param obs_vars Character vector of observable names produced by the
 #'   mixture model (default \code{c("C","K")}).
 #' @param shock_specs Named list, one entry per exogenous shock, each
 #'   \code{list(rho = <AR(1) persistence>, sigma = <innovation std>)} (see
@@ -91,7 +91,7 @@
 #'   \code{\link{hank_mixture_ks_model}}, \code{\link{hank_state_space}}).
 #' @param q Optional truncation horizon passed to \code{\link{hank_state_space}}
 #'   (default \code{T_h}, i.e. no truncation beyond the GE horizon).
-#' @param me_var Measurement-error variance added to every observable's
+#' @param me_variance Measurement-error variance added to every observable's
 #'   diagonal in the Kalman filter (see \code{\link{hank_kalman_loglik}}).
 #'   \strong{Required to be strictly positive} whenever
 #'   \code{length(observables) > 1} for a single-shock model (see Details).
@@ -101,23 +101,23 @@
 #'   \code{\link{hank_state_space}}, \code{\link{hank_kalman_loglik}},
 #'   \code{\link{hank_mixture_simulate}}, \code{\link{hank_phase2_recovery}}
 #' @export
-hank_mixture_kf_loglik <- function(betas, omega, Y, observables = c("C", "K"),
+hank_mixture_kf_loglik <- function(betas, omega, data, obs_vars = c("C", "K"),
                                     shock_specs, a_grid, Pi, e, eis = 1,
                                     alpha, delta, Z = 1, T_h, q = NULL,
-                                    me_var) {
-  if (length(observables) > length(shock_specs) &&
-      (missing(me_var) || !is.numeric(me_var) || length(me_var) != 1L ||
-       !is.finite(me_var) || me_var <= 0))
-    stop("hank_mixture_kf_loglik(): n_obs = ", length(observables),
+                                    me_variance) {
+  if (length(obs_vars) > length(shock_specs) &&
+      (missing(me_variance) || !is.numeric(me_variance) || length(me_variance) != 1L ||
+       !is.finite(me_variance) || me_variance <= 0))
+    stop("hank_mixture_kf_loglik(): n_obs = ", length(obs_vars),
          " > n_shock = ", length(shock_specs),
-         " is stochastically singular; 'me_var' must be a single strictly ",
+         " is stochastically singular; 'me_variance' must be a single strictly ",
          "positive number to keep the observation covariance non-singular.")
 
   mks   <- hank_mixture_ks_steady(a_grid, Pi, e, betas, omega, eis = eis,
                                    alpha = alpha, delta = delta, Z = Z)
   model <- hank_mixture_ks_model(mks, T_h)
-  ss    <- hank_state_space(model, shock_specs, observables, q = q)
-  hank_kalman_loglik(Y, ss, me_var = me_var)
+  ss    <- hank_state_space(model, shock_specs, obs_vars, q = q)
+  hank_kalman_loglik(data, ss, me_variance = me_variance)
 }
 
 
@@ -153,10 +153,10 @@ hank_mixture_kf_loglik <- function(betas, omega, Y, observables = c("C", "K"),
 #'   output).
 #' @param shock_specs Named list, one entry per \code{model$exogenous} shock
 #'   (see \code{\link{hank_state_space}}).
-#' @param observables Character vector of observable names (default
+#' @param obs_vars Character vector of observable names (default
 #'   \code{c("C","K")}).
 #' @param T_data Integer: length of the simulated series.
-#' @param me_var Measurement-error variance added to every observable
+#' @param me_variance Measurement-error variance added to every observable
 #'   (independently at every date); use \code{0} for a noiseless simulation.
 #' @param seed Optional RNG seed (via \code{set.seed()}) for reproducibility;
 #'   if \code{NULL}, the caller's current RNG stream is used unmodified.
@@ -164,16 +164,16 @@ hank_mixture_kf_loglik <- function(betas, omega, Y, observables = c("C", "K"),
 #'   (default \code{model$T_h}).
 #'
 #' @return A \code{T_data x length(observables)} numeric matrix (columns named
-#'   by \code{observables}), demeaned (see Details), finite, and reproducible
+#'   by \code{obs_vars}), demeaned (see Details), finite, and reproducible
 #'   given the same \code{seed}.
 #' @seealso \code{\link{hank_state_space}}, \code{\link{hank_mixture_kf_loglik}},
 #'   \code{\link{hank_simulate_aggregate}}
 #' @export
-hank_mixture_simulate <- function(model, shock_specs, observables = c("C", "K"),
-                                   T_data, me_var, seed = NULL, q = NULL) {
+hank_mixture_simulate <- function(model, shock_specs, obs_vars = c("C", "K"),
+                                   T_data, me_variance, seed = NULL, q = NULL) {
   if (!is.null(seed)) set.seed(seed)
-  ss <- hank_state_space(model, shock_specs, observables, q = q)
-  n_obs   <- length(observables)
+  ss <- hank_state_space(model, shock_specs, obs_vars, q = q)
+  n_obs   <- length(obs_vars)
   exo     <- ss$shock_names
   T_h_reg <- nrow(ss$Theta_list[[1L]])          # q (rows of each Theta block)
 
@@ -187,12 +187,12 @@ hank_mixture_simulate <- function(model, shock_specs, observables = c("C", "K"),
       Y[t, ] <- Y[t, ] + colSums(Theta[s + 1L, , drop = FALSE] * eps[t - s])
     }
   }
-  if (me_var > 0)
-    Y <- Y + matrix(stats::rnorm(T_data * n_obs, 0, sqrt(me_var)), T_data, n_obs)
+  if (me_variance > 0)
+    Y <- Y + matrix(stats::rnorm(T_data * n_obs, 0, sqrt(me_variance)), T_data, n_obs)
 
   Y <- scale(Y, center = TRUE, scale = FALSE)   # demean (see Details)
   attr(Y, "scaled:center") <- NULL
-  matrix(Y, T_data, n_obs, dimnames = list(NULL, observables))
+  matrix(Y, T_data, n_obs, dimnames = list(NULL, obs_vars))
 }
 
 
@@ -230,16 +230,16 @@ hank_mixture_simulate <- function(model, shock_specs, observables = c("C", "K"),
 #' caller/orchestrator.
 #'
 #' \strong{Measurement-error choice}: for each simulated \code{T_data} series,
-#' \code{me_var} is set to \code{(me_frac * sd(column))^2} PER OBSERVABLE
+#' \code{me_variance} is set to \code{(me_frac * sd(column))^2} PER OBSERVABLE
 #' COLUMN of that simulated series (i.e. a fixed fraction of the realized
 #' series' own variation, analogous to \code{hank_phase1_joint_gate}'s
 #' \code{sigma_macro_frac} convention) -- a simple scale-invariant way to
 #' inject "the macro series is observed with some noise" without hand-picking
 #' absolute noise units per observable. Because
 #' \code{\link{hank_kalman_loglik}}/\code{\link{hank_mixture_kf_loglik}} take
-#' a single scalar \code{me_var} (one measurement-error variance shared
+#' a single scalar \code{me_variance} (one measurement-error variance shared
 #' across observables, not a per-observable vector), the LARGER of the two
-#' per-observable \code{me_var} values is used, so the shared scalar is never
+#' per-observable \code{me_variance} values is used, so the shared scalar is never
 #' smaller than what either observable's own noise fraction would imply
 #' (conservative: avoids an under-dispersed, potentially singular effective
 #' covariance for the noisier observable).
@@ -286,6 +286,7 @@ hank_mixture_simulate <- function(model, shock_specs, observables = c("C", "K"),
 #'     \code{list(centre, spread)} at that surface's grid argmin).}
 #' @seealso \code{\link{hank_mixture_kf_loglik}}, \code{\link{hank_mixture_simulate}},
 #'   \code{\link{hank_phase1_joint_gate}}, \code{\link{hank_reweighting_loss}}
+#' @keywords internal
 #' @export
 hank_phase2_recovery <- function(betas = c(0.95, 0.98), omega = c(0.5, 0.5),
                                   n_e = 3L, n_a = 50L, amax = 60,
@@ -334,7 +335,7 @@ hank_phase2_recovery <- function(betas = c(0.95, 0.98), omega = c(0.5, 0.5),
 
     ## ---- (a) simulate a macro series from the TRUTH model ---------------
     Y_sim <- hank_mixture_simulate(model_truth, shock_specs, observables,
-                                    T_data = T_data, me_var = 0, seed = NULL)
+                                    T_data = T_data, me_variance = 0, seed = NULL)
     me_var_col <- (me_frac * apply(Y_sim, 2, stats::sd))^2
     me_var_T   <- max(me_var_col)             # shared-scalar convention (see Details)
     Y_obs <- Y_sim + matrix(stats::rnorm(T_data * length(observables), 0,
@@ -353,10 +354,10 @@ hank_phase2_recovery <- function(betas = c(0.95, 0.98), omega = c(0.5, 0.5),
       cc <- centre_grid[ci]; ss <- spread_grid[si]
       betas_cand <- c(cc - ss, cc + ss)
 
-      ll <- hank_mixture_kf_loglik(betas_cand, omega, Y_obs, observables = observables,
+      ll <- hank_mixture_kf_loglik(betas_cand, omega, Y_obs, obs_vars = observables,
                                     shock_specs = shock_specs, a_grid = ag, Pi = inc$Pi,
                                     e = inc$e, eis = 1, alpha = alpha, delta = delta, Z = Z,
-                                    T_h = T_h, me_var = me_var_T)
+                                    T_h = T_h, me_variance = me_var_T)
       rho_KF_mat[ci, si] <- -ll                # negate: loglik (higher=better) -> loss
 
       blocks_cand <- hank_mixture_blocks(ag, inc$Pi, inc$e, betas = betas_cand,
@@ -412,7 +413,7 @@ hank_phase2_recovery <- function(betas = c(0.95, 0.98), omega = c(0.5, 0.5),
 #' \describe{
 #'   \item{macro}{the structural macro Kalman-filter log-likelihood
 #'     (\code{\link{hank_mixture_kf_loglik}}) on an observed aggregate time
-#'     series \code{Y}; active iff \code{Y} is supplied.}
+#'     series \code{data}; active iff \code{data} is supplied.}
 #'   \item{level}{the grid-invariant functional LEVEL log-likelihood
 #'     (\code{\link{hank_reweight_functional_loss}} against
 #'     \code{\link{hank_reweight_level_metric}}) of a SINGLE stationary
@@ -460,7 +461,7 @@ hank_phase2_recovery <- function(betas = c(0.95, 0.98), omega = c(0.5, 0.5),
 #'   case it OVERRIDES \code{config$omega} for this evaluation (e.g. when a
 #'   sampler is also exploring the mixture weight); if \code{theta$omega} is
 #'   \code{NULL}, \code{config$omega} is used.
-#' @param Y \code{T_data x length(config$observables)} matrix of demeaned
+#' @param data \code{T_data x length(config$observables)} matrix of demeaned
 #'   macro observations, as expected by \code{\link{hank_mixture_kf_loglik}}
 #'   / \code{\link{hank_kalman_loglik}}; \code{NULL} (default) disables the
 #'   macro channel.
@@ -551,10 +552,10 @@ hank_phase2_recovery <- function(betas = c(0.95, 0.98), omega = c(0.5, 0.5),
 #'   \code{\link{hank_reweight_level_metric}}, \code{\link{hank_dist_response_snapshot}},
 #'   \code{\link{hank_mixture_dist_jacobian}}, \code{\link{hank_reweight_functional_metric}}
 #' @export
-hank_mixture_joint_logpost <- function(theta, Y = NULL, dD_hat = NULL, metric = NULL,
+hank_mixture_joint_logpost <- function(theta, data = NULL, dD_hat = NULL, metric = NULL,
                                        config, m_lev_hat = NULL, level_metric = NULL,
                                        log_prior = NULL) {
-  use_macro <- !is.null(Y)
+  use_macro <- !is.null(data)
   use_resp  <- !is.null(dD_hat) && !is.null(metric)
   use_level <- !is.null(m_lev_hat)
   if (use_level && is.null(level_metric))
@@ -579,7 +580,7 @@ hank_mixture_joint_logpost <- function(theta, Y = NULL, dD_hat = NULL, metric = 
   if (use_macro) {
     ss <- hank_state_space(hank_mixture_ks_model(mks, config$T_h),
                            config$shock_specs, config$observables, q = config$q)
-    loglik_macro <- hank_kalman_loglik(Y, ss, me_var = config$me_var)
+    loglik_macro <- hank_kalman_loglik(data, ss, me_variance = config$me_var)
   }
 
   ## ---- one shared set of per-type blocks (needed by EITHER level or
@@ -645,10 +646,10 @@ hank_mixture_joint_logpost <- function(theta, Y = NULL, dD_hat = NULL, metric = 
 #'   any coordinate not in \code{par_names}: \code{$centre}, \code{$spread}, and
 #'   (optionally) \code{$omega} (length-2 mixture weights). Same shape as the
 #'   \code{theta} argument of \code{\link{hank_mixture_joint_logpost}}.
-#' @param config,Y,dD_hat,metric,m_lev_hat,level_metric,log_prior Passed through
+#' @param config,data,dD_hat,metric,m_lev_hat,level_metric,log_prior Passed through
 #'   verbatim to \code{\link{hank_mixture_joint_logpost}} on every evaluation;
 #'   supply the same channel arguments you intend to sample under (at least one
-#'   of \code{Y}, \code{m_lev_hat}, or \code{dD_hat}+\code{metric}).
+#'   of \code{data}, \code{m_lev_hat}, or \code{dD_hat}+\code{metric}).
 #' @param par_names Character subset of \code{c("centre", "spread", "omega1")}
 #'   giving the FREE coordinates (default \code{c("centre", "spread")}).
 #'   \code{"omega1"} maps to \code{theta$omega = c(omega1, 1 - omega1)}.
@@ -690,7 +691,7 @@ hank_mixture_joint_logpost <- function(theta, Y = NULL, dD_hat = NULL, metric = 
 #'   \code{\link{hank_mixture_emulator}}, \code{\link{hank_mixture_sbc}}
 #' @export
 hank_mixture_laplace <- function(theta0, config,
-                                 Y = NULL, dD_hat = NULL, metric = NULL,
+                                 data = NULL, dD_hat = NULL, metric = NULL,
                                  m_lev_hat = NULL, level_metric = NULL,
                                  log_prior = NULL,
                                  par_names = c("centre", "spread"),
@@ -729,7 +730,7 @@ hank_mixture_laplace <- function(theta0, config,
     vv <- setNames(as.numeric(v), par_names)
     r <- tryCatch(
       suppressWarnings(
-        hank_mixture_joint_logpost(to_theta(vv), Y = Y, dD_hat = dD_hat,
+        hank_mixture_joint_logpost(to_theta(vv), data = data, dD_hat = dD_hat,
                                    metric = metric, config = config,
                                    m_lev_hat = m_lev_hat,
                                    level_metric = level_metric,

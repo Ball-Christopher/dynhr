@@ -51,12 +51,20 @@ sequential assignments evaluated by \code{eval_steady_state_model()}.
 \code{variance}, \code{corr}, \code{covar}, deterministic period shocks,
 \code{shocks(overwrite)}.  Multiple \code{shocks} blocks are merged.
 
+\emph{Shock groups:} \code{shock_groups(name = g);} \code{'supply' = e_a,
+e_z;} ... \code{end;} --- parsed into \code{model$shock_groups} (the first
+block, which \code{\link{historical_decomposition}} uses as its default
+grouping) and \code{model$shock_groups_blocks} (every block, keyed by its
+\code{name=} option).  A group that names an undeclared shock is an error.
+
 \emph{Macro language:} \code{@#define}, \code{@#for}/\code{@#endfor},
 \code{@#if}/\code{@#else}/\code{@#endif},
 \code{@#ifdef}/\code{@#ifndef}, \code{@#include}, and
 \code{@\{expr\}} interpolation.  Expanded before any other parsing.
 
-\emph{Other:} \code{initval}/\code{endval}, \code{estimated_params},
+\emph{Other:} \code{initval}/\code{endval}, \code{histval} (pre-sample
+history; \code{y(0)} is lag 1, \code{y(-1)} is lag 2, stored lag-indexed in
+\code{model$histval}), \code{estimated_params},
 \code{estimated_params_init}, \code{occbin_constraints},
 \code{planner_objective}, \code{verbatim} blocks.
 Comments: \code{//}, \code{/* ... */}, \code{\%}.

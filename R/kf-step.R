@@ -19,7 +19,8 @@
 ##   ll    = -0.5 n_obs log(2pi) - 0.5 (log|F| + v' F^-1 v)
 ##   K     = (TT P ZZ' + RR Se_t DD') F^-1
 ##   s'    = TT s + K v
-##   P'    = (TT-K ZZ) P (TT-K ZZ)' + (RR-K DD) Se_t (RR-K DD)'   [+ Joseph me_extra]
+##   P'    = (TT-K ZZ) P (TT-K ZZ)' + (RR-K DD) Se_t (RR-K DD)'
+##             + K diag(me_diag + me_extra) K'                 [Joseph, F4-A]
 ##
 ## The state (s, P) is in the PREDICTION representation: on entry s = E[x_t |
 ## y_{1:t-1}], P = Var; on exit s' = E[x_{t+1} | y_{1:t}].  Iterating from
@@ -72,16 +73,18 @@ kf_stationary_init <- function(TT, RR, Sigma_e) {
 #'   (default) = baseline (all ones).
 #' @param d        Optional observation intercept (SS level of the observables),
 #'   length n_obs. \code{NULL} = zero.
-#' @param me_diag  Optional length-n_obs baseline measurement-error variances
-#'   (added to the diagonal of F only; documented F-regulariser convention).
-#'   \code{NULL} = none.
+#' @param me_diag  Optional length-n_obs baseline measurement-error variances.
+#'   TRUE i.i.d. observation noise (F4-A): added to the diagonal of \code{F}
+#'   AND propagated through the Joseph state-covariance term
+#'   (\code{P' += K diag(me) K'}), matching \code{\link{kalman_filter}}.
 #' @param me_extra Optional length-n_obs per-period EXTRA measurement-error
-#'   variances (added to F AND propagated through the Joseph term, matching the
-#'   shipped filter's \code{me_extra} treatment). \code{NULL} = none.
+#'   variances (same true-noise treatment, added on top of \code{me_diag}).
+#'   \code{NULL} = none.
 #' @return \code{list(ll, s, P)} — the period log-likelihood increment and the
 #'   next-period prediction mean/covariance — or \code{NULL} if the forecast
-#'   covariance is not positive definite (Cholesky failure), so a caller can
-#'   treat the draw as infeasible.
+#'   covariance is non-finite or not positive definite, so a caller can treat
+#'   the draw as infeasible. (Both rejections match the compiled RB-PF kernel
+#'   exactly, so the R and C++ filters weight the same particles.)
 #' @seealso \code{\link{kf_stationary_init}}, \code{\link{make_log_posterior_sv_rbpf}}
 #' @export
 kf_step <- function(s, P, y, TT, ZZ, RR, DD, Sigma_e,
@@ -103,13 +106,27 @@ kf_step <- function(s, P, y, TT, ZZ, RR, DD, Sigma_e,
   v <- y - as.numeric(ZZ %*% s)
   if (!is.null(d)) v <- v - d
 
-  ## Forecast covariance F with measurement-error diagonal.
+  ## Forecast covariance F with measurement-error diagonal. me_vec is the FULL
+  ## observation-noise variance vector for this period (base + extra); it is
+  ## the true i.i.d. noise law, so it also enters the Joseph term below.
+  me_vec <- NULL
+  if (!is.null(me_diag))  me_vec <- rep_len(as.numeric(me_diag), n_obs)
+  if (!is.null(me_extra)) {
+    mx <- rep_len(as.numeric(me_extra), n_obs)
+    me_vec <- if (is.null(me_vec)) mx else me_vec + mx
+  }
   PZ <- P %*% t(ZZ)
   Ft <- ZZ %*% PZ + HH_t
-  if (!is.null(me_diag))  Ft <- Ft + diag(me_diag,  nrow = n_obs)
-  if (!is.null(me_extra)) Ft <- Ft + diag(me_extra, nrow = n_obs)
+  if (!is.null(me_vec)) Ft <- Ft + diag(me_vec, nrow = n_obs)
   Ft <- (Ft + t(Ft)) * 0.5
 
+  ## NON-FINITE F. An overflowing shock scale (exp(h/2) = Inf in the SV
+  ## RB-PF) gives Se = Inf and then NaN in DD Se DD' wherever DD has a
+  ## structural zero (0 * Inf). R's chol() ACCEPTS a matrix with an Inf
+  ## diagonal and finite off-diagonal (sqrt(Inf) = Inf); Armadillo's chol()
+  ## rejects it, so the two used to weight different particles. Reject it here
+  ## (as src/sv_rbpf.cpp does) so neither implementation gets that far.
+  if (!all(is.finite(Ft))) return(NULL)
   Fc <- tryCatch(chol(Ft), error = function(e) NULL)
   if (is.null(Fc)) return(NULL)
   Fi  <- chol2inv(Fc)
@@ -120,12 +137,34 @@ kf_step <- function(s, P, y, TT, ZZ, RR, DD, Sigma_e,
   ## Kalman gain and prediction-form update.
   K_t  <- (TT %*% PZ + SS_t) %*% Fi
   s_n  <- as.numeric(TT %*% s) + drop(K_t %*% v)
-  TmKZ <- TT - K_t %*% ZZ
-  RmKD <- RR - K_t %*% DD
+  KZ   <- K_t %*% ZZ
+  KD   <- K_t %*% DD
+  TmKZ <- TT - KZ
+  RmKD <- RR - KD
+  ## CANCELLATION SNAP. On a perfectly-observed step the gain is K = I exactly
+  ## and both Joseph factors are exactly zero, so P' = 0. In floating point
+  ## they come out at ~1 ulp of the terms that cancelled, and P' is then
+  ## rounding noise SQUARED -- which the next period's F^-1 amplifies without
+  ## limit. That is the whole R-vs-C++ divergence past the SV volatility
+  ## overflow point: F and its Cholesky factor are bit-identical in the two
+  ## implementations, but chol2inv() and arma::inv_sympd() differ by one ulp
+  ## in F^-1, which becomes a 100%-relative difference in TT - K ZZ (measured:
+  ## rel 1.0-1.5) and a factor 2-4 in a |loglik| ~ 1e30 particle weight.
+  ## Zeroing an entry that is within a few ulps of the magnitudes that formed
+  ## it replaces noise with the value it is approximating; it can move a
+  ## well-conditioned result by at most a rounding error, and it makes the two
+  ## implementations agree because both snap to the same exact zero.
+  eps_c <- 8 * .Machine$double.eps
+  TmKZ[abs(TmKZ) <= eps_c * pmax(abs(TT), abs(KZ))] <- 0
+  RmKD[abs(RmKD) <= eps_c * pmax(abs(RR), abs(KD))] <- 0
   P_n  <- tcrossprod(TmKZ %*% P, TmKZ) + tcrossprod(RmKD %*% Se_t, RmKD)
-  ## Joseph true-noise term for the me_extra part only (matches the shipped
-  ## filter: base me_diag stays on the F-only-regulariser convention).
-  if (!is.null(me_extra)) P_n <- P_n + K_t %*% (me_extra * t(K_t))
+  ## Joseph true-noise term for the FULL measurement-error diagonal (base
+  ## me_diag + me_extra). y_t = ZZ x_t + DD e_t + u_t with Var(u_t) =
+  ## diag(me_vec) requires P' += K diag(me_vec) K' for ANY gain K. Before F4-A
+  ## the base me_diag entered F only (an F-regulariser), which made the RB-PF
+  ## disagree with kalman_filter(method = "univariate") by O(me_variance).
+  if (!is.null(me_vec) && any(me_vec != 0))
+    P_n <- P_n + K_t %*% (me_vec * t(K_t))
   P_n <- (P_n + t(P_n)) * 0.5
 
   list(ll = ll, s = s_n, P = P_n)

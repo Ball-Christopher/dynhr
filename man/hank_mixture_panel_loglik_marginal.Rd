@@ -12,7 +12,7 @@ hank_mixture_panel_loglik_marginal(
   omega,
   Pi,
   shock_specs,
-  me_var,
+  me_variance,
   T_h = NULL,
   n_particles = 100L,
   ks = NULL,
@@ -21,7 +21,7 @@ hank_mixture_panel_loglik_marginal(
 )
 }
 \arguments{
-\item{panel, obs_spec, blocks_by_type, omega, Pi, me_var}{As in
+\item{panel, obs_spec, blocks_by_type, omega, Pi, me_variance}{As in
 \code{\link{hank_mixture_panel_loglik}}.}
 
 \item{shock_specs}{The aggregate-path prior. Either

@@ -36,6 +36,55 @@
 }
 
 
+## ---- B5: CPM-buffer exhaustion warnings, raised from R --------------------
+##
+## tpf_run_period_cpp() used to call Rcpp::warning() when a pre-drawn CPM
+## buffer ran out mid-sweep. That is unsafe: under options(warn = 2) R turns a
+## warning into an ERROR, and an R error is a LONGJMP -- it unwinds past every
+## C++ destructor still on the stack, including the kernel's ~RNGScope, which
+## is the thing that writes the advanced RNG state back into .Random.seed.
+## The strictest users therefore got a silently stale .Random.seed (plus
+## leaked Armadillo buffers) on exactly the runs they asked to be strict.
+##
+## The kernel now returns counters and this raises the warnings after the
+## .Call has returned. Neither condition affects correctness: the fallback is
+## a fresh draw from the same N(0,1)/Uniform laws the exhausted buffer held.
+.tpf_warn_env <- new.env(parent = emptyenv())
+
+#' Emit a warning at most once per session, keyed by \code{key}.
+#' @noRd
+.tpf_warn_once <- function(key, ...) {
+  if (isTRUE(.tpf_warn_env[[key]])) return(invisible(NULL))
+  .tpf_warn_env[[key]] <- TRUE
+  warning(paste0(...), call. = FALSE)
+  invisible(NULL)
+}
+
+#' Raise the CPM-buffer-exhaustion warnings a tpf_run_period_cpp() result
+#' reports. Once per session per condition: a particle filter calls the kernel
+#' thousands of times per chain.
+#' @noRd
+.tpf_report_cpm_exhaustion <- function(res) {
+  n_mid <- res$u_mid_exhausted
+  if (!is.null(n_mid) && isTRUE(as.integer(n_mid) > 0L))
+    .tpf_warn_once(
+      "u_mid_exhausted",
+      "tpf_run_period: U_mid slots exhausted (K = ",
+      as.integer(res$u_mid_slots), "); fell back to a fresh RNG draw for ",
+      as.integer(n_mid), " mid-stage resample(s). Increase max_stages_u to ",
+      "suppress.")
+  need <- res$u_mut_need_col
+  if (!is.null(need) && isTRUE(as.integer(need) >= 0L))
+    .tpf_warn_once(
+      "u_mut_exhausted",
+      "tpf_run_period: U_mutation columns exhausted (have ",
+      as.integer(res$u_mut_have_cols), ", need column ",
+      as.integer(need) + 1L, "); fell back to fresh RNG draws. Increase ",
+      "max_stages_u or n_mh in max_stages_u.")
+  invisible(NULL)
+}
+
+
 ## ---- Bit-identical vectorized Kronecker helper ----------------------------
 
 #' Row-index pair for a per-column pairwise Kronecker product
@@ -520,9 +569,6 @@
 #'   ancestor state \code{s_{t-1}} held FIXED, and accepts with ratio
 #'   \code{phi_curr * (loglik(e') - loglik(e))}. The state is never moved
 #'   by mutation.
-#' @param mh_scale    Unused since the mutation step was corrected to fix
-#'   the ancestor state (no state random walk is proposed, so no proposal
-#'   covariance scale is needed). Kept for API/back-compat only.
 #' @param use_rcpp    Logical; use C++ propagation if TRUE.
 #' @param backend     Character; \code{"cpp"} (default, uses the C++ period
 #'   loop when compiled) or \code{"R"} (pure-R reference path).  When
@@ -533,7 +579,7 @@
 tpf_run_period <- function(particles, y_t, dr2, Sigma_e, L_e,
                             ZZ, DD, d_obs, ghss_obs,
                             me_variance, ess_target = 0.5,
-                            n_mh = 1L, mh_scale = 1.0,
+                            n_mh = 1L,
                             use_rcpp = .HAS_RCPP_TPF(),
                             backend  = if (.HAS_RCPP_TPF_PERIOD()) "cpp" else "R",
                             hxx_obs = NULL, hxu_obs = NULL, huu_obs = NULL,
@@ -584,13 +630,23 @@ tpf_run_period <- function(particles, y_t, dr2, Sigma_e, L_e,
       me_variance = me_variance,
       ess_target  = ess_target,
       n_mh        = as.integer(n_mh),
-      mh_scale    = mh_scale,
       max_stages  = 200L,
       U_normals   = U_normals,  # CPM: NULL -> draw internally (bit-identical to pre-CPM)
       U_resample  = U_resample, # CPM: NULL -> draw from RNG (bit-identical to pre-CPM)
       U_mid       = U_mid,      # CPM legacy: NULL -> draw from RNG for mid-stage (bit-identical)
       U_mutation  = U_mutation  # CPM Option A: NULL -> draw from RNG (bit-identical to pre-Option-A)
     )
+    ## ---- B5 warning channel -------------------------------------------------
+    ## The kernel COUNTS its two CPM-buffer-exhaustion conditions and reports
+    ## them here instead of calling Rcpp::warning() mid-sweep. Under
+    ## options(warn = 2) an R warning IS an error, and R errors longjmp: the
+    ## jump would skip ~RNGScope inside tpf_run_period_cpp, so the RNG state
+    ## the kernel advanced would never be written back to .Random.seed (and
+    ## every Armadillo buffer alive at that moment would leak). Raising the
+    ## warning here, after the .Call has returned and the destructors have
+    ## run, is longjmp-safe. Warned once per SESSION (not per call): a
+    ## particle filter calls this thousands of times per chain.
+    .tpf_report_cpm_exhaustion(res_cpp)
     ## z_resample_used: scalar (NaN when non-CPM, actual z when CPM)
     z_res <- res_cpp$z_resample_used
     if (!is.null(z_res) && length(z_res) == 1L && is.nan(z_res))
@@ -908,7 +964,7 @@ tpf_run_period <- function(particles, y_t, dr2, Sigma_e, L_e,
 tpf_run_period3 <- function(particles, y_t, dr3, Sigma_e, L_e,
                              ZZ, DD, d_obs, ghss_obs, ZZ_xss, ghs3_obs,
                              me_variance, ess_target = 0.5,
-                             n_mh = 1L, mh_scale = 1.0,
+                             n_mh = 1L,
                              hxx_obs = NULL, hxu_obs = NULL, huu_obs = NULL,
                              hxxu_obs = NULL, hxuu_obs = NULL,
                              hxxx_obs = NULL, huuu_obs = NULL,
@@ -1215,7 +1271,9 @@ tpf_run_period3 <- function(particles, y_t, dr3, Sigma_e, L_e,
   if (verbose) message(sprintf("  [TPF preflight] evaluating loglik SD (K = %d)...", K))
 
   logliks <- vapply(seq_len(K), function(k) {
-    set.seed(k)   # vary RNG stream externally; closure must have seed = NULL
+    ## Vary the RNG stream externally; the closure MUST have seed = NULL for
+    ## this to bite (enforced by the exactly-equal check below).
+    set.seed(k)
     res <- tryCatch(log_post_fn(theta_mode), error = function(e) NULL)
     if (is.null(res) || !is.finite(res$loglik)) NA_real_ else res$loglik
   }, numeric(1L))
@@ -1228,6 +1286,27 @@ tpf_run_period3 <- function(particles, y_t, dr3, Sigma_e, L_e,
     return(list(sd = NA_real_, mean = NA_real_, logliks = logliks,
                 n_needed = NA_integer_, accept_noise_factor = NA_real_,
                 skipped = FALSE))
+  }
+
+  ## ---- Fixed-seed closure detection (the preflight's blind spot) --------
+  ## The external set.seed(k) above only varies the filter noise when the
+  ## closure itself was built with seed = NULL. A closure built with a fixed
+  ## seed re-seeds (or, post-RNG-hygiene fix, locally seeds) on EVERY call, so
+  ## all K logliks come out bit-identical, SD = 0, and the preflight would
+  ## report "SD = 0.000 (< 1 threshold, OK)" -- the most dangerous possible
+  ## verdict, because a deterministic likelihood destroys the pseudo-marginal
+  ## invariance of PMMH (the chain targets the WRONG distribution and never
+  ## reveals it through a diagnostic).
+  if (max(valid_ll) - min(valid_ll) < 1e-12) {
+    stop("Particle-filter preflight: all ", length(valid_ll),
+         " log-likelihood evaluations at theta are exactly equal ",
+         "(spread < 1e-12). The log-posterior closure has a fixed seed, so ",
+         "the particle filter is deterministic and its Monte Carlo variance ",
+         "cannot be measured. PMMH / particle-MCMC requires a STOCHASTIC ",
+         "likelihood: rebuild the closure with seed = NULL in the factory ",
+         "(e.g. make_log_posterior_tpf(..., seed = NULL)), or skip the ",
+         "preflight with pmcmc_preflight_skip = TRUE if you only want a ",
+         "one-off deterministic likelihood value.", call. = FALSE)
   }
 
   sd_ll   <- sd(valid_ll)
@@ -1296,6 +1375,83 @@ tpf_loglik_sd_preflight <- function(log_post_fn, theta, K = 30L,
 }
 
 
+## ---- RNG / linear-algebra helpers shared by the PF closures --------------
+
+#' Evaluate `expr` under a fixed seed WITHOUT clobbering the caller's RNG
+#'
+#' The particle-filter log-posterior closures accept a `seed` argument that
+#' makes a single evaluation reproducible. Calling `set.seed(seed)` at the top
+#' of every evaluation also silently RESETS the caller's global RNG stream, so
+#' an outer sampler (RWMH, SBC, simulation) that draws before and after the
+#' likelihood keeps replaying the SAME pseudo-random numbers -- the chain
+#' degenerates to a deterministic sequence.
+#'
+#' This helper saves `.Random.seed` (or records its absence), seeds locally,
+#' evaluates `expr`, and restores the previous global state on exit. Semantics:
+#' seeded closures stay deterministic in theta, and the caller's stream is left
+#' exactly as it was found.
+#'
+#' `expr` must NOT contain a top-level `return()`: it is forced here as a
+#' promise, so callers pass a CALL to an inner evaluator function.
+#'
+#' @param seed Integer scalar or NULL (NULL = no seeding, no save/restore).
+#' @param expr Expression to evaluate (lazily, in the caller's frame).
+#' @return The value of `expr`.
+#' @noRd
+.with_local_seed <- function(seed, expr) {
+  if (!is.null(seed)) {
+    ge  <- globalenv()
+    had <- exists(".Random.seed", envir = ge, inherits = FALSE)
+    old <- if (had) get(".Random.seed", envir = ge, inherits = FALSE) else NULL
+    on.exit({
+      if (had) {
+        assign(".Random.seed", old, envir = ge)
+      } else if (exists(".Random.seed", envir = ge, inherits = FALSE)) {
+        rm(list = ".Random.seed", envir = ge)
+      }
+    }, add = TRUE)
+    set.seed(seed)
+  }
+  expr
+}
+
+#' PSD (eigen) square root: L with L %*% t(L) == S for symmetric PSD S
+#'
+#' Used as the fallback when `chol()` fails on a (numerically) singular or
+#' slightly indefinite covariance. Unlike `diag(sqrt(diag(S)))` this keeps ALL
+#' cross-state correlations: negative eigenvalues (rounding noise) are clamped
+#' to zero and the resulting factor reproduces S exactly on its PSD part.
+#'
+#' @param S Symmetric matrix.
+#' @return A square matrix L with `tcrossprod(L)` equal to the PSD part of S.
+#' @noRd
+.tpf_psd_sqrt <- function(S) {
+  eg   <- eigen(S, symmetric = TRUE)
+  vals <- pmax(eg$values, 0)
+  eg$vectors %*% diag(sqrt(vals), nrow = length(vals))
+}
+
+#' Stationary (Lyapunov) initial state covariance for the TPF particle cloud
+#'
+#' Solves P = TT P TT' + RQR via \code{\link{solve_lyapunov}} (doubling
+#' algorithm, RELATIVE convergence tolerance, NaN on a non-stationary TT).
+#' The previous inline fixed-point loop ran a bounded number of plain
+#' iterations with an absolute-ish break and TRUNCATED SILENTLY for persistent
+#' states -- with rho = 0.999 the 500-step fixed point is still ~37% short of
+#' sigma^2/(1 - rho^2).
+#'
+#' @param TT  n_s x n_s state transition matrix.
+#' @param RQR n_s x n_s state shock covariance R Sigma_e R'.
+#' @return The stationary covariance, or NULL when it does not exist
+#'   (non-stationary TT -> NaN from solve_lyapunov) or is non-finite.
+#' @noRd
+.tpf_init_cov <- function(TT, RQR) {
+  P0 <- tryCatch(solve_lyapunov(TT, RQR), error = function(e) NULL)
+  if (is.null(P0) || !all(is.finite(P0))) return(NULL)
+  (P0 + t(P0)) / 2                       # symmetrise (round-off only)
+}
+
+
 ## ---- Factory: make_log_posterior_tpf ------------------------------------
 
 #' Construct the tempered particle filter log-posterior function
@@ -1318,8 +1474,6 @@ tpf_loglik_sd_preflight <- function(log_post_fn, theta, K = 30L,
 #'   stage (default 1); each step is an independence proposal on the
 #'   period-t shock only (ancestor state fixed) -- see the internal
 #'   \code{tpf_run_period()} mutation step.
-#' @param mh_scale    Unused since the mutation step fix (ancestor state is
-#'   never moved); kept for API/back-compat only.
 #' @param seed        Integer RNG seed for reproducibility (NULL = no fixed seed).
 #' @param system_priors Optional system priors list (see \code{\link{sp_irf}}).
 #' @param max_stages_u  Maximum number of tempering stages per observation
@@ -1351,6 +1505,12 @@ tpf_loglik_sd_preflight <- function(log_post_fn, theta, K = 30L,
 #'   \code{rwmh_cpm}/\code{U_list} use MUST pass \code{burn_in_init = 0L}
 #'   explicitly, since the CPM slot layout has no burn-in slots — the
 #'   closure errors at the boundary if this is violated.
+#' @param power Power-posterior exponent zeta applied to the log-likelihood:
+#'   \code{logpost = zeta * loglik + logprior}. \code{NULL} (default) resolves
+#'   the global \code{power_posterior} option ONCE at factory time (falling
+#'   back to 1), so the closure's contract is fixed for its lifetime rather
+#'   than silently changing under an option set mid-chain. Same contract as
+#'   \code{make_log_posterior()} and \code{make_log_posterior_sv_rbpf()}.
 #' @section Missing data:
 #' \code{data} may contain \code{NA}/non-finite entries, handled per the
 #' package's usual per-element (univariate-KF-style) convention rather than
@@ -1380,18 +1540,27 @@ make_log_posterior_tpf <- function(model, data, prior_spec, obs_vars,
                                     n_particles  = 1000L,
                                     ess_target   = 0.5,
                                     n_mh         = 1L,
-                                    mh_scale     = 1.0,
                                     seed         = NULL,
                                     system_priors = NULL,
                                     max_stages_u  = 16L,
                                     order         = 2L,
-                                    burn_in_init  = 50L) {
+                                    burn_in_init  = 50L,
+                                    power         = NULL) {
 
   ## Force promises for closure-capture safety (same pattern as cumulant branch)
   force(data); force(prior_spec); force(obs_vars); force(me_variance)
-  force(n_particles); force(ess_target); force(n_mh); force(mh_scale)
+  force(n_particles); force(ess_target); force(n_mh)
   force(seed); force(system_priors); force(max_stages_u); force(order)
-  force(burn_in_init)
+  force(burn_in_init); force(power)
+
+  ## Power-posterior exponent: explicit arg > global option > 1, resolved ONCE
+  ## here so the closure's contract cannot change under it mid-chain.
+  power <- .dynhr_opt("power_posterior", power, default = 1)
+  if (!is.numeric(power) || length(power) != 1L || !is.finite(power) ||
+      power < 0)
+    stop("make_log_posterior_tpf: `power` must be a finite non-negative ",
+         "scalar.", call. = FALSE)
+  power <- as.numeric(power)
 
   if (!is.numeric(burn_in_init) || length(burn_in_init) != 1L ||
       !is.finite(burn_in_init) || burn_in_init < 0 ||
@@ -1435,67 +1604,16 @@ make_log_posterior_tpf <- function(model, data, prior_spec, obs_vars,
       !is.null(compiled$model$lead_lag_incidence))
     compiled$lead_lag_incidence <- compiled$model$lead_lag_incidence
 
-  sys_cache <- cache_system_structure(compiled)
-
   ## data: n_obs x T (columns = time periods)
   T_obs <- ncol(data)
 
-  ## Per-closure warm-start for steady-state solve
-  ss_warm <- NULL
-
-  function(theta, U_list = NULL) {
-    if (!is.null(U_list) && burn_in_init > 0L) {
-      stop("make_log_posterior_tpf: burn_in_init > 0 is incompatible with an ",
-           "externally supplied U_list (the CPM slot layout has no burn-in ",
-           "slots). Use burn_in_init = 0 with CPM/common-random-number paths.",
-           call. = FALSE)
-    }
-    ## Fixed seed for reproducible filter evaluation.
-    ## When seed is set: applies to ALL random draws (shock normals when
-    ## U_list = NULL, plus resampling uniforms and RWMH mutation normals).
-    ## When U_list is supplied: seed controls the non-U randomness (resampling
-    ## uniforms); the shock normals come from U_list (seed has no effect on them).
-    if (!is.null(seed)) set.seed(seed)
-
-    lp <- log_prior(theta, prior_spec)
-    if (!is.finite(lp))
-      return(list(logpost = -Inf, loglik = -Inf, logprior = lp))
-
-    params <- .apply_theta_to_params(model, theta)
-
-    ## ---- Steady state (warm-started) ------------------------------------
-    ss_result <- solve_steady_state(model, compiled, params,
-                                    y0 = ss_warm, verbose = FALSE)
-    if (is.null(ss_result) || !isTRUE(ss_result$converged)) {
-      if (!is.null(ss_warm))
-        ss_result <- solve_steady_state(model, compiled, params,
-                                        verbose = FALSE)
-      if (is.null(ss_result) || !isTRUE(ss_result$converged)) {
-        ss_warm <<- NULL
-        return(list(logpost = -Inf, loglik = -Inf, logprior = lp))
-      }
-    }
-    ss_warm <<- ss_result$ss
-
-    ## ---- First-order perturbation ---------------------------------------
-    ## Re-derive SSM-computed params for a consistent linearization point
-    ## (no-op for non-SSM-parameter models; Tier 13 #1).
-    params <- ss_result$params %||% params
-    sys <- extract_system_matrices_fast(sys_cache, ss_result$ss, params)
-    dr1 <- .solve_from_system(sys, model, compiled, ss_result$ss, params, FALSE)
-    if (is.null(dr1) || !isTRUE(dr1$bk_satisfied))
-      return(list(logpost = -Inf, loglik = -Inf, logprior = lp))
-
-    ## Stationarity guard (mirrors R/posterior.R:150-158)
-    ns <- length(dr1$state_idx)
-    ev <- dr1$eigenvalues
-    spectral_radius <- if (!is.null(ev) && length(ev) >= ns)
-      max(Mod(ev[seq_len(ns)]))
-    else
-      max(Mod(eigen(dr1$ghx[dr1$state_idx, , drop = FALSE],
-                    only.values = TRUE)$values))
-    if (spectral_radius >= 1)
-      return(list(logpost = -Inf, loglik = -Inf, logprior = lp))
+  ## Solve hook: first-order rule (BK + stationarity guard) then the per-draw
+  ## higher-order perturbation the particles live on. `dr1` is kept alongside
+  ## `dr2` because the system prior is evaluated against the FIRST-order rule.
+  tpf_solve <- function(model, compiled, sys_cache, ss, params, theta) {
+    s1 <- .posterior_solve1(model, compiled, sys_cache, ss, params, "spectral")
+    if (is.null(s1)) return(NULL)
+    dr1 <- s1$dr
 
     ## ---- Higher-order perturbation (per-draw, expensive) ----------------
     Sigma_e <- .get_shock_cov(model, model$varexo_names, params)
@@ -1503,27 +1621,35 @@ make_log_posterior_tpf <- function(model, data, prior_spec, obs_vars,
       ## Pruned ORDER-3 state space: full third-order solve (includes the
       ## sigma-cross terms ghxss/ghuss via solve_perturbation's order-3 path).
       dr2 <- tryCatch(
-        solve_perturbation(model, compiled, ss_result$ss, params,
+        solve_perturbation(model, compiled, ss, params,
                            order = 3L, Sigma_e = Sigma_e, verbose = FALSE),
         error = function(e) NULL
       )
-      if (is.null(dr2) || !isTRUE(dr2$bk_satisfied))
-        return(list(logpost = -Inf, loglik = -Inf, logprior = lp))
+      if (is.null(dr2) || !isTRUE(dr2$bk_satisfied)) return(NULL)
     } else {
       dr2 <- tryCatch(
-        solve_perturbation_order2(model, compiled, ss_result$ss, params,
+        solve_perturbation_order2(model, compiled, ss, params,
                                    dr1, Sigma_e = Sigma_e, verbose = FALSE),
         error = function(e) NULL
       )
-      if (is.null(dr2))
-        return(list(logpost = -Inf, loglik = -Inf, logprior = lp))
+      if (is.null(dr2)) return(NULL)
     }
+    list(dr = dr1, dr2 = dr2, Sigma_e = Sigma_e)
+  }
+
+  ## Likelihood hook: the whole TPF sweep for one theta. Everything above the
+  ## higher-order solve (prior, theta -> params, the warm-started steady-state
+  ## solve, the -Inf shapes, the tempering) lives in the shared builder,
+  ## R/posterior-closure.R.
+  tpf_loglik <- function(sol, params, ss, theta, me_floor_check,
+                         U_list = NULL, ...) {
+    dr2     <- sol$dr2
+    Sigma_e <- sol$Sigma_e
 
     ## ---- Observation mapping --------------------------------------------
     endo    <- dr2$endo_names
     obs_idx <- match(obs_vars, endo)
-    if (any(is.na(obs_idx)))
-      return(list(logpost = -Inf, loglik = -Inf, logprior = lp))
+    if (any(is.na(obs_idx))) return(NULL)
 
     ZZ       <- dr2$ghx[obs_idx, , drop = FALSE]   # n_obs x n_s
     DD       <- dr2$ghu[obs_idx, , drop = FALSE]   # n_obs x n_e
@@ -1588,11 +1714,8 @@ make_log_posterior_tpf <- function(model, data, prior_spec, obs_vars,
     )
 
     ## Cholesky of Sigma_e for shock sampling
-    L_e <- tryCatch(t(chol(Sigma_e)), error = function(e) {
-      eg   <- eigen(Sigma_e, symmetric = TRUE)
-      vals <- pmax(eg$values, 0)
-      eg$vectors %*% diag(sqrt(vals), nrow = length(vals))
-    })
+    L_e <- tryCatch(t(chol(Sigma_e)),
+                    error = function(e) .tpf_psd_sqrt(Sigma_e))
 
     n_s  <- length(dr2$state_idx)
     n_2s <- 2L * n_s
@@ -1611,19 +1734,13 @@ make_log_posterior_tpf <- function(model, data, prior_spec, obs_vars,
     ## TT_s / RR_s already extracted above when building ss_obs.
     QQ_s <- tcrossprod(RR_s %*% Sigma_e, RR_s)       # n_s x n_s
 
-    P0 <- tryCatch({
-      ## Discrete Lyapunov equation: P = TT*P*TT' + QQ
-      ## Use the dlyap-style iteration; Matrix::lyap is not always available.
-      ## For small systems the direct solve is fine; 100 iterations converge
-      ## quickly for stationary models (spectral radius < 1 guaranteed here).
-      Pk <- QQ_s
-      for (iter in seq_len(500L)) {
-        Pk_new <- TT_s %*% Pk %*% t(TT_s) + QQ_s
-        if (max(abs(Pk_new - Pk)) < 1e-12 * (1 + max(abs(Pk_new)))) break
-        Pk <- Pk_new
-      }
-      Pk
-    }, error = function(e) NULL)
+    ## Discrete Lyapunov equation P = TT P TT' + QQ, solved by the package's
+    ## `solve_lyapunov()` doubling algorithm (relative tolerance; NaN when TT
+    ## is not stationary). The former inline fixed-point loop capped at 500
+    ## plain iterations and BROKE OUT SILENTLY when it had not converged, so a
+    ## persistent state (rho = 0.999 => mixing time ~ 1/(1-rho)) started the
+    ## cloud from a covariance ~37% too small with no warning at all.
+    P0 <- .tpf_init_cov(TT_s, QQ_s)
 
     ## CPM U_list layout (3T+1 entries):
     ##   Slot 1:              init normals (n_s x N matrix)
@@ -1652,22 +1769,25 @@ make_log_posterior_tpf <- function(model, data, prior_spec, obs_vars,
     mut_buf_cols <- as.integer(max_stages_u) * as.integer(n_mh) * N
     has_mutation <- (n_mh > 0L)
 
-    if (is.null(P0) || !is.finite(max(abs(P0)))) {
-      ## Fallback: start from zero (less accurate but still unbiased)
-      particles <- matrix(0, nrow = n_st, ncol = N)
-      ## Still need to consume / record the init normals slot
-      U_init_used <- if (!is.null(U_init_normals)) U_init_normals else
-                     matrix(0, nrow = n_s, ncol = N)
-    } else {
-      ## Draw x1_0^i ~ N(0, P0); x2_0^i = 0 (and x3_0^i = 0 at order 3)
-      L_P0 <- tryCatch(t(chol(P0 + diag(1e-12, n_s))),
-                       error = function(e) diag(sqrt(diag(P0) + 1e-12), n_s))
-      z_init <- if (!is.null(U_init_normals)) U_init_normals else
-                matrix(rnorm(n_s * N), nrow = n_s)
-      U_init_used <- z_init
-      x1_init     <- L_P0 %*% z_init
-      particles   <- rbind(x1_init, matrix(0, nrow = n_st - n_s, ncol = N))
+    if (is.null(P0)) {
+      ## No stationary initial covariance exists (solve_lyapunov returned NaN
+      ## for a non-stationary TT, or the solve failed). The old zero-start
+      ## fallback quietly evaluated the likelihood of a DIFFERENT model
+      ## (degenerate initial cloud); reject the draw instead.
+      return(NULL)
     }
+    ## Draw x1_0^i ~ N(0, P0); x2_0^i = 0 (and x3_0^i = 0 at order 3)
+    ## chol() fallback must be a PSD square root, NOT diag(sqrt(diag(P0))):
+    ## the diagonal version silently discards every state CORRELATION, so a
+    ## near-singular P0 (the exact case where chol fails) is replaced by an
+    ## independent-states cloud with the right marginals and the wrong joint.
+    L_P0 <- tryCatch(t(chol(P0 + diag(1e-12, n_s))),
+                     error = function(e) .tpf_psd_sqrt(P0))
+    z_init <- if (!is.null(U_init_normals)) U_init_normals else
+              matrix(rnorm(n_s * N), nrow = n_s)
+    U_init_used <- z_init
+    x1_init     <- L_P0 %*% z_init
+    particles   <- rbind(x1_init, matrix(0, nrow = n_st - n_s, ncol = N))
 
     ## ---- Optional particle burn-in (burn_in_init > 0) --------------------
     ## The Lyapunov draw above puts x1_0 at the FIRST-order stationary
@@ -1879,7 +1999,6 @@ make_log_posterior_tpf <- function(model, data, prior_spec, obs_vars,
           me_variance = me_variance,
           ess_target  = ess_target,
           n_mh        = n_mh,
-          mh_scale    = mh_scale,
           U_normals   = U_normals_t,
           U_resample  = U_resample_t,
           U_mid       = NULL,
@@ -1901,7 +2020,6 @@ make_log_posterior_tpf <- function(model, data, prior_spec, obs_vars,
         me_variance = me_variance,
         ess_target  = ess_target,
         n_mh        = n_mh,
-        mh_scale    = mh_scale,
         use_rcpp    = .HAS_RCPP_TPF(),
         backend     = if (.HAS_RCPP_TPF_PERIOD()) "cpp" else "R",
         U_normals   = U_normals_t,
@@ -1923,25 +2041,39 @@ make_log_posterior_tpf <- function(model, data, prior_spec, obs_vars,
         U_realized[[2L * T_obs + 1L + t]] <- U_mutation_t        # mutation matrix
     }
 
-    if (!is.finite(loglik))
-      return(list(logpost = -Inf, loglik = -Inf, logprior = lp))
+    if (!is.finite(loglik)) return(NULL)
 
-    ## ---- System priors --------------------------------------------------
-    if (!is.null(system_priors)) {
-      sp_lp <- .eval_system_priors(
-        system_priors,
-        list(theta   = theta,
-             model   = model,
-             dr      = dr1,
-             Sigma_e = Sigma_e,
-             params  = params))
-      if (!is.finite(sp_lp))
-        return(list(logpost = -Inf, loglik = loglik, logprior = lp))
-      lp <- lp + sp_lp
+    ## CPM: $U_list carries the standard normals used per period (n_e x N
+    ## each). The system prior is evaluated by the shared builder against the
+    ## FIRST-order rule (sol$dr) and this Sigma_e, and folds into $logprior.
+    list(loglik = loglik, extra = list(U_list = U_realized))
+  }
+
+  eval_one <- .make_posterior_closure(
+    model, data, prior_spec, obs_vars, compiled,
+    solve_fn          = tpf_solve,
+    loglik_fn         = tpf_loglik,
+    power             = power,
+    needs_me_floor    = FALSE,
+    system_prior      = system_priors,
+    system_prior_mode = "lp",
+    pass_dots         = TRUE)
+
+  function(theta, U_list = NULL) {
+    if (!is.null(U_list) && burn_in_init > 0L) {
+      stop("make_log_posterior_tpf: burn_in_init > 0 is incompatible with an ",
+           "externally supplied U_list (the CPM slot layout has no burn-in ",
+           "slots). Use burn_in_init = 0 with CPM/common-random-number paths.",
+           call. = FALSE)
     }
-
-    list(logpost = .dynhr_opt("power_posterior", default = 1) * loglik + lp,
-         loglik = loglik, logprior = lp,
-         U_list = U_realized)  # CPM: standard normals used per period (n_e x N each)
+    ## Fixed seed for reproducible filter evaluation.
+    ## When seed is set: applies to ALL random draws (shock normals when
+    ## U_list = NULL, plus resampling uniforms and RWMH mutation normals).
+    ## When U_list is supplied: seed controls the non-U randomness (resampling
+    ## uniforms); the shock normals come from U_list (seed has no effect on them).
+    ## The seeding is LOCAL: .with_local_seed() restores the caller's global
+    ## .Random.seed on exit, so a seeded closure no longer freezes the RNG
+    ## stream of whatever sampler is calling it (A1).
+    .with_local_seed(seed, eval_one(theta, U_list = U_list))
   }
 }

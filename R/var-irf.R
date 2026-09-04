@@ -53,7 +53,7 @@
 #' efficient here because every equation shares the same regressors), and
 #' returns the coefficient matrices together with the residual covariance.
 #'
-#' @param Y A \code{T x K} numeric matrix or data frame: rows are time periods
+#' @param data A \code{T x K} numeric matrix or data frame: rows are time periods
 #'   (in order), columns are the \code{K} endogenous variables.  Column names,
 #'   if present, are carried through to the IRFs.
 #' @param p Lag order (positive integer).
@@ -82,13 +82,13 @@
 #'
 #' @seealso \code{\link{var_irf}}, \code{\link{var_irf_bootstrap}}
 #' @export
-estimate_var <- function(Y, p = 1L, type = c("const", "none", "trend")) {
+estimate_var <- function(data, p = 1L, type = c("const", "none", "trend")) {
   type <- match.arg(type)
   p    <- as.integer(p)
   if (p < 1L) stop("estimate_var: `p` must be a positive integer.")
 
-  var_names <- colnames(as.matrix(Y))
-  d  <- .var_design(Y, p, type)
+  var_names <- colnames(as.matrix(data))
+  d  <- .var_design(data, p, type)
   X  <- d$X; Yl <- d$Ylhs; K <- d$K
   neff <- nrow(Yl)
   if (is.null(var_names)) var_names <- paste0("y", seq_len(K))
@@ -234,7 +234,7 @@ var_irf <- function(varfit, horizon = 20L,
 #'
 #' @param varfit A \code{var_fit} from \code{\link{estimate_var}}.
 #' @param horizon Number of IRF periods.
-#' @param Y The original \code{T x K} data used to fit \code{varfit} (needed to
+#' @param data The original \code{T x K} data used to fit \code{varfit} (needed to
 #'   recover the \code{p} initial-condition rows for the recursive DGP).
 #' @param n_boot Number of bootstrap replications.  Default \code{1000}.
 #' @param ci Two-element vector of lower/upper percentiles for the band.
@@ -256,26 +256,27 @@ var_irf <- function(varfit, horizon = 20L,
 #' set.seed(1)
 #' Y <- matrix(rnorm(400), 200, 2)
 #' fit <- estimate_var(Y, p = 1)
-#' bands <- var_irf_bootstrap(fit, horizon = 8, Y = Y, n_boot = 200, seed = 42)
+#' bands <- var_irf_bootstrap(fit, horizon = 8, data = Y, n_boot = 200, seed = 42)
 #' bands$lower$shock1[1, ]   # lower band, impact, shock 1
 #'
 #' @seealso \code{\link{var_irf}}, \code{\link{match_irfs}}
 #' @export
-var_irf_bootstrap <- function(varfit, horizon = 20L, Y = NULL,
+var_irf_bootstrap <- function(varfit, horizon = 20L, data = NULL,
                               n_boot = 1000L, ci = c(0.16, 0.84),
                               shock = NULL, seed = 1L) {
   if (!inherits(varfit, "var_fit"))
     stop("var_irf_bootstrap: `varfit` must be a var_fit.")
-  if (is.null(Y))
-    stop("var_irf_bootstrap: supply the original data `Y` (for initial conditions).")
+  if (is.null(data))
+    stop("var_irf_bootstrap: supply the original data via `data` ",
+         "(for initial conditions).")
   if (length(ci) != 2L || any(ci < 0) || any(ci > 1) || ci[1] >= ci[2])
     stop("var_irf_bootstrap: `ci` must be c(lo, hi) with 0 <= lo < hi <= 1.")
   horizon <- as.integer(horizon)
   n_boot  <- as.integer(n_boot)
 
-  Y  <- as.matrix(Y)
+  data  <- as.matrix(data)
   K  <- varfit$K; p <- varfit$p; type <- varfit$type
-  Tn <- nrow(Y)
+  Tn <- nrow(data)
   resid <- varfit$residuals
   neff  <- nrow(resid)
 
@@ -297,7 +298,7 @@ var_irf_bootstrap <- function(varfit, horizon = 20L, Y = NULL,
     ub  <- resid[idx, , drop = FALSE]
     ## Regenerate Y* recursively from the original first p rows.
     Ys <- matrix(0, Tn, K)
-    Ys[seq_len(p), ] <- Y[seq_len(p), , drop = FALSE]
+    Ys[seq_len(p), ] <- data[seq_len(p), , drop = FALSE]
     for (t in (p + 1L):Tn) {
       reg <- numeric(0)
       for (lag in seq_len(p)) reg <- c(reg, Ys[t - lag, ])

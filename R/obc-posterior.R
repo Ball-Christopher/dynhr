@@ -37,11 +37,20 @@
 #'   (warn-only, once per closure) against a near-degenerate slack-regime
 #'   innovation covariance via \code{getOption("dynhr.me_floor_check", TRUE)};
 #'   see \code{.obc_warn_me_floor_lock()} in R/obc-regime.R.
+#' @param power       Power-posterior (generalised-Bayes) tempering exponent
+#'   \eqn{\zeta}: \code{$logpost} becomes
+#'   \eqn{\log p(\theta) + \zeta \cdot \log L(\theta)} while \code{$loglik}
+#'   keeps the RAW (untempered) value. \code{NULL} (default) resolves the
+#'   \code{power_posterior} package option ONCE, at factory time.
 #' @return Function(theta) -> list(logpost, loglik, logprior)
 #' @noRd
 make_log_posterior_obc <- function(model, data, prior_spec, obs_vars,
                                     compiled, specs = NULL,
-                                    me_variance = 1e-8) {
+                                    me_variance = 1e-8,
+                                    power = NULL) {
+
+  ## Resolve zeta ONCE here, not per draw (see .resolve_power_posterior).
+  power <- .resolve_power_posterior(power, "make_log_posterior_obc")
 
   # ---- Guards: run once, fail fast ----------------------------------------
   obc_assert_linear(model)
@@ -52,8 +61,6 @@ make_log_posterior_obc <- function(model, data, prior_spec, obs_vars,
       !is.null(compiled$model$lead_lag_incidence)) {
     compiled$lead_lag_incidence <- compiled$model$lead_lag_incidence
   }
-  sys_cache <- cache_system_structure(compiled)
-
   # Observable indices: fixed by model structure, not by parameter draw
   endo    <- model$var_names
   obs_idx <- match(obs_vars, endo)
@@ -66,66 +73,39 @@ make_log_posterior_obc <- function(model, data, prior_spec, obs_vars,
   if (is.data.frame(data)) data <- as.matrix(data)
   Y <- if (nrow(data) == length(obs_vars)) data else t(data)
 
-  ## me-floor hazard guard (see R/obc-regime.R .obc_warn_me_floor_lock() and
-  ## R/pruned-state-space.R): warn at most once per closure, not once per draw.
-  .me_floor_checked <- FALSE
+  ## Adapter over the shared closure builder (R/posterior-closure.R). Specific
+  ## to this branch: the cold (never warm-started) steady-state solve, the
+  ## always-eigen() stationarity guard, and the OccBin guess-and-verify pass
+  ## feeding kalman_filter_obc(). No system priors on the OBC paths.
+  .make_posterior_closure(
+    model, data, prior_spec, obs_vars, compiled,
+    stationarity = "eigen",
+    loglik_fn = function(sol, params, ss, theta, me_floor_check, ...) {
+      dr_slack <- sol$dr
+      .obc_warn_me_floor_lock(
+        dr_slack, model, params, obs_vars, obs_idx, me_variance,
+        check = me_floor_check)
 
-  # ---- Closure: evaluated at each MCMC draw --------------------------------
-  function(theta) {
-    lp <- log_prior(theta, prior_spec)
-    if (!is.finite(lp))
-      return(list(logpost = -Inf, loglik = -Inf, logprior = lp))
+      # OccBin regime path + lazy per-regime policy cache
+      gv <- obc_guess_verify(
+        Y, dr_slack, sol$sys, obs_idx,
+        model, params, obs_vars, specs,
+        me_variance = me_variance
+      )
+      if (is.null(gv)) return(NULL)
 
-    params <- .apply_theta_to_params(model, theta)
-
-    ss_result <- solve_steady_state(model, compiled, params, verbose = FALSE)
-    if (is.null(ss_result) || !ss_result$converged)
-      return(list(logpost = -Inf, loglik = -Inf, logprior = lp))
-
-    ## Re-derive SSM-computed params for a consistent linearization point
-    ## (no-op for non-SSM-parameter models; Tier 13 #1).
-    params <- ss_result$params %||% params
-    sys <- extract_system_matrices_fast(sys_cache, ss_result$ss, params)
-
-    # Slack policy function
-    dr_slack <- .solve_from_system(sys, model, compiled, ss_result$ss, params, FALSE)
-    if (is.null(dr_slack) || !dr_slack$bk_satisfied)
-      return(list(logpost = -Inf, loglik = -Inf, logprior = lp))
-
-    max_eig <- max(Mod(eigen(
-      dr_slack$ghx[dr_slack$state_idx, , drop = FALSE],
-      only.values = TRUE
-    )$values))
-    if (max_eig >= 1)
-      return(list(logpost = -Inf, loglik = -Inf, logprior = lp))
-
-    .obc_warn_me_floor_lock(
-      dr_slack, model, params, obs_vars, obs_idx, me_variance,
-      check = !.me_floor_checked &&
-        isTRUE(getOption("dynhr.me_floor_check", TRUE)))
-    .me_floor_checked <<- TRUE   # guard once per closure, not per MCMC draw
-
-    # OccBin regime path + lazy per-regime policy cache
-    gv <- obc_guess_verify(
-      Y, dr_slack, sys, obs_idx,
-      model, params, obs_vars, specs,
-      me_variance = me_variance
-    )
-    if (is.null(gv))
-      return(list(logpost = -Inf, loglik = -Inf, logprior = lp))
-
-    # Regime-switching Kalman filter
-    kf <- kalman_filter_obc(
-      Y, dr_slack, gv$regime_cache,
-      model, params, obs_vars, gv$regime_path,
-      me_variance     = me_variance,
-      return_filtered = FALSE
-    )
-    if (is.null(kf) || !is.finite(kf$loglik))
-      return(list(logpost = -Inf, loglik = -Inf, logprior = lp))
-
-    list(logpost = kf$loglik + lp, loglik = kf$loglik, logprior = lp)
-  }
+      # Regime-switching Kalman filter
+      kf <- kalman_filter_obc(
+        Y, dr_slack, gv$regime_cache,
+        model, params, obs_vars, gv$regime_path,
+        me_variance     = me_variance,
+        return_filtered = FALSE
+      )
+      if (is.null(kf) || !is.finite(kf$loglik)) return(NULL)
+      list(loglik = kf$loglik)
+    },
+    power      = power,
+    warm_start = FALSE)
 }
 
 
@@ -152,18 +132,26 @@ make_log_posterior_obc <- function(model, data, prior_spec, obs_vars,
 #'   innovation covariance via \code{getOption("dynhr.me_floor_check", TRUE)};
 #'   see \code{.obc_warn_me_floor_lock()} in R/obc-regime.R.
 #' @param max_inner   Max inner iterations per period (default 10)
+#' @param power       Power-posterior (generalised-Bayes) tempering exponent
+#'   \eqn{\zeta}: \code{$logpost} becomes
+#'   \eqn{\log p(\theta) + \zeta \cdot \log L(\theta)} while \code{$loglik}
+#'   keeps the RAW (untempered) value. \code{NULL} (default) resolves the
+#'   \code{power_posterior} package option ONCE, at factory time.
 #' @return Function(theta) -> list(logpost, loglik, logprior, regime_path)
 #' @export
 make_log_posterior_obc_pkf <- function(model, data, prior_spec, obs_vars,
                                         compiled, specs = NULL,
                                         me_variance = 1e-8,
-                                        max_inner   = 10L) {
+                                        max_inner   = 10L,
+                                        power       = NULL) {
 
   ## prior_spec/me_variance/max_inner are only referenced inside the returned
   ## closure, so without forcing they remain unevaluated promises pointing at
   ## the caller's frame. A mirai daemon that ships this closure before it has
   ## been called once would fail to resolve them ("object ... not found").
   force(prior_spec); force(me_variance); force(max_inner)
+  ## Resolve zeta ONCE here, not per draw (see .resolve_power_posterior).
+  power <- .resolve_power_posterior(power, "make_log_posterior_obc_pkf")
 
   if (is.null(specs)) specs <- obc_parse_tags(model)
 
@@ -171,8 +159,6 @@ make_log_posterior_obc_pkf <- function(model, data, prior_spec, obs_vars,
       !is.null(compiled$model$lead_lag_incidence)) {
     compiled$lead_lag_incidence <- compiled$model$lead_lag_incidence
   }
-  sys_cache <- cache_system_structure(compiled)
-
   endo    <- model$var_names
   obs_idx <- match(obs_vars, endo)
   if (any(is.na(obs_idx)))
@@ -182,73 +168,41 @@ make_log_posterior_obc_pkf <- function(model, data, prior_spec, obs_vars,
   if (is.data.frame(data)) data <- as.matrix(data)
   Y <- if (nrow(data) == length(obs_vars)) data else t(data)
 
-  ## me-floor hazard guard (see R/obc-regime.R .obc_warn_me_floor_lock() and
-  ## R/pruned-state-space.R): warn at most once per closure, not once per draw.
-  .me_floor_checked <- FALSE
+  ## Adapter over the shared closure builder (R/posterior-closure.R). Two
+  ## things are specific here beyond the PKF call itself: the cold
+  ## steady-state solve with the always-eigen() stationarity guard, and the
+  ## RETURN SHAPE -- this is the only factory that carries a `regime_path`
+  ## field, NULL on every rejected draw, which `reject_fields` supplies.
+  .make_posterior_closure(
+    model, data, prior_spec, obs_vars, compiled,
+    stationarity = "eigen",
+    loglik_fn = function(sol, params, ss, theta, me_floor_check, ...) {
+      dr_slack <- sol$dr
+      .obc_warn_me_floor_lock(
+        dr_slack, model, params, obs_vars, obs_idx, me_variance,
+        check = me_floor_check)
 
-  function(theta) {
-    lp <- log_prior(theta, prior_spec)
-    if (!is.finite(lp))
-      return(list(logpost = -Inf, loglik = -Inf, logprior = lp,
-                  regime_path = NULL))
+      # Seed the regime cache with the slack policy
+      regime_cache <- new.env(parent = emptyenv(), hash = TRUE)
+      obc_ensure_policy(0L, regime_cache, sol$sys, dr_slack, specs, obs_idx)
 
-    params <- .apply_theta_to_params(model, theta)
+      # Warm-start from a previously accepted regime path if provided
+      regime_hint <- attr(theta, "regime_hint")
 
-    ss_result <- solve_steady_state(model, compiled, params, verbose = FALSE)
-    if (is.null(ss_result) || !ss_result$converged)
-      return(list(logpost = -Inf, loglik = -Inf, logprior = lp,
-                  regime_path = NULL))
-
-    ## Re-derive SSM-computed params for a consistent linearization point
-    ## (no-op for non-SSM-parameter models; Tier 13 #1).
-    params <- ss_result$params %||% params
-    sys <- extract_system_matrices_fast(sys_cache, ss_result$ss, params)
-
-    dr_slack <- .solve_from_system(sys, model, compiled, ss_result$ss, params, FALSE)
-    if (is.null(dr_slack) || !dr_slack$bk_satisfied)
-      return(list(logpost = -Inf, loglik = -Inf, logprior = lp,
-                  regime_path = NULL))
-
-    max_eig <- max(Mod(eigen(
-      dr_slack$ghx[dr_slack$state_idx, , drop = FALSE],
-      only.values = TRUE
-    )$values))
-    if (max_eig >= 1)
-      return(list(logpost = -Inf, loglik = -Inf, logprior = lp,
-                  regime_path = NULL))
-
-    .obc_warn_me_floor_lock(
-      dr_slack, model, params, obs_vars, obs_idx, me_variance,
-      check = !.me_floor_checked &&
-        isTRUE(getOption("dynhr.me_floor_check", TRUE)))
-    .me_floor_checked <<- TRUE   # guard once per closure, not per MCMC draw
-
-    # Seed the regime cache with the slack policy
-    regime_cache <- new.env(parent = emptyenv(), hash = TRUE)
-    obc_ensure_policy(0L, regime_cache, sys, dr_slack, specs, obs_idx)
-
-    # Warm-start from a previously accepted regime path if provided
-    regime_hint <- attr(theta, "regime_hint")
-
-    kf <- kalman_filter_obc_pkf(
-      Y, dr_slack, regime_cache, sys,
-      model, params, obs_vars, specs,
-      obs_idx          = obs_idx,
-      regime_path_init = regime_hint,
-      me_variance      = me_variance,
-      max_inner        = max_inner,
-      return_filtered  = FALSE,
-      return_shocks    = FALSE
-    )
-    if (is.null(kf) || !is.finite(kf$loglik))
-      return(list(logpost = -Inf, loglik = -Inf, logprior = lp,
-                  regime_path = NULL))
-
-    list(
-      logpost     = kf$loglik + lp,
-      loglik      = kf$loglik,
-      logprior    = lp,
-      regime_path = kf$regime_path
-    )
-  }
+      kf <- kalman_filter_obc_pkf(
+        Y, dr_slack, regime_cache, sol$sys,
+        model, params, obs_vars, specs,
+        obs_idx          = obs_idx,
+        regime_path_init = regime_hint,
+        me_variance      = me_variance,
+        max_inner        = max_inner,
+        return_filtered  = FALSE,
+        return_shocks    = FALSE
+      )
+      if (is.null(kf) || !is.finite(kf$loglik)) return(NULL)
+      list(loglik = kf$loglik, extra = list(regime_path = kf$regime_path))
+    },
+    power         = power,
+    warm_start    = FALSE,
+    reject_fields = list(regime_path = NULL))
 }

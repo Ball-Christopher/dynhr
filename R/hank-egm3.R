@@ -8,17 +8,6 @@
   (1-wx)*(1-wy)*Z[ix,iy]+wx*(1-wy)*Z[ix+1,iy]+(1-wx)*wy*Z[ix,iy+1]+wx*wy*Z[ix+1,iy+1]
 }
 
-.hank3_projected_foc <- function(foc, start, lo, hi, tol=1e-8) {
-  raw <- try(nleqslv::nleqslv(start,foc,method="Broyden",global="dbldog",control=list(ftol=tol,maxit=50))$x,silent=TRUE)
-  z <- pmin(hi,pmax(lo,if(inherits(raw,"try-error")||any(!is.finite(raw)))start else raw))
-  # Projected Euler ascent: g>0 means the costly asset should increase.  At a
-  # lower bound g<=0 and at an upper bound g>=0 are the KKT conditions.
-  for(k in 1:1000L) { g<-foc(z); zn<-pmin(hi,pmax(lo,z+.05*g)); if(max(abs(zn-z))<tol){z<-zn;break};z<-zn }
-  g<-foc(z); interior<-z>lo+1e-7&z<hi-1e-7
-  kkt<-all((interior&abs(g)<1e-6)|(!interior&(z<=lo+1e-7&g<=1e-6|z>=hi-1e-7&g>=-1e-6)))
-  if(!kkt)stop("hank_egm3_solve: projected joint FOC failed complementarity")
-  z
-}
 
 .hank3_active_foc <- function(foc, start, lo, hi, tol=1e-7) {
   valid <- function(z) { g<-foc(z); int<-z>lo+1e-6&z<hi-1e-6; all((int&abs(g)<1e-5)|(!int&(z<=lo+1e-6&g<=1e-5|z>=hi-1e-6&g>=-1e-5))) }
@@ -57,6 +46,44 @@
     Vd_init=Vd,Vf_init=Vf,Va_init=Va,px=px,backend=backend)
 }
 
+## Shape validation shared by .hank_egm3_step() and the compiled kernel
+## (src/hank_egm3.cpp::egm3_check_shapes). Names the offending argument and
+## the shape it must have; the two implementations are kept deliberately
+## parallel so a caller gets the same diagnosis whichever branch runs.
+.hank_egm3_check_step_shapes <- function(d_grid, f_grid, a_grid, y, Pi,
+                                         Vd, Vf, Va) {
+  dm <- dim(Vd)
+  if (is.null(dm) || length(dm) != 4L)
+    stop(".hank_egm3_step: `Vd` must be a four-dimensional array ",
+         "(n_e x n_d x n_f x n_a); dim(Vd) is ",
+         if (is.null(dm)) "NULL" else paste(dm, collapse = " x "), ".",
+         call. = FALSE)
+  ne <- length(y); nd <- length(d_grid)
+  nf <- length(f_grid); na <- length(a_grid)
+  want <- c(ne, nd, nf, na)
+  if (!identical(as.integer(dm), as.integer(want)))
+    stop(".hank_egm3_step: dim(`Vd`) must be ",
+         "length(y) x length(d_grid) x length(f_grid) x length(a_grid) = ",
+         paste(want, collapse = " x "), "; got ",
+         paste(dm, collapse = " x "), ".", call. = FALSE)
+  for (nm in c("Vf", "Va")) {
+    x <- if (nm == "Vf") Vf else Va
+    if (is.null(dim(x)) || !identical(as.integer(dim(x)), as.integer(want)))
+      stop(".hank_egm3_step: `", nm, "` must have the same dim as `Vd` (",
+           paste(want, collapse = " x "), "); got ",
+           if (is.null(dim(x))) paste0("a length-", length(x),
+                                       " object with no dim")
+           else paste(dim(x), collapse = " x "), ".", call. = FALSE)
+  }
+  if (!is.matrix(Pi) || nrow(Pi) != ne || ncol(Pi) != ne)
+    stop(".hank_egm3_step: `Pi` must be an n_e x n_e matrix with ",
+         "n_e = length(y) = ", ne, "; got ",
+         if (is.matrix(Pi)) paste(dim(Pi), collapse = " x ")
+         else paste0("a non-matrix of length ", length(Pi)), ".",
+         call. = FALSE)
+  invisible(TRUE)
+}
+
 ## `threads` MUST be forwarded here. hank_egm3_step_cpp defaults it to 1, so
 ## every caller that omitted it ran the policy root single-threaded -- and this
 ## step is 87.8% of a fake-news Jacobian (measured by Rprof at the medium rung:
@@ -68,6 +95,13 @@
 .hank_egm3_step <- function(d_grid,f_grid,a_grid,y,Pi,rd,rf,ra,beta,eis,
                             chi0,chi1,chi2,phi0,phi1,phi2,Vd,Vf,Va,px=1,
                             threads=1L) {
+  ## Shape gate (B4). The compiled kernel reads dim(Vd) and then indexes every
+  ## grid with raw pointer arithmetic, so a dropped dim attribute or a grid
+  ## whose length disagrees with the array used to be an out-of-bounds READ,
+  ## not an error. The kernel now checks too -- these R checks exist so the
+  ## message is identical on BOTH branches below, including the singleton-f
+  ## reduction, which never reaches the kernel at all.
+  .hank_egm3_check_step_shapes(d_grid, f_grid, a_grid, y, Pi, Vd, Vf, Va)
   if (length(f_grid) == 1L)
     ## The singleton-f reduction has no three-asset compiled step; it routes to
     ## hank_egm3_solve's reduction path, which delegates to the two-asset

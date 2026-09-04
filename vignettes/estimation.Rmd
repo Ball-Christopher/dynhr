@@ -29,10 +29,15 @@ This vignette walks through Bayesian estimation of a DSGE model in dynhr:
 2. Build a log-posterior evaluator (Gaussian or cumulant-based)
 3. Find the posterior mode
 4. Draw from the posterior (RWMH, SMC, or NUTS)
-5. Inspect convergence and run diagnostics (D1–D30)
+5. Inspect convergence and run diagnostics (D0–D41)
 6. (Optional) Evaluate Ramsey, OSR, discretionary, or Nash welfare
 
-For a one-call pipeline skip to §6.
+For a one-call pipeline skip to §7.
+
+The running example is `nk_demo.mod` — a three-equation New Keynesian
+model — together with `nk_demo_data.csv`, 200 quarters of simulated
+output-growth observations.  Both ship with the package, so every chunk below
+runs from a clean install with no data of your own.
 
 ---
 
@@ -41,21 +46,29 @@ For a one-call pipeline skip to §6.
 Priors live in the `estimated_params` block of the `.mod` file:
 
 ```
-// example: nk_hs2016.mod
+// inst/extdata/models/nk_demo.mod
 estimated_params;
-  tau,    gamma_pdf,  2.00, 0.50;   // IES (inverse)
-  kappa,  beta_pdf,   0.33, 0.10;   // NK slope
-  psi1,   gamma_pdf,  1.50, 0.25;   // Taylor inflation
-  rho_R,  beta_pdf,   0.75, 0.10;   // interest rate smoothing
-  stderr eps_R, inv_gamma_pdf, 0.20, 0.10;
+// name,        distribution,  p1,    p2,    lower, upper
+  kappa,        beta_pdf,      0.10,  0.05,  0.001, 0.95;   // Phillips slope
+  phi_pi,       normal_pdf,    1.50,  0.25,  1.010, 4.00;   // Taylor: inflation
+  phi_y,        normal_pdf,    0.25,  0.10,  0.000, 2.00;   // Taylor: output gap
+  rho_r,        beta_pdf,      0.75,  0.10,  0.010, 0.99;   // rate smoothing
+  rho_g,        beta_pdf,      0.85,  0.08,  0.010, 0.99;   // demand persistence
+  rho_u,        beta_pdf,      0.50,  0.15,  0.010, 0.99;   // cost-push persistence
+  stderr e_g,   inv_gamma_pdf, 0.30,  2.00;
+  stderr e_u,   inv_gamma_pdf, 0.15,  2.00;
+  stderr e_m,   inv_gamma_pdf, 0.20,  2.00;
 end;
 ```
 
+The optional fifth and sixth columns are hard bounds; `phi_pi`'s lower bound
+of 1.01 keeps the sampler inside the determinacy region.
+
 Extract the prior specification in R:
 
-```{r priors, purl = FALSE}
+```{r priors, eval = TRUE, purl = FALSE}
 library(dynhr)
-mod    <- system.file("extdata", "models", "nk_hs2016.mod", package = "dynhr")
+mod    <- system.file("extdata", "models", "nk_demo.mod", package = "dynhr")
 model  <- parse_mod(mod, verbose = FALSE)
 priors <- prior_spec(model)   # extracts estimated_params block
 print(priors)
@@ -68,16 +81,18 @@ print(priors)
 
 ## 2  Build the log-posterior
 
-```{r posterior, purl = FALSE}
+```{r posterior, eval = TRUE, purl = FALSE}
 compiled <- compile_model(model, verbose = FALSE)
 
 # Observed data (T × n_obs matrix; column names must match obs vars in model)
-Y <- read.csv("my_data.csv")
-Y <- as.matrix(Y[, c("YGR", "INFL", "INT")])
+obs_vars <- c("ygr", "infl", "intr")
+Y <- read.csv(system.file("extdata", "models", "nk_demo_data.csv",
+                          package = "dynhr"))
+Y <- as.matrix(Y[, obs_vars])
 
 # Build the closure
 log_post <- make_posterior(model, data = Y, prior_spec = priors,
-                           obs_vars    = c("YGR", "INFL", "INT"),
+                           obs_vars    = obs_vars,
                            compiled    = compiled,
                            me_variance = 0)
 
@@ -108,8 +123,9 @@ than the per-step exact-diffuse phase (~500–800 ms/eval) — and returns the
 global mode-finders (CMA-ES) and MCMC sample the feasibility boundary
 heavily, this is frequently the difference between a tractable and an
 intractable estimation. If you genuinely want the exact-diffuse treatment for
-every near-unit root, pass `lik_init = "diffuse"` explicitly via
-`posterior_options`.
+every near-unit root, pass it explicitly:
+`make_posterior(..., lik_init = "diffuse")` (`run_full_estimation()` takes the
+same `lik_init` argument).
 
 ### Cumulant-based likelihood
 
@@ -122,7 +138,7 @@ when the data exhibit non-Gaussian features:
 ```{r cumulant, eval = FALSE, purl = FALSE}
 log_post_cumulant <- make_posterior(model, data = Y,
   prior_spec   = priors,
-  obs_vars     = c("YGR", "INFL", "INT"),
+  obs_vars     = obs_vars,
   compiled     = compiled,
   likelihood   = "cumulant",
   orders       = 1:4        # which cumulants to match
@@ -132,6 +148,74 @@ log_post_cumulant <- make_posterior(model, data = Y,
 The underlying `make_log_posterior_cumulant()` is also callable directly,
 and the individual cumulant functions `compute_third_cumulant()` and
 `compute_fourth_cumulant()` can be used standalone for analysis.
+
+### Nonlinear likelihood: the global (projection) particle filter
+
+Every likelihood above evaluates a *perturbation* solution. When the
+nonlinearity is the object of interest rather than a nuisance, the
+`"global_pf"` likelihood pairs a projection solve with a bootstrap particle
+filter, so the model is never linearised:
+
+```{r globalpf, eval = FALSE, purl = FALSE}
+log_post_gpf <- make_log_posterior(model, data = Y,
+  prior_spec  = priors,
+  obs_vars    = obs_vars,
+  compiled    = compiled,
+  likelihood  = "global_pf",
+  n_particles = 1000L,
+  poly_degree = 3L,     # Chebyshev degree of the policy approximation
+  n_quad      = 5L,     # quadrature nodes for the expectation
+  me_variance = 0.01    # particle filters need observation noise
+)
+```
+
+The estimate is unbiased for the marginal likelihood, so `pmmh()` over this
+closure is a valid pseudo-marginal sampler — provided you keep the default
+`seed = NULL`, which draws a fresh particle cloud per evaluation. A fixed
+seed makes the filter deterministic and breaks pseudo-marginal validity.
+`global_pf_sbc()` runs the rank-uniformity certification for this posterior.
+
+The underlying solver, `solve_global()`, is described in
+`vignette("solving")`, and its accuracy diagnostics (`euler_errors()`,
+`den_haan_marcet()`) are in the same place.
+
+### Mixed-frequency observations
+
+`obs_aggregation` declares that an observable is the *k*-period temporal
+aggregate of a higher-frequency model variable, so a monthly model can be
+estimated on quarterly data without leaving the monthly frequency:
+
+```{r mixedfreq, eval = FALSE, purl = FALSE}
+agg <- list(
+  gdp_q = list(of = "gdp_m", type = "flow_sum", k = 3L)
+)
+
+log_post_mf <- make_posterior(model, data = Y,
+                              prior_spec = priors,
+                              obs_vars   = obs_vars,
+                              compiled   = compiled,
+                              obs_aggregation = agg)
+```
+
+The aggregated observable is `NA` in the periods where it is not observed;
+the filter's existing missing-data path handles those unchanged. Four
+aggregators are supported, all of them fixed linear filters of the latent:
+
+| `type` | weights | use |
+|---|---|---|
+| `flow_sum` | `(1, …, 1)` | *k*-period sum of a flow |
+| `flow_mean` | `(1/k, …, 1/k)` | *k*-period average |
+| `stock_end` | `(1)` | end-of-period stock |
+| `triangle` | `(1, 2, …, k, …, 2, 1)/k` | Mariano–Murasawa growth-rate approximation |
+
+Implementation is fixed-weight state augmentation (Harvey 1989 §6.3;
+Mariano & Murasawa 2003): the *m*−1 lags of the latent are carried as extra
+states, so `ZZ` and `TT` stay constant and the filter's hot path is
+untouched. The cost is *m*−1 extra states per aggregated observable. A model
+with no `obs_aggregation` returns a byte-identical log-likelihood.
+`mf_augment_state_space()` exposes the augmentation directly, and
+`mf_expand_observations()` places a low-frequency series onto the
+high-frequency grid.
 
 ---
 
@@ -208,9 +292,29 @@ Laplace posterior covariance, and `laplace_log_marglik()` turns the mode plus
 that Hessian into a Laplace estimate of the log marginal likelihood (a cheap
 model-comparison score that does not need SMC):
 
+`posterior_hessian()` differentiates the state-space likelihood itself, so it
+takes the model pieces rather than the log-posterior closure: the parsed and
+compiled model, the decision rule and full parameter vector at the mode, the
+names of the estimated parameters, and the data.  `laplace_log_marglik()` reads
+the exact Hessian off a `run_mode_finding(use_exact_hessian = TRUE)` result:
+
 ```{r hessian-curvature, eval = FALSE, purl = FALSE}
-H  <- posterior_hessian(log_post, mode$theta_mode, t2_method = "adjoint_solution")
-lm <- laplace_log_marglik(log_post, mode$theta_mode, hessian = H)
+params_mode <- apply_theta_to_params(model, mode$theta_mode)
+dr_mode     <- solve_perturbation(model, compiled,
+                                  solve_steady(compiled, params_mode)$values,
+                                  params_mode, verbose = FALSE)
+
+H <- posterior_hessian(model, compiled, dr_mode, params_mode,
+                       param_names = priors$name,
+                       obs_vars = obs_vars, data = Y,
+                       include_prior = TRUE, prior_spec = priors,
+                       t2_method = "adjoint_solution")
+
+## Laplace evidence: from a mode result that carries the exact Hessian
+solved   <- solve_model(model)
+mode_res <- run_mode_finding(solved, data = Y, obs_vars = obs_vars,
+                             use_exact_hessian = TRUE, verbose = FALSE)
+lm <- laplace_log_marglik(mode_res)
 ```
 
 On weakly-identified or ill-conditioned posteriors, `check_hessian_conditioning()`
@@ -297,13 +401,35 @@ should have zero divergences.
 
 ## 7  One-call pipeline
 
-All of the above in \(<30\) lines:
+All of the above in one call.  This chunk actually runs (about 7 seconds) on
+the packaged `nk_demo` model and data:
 
-```{r onecall, purl = FALSE}
+```{r onecall, eval = TRUE, results = "hide", purl = FALSE}
 result <- run_full_estimation(
-  mod_file    = "nk_hs2016.mod",
+  mod_file    = mod,                # system.file(... "nk_demo.mod" ...) from §1
   data        = Y,
-  obs_vars    = c("YGR", "INFL", "INT"),
+  obs_vars    = obs_vars,
+  output_dir  = tempdir(),
+  sampler     = "smc",              # no mode required; gives log p(Y | M)
+  n_particles = 500L,
+  seed        = 1L,
+  verbose     = FALSE
+)
+```
+
+```{r onecall-summary, eval = TRUE, purl = FALSE}
+summary(result$chains)
+result$chains$log_marginal_lik
+```
+
+A production run would use many more particles, or the random-walk sampler
+with multiple chains:
+
+```{r onecall-rwmh, purl = FALSE}
+result <- run_full_estimation(
+  mod_file    = mod,
+  data        = Y,
+  obs_vars    = obs_vars,
   output_dir  = "output/",
   sampler     = "rwmh",
   n_draws     = 100000L,
@@ -346,7 +472,7 @@ where `"hessian"` recovered it fully). It errors unless you set
 After any sampler:
 
 ```{r diag, purl = FALSE}
-# Run the 30-diagnostic battery (D1–D30)
+# Run the diagnostic battery (D0–D41)
 diags <- run_diagnostics(
   model    = model,
   compiled = compiled,
@@ -367,11 +493,15 @@ cd <- chain_diagnostics(result$chains$chain)   # n_draws x n_par (or a chain lis
 print(cd)                                       # rhat, ess_bulk, ess_tail, mcse
 ```
 
-The diagnostic suite covers pre-estimation identification (D1–D4, D19–D26),
-MCMC quality (D5–D7), post-estimation fit (D8–D18), and advanced topics
-such as OBC identification (D27), regime-switching identification (D28),
-data-driven constraints (D29), and arbitrary-precision rank checks (D30).
-See `vignette("diagnostics")` for details.
+The diagnostic suite covers static equation-system rank (D0), pre-estimation
+identification (D1–D4, D19–D26, D37), MCMC quality (D5–D7), post-estimation fit
+(D8–D18), and advanced topics such as OBC identification and scenarios (D27,
+D31–D32), regime-switching identification (D28), data-driven constraints (D29),
+arbitrary-precision rank checks (D30), the "deep parameter" checks D33–D36, and
+Kalman-innovation whiteness (D41).  Three further diagnostics — D38
+(`diag_sloppiness()`), D39 (`diag_stability_map()`) and D40
+(`diag_near_unit_root()`) — are called directly rather than through the
+orchestrator.  See `vignette("diagnostics")` for details.
 
 Key convergence checks:
 
@@ -446,7 +576,7 @@ disc_result <- discretionary_policy(model,
 ### 9.6  Regime-dependent Ramsey
 
 - `ramsey_regime_deterministic()` — deterministic regime path with per-regime objectives
-- `ramsey_regime_markov()` — Markov-switching Ramsey with ergodic welfare
+- `ramsey_regime_independent()` — Markov-switching Ramsey with ergodic welfare
 
 ### 9.7  Sufficient-statistics optimal policy
 
@@ -486,6 +616,85 @@ chain_mat <- chains$chain
 # Use coda::as.mcmc(chain_mat) if coda is installed
 ```
 
+### Checkpointing and resuming a long run
+
+`saveRDS()` preserves the draws but not the sampler: restarting from it
+begins a fresh chain at a fresh adaptation state. For runs long enough to
+outlive a session or a scheduler slot, `mcmc()` checkpoints instead:
+
+```{r checkpoint, eval = FALSE, purl = FALSE}
+# First leg: writes a state pack every `flush_every` draws
+res1 <- mcmc(log_post, theta0, Sigma_prop,
+             n_draws = 5000, n_warmup = 2000,
+             checkpoint_dir = "output/chain1",
+             flush_every    = 1000)
+
+# Later, in a new session: continue where it stopped.
+# `n_warmup` stays as it was; grow `n_draws` to the new TOTAL.
+res2 <- mcmc(log_post, theta0, Sigma_prop,
+             n_draws = 20000, n_warmup = 2000,
+             checkpoint_dir = "output/chain1",
+             resume = TRUE)
+```
+
+The state pack carries the position, the log-posterior, the adaptation
+state and `.Random.seed`, so a resumed chain is statistically identical to
+the uninterrupted run. It is checksummed and written atomically, and
+`mcmc_chain_restore()` refuses a tampered pack or one saved mid-adaptation
+(pass `allow_mid_adaptation = TRUE` only if you know why you want that).
+`mcmc_chain_state()`, `mcmc_chain_save()`, `mcmc_chain_restore()` and
+`mcmc_chain_extend()` are the sampler-agnostic primitives underneath, for
+building the same behaviour into a bespoke sampler.
+
+---
+
+## 11  Delayed acceptance
+
+When a model has both a cheap approximate likelihood and an expensive exact
+one, `screen_fn` runs the cheap one first and only evaluates the expensive
+one on proposals that survive:
+
+```{r delayed, eval = FALSE, purl = FALSE}
+cheap <- make_posterior(model, data = Y, prior_spec = priors,
+                        obs_vars = obs_vars, compiled = compiled)
+
+exact <- make_log_posterior(model, data = Y, prior_spec = priors,
+                            obs_vars = obs_vars, compiled = compiled,
+                            likelihood = "tpf", me_variance = 0.01)
+
+res <- mcmc(exact, theta0, Sigma_prop,
+            n_draws = 10000, n_warmup = 2000,
+            screen_fn = cheap)
+```
+
+The two-stage acceptance ratio corrects for the screening, so the invariant
+distribution is still the exact posterior. The saving is real only when the
+screen rejects most proposals and is much cheaper than the target; a screen
+that disagrees with the target wastes both evaluations.
+
+---
+
+## 12  Method of moments (GMM / SMM)
+
+`method_of_moments()` estimates by matching model-implied moments to sample
+moments rather than by evaluating a likelihood — useful when the likelihood
+is unavailable, unreliable, or simply not the estimator you want to defend:
+
+```{r mom, eval = FALSE, purl = FALSE}
+mm <- method_of_moments(model, data = Y, obs_vars = obs_vars,
+                        moments   = list(orders = 1:2, lags = 0:4),
+                        method    = "gmm",       # or "smm"
+                        weighting = "optimal",   # identity/newey_west/diagonal
+                        two_step  = TRUE)
+```
+
+`method = "gmm"` uses analytic model moments; `"smm"` simulates them
+(`n_sim` replications of the sample, common random numbers across
+parameter draws). `weighting = "optimal"` runs the standard two-step
+procedure, with `"newey_west"` available for serially correlated moment
+conditions. The moment Jacobian is analytic where dynhr has one and falls
+back to finite differences otherwise (`jacobian = "auto"`).
+
 ---
 
 ## See also
@@ -494,16 +703,22 @@ chain_mat <- chains$chain
 - `?prior_spec` -- prior distribution families supported
 - `?make_posterior` -- posterior evaluator options
 - `?find_mode` -- optimiser methods (CMA-ES, Nelder-Mead, JADE)
-- `?estimate_mode`, `?estimate_posterior` -- stepwise estimation API
+- `?run_mode_finding`, `?run_posterior_estimation` -- stepwise estimation API
 - `?make_log_posterior_cumulant` -- cumulant-based posterior
+- `?make_log_posterior_global_pf`, `?global_pf_sbc` -- projection + particle filter
+- `?kalman_filter` (`obs_aggregation`), `?mf_augment_state_space` -- mixed frequency
+- `?mcmc` (`checkpoint_dir`, `resume`, `screen_fn`) -- checkpointing, delayed acceptance
+- `?mcmc_chain_state`, `?mcmc_chain_save`, `?mcmc_chain_restore` -- state packs
+- `?method_of_moments` -- GMM / SMM
+- `?forecast_backtest` -- out-of-sample scoring (see `vignette("diagnostics")`)
 - `?ramsey_model`, `?ramsey_nn1` -- Ramsey optimal policy
 - `?osr`, `?discretionary_policy` -- OSR and discretionary policy
 - `?nash_ramsey_cooperative`, `?nash_ramsey_openloop` -- Nash games
 - `?ramsey_obc_pf`, `?ramsey_obc_pwlinear` -- Ramsey with OBC
-- `?ramsey_regime_deterministic`, `?ramsey_regime_markov` -- regime-dependent
+- `?ramsey_regime_deterministic`, `?ramsey_regime_independent` -- regime-dependent
 - `?opp_sufficient_stats` -- sufficient-statistics OPP
 - `?welfare_compute`, `?welfare_ce_diff` -- welfare toolkit
-- `vignette("diagnostics")` -- the D1–D30 diagnostic battery
+- `vignette("diagnostics")` -- the D0–D41 diagnostic battery
 
 ---
 
@@ -524,6 +739,8 @@ Hansen, N. (2016). The CMA evolution strategy: A tutorial. *arXiv:1604.00772*.
 Herbst, E. P., & Schorfheide, F. (2015). *Bayesian Estimation of DSGE Models*. Princeton University Press.
 
 Hoffman, M. D., & Gelman, A. (2014). The No-U-Turn sampler: Adaptively setting path lengths in Hamiltonian Monte Carlo. *Journal of Machine Learning Research*, 15(1), 1593-1623.
+
+Mariano, R. S., & Murasawa, Y. (2003). A new coincident index of business cycles based on monthly and quarterly series. *Journal of Applied Econometrics*, 18(4), 427-443.
 
 Mutschler, W. (2015). Identification of DSGE models — The effect of higher-order approximation and pruning. *Journal of Economic Dynamics and Control*, 56, 1-33.
 

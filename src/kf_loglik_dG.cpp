@@ -240,19 +240,26 @@ List kf_loglik_dG_cpp(const arma::mat& Y,
     const arma::vec s_new = TT * s + K * v;
     const arma::mat AP    = A * P;
     const arma::mat BSig  = B * Sigma_e;
-    const arma::mat P_new = sym(AP * A.t() + BSig * B.t());
+    // TRUE measurement-noise law (F3-D): P' += K me_diag K'.
+    arma::mat P_new_raw = AP * A.t() + BSig * B.t();
+    if (me_variance != 0.0) P_new_raw += me_variance * (K * K.t());
+    const arma::mat P_new = sym(P_new_raw);
 
     // Advance tangent state:
     // ds' = dTT s + TT ds + dK v + K dv
     const arma::vec ds_new = dTT * s + TT * ds + dK_t * v + K * dv_t;
 
     // dP' = sym(dA P A' + A dP A' + A P dA' + dB Sig B' + B dSig B' + B Sig dB')
-    const arma::mat dP_new = sym(dA_t * P    * A.t() +
-                                 A    * dP   * A.t() +
-                                 AP   * dA_t.t() +
-                                 dB_t * Sigma_e * B.t() +
-                                 B    * dSig    * B.t() +
-                                 BSig * dB_t.t());
+    arma::mat dP_new_raw = dA_t * P    * A.t() +
+                           A    * dP   * A.t() +
+                           AP   * dA_t.t() +
+                           dB_t * Sigma_e * B.t() +
+                           B    * dSig    * B.t() +
+                           BSig * dB_t.t();
+    // Tangent of the ME Joseph term (me_diag is data): += me (dK K' + K dK')
+    if (me_variance != 0.0)
+      dP_new_raw += me_variance * (dK_t * K.t() + K * dK_t.t());
+    const arma::mat dP_new = sym(dP_new_raw);
 
     s  = s_new;  P  = P_new;
     ds = ds_new; dP = dP_new;
@@ -347,6 +354,13 @@ List kf_loglik_dG_cpp(const arma::mat& Y,
     // bar_K = outer(bar_s, v)
     arma::mat bar_K  = bar_s  * v.t();
     arma::mat dbar_K = dbar_s * v.t() + bar_s * dv.t();
+
+    // Adjoint (and its tangent) of the ME Joseph term P_t += K me K':
+    // bar_K += 2 me bar_P K; dbar_K += 2 me (dbar_P K + bar_P dK).
+    if (me_variance != 0.0) {
+      bar_K  += 2.0 * me_variance * (bar_P  * K);
+      dbar_K += 2.0 * me_variance * (dbar_P * K + bar_P * dK);
+    }
 
     // bar_v = K' bar_s
     arma::vec bar_v  = K.t()  * bar_s;

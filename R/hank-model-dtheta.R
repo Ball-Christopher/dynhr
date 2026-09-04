@@ -223,7 +223,7 @@ hank_model_dtheta_irf <- function(model, dZ, dtheta) {
 #' @param shock_specs Named list, one entry per exogenous shock, each with a
 #'   \code{rho} element (the driving path is \code{rho^t}, as in
 #'   \code{\link{hank_state_space}}).
-#' @param observables Character vector of observable names, in the column order
+#' @param obs_vars Character vector of observable names, in the column order
 #'   of the \code{Theta} matrices.
 #' @param param Character parameter name, or a \code{\link{hank_model_dtheta}}
 #'   result.
@@ -232,7 +232,7 @@ hank_model_dtheta_irf <- function(model, dZ, dtheta) {
 #' @seealso \code{\link{hank_dtheta_fn}},
 #'   \code{\link{hank_loglik_ar_structural_grad}}
 #' @export
-hank_dtheta_theta_list <- function(model, shock_specs, observables, param) {
+hank_dtheta_theta_list <- function(model, shock_specs, obs_vars, param) {
   dt <- if (is.character(param)) hank_model_dtheta(model, param) else param
   T_h <- model$T_h
   exo <- model$exogenous
@@ -242,8 +242,8 @@ hank_dtheta_theta_list <- function(model, shock_specs, observables, param) {
       stop("hank_dtheta_theta_list(): shock_specs[['", z, "']] needs a `rho`.")
     dZ <- stats::setNames(list(rho_z^(seq_len(T_h) - 1L)), z)
     d <- hank_model_dtheta_irf(model, dZ, dt)
-    matrix(vapply(observables, function(o) d[[o]], numeric(T_h)),
-           T_h, length(observables), dimnames = list(NULL, observables))
+    matrix(vapply(obs_vars, function(o) d[[o]], numeric(T_h)),
+           T_h, length(obs_vars), dimnames = list(NULL, obs_vars))
   }), exo)
 }
 
@@ -267,7 +267,7 @@ hank_dtheta_theta_list <- function(model, shock_specs, observables, param) {
 #' rebuilds to zero, which is the dominant term at scale.
 #'
 #' @param model_fn \code{function(theta)} returning a \code{\link{hank_model}}.
-#' @param shock_specs,observables As for \code{\link{hank_dtheta_theta_list}}.
+#' @param shock_specs,obs_vars As for \code{\link{hank_dtheta_theta_list}}.
 #' @param model Optional prebuilt \code{\link{hank_model}} to seed the memo
 #'   with; requires \code{theta}, and is used only while the requested
 #'   \code{theta} is \code{identical()} to it (any other \code{theta} rebuilds
@@ -294,7 +294,7 @@ hank_dtheta_theta_list <- function(model, shock_specs, observables, param) {
 #'   difference -- worth keeping for the first call, since a declared-derivative
 #'   set that omits a channel is exactly what this cannot self-detect)
 #' @export
-hank_dtheta_fn <- function(model_fn, shock_specs, observables, model = NULL,
+hank_dtheta_fn <- function(model_fn, shock_specs, obs_vars, model = NULL,
                            theta = NULL) {
   memo <- new.env(parent = emptyenv())
   memo$theta <- NULL; memo$model <- NULL; memo$dt <- list()
@@ -321,6 +321,6 @@ hank_dtheta_fn <- function(model_fn, shock_specs, observables, model = NULL,
     ## is not, so a moving rho costs the application and not the rebuild.
     hank_dtheta_theta_list(memo$model,
                            shock_specs_now %||% shock_specs,
-                           observables, memo$dt[[param]])
+                           obs_vars, memo$dt[[param]])
   }
 }

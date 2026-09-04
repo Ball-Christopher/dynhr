@@ -298,7 +298,10 @@ List kf_adjoint_diffuse_cpp(const arma::mat& Y,
         arma::mat B = RR - K * DD;
 
         arma::mat P_inf_new  = sym(TT * P_inf * TT.t());
-        arma::mat P_star_new = sym(A * P_star * A.t() + B * Sigma_e * B.t());
+        // TRUE measurement-noise law (F3-D): P' += K me_diag K'.
+        arma::mat P_star_raw = A * P_star * A.t() + B * Sigma_e * B.t();
+        if (me_variance != 0.0) P_star_raw += me_variance * (K * K.t());
+        arma::mat P_star_new = sym(P_star_raw);
 
         rec.cas         = CASE_A;
         rec.s_prev      = s;
@@ -402,7 +405,12 @@ List kf_adjoint_diffuse_cpp(const arma::mat& Y,
       step_valid[t]   = true;
 
       s      = TT * s + K * v;
-      P_star = sym(A * P_star * A.t() + B * Sigma_e * B.t());
+      // TRUE measurement-noise law (F3-D): P' += K me_diag K'.
+      {
+        arma::mat P_star_raw = A * P_star * A.t() + B * Sigma_e * B.t();
+        if (me_variance != 0.0) P_star_raw += me_variance * (K * K.t());
+        P_star = sym(P_star_raw);
+      }
     }
 
     step_store[t] = rec;
@@ -449,6 +457,9 @@ List kf_adjoint_diffuse_cpp(const arma::mat& Y,
       // Adjoint of s_t = TT s_prev + K v
       G_TT      += bar_s * s_prev.t();
       arma::mat bar_K     = bar_s * v.t();
+      // Adjoint of the ME Joseph term in P_t (P_t += K me_diag K'; me_diag
+      // is DATA): d tr(bar_P K me K') / dK = 2 bar_P K me.
+      if (me_variance != 0.0) bar_K += 2.0 * me_variance * (bar_P_star * K);
       arma::vec bar_v     = K.t() * bar_s;
       arma::vec bar_s_prev = TT.t() * bar_s;
 

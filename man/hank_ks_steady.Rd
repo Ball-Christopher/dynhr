@@ -28,3 +28,21 @@ aggregate assets equal the firm's capital demand, then returns the full
 steady-state het block and firm quantities.  The market-clearing solve
 doubles as an Aiyagari-style external check on the household block.
 }
+\examples{
+## Small grids keep the example quick; production calibrations use
+## n = 7 income states and 500+ asset points.
+inc    <- hank_income_rouwenhorst(rho = 0.95, sigma = 0.5, n = 3)
+a_grid <- hank_asset_grid(amax = 50, n = 100, amin = 0)
+
+ks <- hank_ks_steady(a_grid, inc$Pi, inc$e, beta = 0.98, eis = 1,
+                     alpha = 0.36, delta = 0.025)
+c(r = ks$r, w = ks$w, K = ks$K)
+
+## Asset-market clearing is the equilibrium condition that was solved
+all.equal(ks$block$A, ks$K, tolerance = 1e-6)
+}
+\seealso{
+\code{\link{hank_income_rouwenhorst}}, \code{\link{hank_asset_grid}},
+  \code{\link{hank_het_block}}, \code{\link{hank_ks_model}},
+  \code{\link{hank_het_jacobian}}
+}

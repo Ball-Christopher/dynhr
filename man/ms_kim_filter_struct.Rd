@@ -5,7 +5,7 @@
 \title{Kim-Nelson filter for structural MS-DSGE (regime-specific decision rules)}
 \usage{
 ms_kim_filter_struct(
-  Y,
+  data,
   ms_dr,
   model,
   params,
@@ -13,11 +13,14 @@ ms_kim_filter_struct(
   Sigma_e_by_regime = NULL,
   me_variance = 0,
   return_regime_probs = FALSE,
-  lik_init = c("auto", "stationary", "kappa")
+  return_state_path = FALSE,
+  return_collapse_diag = FALSE,
+  lik_init = c("auto", "stationary", "kappa"),
+  collapse = c("gpb2", "gpb3")
 )
 }
 \arguments{
-\item{Y}{Observation matrix (n_obs x T). May contain \code{NA}s.}
+\item{data}{Observation matrix (n_obs x T). May contain \code{NA}s.}
 
 \item{ms_dr}{An \code{MsDecisionRules} object from
 \code{\link{solve_ms_perturbation}}.}
@@ -33,13 +36,73 @@ ms_kim_filter_struct(
 shock covariance matrices. If \code{NULL}, a common
 \eqn{\Sigma_e} from \code{params} is used for all regimes.}
 
-\item{me_variance}{Scalar measurement-error variance (default 0).}
+\item{me_variance}{Scalar variance of TRUE i.i.d. measurement error
+\eqn{u_t \sim N(0, \code{me\_variance} \cdot I)} added
+to the measurement equation (default 0).  It enters both
+\eqn{F_{ij}} and the Joseph covariance update (the
+\eqn{K (\code{me\_variance} I) K'} term), so the
+log-likelihood is the exact joint-Gaussian likelihood of
+that model.  This is the same semantics as
+\code{\link{ms_kim_filter}} --- see its
+\emph{Measurement error} section --- and it DIFFERS from
+the multivariate \code{\link{kalman_filter}} methods,
+where \code{me_variance} is an \eqn{F}-only regulariser;
+\code{kalman_filter(method = "univariate")} is the
+single-regime true-ME oracle.}
 
 \item{return_regime_probs}{Logical; return \code{n_regimes x T} filtered
 regime probability matrix (default FALSE).}
 
+\item{return_state_path}{Logical; if \code{TRUE} additionally return the
+per-regime collapsed filtered moments, the per-path
+Durbin-Koopman backward blocks and the state-space pieces
+\code{\link{ms_kim_smoother_struct}} consumes
+(\code{beta_filt}, \code{P_filt}, \code{dk_path},
+\code{joint_filt}, \code{cell_filt},
+\code{TT_list}, \code{RR_list}, \code{QQ_list},
+\code{Sigma_e_list}, \code{P0_list}).  \code{joint_filt}
+is the \code{h x h x T} array of Hamilton-filter posterior
+JOINT regime probabilities
+\eqn{\Pr[s_{t-1} = i, s_t = j \mid y_{1:t}]};
+\code{cell_filt} (\code{"gpb3"} only) is the length-T
+list of UNCOLLAPSED per-cell posteriors, the per-TRIPLE
+filtered joint the GPB(3) backward pass needs.  Implies
+\code{return_regime_probs = TRUE}.  The stored blocks are
+by-products of the measurement update that has already
+happened, so the flag is numerically inert: the
+log-likelihood and the regime probabilities are
+BIT-IDENTICAL with and without it (pinned in
+\code{test-ms-smoother-struct.R}).  Default \code{FALSE}.}
+
+\item{return_collapse_diag}{Logical; if \code{TRUE} additionally return
+\code{collapse_diag} (\code{n_regimes x T}) and
+\code{collapse_max}, the GPB(2) COLLAPSE-QUALITY
+statistic.  See the "Collapse quality" section of
+\code{\link{ms_kim_filter}}; this filter is where it
+matters most, because with regime-specific
+\code{ZZ_s} / \code{d_s} the path means separate much
+faster than in the shock-variance-only model.  Default
+\code{FALSE}.}
+
 \item{lik_init}{State covariance initialisation: \code{"auto"},
 \code{"stationary"}, or \code{"kappa"}.}
+
+\item{collapse}{Character; the GPB collapse depth.  \code{"gpb2"}
+(default, and bit-identical to every release before this argument
+existed) is Kim's filter: it keeps \eqn{h} Gaussians, collapsing
+\eqn{h^2 \to h} each period on the LAST regime.  \code{"gpb3"} keeps
+\eqn{h^2} Gaussians indexed by the last TWO regimes
+\eqn{(s_{t-1}, s_t)}, collapsing \eqn{h^3 \to h^2}; it costs about
+\eqn{h} times as much per period and is exact whenever GPB(2)'s error
+is entirely due to the one-period collapse.  Use it when
+\code{collapse_max} from a \code{"gpb2"} run is O(1) nats or more (see
+the \emph{Collapse quality} section).  \code{return_state_path} is
+supported under \code{"gpb3"}, but the state path then carries the
+\eqn{h^2} pair-indexed components, which the Kim SMOOTHERS route to
+their own PAIR-INDEXED backward pass (F4-D): an adjoint per pair
+collapsed with the \eqn{h^3} smoothed joint
+\eqn{\Pr[s_{t-2}, s_{t-1}, s_t \mid y_{1:T}]}, whose weights come from
+\code{cell_filt}.}
 }
 \value{
 A list with:
@@ -49,6 +112,16 @@ A list with:
       \code{return_regime_probs = TRUE}, otherwise \code{NULL}.}
     \item{\code{n_obs}}{Number of observed variables.}
     \item{\code{n_T}}{Number of time periods.}
+    \item{\code{beta_filt}, \code{P_filt}, \code{dk_path},
+      \code{joint_filt}, \code{cell_filt}, \code{collapse},
+      \code{TT_list},
+      \code{RR_list}, \code{QQ_list}, \code{Sigma_e_list}, \code{P0_list},
+      \code{d_list}, \code{state_names}, \code{shock_names},
+      \code{lik_init}}{Present only when
+      \code{return_state_path = TRUE} (\code{cell_filt} is \code{NULL}
+      unless \code{collapse = "gpb3"}).}
+    \item{\code{collapse_diag}, \code{collapse_max}}{Present only when
+      \code{return_collapse_diag = TRUE}.}
   }
 }
 \description{
@@ -62,4 +135,7 @@ extracted from an \code{MsDecisionRules} object (output of
 The shock covariance \eqn{\Sigma_e} is per-regime from the decision rules;
 for shared-\eqn{\Sigma_e} with only structural params switching, supply the
 same \code{Sigma_e} for all regimes (the common case).
+}
+\seealso{
+\code{\link{ms_kim_smoother_struct}}, \code{\link{ms_kim_filter}}
 }

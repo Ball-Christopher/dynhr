@@ -31,6 +31,8 @@
 #'   (default 500).  Fewer iterations are acceptable since we only need
 #'   a rough comparison.
 #' @param verbose      Print progress messages.
+#' @param meta         Optional [diag_meta()] list applied to the plots
+#'   (model name, sample size); `NULL` derives a default from the model.
 #' @return A \code{dynhr_diagnostic} list.
 #' @export
 diag_prior_sensitivity <- function(solved,
@@ -40,7 +42,8 @@ diag_prior_sensitivity <- function(solved,
                                     me_variance    = 0,
                                     threshold      = 0.50,
                                     n_iter         = 500L,
-                                    verbose        = TRUE) {
+                                    verbose        = TRUE,
+                                    meta           = NULL) {
 
   .vcat <- function(...) if (verbose) cat(...)
 

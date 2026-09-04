@@ -4,7 +4,7 @@
 \alias{hank_dtheta_theta_list}
 \title{Parameter derivatives of the per-shock MA coefficients}
 \usage{
-hank_dtheta_theta_list(model, shock_specs, observables, param)
+hank_dtheta_theta_list(model, shock_specs, obs_vars, param)
 }
 \arguments{
 \item{model}{A \code{\link{hank_model}}.}
@@ -13,7 +13,7 @@ hank_dtheta_theta_list(model, shock_specs, observables, param)
 \code{rho} element (the driving path is \code{rho^t}, as in
 \code{\link{hank_state_space}}).}
 
-\item{observables}{Character vector of observable names, in the column order
+\item{obs_vars}{Character vector of observable names, in the column order
 of the \code{Theta} matrices.}
 
 \item{param}{Character parameter name, or a \code{\link{hank_model_dtheta}}

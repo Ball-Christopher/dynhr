@@ -7,7 +7,7 @@
 hank_mixture_laplace(
   theta0,
   config,
-  Y = NULL,
+  data = NULL,
   dD_hat = NULL,
   metric = NULL,
   m_lev_hat = NULL,
@@ -27,10 +27,10 @@ any coordinate not in \code{par_names}: \code{$centre}, \code{$spread}, and
 (optionally) \code{$omega} (length-2 mixture weights). Same shape as the
 \code{theta} argument of \code{\link{hank_mixture_joint_logpost}}.}
 
-\item{config, Y, dD_hat, metric, m_lev_hat, level_metric, log_prior}{Passed through
+\item{config, data, dD_hat, metric, m_lev_hat, level_metric, log_prior}{Passed through
 verbatim to \code{\link{hank_mixture_joint_logpost}} on every evaluation;
 supply the same channel arguments you intend to sample under (at least one
-of \code{Y}, \code{m_lev_hat}, or \code{dD_hat}+\code{metric}).}
+of \code{data}, \code{m_lev_hat}, or \code{dD_hat}+\code{metric}).}
 
 \item{par_names}{Character subset of \code{c("centre", "spread", "omega1")}
 giving the FREE coordinates (default \code{c("centre", "spread")}).

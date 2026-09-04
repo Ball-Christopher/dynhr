@@ -40,6 +40,15 @@ the first slice only (2-D case) or omitted (3-D case).}
 \value{
 Matrix (n_periods x n_endo) when \code{n_replications = 1};
   3-D array (n_periods x n_endo x n_replications) when \code{> 1}.
+
+  The values are \strong{deviations from the steady state}; the same paths
+  in LEVELS are attached as \code{attr(., "levels")}. Every filtering and
+  smoothing entry point -- \code{\link{kalman_filter}},
+  \code{\link{kalman_smoother}}, \code{\link{forecast_backtest}},
+  \code{\link{realtime_decomposition}} -- takes LEVELS and subtracts the
+  model's steady state itself, so feed them
+  \code{attr(sim, "levels")[, obs_vars]}, not the raw return value, unless
+  the observables' steady states are zero.
 }
 \description{
 Simulate the model forward from steady state

@@ -11,7 +11,7 @@ posterior_hessian(
   params,
   param_names,
   obs_vars,
-  Y,
+  data,
   me_variance = 0,
   include_prior = FALSE,
   prior_spec = NULL,
@@ -41,7 +41,7 @@ point.}
 
 \item{obs_vars}{character vector of observable variable names.}
 
-\item{Y}{n_obs x T observation matrix (no NAs).}
+\item{data}{n_obs x T observation matrix (no NAs).}
 
 \item{me_variance}{scalar measurement-error variance (default 0).}
 

@@ -4,7 +4,6 @@
 ##
 ## Provides:
 ##   obc_build_binding_sys()   -- substitute constraint equations into Jacobians
-##   obc_binding_constant()    -- compute bound-induced constant offsets
 ##   obc_solve_binding()       -- OccBin terminal-substitution policy solve
 ##
 ## The OccBin approach (Guerrieri-Iacoviello 2015) constructs the binding-regime
@@ -72,36 +71,6 @@ obc_build_binding_sys <- function(sys, specs) {
   sys_b$f_exo   <- f_exo_b
 
   list(sys_b = sys_b, const_b = const_b)
-}
-
-
-#' Compute the binding-regime constant offsets
-#'
-#' The bound value (e.g. -0.00401606 for ZLB) is non-zero in deviation-from-SS
-#' form, so pinning var_t = bound creates a non-homogeneous system. The
-#' "binding-regime steady state" (where all variables settle if the OBC keeps
-#' binding, with shocks at zero) satisfies:
-#'
-#'   (f_minus_b + f_zero_b + f_plus_b) * c_full = const_b
-#'
-#' Splits c_full into a state-level constant (c_state, for the transition
-#' equation) and an observable-level constant (c_obs, for the measurement
-#' equation).
-#'
-#' @param sys_b     Binding-regime system matrices (from obc_build_binding_sys)
-#' @param const_b   Constant vector from obc_build_binding_sys
-#' @param state_idx Integer vector: state variable indices (from dr$state_idx)
-#' @param obs_idx   Integer vector: observable variable indices in endo vector
-#' @return List with $c_full (n_endo), $c_state (n_state), $c_obs (n_obs)
-#' @noRd
-obc_binding_constant <- function(sys_b, const_b, state_idx, obs_idx) {
-  A <- sys_b$f_minus + sys_b$f_zero + sys_b$f_plus
-  c_full <- solve(A, const_b)
-  list(
-    c_full  = c_full,
-    c_state = c_full[state_idx],
-    c_obs   = c_full[obs_idx]
-  )
 }
 
 

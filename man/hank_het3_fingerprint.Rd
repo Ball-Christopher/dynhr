@@ -55,3 +55,4 @@ hank_het3_fingerprint(blk)
 \seealso{
 \code{\link{hank_het3_manifest}} (run provenance, not identity)
 }
+\keyword{internal}

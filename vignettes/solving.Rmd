@@ -93,8 +93,8 @@ All residuals should be below `1e-10` for reliable perturbation.
 When a `.mod` file contains a `steady_state_model` block, dynhr evaluates
 it analytically and uses the result as the Newton starting point — or
 directly if it already satisfies the model equations.  The RBC model uses
-numerical Newton only; models that ship a `steady_state_model` block seed the
-solver from that closed-form starting point instead.
+numerical Newton only; see `nk_demo.mod` for a model that relies on the
+block pattern.
 
 ---
 
@@ -531,15 +531,96 @@ ss_seeded <- solve_steady(compiled, params,
 
 ---
 
+## 14  Global (projection) solutions
+
+Perturbation approximates the policy function around the steady state. When
+the state travels far enough that a local expansion stops being credible —
+large shocks, strong curvature, an occasionally binding constraint you do
+not want to treat piecewise — `solve_global()` solves the model on a
+Chebyshev collocation grid instead:
+
+```{r global, eval = FALSE}
+gsol <- solve_global(compiled, steady$values, params,
+                     poly_degree = 3L,   # Chebyshev degree per state
+                     n_quad      = 5L,   # quadrature nodes for E_t
+                     n_nodes     = 7L)   # collocation nodes per state
+```
+
+The default `state_domain` is measured rather than guessed: it is derived
+from the model's own shock process and unconditional state dispersion, so an
+AR(1) with a large innovation gets a wider grid automatically. Pass
+`state_domain` explicitly to override. `init_from_perturbation = TRUE`
+(default) seeds the iteration from the perturbation solution, which is
+almost always the fastest reliable start.
+
+`simulate()` works on the returned `GlobalSolution` object, and
+`make_log_posterior(likelihood = "global_pf")` estimates on it without
+linearising (see `vignette("estimation")`).
+
+### 14.1  Is the solution accurate enough?
+
+A global solution is only worth the cost if you check it. Two standard
+accuracy diagnostics are available, and both work on perturbation solutions
+too, so they can be used to decide *whether* you need a global solve:
+
+```{r accuracy, eval = FALSE}
+# Unit-free Euler-equation residuals, in consumption units:
+# log10(err) = -3 means an error of $1 per $1000 spent.
+ee <- euler_errors(gsol, n_points = 1000)
+
+# Den Haan & Marcet (1994): are the residuals orthogonal to the
+# information set? A rejection means the solution is systematically wrong,
+# not merely imprecise.
+dhm <- den_haan_marcet(gsol, T_sim = 10000, n_reps = 100)
+```
+
+`euler_errors()` is model-agnostic — it reads the Euler equations from the
+parsed model rather than assuming RBC parameter names.
+
+---
+
+## 15  Markov-switching models
+
+For models whose parameters switch across regimes according to a Markov
+chain, the filtering, smoothing and IRF stack is regime-aware:
+
+```{r ms, eval = FALSE}
+# ms_spec declares the regimes, their parameter values and the transition
+# matrix; see ?ms_kim_filter for its structure.
+filt <- ms_kim_filter(data = Y, dr = dr, model = model, params = params,
+                      obs_vars = obs_vars, ms_spec = ms_spec,
+                      return_regime_probs = TRUE)
+
+smo  <- ms_kim_smoother(data = Y, dr = dr, model = model, params = params,
+                        obs_vars = obs_vars, ms_spec = ms_spec,
+                        collapse = "gpb3")
+
+irf  <- ms_irf(dr, model, ms_spec = ms_spec, n_periods = 40)
+```
+
+Kim's filter collapses the regime-conditional Kalman recursions to keep the
+state count finite. `collapse = "gpb2"` (the default) collapses over one
+lag; `collapse = "gpb3"` keeps the pair `(s_{t-1}, s_t)` and collapses over
+two, which is strictly weaker as an approximation and markedly more accurate
+when regimes are persistent and the data are informative — at roughly 1.75×
+the cost. `ms_kim_smoother_struct()` is the counterpart for *structural*
+Markov switching (switching in the structural equations rather than in the
+reduced-form matrices).
+
+---
+
 ## See also
 
 - `vignette("estimation")` — Bayesian estimation pipeline
-- `vignette("diagnostics")` — diagnostic battery D1–D30
+- `vignette("diagnostics")` — diagnostic battery D0–D41
 - `?solve_perturbation_order2`, `?solve_perturbation_order3` — higher-order solvers
 - `?solve_obc_lcp`, `?occbin_solve_path` — OBC tools
 - `?solve_sigma_cross`, `?solve_sigma_order4` — sigma-correction terms
 
 ---
+- `?solve_global`, `?simulate.GlobalSolution` -- projection solutions
+- `?euler_errors`, `?den_haan_marcet` -- solution accuracy
+- `?ms_kim_filter`, `?ms_kim_smoother`, `?ms_irf` -- Markov switching
 
 ## References
 
@@ -553,9 +634,13 @@ Boehl, G. (2020). Efficient solution and computation of models with occasionally
 
 Cottle, R. W., Pang, J.-S., & Stone, R. E. (2009). *The Linear Complementarity Problem*. SIAM.
 
+Den Haan, W. J., & Marcet, A. (1994). Accuracy in simulations. *Review of Economic Studies*, 61(1), 3-17.
+
 Guerrieri, L., & Iacoviello, M. (2015). OccBin: A toolkit for solving dynamic models with occasionally binding constraints easily. *Journal of Monetary Economics*, 70, 22-38.
 
 Kalman, R. E. (1960). A new approach to linear filtering and prediction problems. *Journal of Basic Engineering*, 82(1), 35-45.
+
+Kim, C.-J. (1994). Dynamic linear models with Markov-switching. *Journal of Econometrics*, 60(1-2), 1-22.
 
 Klein, P. (2000). Using the generalized Schur form to solve a multivariate linear rational expectations model. *Journal of Economic Dynamics and Control*, 24(10), 1405-1423.
 

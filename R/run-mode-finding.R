@@ -176,11 +176,21 @@
 #'   }
 #'
 #' @examples
-#' \dontrun{
-#' mod  <- solve_model("my_model.mod")
-#' data <- read.csv("data.csv")
-#' mode <- run_mode_finding(mod, data, obs_vars = c("y", "pi", "r"))
-#' }
+#' ## Model and data both ship with the package
+#' solved   <- solve_model(system.file("extdata/models/nk_demo.mod",
+#'                                     package = "dynhr"), verbose = FALSE)
+#' obs_vars <- c("ygr", "infl", "intr")
+#' Y <- as.matrix(read.csv(system.file("extdata/models/nk_demo_data.csv",
+#'                                     package = "dynhr"))[, obs_vars])
+#'
+#' ## n_iter is capped here to keep the example quick
+#' mode <- run_mode_finding(solved, Y, obs_vars = obs_vars,
+#'                          n_iter = 200L, verbose = FALSE)
+#' mode
+#' round(mode$theta_mode, 4)
+#'
+#' ## The proposal covariance feeds straight into mcmc()
+#' dim(mode$Sigma_prop)
 #'
 #' @seealso \code{\link{solve_model}}, \code{\link{run_posterior_estimation}},
 #'   \code{\link{find_mode}}, \code{\link{make_posterior}}
@@ -1024,6 +1034,41 @@ build_sigma_prop <- function(lp_fn, theta_mode, prior_spec,
       hess <- num_hessian(lp_fn, theta_mode, h = h)
     }
   }
+  .pc   <- .proposal_cov_from_hessian(hess, prior_spec, theta_mode, verbose)
+  V_mode <- .pc$V_mode
+  Sigma  <- .pc$Sigma
+  Sigma
+}
+
+
+
+#' Posterior-curvature proposal covariance from a Hessian at the mode
+#'
+#' Shared by \code{run_mode_finding()} and the one-call estimation entry
+#' points (\code{run_full_estimation()}, \code{estimate-runner.R}). Extracted
+#' 2026-09-04: the two samplers used to test \code{mode_res$V_mode}, which
+#' \code{.run_mode_finding()} never sets, so the Hessian branch was DEAD and
+#' every RWMH proposal silently came from prior variances. On a well-identified
+#' posterior that froze the chain outright (0\% acceptance, zero posterior
+#' variance) while the inverse-Hessian proposal sampled at 23.5\%.
+#'
+#' @param hess Hessian of the LOG-posterior at the mode (negative definite
+#'   there), n_par x n_par.
+#' @param prior_spec Prior specification; \code{$std} supplies the per-
+#'   parameter scale used to cap genuinely flat eigen-directions.
+#' @param theta_mode Named mode vector (supplies the dimnames).
+#' @param verbose Passed through to the \code{.vcat()} progress notes.
+#' @return \code{list(V_mode, Sigma)} — the regularised inverse-Hessian
+#'   posterior covariance and the scaled RWMH proposal covariance.
+#' @noRd
+.proposal_cov_from_hessian <- function(hess, prior_spec, theta_mode,
+                                       verbose = TRUE) {
+  n_par <- length(theta_mode)
+  ## `.vcat` is a LOCAL closure in each caller (run-mode-finding.R:251, :945),
+  ## not a package-level function, so it must be re-made here or the
+  ## regularisation branches below would fail to find it.
+  .vcat <- function(...) if (verbose) cat(...)
+
   if (any(!is.finite(hess)) ||
       !(is.finite(rcond(-hess)) && rcond(-hess) > .Machine$double.eps)) {
     ## Non-finite entries or ill-conditioned: use .make_pd to preserve finite
@@ -1098,9 +1143,8 @@ build_sigma_prop <- function(lp_fn, theta_mode, prior_spec,
     Sigma <- eig$vectors %*% diag(pmax(eig$values, 1e-6), nrow = n_par) %*% t(eig$vectors)
   }
 
-  Sigma
+  list(V_mode = V_mode, Sigma = Sigma)
 }
-
 
 #' Numerical Hessian via central differences
 #' @noRd

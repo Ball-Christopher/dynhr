@@ -55,46 +55,6 @@
 
 
 ## ---------------------------------------------------------------------------
-## Internal: multivariate-t log-density
-## ---------------------------------------------------------------------------
-## log p(v; 0, Sigma, nu) for the multivariate Student-t with
-##   location 0, scale matrix Sigma (k x k, PD), df nu > 0.
-##
-## Arguments:
-##   v       numeric k-vector (innovation).
-##   Sigma   k x k PD scale matrix.
-##   nu      scalar degrees-of-freedom (must be > 0).
-##   Sigma_chol  (optional) precomputed upper Cholesky of Sigma.
-##
-## Returns: scalar log-density (may be -Inf on numerical failure).
-##
-#' @noRd
-.log_mvt <- function(v, Sigma, nu, Sigma_chol = NULL) {
-  k <- length(v)
-  stopifnot(k >= 1L, nu > 0)
-
-  if (is.null(Sigma_chol)) {
-    Sigma_chol <- tryCatch(chol(Sigma), error = function(e) NULL)
-    if (is.null(Sigma_chol)) return(-Inf)
-  }
-
-  log_det_Sigma <- 2 * sum(log(diag(Sigma_chol)))
-  Sigma_inv     <- chol2inv(Sigma_chol)
-
-  ## Mahalanobis^2: v' Sigma^{-1} v
-  Q <- drop(crossprod(v, Sigma_inv %*% v))
-
-  ## Normalizing constants
-  ## lgamma((nu + k) / 2) - lgamma(nu / 2) - (k / 2) * log(nu * pi)
-  log_norm <- lgamma((nu + k) / 2) - lgamma(nu / 2) -
-    (k / 2) * log(nu * pi)
-
-  log_norm - 0.5 * log_det_Sigma -
-    (nu + k) / 2 * log1p(Q / nu)
-}
-
-
-## ---------------------------------------------------------------------------
 ## kalman_filter_student_t()
 ## ---------------------------------------------------------------------------
 ##

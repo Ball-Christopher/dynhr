@@ -86,6 +86,26 @@ Higher orders extend via successive approximation:
   Order 3: Binning (2013) recursive Sylvester with Faà di Bruno
   Orders 4-5: Levintal (2017) compact tensor Sylvester recursion
 }
+\examples{
+model    <- parse_mod(system.file("extdata/models/rbc.mod",
+                                  package = "dynhr"), verbose = FALSE)
+compiled <- compile_model(model, verbose = FALSE)
+steady   <- solve_steady(compiled, model$param_values,
+                         endo_names = model$var_names,
+                         exo_names  = model$varexo_names, verbose = FALSE)
+
+dr <- solve_perturbation(model, compiled, steady$values,
+                         model$param_values, verbose = FALSE)
+dr$bk_satisfied            # TRUE when Blanchard-Kahn holds
+dim(dr$ghx)                # state transition
+dim(dr$ghu)                # shock impact (unit shocks; excludes Sigma_e)
+
+## Order 2 needs a model compiled to at least that order
+compiled2 <- compile_model(model, max_order = 2L, verbose = FALSE)
+dr2 <- solve_perturbation(model, compiled2, steady$values,
+                          model$param_values, order = 2L, verbose = FALSE)
+class(dr2)
+}
 \references{
 Klein, P. (2000). Using the generalized Schur form to solve a multivariate
     linear rational expectations model. \emph{Journal of Economic Dynamics and
@@ -99,4 +119,9 @@ Klein, P. (2000). Using the generalized Schur form to solve a multivariate
     short-run and long-run restrictions. \emph{Norges Bank Working Paper}.
   Levintal, O. (2017). Fifth-order perturbation solution of DSGE models.
     \emph{Journal of Economic Dynamics and Control}, 80, 1-16.
+}
+\seealso{
+\code{\link{compile_model}}, \code{\link{solve_steady}},
+  \code{\link{compute_irfs}}, \code{\link{simulate_model}},
+  \code{\link{bk_distance}}
 }

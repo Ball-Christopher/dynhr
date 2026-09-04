@@ -90,8 +90,14 @@ fit$fh      # ~ 0
 
 }
 \references{
-Sims, C. A. \emph{csminwel}.
-  \url{http://sims.princeton.edu/yftp/optimize/}.
+Sims, C. A. \emph{csminwel} (optimization software).
+  \url{https://www.princeton.edu/~sims/#optimize}. The canonical file
+  location, \code{http://sims.princeton.edu/yftp/optimize/}, has been
+  unreachable since 2026 and is preserved in the Internet Archive:
+  \url{https://web.archive.org/web/20180409211528/http://sims.princeton.edu/yftp/optimize/mfiles/csminwel.m}.
+  This is a base-R port of Sims's own MATLAB files, not of the GPL forks
+  shipped with Dynare -- see the provenance note at the top of
+  \code{R/csminwel.R}.
 }
 \seealso{
 \code{\link{match_irfs}}, \code{\link[stats]{optim}}

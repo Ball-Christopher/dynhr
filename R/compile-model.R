@@ -128,6 +128,17 @@ check_model <- function(model) {
 #'   so upgrading dynhr invalidates stale entries. Useful for batch/replication
 #'   workflows that recompile the same large models repeatedly.
 #' @return An object of class "dynhr_compiled".
+#' @seealso \code{\link{parse_mod}}, \code{\link{solve_steady}},
+#'   \code{\link{solve_perturbation}}
+#' @examples
+#' model    <- parse_mod(system.file("extdata/models/rbc.mod",
+#'                                   package = "dynhr"), verbose = FALSE)
+#' compiled <- compile_model(model, verbose = FALSE)
+#' compiled
+#'
+#' ## Raise max_order to unlock higher-order perturbation later
+#' compiled2 <- compile_model(model, max_order = 2L, verbose = FALSE)
+#' compiled2$max_order
 #' @export
 compile_model <- function(model, verbose = FALSE, max_order = 1L,
                           param_deriv = c("auto", "on", "off", "second"),
@@ -214,8 +225,18 @@ compile_model <- function(model, verbose = FALSE, max_order = 1L,
 }
 
 
-#' Print method for dynhr_compiled
-#' @noRd
+#' Print a compiled dynhr model
+#'
+#' Prints a one-screen summary of a `dynhr_compiled` object: variable and
+#' parameter counts, and the shapes of the static and dynamic residual /
+#' Jacobian blocks.
+#'
+#' @param x A `dynhr_compiled` object, as returned by [compile_model()].
+#' @param ... Ignored; present for S3 generic compatibility.
+#'
+#' @return `x`, invisibly. Called for the side effect of printing.
+#'
+#' @export
 print.dynhr_compiled <- function(x, ...) {
     cat("=== dynhr_compiled ===\n")
     cat("Endogenous vars: ", length(x$model$var_names), "\n")

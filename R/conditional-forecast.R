@@ -130,8 +130,15 @@
   ## eta_star = A_w' (A_w A_w')^{-1} b_cond; eps_star = W eta_star
   AtA  <- tcrossprod(A_w)          ## n_cond x n_cond
   AtA  <- (AtA + t(AtA)) * 0.5
-  ch   <- chol(AtA + 1e-12 * diag(n_cond))
-  AtA_inv <- chol2inv(ch)
+  ## Minimum-norm solve, not a ridge. `AtA` is rank-deficient whenever the
+  ## conditions are collinear or over-specified -- forcing two series that the
+  ## model cannot independently hit, or conditioning through a shock that has
+  ## been switched off (weight 0) -- which is a normal thing for a user to ask
+  ## for, not an error. The old `chol(AtA + 1e-12 * diag(n_cond))` was both
+  ## ABSOLUTE (meaningless when AtA is not O(1)) and UNGUARDED, so it threw.
+  ## .safe_inv() truncates on a RELATIVE singular-value cutoff and returns the
+  ## minimum-norm solution, warning when it does.
+  AtA_inv <- .safe_inv(AtA, warn_label = "conditional_forecast: condition system")
 
   eps_free_star <- w * (t(A_w) %*% (AtA_inv %*% b_cond))   ## n_free x 1
 
@@ -248,7 +255,10 @@
       D_w <- sweep(D_c, 2L, w_free, "*")
       DDt <- tcrossprod(D_w)
       DDt <- (DDt + t(DDt)) * 0.5
-      DDt_inv <- chol2inv(chol(DDt + 1e-12 * diag(n_c)))
+      ## See the note at the condition-system solve above: DDt loses rank when
+      ## a conditioning shock is switched off (w_free = 0) or the conditions
+      ## outnumber the free shocks. Minimum-norm, not a ridge.
+      DDt_inv <- .safe_inv(DDt, warn_label = "conditional_forecast: shock system")
       eps_free <- w_free * as.numeric(t(D_w) %*% (DDt_inv %*% b_h))
       eps_h[free_shk_idx] <- eps_free
     }
@@ -284,7 +294,8 @@
           D_c <- D_mat[cond_idx, free_shk_idx, drop = FALSE]
           D_w <- sweep(D_c, 2L, w_free, "*")
           DDt <- tcrossprod(D_w)
-          DDt_inv <- chol2inv(chol((DDt + t(DDt)) * 0.5 + 1e-12 * diag(nrow(D_c))))
+          DDt_inv <- .safe_inv((DDt + t(DDt)) * 0.5,
+                               warn_label = "conditional_forecast: shock system")
           ## Particular solution (whitened)
           eta_particular <- t(D_w) %*% (DDt_inv %*% b_h)
           ## Null-space component (keeps random variation on free shocks
@@ -395,8 +406,43 @@
       if (has_me_extra) diag(F_t) <- diag(F_t) + me_extra[obs_ok, h]
       F_t <- (F_t + t(F_t)) * 0.5
 
-      F_ch <- tryCatch(chol(F_t + 1e-10 * diag(n_ok)), error = function(e) NULL)
-      if (is.null(F_ch)) F_ch <- chol(F_t + 1e-6 * diag(n_ok))
+      ## Singular F: drop the zero-variance components, do NOT ridge them.
+      ## This used to read
+      ##     F_ch <- tryCatch(chol(F_t + 1e-10 * diag(n_ok)), ...)
+      ##     if (is.null(F_ch)) F_ch <- chol(F_t + 1e-6 * diag(n_ok))
+      ## which carried three problems. The 1e-10 ridge was added on EVERY
+      ## period, so this pass was never an unregularised Kalman filter; both
+      ## ridges were ABSOLUTE while F_t is not O(1) (a unit-root state space
+      ## with `shock_scale` puts it many orders higher); and the fallback was
+      ## UNGUARDED, so when 1e-6 was not enough it threw. Same defect as the
+      ## one fixed in kalman_smoother() -- see test-smoother-singular-F.R.
+      F_ch <- tryCatch(chol(F_t), error = function(e) NULL)
+      if (is.null(F_ch)) {
+        keep <- .smoother_informative_obs(F_t)
+        if (!any(keep)) {
+          ## No component carries information this period: predict-only.
+          s_tt <- s_tp
+          P_tt <- P_tp
+          s_filt[h, ]   <- s_tt
+          P_filt[, , h] <- P_tt
+          next
+        }
+        obs_ok <- obs_ok[keep]
+        n_ok   <- length(obs_ok)
+        v_ok   <- v_ok[keep]
+        Zt     <- Z_mat[obs_ok, , drop = FALSE]
+        DQDt   <- tcrossprod(D_mat[obs_ok, , drop = FALSE] %*% Q,
+                             D_mat[obs_ok, , drop = FALSE])
+        RQDt   <- RQD[, obs_ok, drop = FALSE]
+        F_t    <- Zt %*% P_tt %*% t(Zt) + DQDt
+        if (has_me_extra) diag(F_t) <- diag(F_t) + me_extra[obs_ok, h]
+        F_t    <- (F_t + t(F_t)) * 0.5
+        F_ch   <- tryCatch(chol(F_t), error = function(e) NULL)
+        if (is.null(F_ch))
+          stop("conditional_forecast: the innovation covariance at horizon ",
+               h, " is not positive definite even after dropping every ",
+               "zero-variance observation component.", call. = FALSE)
+      }
       F_inv <- chol2inv(F_ch)
 
       K_t  <- (T_mat %*% P_tt %*% t(Zt) + RQDt) %*% F_inv
@@ -490,17 +536,17 @@
 ##   "pskf" -> PSKF smoother; smoothed mean at T via Gaussian RTS backward pass.
 ##   "pkf"  -> OBC PKF forward pass; filtered state s_{T|T} and P_{T|T}.
 ##
-## @param Y        T x n_obs observation matrix (rows = time).
+## @param data     T x n_obs observation matrix (rows = time).
 ## @param ss_raw   State-space list from build_dsge_state_space().
 ## @param Q        n_shock x n_shock shock covariance.
 ## @param ctx      estimation_context or NULL.
 ## @param model    Parsed model (for tpf/pskf/pkf paths).
 ## @param dr       Decision rules (DecisionRules or DecisionRules2).
-## @param obs_names Character vector of observable names.
+## @param obs_vars  Character vector of observable names.
 ## @param compiled  Compiled model (dynhr_compiled) — required for pkf path.
 ## @return list(s0 = n_state numeric, P0 = n_state x n_state matrix).
 ## ---------------------------------------------------------------------------
-.extract_terminal_state <- function(Y, ss_raw, Q, ctx, model, dr, obs_names,
+.extract_terminal_state <- function(data, ss_raw, Q, ctx, model, dr, obs_vars,
                                     compiled = NULL) {
 
   lik <- if (is.null(ctx)) "gaussian" else ctx$likelihood
@@ -527,7 +573,12 @@
 
   ## ---- Gaussian / Whittle path (original code) ----------------------------
   if (identical(path, "gaussian")) {
-    sm <- kalman_smoother(Y, ss_raw, Q = Q)
+    ## Levels in: `ss_raw$d` is the observation intercept and the smoother
+    ## subtracts it, the same demeaning the tpf and pskf paths below do
+    ## explicitly. Before 0.9.3 this branch alone took deviations, so the same
+    ## conditional_forecast() call needed different data depending on
+    ## ctx$likelihood.
+    sm <- .kalman_smoother_ss(data, ss_raw, Q = Q)
     s0 <- as.numeric(sm$filtered_states[nrow(sm$filtered_states), ])
     P0 <- sm$P_filt_last
     return(list(s0 = s0, P0 = P0))
@@ -557,19 +608,20 @@
     n_particles <- tpf_opts$n_particles %||% 500L
     ess_target  <- tpf_opts$ess_target  %||% 0.5
     n_mh        <- tpf_opts$n_mh        %||% 1L
-    mh_scale    <- tpf_opts$mh_scale    %||% 1.0
+    ## No mh_scale: removed from the TPF stack 2026-09-02 (inert since the
+    ## mutation step was corrected to hold the ancestor state fixed).
     tpf_seed    <- tpf_opts$seed        %||% NULL
 
     ## State-space from the order-2 DR
     state_idx <- dr$state_idx
-    obs_idx   <- match(obs_names, dr$endo_names)
+    obs_idx   <- match(obs_vars, dr$endo_names)
     if (any(is.na(obs_idx)))
       stop("conditional_forecast (tpf): some obs_names not found in dr$endo_names.",
            call. = FALSE)
 
     ZZ       <- dr$ghx[obs_idx,   , drop = FALSE]
     DD       <- dr$ghu[obs_idx,   , drop = FALSE]
-    d_obs    <- dr$ys[obs_names]
+    d_obs    <- dr$ys[obs_vars]
     ghss_obs <- 0.5 * dr$ghss[obs_idx]
 
     n_s  <- length(state_idx)
@@ -610,7 +662,7 @@
     }
 
     ## Run TPF forward pass over all T periods; keep final particles
-    Y_mat <- t(Y)    ## n_obs x T (columns = periods)
+    Y_mat <- t(data)    ## n_obs x T (columns = periods)
     T_obs <- ncol(Y_mat)
     for (t in seq_len(T_obs)) {
       y_t <- Y_mat[, t]
@@ -628,7 +680,6 @@
         me_variance = me_var,
         ess_target  = ess_target,
         n_mh        = n_mh,
-        mh_scale    = mh_scale,
         use_rcpp    = .HAS_RCPP_TPF(),
         backend     = if (.HAS_RCPP_TPF_PERIOD()) "cpp" else "R"
       )
@@ -653,7 +704,7 @@
     me_var <- if (!is.null(ctx$me_variance)) ctx$me_variance else 0
 
     state_idx <- dr$state_idx
-    obs_idx   <- match(obs_names, dr$endo_names)
+    obs_idx   <- match(obs_vars, dr$endo_names)
     if (any(is.na(obs_idx)))
       stop("conditional_forecast (pskf): some obs_names not found in dr$endo_names.",
            call. = FALSE)
@@ -664,7 +715,7 @@
     ## CSN shock parameters
     exo_names <- dr$exo_names
     csn <- tryCatch(
-      .get_csn_shock_params(model, exo_names, obs_names, dr,
+      .get_csn_shock_params(model, exo_names, obs_vars, dr,
                             model$param_values, me_var),
       error = function(e) {
         stop(
@@ -676,8 +727,8 @@
     )
 
     ## Demean Y (PSKF works on deviations from SS)
-    d_obs <- dr$ys[obs_names]
-    Y_dm  <- t(Y) - d_obs   ## n_obs x T
+    d_obs <- dr$ys[obs_vars]
+    Y_dm  <- t(data) - d_obs   ## n_obs x T
 
     sm <- tryCatch(
       pskf_smoother(
@@ -733,7 +784,7 @@
     ## OBC specs: use pre-parsed ones from ctx if available, else parse now.
     specs <- ctx$obc_specs %||% obc_parse_tags(model)
 
-    obs_idx <- match(obs_names, model$var_names)
+    obs_idx <- match(obs_vars, model$var_names)
     if (any(is.na(obs_idx)))
       stop("conditional_forecast (pkf): some obs_names not found in model$var_names.",
            call. = FALSE)
@@ -770,7 +821,7 @@
     ## me-floor hazard guard (see R/obc-regime.R .obc_warn_me_floor_lock() and
     ## R/pruned-state-space.R); single-shot call site, no closure latch needed.
     .obc_warn_me_floor_lock(
-      dr_slack, model, params, obs_names, obs_idx, me_var,
+      dr_slack, model, params, obs_vars, obs_idx, me_var,
       check = isTRUE(getOption("dynhr.me_floor_check", TRUE)))
 
     ## Seed regime cache with the slack policy.
@@ -778,13 +829,13 @@
     obc_ensure_policy(0L, regime_cache, sys, dr_slack, specs, obs_idx)
 
     ## Ensure Y is n_obs x T.
-    Y_mat <- if (is.null(dim(Y))) matrix(Y, nrow = length(obs_names)) else
-              if (nrow(Y) == length(obs_names)) Y else t(Y)
+    Y_mat <- if (is.null(dim(data))) matrix(data, nrow = length(obs_vars)) else
+              if (nrow(data) == length(obs_vars)) data else t(data)
 
     ## PKF forward pass: collect filtered state and P_{T|T}.
     kf <- kalman_filter_obc_pkf(
       Y_mat, dr_slack, regime_cache, sys,
-      model, params, obs_names, specs,
+      model, params, obs_vars, specs,
       obs_idx         = obs_idx,
       me_variance     = me_var,
       return_filtered = TRUE,
@@ -824,7 +875,7 @@
     ## OBC specs
     specs <- ctx$obc_specs %||% obc_parse_tags(model)
 
-    obs_idx <- match(obs_names, model$var_names)
+    obs_idx <- match(obs_vars, model$var_names)
     if (any(is.na(obs_idx)))
       stop("conditional_forecast (", path, "): some obs_names not found in model$var_names.",
            call. = FALSE)
@@ -878,14 +929,14 @@
     obc_ensure_policy(0L, regime_cache, sys, dr_slack, specs, obs_idx, copf_args)
 
     ## Ensure Y is n_obs x T
-    Y_mat <- if (is.null(dim(Y))) matrix(Y, nrow = length(obs_names)) else
-              if (nrow(Y) == length(obs_names)) Y else t(Y)
+    Y_mat <- if (is.null(dim(data))) matrix(data, nrow = length(obs_vars)) else
+              if (nrow(data) == length(obs_vars)) data else t(data)
 
     ## Run PPF/COPF forward pass over the full history, returning the terminal
     ## particle cloud.
     pf <- ppf_likelihood(
       Y_mat, dr_slack, regime_cache, sys,
-      model, params, obs_names, specs,
+      model, params, obs_vars, specs,
       obs_idx          = obs_idx,
       N                = N_particles,
       me_variance      = me_var,
@@ -923,10 +974,15 @@
 #'
 #' @param model       Parsed model object from \code{parse_mod()}.
 #' @param dr          Decision rules from \code{solve_perturbation()}.
-#' @param Y           \code{T x n_obs} data matrix used to anchor the forecast
-#'   (filtered terminal state \code{s_{T|T}} is extracted internally). May
-#'   also be a list output from \code{kalman_smoother()} (then its
+#' @param data        \code{T x n_obs} matrix of observables in
+#'   \strong{levels}, used to anchor the forecast (the filtered terminal
+#'   state \code{s_{T|T}} is extracted internally, subtracting the model's
+#'   steady state as \code{\link{kalman_filter}()} does). May also be a list
+#'   output from \code{\link{kalman_smoother}()} (then its
 #'   \code{filtered_states} and \code{P_filt_last} fields are used directly).
+#'   Note that the FORECAST PATHS and the \code{conditions} remain in
+#'   deviations from steady state: only the anchoring data is in levels, and
+#'   only because every filtering entry point now is.
 #' @param conditions  Data frame with columns:
 #'   \describe{
 #'     \item{\code{var}}{Character: observable name.}
@@ -938,8 +994,8 @@
 #'   }
 #'   Pass \code{NULL} or a zero-row data frame for an unconditional forecast.
 #' @param horizon     Integer: total forecast horizon H.
-#' @param obs_names   Character vector: names of observables in \code{Y}
-#'   (column order). Defaults to \code{colnames(Y)} if available.
+#' @param obs_vars    Character vector: names of observables in \code{data}
+#'   (column order). Defaults to \code{colnames(data)} if available.
 #' @param type        \code{"anticipated"} (default): the whole shock path is
 #'   chosen at time T (Waggoner-Zha stacked solution). \code{"unanticipated"}:
 #'   agents are surprised each period; the conditioning shock is chosen
@@ -994,11 +1050,34 @@
 #'     Multivariate Models. \emph{Review of Economics and Statistics}, 81(4),
 #'     639-651.
 #'
+#' @seealso \code{\link{plan_condition}}, \code{\link{bayesian_conditional_forecast}},
+#'   \code{\link{kalman_smoother}}
+#' @examples
+#' model    <- parse_mod(system.file("extdata/models/rbc.mod",
+#'                                   package = "dynhr"), verbose = FALSE)
+#' compiled <- compile_model(model, verbose = FALSE)
+#' steady   <- solve_steady(compiled, model$param_values,
+#'                          endo_names = model$var_names,
+#'                          exo_names  = model$varexo_names, verbose = FALSE)
+#' dr <- solve_perturbation(model, compiled, steady$values,
+#'                          model$param_values, verbose = FALSE)
+#'
+#' set.seed(1)
+#' Y <- as.matrix(simulate_model(dr, n_periods = 100L, model = model,
+#'                               burn_in = 20L)[, "y", drop = FALSE])
+#'
+#' ## Hard-condition output growth for the first two forecast quarters
+#' conds <- data.frame(var = "y", horizon = 1:2, value = c(0.01, 0.008))
+#' cf <- conditional_forecast(model, dr, Y, conditions = conds,
+#'                            horizon = 8L, obs_vars = "y")
+#' cf
+#' head(cf$shock_paths)        # the shock path that delivers the conditions
+#'
 #' @export
 ## ---------------------------------------------------------------------------
-conditional_forecast <- function(model, dr, Y, conditions = NULL,
+conditional_forecast <- function(model, dr, data, conditions = NULL,
                                  horizon = 8L,
-                                 obs_names = NULL,
+                                 obs_vars = NULL,
                                  type   = c("anticipated", "unanticipated"),
                                  method = c("hard", "soft"),
                                  n_draws = 0L,
@@ -1040,25 +1119,25 @@ conditional_forecast <- function(model, dr, Y, conditions = NULL,
   ## ---- Resolve observable names ----
   ## Y may be a raw matrix/data.frame or a kalman_smoother() result list.
   smoother_result <- NULL
-  if (is.list(Y) && !is.data.frame(Y) && !is.null(Y$filtered_states)) {
-    smoother_result <- Y
-    Y <- NULL
-    if (is.null(obs_names))
+  if (is.list(data) && !is.data.frame(data) && !is.null(data$filtered_states)) {
+    smoother_result <- data
+    data <- NULL
+    if (is.null(obs_vars))
       stop("conditional_forecast: when Y is a kalman_smoother() result, supply obs_names explicitly.",
            call. = FALSE)
   } else {
-    Y <- as.matrix(Y)
-    if (is.null(obs_names)) {
-      if (!is.null(colnames(Y))) obs_names <- colnames(Y)
+    data <- as.matrix(data)
+    if (is.null(obs_vars)) {
+      if (!is.null(colnames(data))) obs_vars <- colnames(data)
       else stop("conditional_forecast: obs_names must be supplied when Y has no colnames.",
                 call. = FALSE)
     }
   }
 
   ## ---- Build state space ----
-  ss_raw <- build_dsge_state_space(model, dr, obs_names, verbose = FALSE)
+  ss_raw <- build_dsge_state_space(model, dr, obs_vars, verbose = FALSE)
   ## Attach obs_names for internal use
-  ss_raw$obs_names_fcst <- obs_names
+  ss_raw$obs_names_fcst <- obs_vars
 
   ## Default shock covariance: Sigma_e from the shocks; block (ghu holds
   ## unit-shock responses). Threaded through the terminal-state smoother run
@@ -1072,7 +1151,7 @@ conditional_forecast <- function(model, dr, Y, conditions = NULL,
           else diag(ss_raw$n_state) * 1e-6   ## fallback: near-zero uncertainty
   } else {
     ## Dispatch terminal-state extraction on ctx$likelihood
-    ts <- .extract_terminal_state(Y, ss_raw, Q, ctx, model, dr, obs_names,
+    ts <- .extract_terminal_state(data, ss_raw, Q, ctx, model, dr, obs_vars,
                                   compiled = compiled)
     s0 <- ts$s0
     P0 <- ts$P0
@@ -1098,7 +1177,7 @@ conditional_forecast <- function(model, dr, Y, conditions = NULL,
         horizon      = H,
         type         = type,
         method       = method,
-        obs_names    = obs_names,
+        obs_names    = obs_vars,
         shock_names  = ss_raw$shock_names
       ),
       class = "dynhr_cfcst"
@@ -1115,7 +1194,7 @@ conditional_forecast <- function(model, dr, Y, conditions = NULL,
     stop(sprintf("conditional_forecast: 'conditions' is missing columns: %s.",
                  paste(miss, collapse = ", ")), call. = FALSE)
 
-  bad_var <- setdiff(conditions$var, obs_names)
+  bad_var <- setdiff(conditions$var, obs_vars)
   if (length(bad_var))
     stop(sprintf("conditional_forecast: condition variable(s) not in obs_names: %s.",
                  paste(bad_var, collapse = ", ")), call. = FALSE)
@@ -1127,7 +1206,7 @@ conditional_forecast <- function(model, dr, Y, conditions = NULL,
 
   ## Add var_idx and normalise stderr
   cond_df <- conditions
-  cond_df$var_idx <- match(cond_df$var, obs_names)
+  cond_df$var_idx <- match(cond_df$var, obs_vars)
   if (!"stderr" %in% names(cond_df)) cond_df$stderr <- NA_real_
   cond_df$stderr <- as.numeric(cond_df$stderr)
 
@@ -1192,7 +1271,7 @@ conditional_forecast <- function(model, dr, Y, conditions = NULL,
       horizon      = H,
       type         = type,
       method       = method,
-      obs_names    = obs_names,
+      obs_names    = obs_vars,
       shock_names  = all_shocks
     ),
     class = "dynhr_cfcst"

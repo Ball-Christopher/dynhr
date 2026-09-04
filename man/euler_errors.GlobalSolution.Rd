@@ -2,30 +2,56 @@
 % Please edit documentation in R/global-solution-methods.R
 \name{euler_errors.GlobalSolution}
 \alias{euler_errors.GlobalSolution}
-\title{Compute Euler equation accuracy for a GlobalSolution}
+\title{Model-agnostic Euler-equation accuracy for a GlobalSolution}
 \usage{
-\method{euler_errors}{GlobalSolution}(x, n_grid = 10L, n_quad = 20L, ...)
+\method{euler_errors}{GlobalSolution}(
+  x,
+  n_grid = 10L,
+  n_quad = 20L,
+  state_domain = NULL,
+  normalize_by = "auto",
+  ...
+)
 }
 \arguments{
 \item{x}{A \code{GlobalSolution} object.}
 
 \item{n_grid}{Number of test points per state dimension (default 10).}
 
-\item{n_quad}{Quadrature nodes for the Euler error (default 20).}
+\item{n_quad}{Gauss-Hermite nodes per shock dimension (default 20).}
+
+\item{state_domain}{Named list of \code{c(lo, hi)} per state giving the
+evaluation box.  \code{NULL} (default) uses the solution's own
+\code{state_domain}.  Supply one to compare a projection and a
+perturbation policy on the SAME box, or to stay strictly inside the
+collocation nodes: Chebyshev-Gauss nodes stop at
+\eqn{\cos(\pi/(2n))} of the half-width, so the default box's corners are
+a (short) EXTRAPOLATION and their error need not fall with
+\code{poly_degree}.}
+
+\item{normalize_by}{Numeraire variable for the unit-free normalisation.
+\code{"auto"} (default) picks the first of \code{c}, \code{C},
+\code{cons}, \code{consumption} present in the model; a variable name
+forces one; \code{NA} reports every equation raw.}
 
 \item{...}{Ignored.}
 }
 \value{
-A list with \code{log10_errors} (vector), \code{max_log10_error},
-  and \code{grid} (the evaluation grid).
+A list with \code{errors} and \code{log10_errors} (both
+  \code{n_points x n_eq} matrices), the raw \code{residuals},
+  \code{max_log10_by_eq} / \code{mean_log10_by_eq}, the overall
+  \code{max_log10_error} / \code{mean_log10_error}, the per-equation
+  \code{normalized} flag, the \code{numeraire} used and the evaluation
+  \code{grid}.
 }
 \description{
-Evaluates the unit-free Euler equation error (Maliar-Maliar 2014 metric)
-on a grid of test points. The error at each point is:
+Evaluates the compiled model's OWN dynamic residuals under the projection
+policy on a regular grid of state lags, taking the \eqn{t+1} expectation by
+Gauss-Hermite quadrature over the shocks.  Residuals of equations in which
+the numeraire variable appears are reported in consumption-equivalent
+units (the fractional change in \eqn{\nu_t} that would zero the residual);
+the rest are reported raw.  See the file header for the definition.
 }
-\details{
-\deqn{ee = E_t[\beta \cdot MPK_{t+1}] \cdot c_t - 1}
-
-where \eqn{MPK_{t+1} = \alpha \exp(z_{t+1}) k_t^{\alpha-1} / c_{t+1}}
-(for the simple RBC model with full depreciation).
+\seealso{
+\code{\link{den_haan_marcet}}
 }

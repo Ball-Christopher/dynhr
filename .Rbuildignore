@@ -59,3 +59,8 @@
 ^memory(/|$)
 ^check_release\.out$
 ^check_.*\.out$
+^public_export_[0-9]+$
+^public_export_[0-9]+/
+^release_check_.*\.log$
+^dynhr\.Rcheck
+^dynhr_.*\.tar\.gz$

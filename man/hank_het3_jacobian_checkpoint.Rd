@@ -68,3 +68,4 @@ dim(J$C$rd)
 \code{\link{hank_het3_jacobian}},
   \code{\link{hank_het3_jacobian_spot}}
 }
+\keyword{internal}

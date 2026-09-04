@@ -2,9 +2,12 @@
 % Please edit documentation in R/diag-plot-theme.R
 \name{scale_colour_dynhr}
 \alias{scale_colour_dynhr}
+\alias{scale_color_dynhr}
 \title{Legacy: colour scale -- now Tol vibrant in dynhr order}
 \usage{
 scale_colour_dynhr(...)
+
+scale_color_dynhr(...)
 }
 \arguments{
 \item{...}{Arguments passed to \code{\link{scale_colour_dynhr_vibrant}}.}

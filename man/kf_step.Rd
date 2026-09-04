@@ -43,19 +43,21 @@ deviation for THIS period (\code{exp(h_t/2)} in the SV filter). \code{NULL}
 \item{d}{Optional observation intercept (SS level of the observables),
 length n_obs. \code{NULL} = zero.}
 
-\item{me_diag}{Optional length-n_obs baseline measurement-error variances
-(added to the diagonal of F only; documented F-regulariser convention).
-\code{NULL} = none.}
+\item{me_diag}{Optional length-n_obs baseline measurement-error variances.
+TRUE i.i.d. observation noise (F4-A): added to the diagonal of \code{F}
+AND propagated through the Joseph state-covariance term
+(\code{P' += K diag(me) K'}), matching \code{\link{kalman_filter}}.}
 
 \item{me_extra}{Optional length-n_obs per-period EXTRA measurement-error
-variances (added to F AND propagated through the Joseph term, matching the
-shipped filter's \code{me_extra} treatment). \code{NULL} = none.}
+variances (same true-noise treatment, added on top of \code{me_diag}).
+\code{NULL} = none.}
 }
 \value{
 \code{list(ll, s, P)} — the period log-likelihood increment and the
   next-period prediction mean/covariance — or \code{NULL} if the forecast
-  covariance is not positive definite (Cholesky failure), so a caller can
-  treat the draw as infeasible.
+  covariance is non-finite or not positive definite, so a caller can treat
+  the draw as infeasible. (Both rejections match the compiled RB-PF kernel
+  exactly, so the R and C++ filters weight the same particles.)
 }
 \description{
 Advances the prediction-form Kalman recursion one period, optionally with a

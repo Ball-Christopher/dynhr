@@ -439,7 +439,20 @@ ppf_likelihood <- function(Y, dr_slack, regime_cache, sys,
 
   proposal     <- match.arg(proposal)
   regime_guess <- match.arg(regime_guess)
-  if (!is.null(seed)) set.seed(seed)
+  if (!is.null(seed)) {
+    ## Local seed: deterministic in theta but leaves the CALLER's RNG stream
+    ## untouched (an outer sampler must not replay the same proposals; see
+    ## .with_local_seed in tpf-likelihood.R and NEWS 0.9.2.0003).
+    .ge_ <- globalenv()
+    .had_ <- exists(".Random.seed", envir = .ge_, inherits = FALSE)
+    .old_ <- if (.had_) get(".Random.seed", envir = .ge_, inherits = FALSE) else NULL
+    on.exit({
+      if (.had_) assign(".Random.seed", .old_, envir = .ge_)
+      else if (exists(".Random.seed", envir = .ge_, inherits = FALSE))
+        rm(list = ".Random.seed", envir = .ge_)
+    }, add = TRUE)
+    set.seed(seed)
+  }
 
   endo    <- dr_slack$endo_names
   exo     <- dr_slack$exo_names
@@ -596,6 +609,13 @@ ppf_likelihood <- function(Y, dr_slack, regime_cache, sys,
 #'   (all-slack at t = 1); "slack" always guesses all-slack. Pure variance
 #'   reduction — weights are valid for any guess.
 #' @param seed        Integer RNG seed (NULL = not fixed; each call differs)
+#' @param power       Power-posterior (generalised-Bayes) tempering exponent
+#'   \eqn{\zeta}: \code{$logpost} becomes
+#'   \eqn{\log p(\theta) + \zeta \cdot \log L(\theta)} while \code{$loglik}
+#'   keeps the RAW (untempered) particle-filter estimate -- so PMMH's
+#'   unbiasedness argument and any marginal-likelihood use of \code{$loglik}
+#'   are unaffected. \code{NULL} (default) resolves the \code{power_posterior}
+#'   package option ONCE, at factory time.
 #' @return Function(theta) -> list(logpost, loglik, logprior)
 #' @export
 make_log_posterior_obc_ppf <- function(model, data, prior_spec, obs_vars,
@@ -604,10 +624,13 @@ make_log_posterior_obc_ppf <- function(model, data, prior_spec, obs_vars,
                                         N            = 1000L,
                                         proposal     = c("bootstrap", "copf"),
                                         regime_guess = c("ancestor", "slack"),
-                                        seed         = NULL) {
+                                        seed         = NULL,
+                                        power        = NULL) {
 
   ## Force promises (closure-capture safety; mirrors PKF and TPF factories)
   force(prior_spec); force(me_variance); force(N); force(seed)
+  ## Resolve zeta ONCE here, not per draw (see .resolve_power_posterior).
+  power <- .resolve_power_posterior(power, "make_log_posterior_obc_ppf")
   proposal     <- match.arg(proposal)
   regime_guess <- match.arg(regime_guess)
 
@@ -627,8 +650,6 @@ make_log_posterior_obc_ppf <- function(model, data, prior_spec, obs_vars,
       !is.null(compiled$model$lead_lag_incidence)) {
     compiled$lead_lag_incidence <- compiled$model$lead_lag_incidence
   }
-  sys_cache <- cache_system_structure(compiled)
-
   endo    <- model$var_names
   obs_idx <- match(obs_vars, endo)
   if (any(is.na(obs_idx)))
@@ -638,55 +659,43 @@ make_log_posterior_obc_ppf <- function(model, data, prior_spec, obs_vars,
   if (is.data.frame(data)) data <- as.matrix(data)
   Y <- if (nrow(data) == length(obs_vars)) data else t(data)
 
+  ## Inner evaluator over the shared closure builder (R/posterior-closure.R):
+  ## cold steady-state solve, always-eigen() stationarity guard, no system
+  ## priors -- the OBC bootstrap/COPF particle filter is the only branch-
+  ## specific part. `pass_dots = TRUE` returns the raw `function(theta, ...)`;
+  ## the seeded wrapper below restores the public `function(theta)` signature.
+  eval_one <- .make_posterior_closure(
+    model, data, prior_spec, obs_vars, compiled,
+    stationarity = "eigen",
+    loglik_fn = function(sol, params, ss, theta, me_floor_check, ...) {
+      ## FRESH regime_cache per draw (theta-dependent matrices)
+      regime_cache <- new.env(parent = emptyenv(), hash = TRUE)
+      obc_ensure_policy(0L, regime_cache, sol$sys, sol$dr, specs, obs_idx)
+
+      pf <- ppf_likelihood(
+        Y, sol$dr, regime_cache, sol$sys,
+        model, params, obs_vars, specs,
+        obs_idx      = obs_idx,
+        N            = N,
+        me_variance  = me_variance,
+        proposal     = proposal,
+        regime_guess = regime_guess,
+        seed         = NULL   # the closure below already set the local seed
+      )
+      if (is.null(pf) || !is.finite(pf$loglik)) return(NULL)
+      list(loglik = pf$loglik)
+    },
+    power          = power,
+    warm_start     = FALSE,
+    needs_me_floor = FALSE,
+    pass_dots      = TRUE)
+
   ## ---- Closure: evaluated at each parameter draw -------------------------
   function(theta) {
-    ## Fixed seed per theta for reproducibility (same seed = same loglik)
-    if (!is.null(seed)) set.seed(seed)
-
-    lp <- log_prior(theta, prior_spec)
-    if (!is.finite(lp))
-      return(list(logpost = -Inf, loglik = -Inf, logprior = lp))
-
-    params <- .apply_theta_to_params(model, theta)
-
-    ss_result <- solve_steady_state(model, compiled, params, verbose = FALSE)
-    if (is.null(ss_result) || !ss_result$converged)
-      return(list(logpost = -Inf, loglik = -Inf, logprior = lp))
-
-    ## Re-derive SSM-computed params for a consistent linearization point
-    ## (no-op for non-SSM-parameter models; Tier 13 #1).
-    params <- ss_result$params %||% params
-    sys <- extract_system_matrices_fast(sys_cache, ss_result$ss, params)
-
-    dr_slack <- .solve_from_system(sys, model, compiled, ss_result$ss, params, FALSE)
-    if (is.null(dr_slack) || !dr_slack$bk_satisfied)
-      return(list(logpost = -Inf, loglik = -Inf, logprior = lp))
-
-    max_eig <- max(Mod(eigen(
-      dr_slack$ghx[dr_slack$state_idx, , drop = FALSE],
-      only.values = TRUE
-    )$values))
-    if (max_eig >= 1)
-      return(list(logpost = -Inf, loglik = -Inf, logprior = lp))
-
-    ## FRESH regime_cache per draw (theta-dependent matrices)
-    regime_cache <- new.env(parent = emptyenv(), hash = TRUE)
-    obc_ensure_policy(0L, regime_cache, sys, dr_slack, specs, obs_idx)
-
-    pf <- ppf_likelihood(
-      Y, dr_slack, regime_cache, sys,
-      model, params, obs_vars, specs,
-      obs_idx      = obs_idx,
-      N            = N,
-      me_variance  = me_variance,
-      proposal     = proposal,
-      regime_guess = regime_guess,
-      seed         = NULL   # seed already set above if non-NULL
-    )
-
-    if (is.null(pf) || !is.finite(pf$loglik))
-      return(list(logpost = -Inf, loglik = -Inf, logprior = lp))
-
-    list(logpost = pf$loglik + lp, loglik = pf$loglik, logprior = lp)
+    ## Fixed seed per theta for reproducibility (same seed = same loglik).
+    ## LOCAL: deterministic in theta but leaves the CALLER's RNG stream
+    ## untouched (an outer sampler must not replay the same proposals; see
+    ## .with_local_seed in tpf-likelihood.R and NEWS 0.9.2.0003).
+    .with_local_seed(seed, eval_one(theta))
   }
 }

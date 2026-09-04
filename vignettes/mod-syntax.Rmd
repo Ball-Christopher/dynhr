@@ -318,7 +318,8 @@ m_ssm <- parse_mod("
 length(m_ssm$steady_state_model)   # 2 assignments
 ```
 
-Canonical fixtures:
+Verified against these development fixtures (not shipped — see
+§11):
 
 - `fs2000.mod` — money-in-utility model with 18-line analytical SS
 - `caldara_rp.mod` — Epstein-Zin model with SS that also sets a
@@ -614,7 +615,7 @@ parameters.
 `// @dynhr:expectations`, `@dynhr:benchmarks`,
 `@dynhr:variable_labels`, `@dynhr:shock_categories`,
 `@dynhr:narratives`, and `@dynhr:end` comment blocks are extracted by
-`extract_mod_metadata()` and drive the 30-diagnostic battery.  They
+`extract_mod_metadata()` and drive the D0–D41 diagnostic battery.  They
 are plain `//` comments so Dynare ignores them.  See
 `vignette("mod-conversion")` for full syntax.
 
@@ -649,21 +650,29 @@ this is intentional so that a missing branch is not silently wrong.
 
 ---
 
-## 11  Canonical fixture models
+## 11  Shipped fixture models
 
-The package ships with several reference `.mod` files under
-`inst/extdata/models/` that exercise the full supported syntax:
+These `.mod` files ship under `inst/extdata/models/`, and between them
+exercise the supported syntax:
 
 | File | Features |
 |------|----------|
-| `rbc.mod` | Basic nonlinear RBC, `shocks`, `steady`, `stoch_simul` |
-| `nk_canonical.mod` | 3-equation NK, `model(linear)`, `initval` |
-| `nk_hs2016.mod` | Linear NK with `#` local vars, `estimated_params` |
-| `caldara_rp.mod` | Recursive preferences, `#theta` local var, `steady_state_model` |
-| `fs2000.mod` | Money-in-utility, `steady_state_model`, `estimated_params`, aux expansion |
-| `kpr1988.mod` | King-Plosser-Rebelo, `steady_state_model` |
-| `aikman_3obc.mod` | OBC model, `model(linear)`, `occbin_constraints`, MCP tags |
-| `nz_base_nonlinear.mod` | Large nonlinear open-economy, `#` local vars |
+| `rbc.mod` | Basic nonlinear RBC, `shocks`, `initval`, `stoch_simul` |
+| `rbc2shock.mod` | The same with two shocks (variance decomposition, multi-shock filtering) |
+| `nk_demo.mod` | Nonlinear 3-equation NK, `varobs`, `estimated_params` — the estimation walkthrough's fixture, with simulated data beside it |
+| `nk_2obc.mod` | `model(linear)` with two occasionally-binding constraints, `estimated_params` |
+| `nk_zlb_dynare.mod` | `model(linear)` with `occbin_constraints` (ZLB) |
+| `sw2007.mod` | Smets-Wouters (2007): `model(linear)`, `varobs`, `estimated_params`, with data, mode and Hessian beside it |
+
+Every shipped model carries a provenance row in
+`inst/extdata/models/MODELS_SOURCE.md`.
+
+Other models named in this vignette — `fs2000.mod`, `caldara_rp.mod`,
+`kpr1988.mod`, `nk_canonical.mod`, `nk_hs2016.mod`, `aikman_3obc.mod`,
+`nz_base_nonlinear.mod` — are development fixtures the parser is tested
+against. They are **not** shipped: several are third-party files whose
+licences are incompatible with this package's, which is the whole reason the
+provenance record exists.
 
 ```{r fixture-path}
 system.file("extdata", "models", "rbc.mod", package = "dynhr")

@@ -155,8 +155,8 @@ stochastic_steady_state <- function(dr, model, params = NULL) {
 #'   \code{sss} = the stochastic steady state vector,
 #'   \code{initial_state} = the state used as the GIRF starting point,
 #'   \code{order = 2L}, \code{n_periods}, \code{endo_names}, \code{exo_names}.
-#'   The object is compatible with \code{plot_irfs()} and any downstream code
-#'   that accepts \code{IRFCollection}.
+#'   The object is accepted by any downstream code that consumes an
+#'   \code{IRFCollection}.
 #' @seealso \code{\link{stochastic_steady_state}},
 #'   \code{\link{compute_irfs}} (standard linear IRF from det-SS),
 #'   \code{\link{compute_irfs_order2}} (non-linear IRF from det-SS)

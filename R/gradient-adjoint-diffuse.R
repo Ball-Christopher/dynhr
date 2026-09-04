@@ -215,7 +215,10 @@
     A   <- TT - K %*% ZZ
     B   <- RR - K %*% DD
     s_n <- as.numeric(TT %*% s_in) + as.numeric(K %*% v_in)
-    P_n <- .sym(tcrossprod(A %*% P_in, A) + tcrossprod(B %*% Sigma_e, B))
+    P_raw <- tcrossprod(A %*% P_in, A) + tcrossprod(B %*% Sigma_e, B)
+    ## TRUE measurement-noise law (F3-D): P' += K me_diag K'.
+    if (me_variance != 0) P_raw <- P_raw + me_variance * tcrossprod(K)
+    P_n <- .sym(P_raw)
     list(ll = ll, s = s_n, P = P_n, K = K, Fi = Fi, A = A, B = B, Fiv = Fiv)
   }
 
@@ -347,6 +350,10 @@
       ## Adjoint of s_t = TT s_prev + K v
       G_TT       <- G_TT + outer(bar_s, s_prev)
       bar_K      <- outer(bar_s, v)
+      ## Adjoint of the ME Joseph term in P_t (P_t += K me_diag K'; me_diag
+      ## is DATA): d tr(bar_P K me K') / dK = 2 bar_P K me.
+      if (me_variance != 0)
+        bar_K <- bar_K + 2 * me_variance * (bar_P_star %*% K)
       bar_v      <- as.numeric(t(K) %*% bar_s)
       bar_s_prev <- as.numeric(t(TT) %*% bar_s)
 

@@ -21,7 +21,8 @@ hank_het_block(
   Tr = 0,
   Tr_incidence = NULL,
   r_minus = NULL,
-  Va_init = NULL
+  Va_init = NULL,
+  dist_init = NULL
 )
 }
 \arguments{
@@ -126,11 +127,40 @@ may respond to it.}
 straight through to \code{\link{hank_egm_solve}} (and to the wedge
 solver's symmetric starting solve). \code{NULL} (default) uses that
 solver's own cash-on-hand guess.}
+
+\item{dist_init}{Optional seed for the stationary-distribution power
+iteration (\code{\link{hank_stationary_dist}}'s \code{d0}), for
+REDUCIBLE \code{Pi} (more than one communicating class -- e.g. the
+\code{\link{hank_employment_income3}} degenerate E/U/N chain at
+\code{p_un = p_nu = 0}, where \code{N} is a closed, unreachable class).
+A reducible chain has more than one invariant distribution, and the
+DEFAULT uniform init strands whatever mass it assigns to a closed class
+there forever -- see the roxygen on \code{\link{.hank_pi_reducible}}.
+Accepts either a length-\code{n_e} marginal over income states (spread
+uniformly across the asset grid; this is the shape of
+\code{hank_employment_income3()$pi}) or a full \code{n_e x n_a} matrix /
+length-\code{(n_e*n_a)} vector (distribution order). \code{NULL}
+(default) keeps the solver's own default (uniform) init -- BYTE-IDENTICAL
+to pre-\code{dist_init} behavior -- but if \code{Pi} is reducible in that
+case, \code{hank_het_block} STOPS with an informative error (naming
+\code{dist_init}) instead of silently converging to an init-dependent
+mixture. When \code{dist_init} is supplied, the distribution ALWAYS
+routes through the R power-iteration path
+(\code{\link{hank_stationary_dist}}, which accepts \code{d0}) even on
+\code{backend = "cpp"} -- the compiled fused kernel
+(\code{hank_stationary_dist_cpp}) has no \code{d0} argument, so this is
+a deliberate (documented) backend fallback for that one call, not a
+silent slow path; the household EGM solve itself still uses whichever
+backend was requested.}
 }
 \value{
 An object of class \code{hank_het_block} with the steady-state
   policies (\code{a}, \code{c}), marginal value \code{Va}, distribution
-  \code{D} (vector) and forward operator \code{Lambda}, aggregate
+  \code{D} (a vector in ASSET-FAST order: element \code{i + (s-1)*n_a}
+  is asset node \code{i} of income state \code{s}, i.e.
+  \code{matrix(D, nrow = n_a)} has one COLUMN per income state — note
+  this is the transpose of the policy matrices' \code{n_e x n_a}
+  orientation) and forward operator \code{Lambda}, aggregate
   steady-state outputs \code{A}, \code{C}, the borrowing constraint
   \code{amin}, the calibration, (when supplied) \code{Pi_fn} /
   \code{Pi_inputs}, \code{Omega_ss} (the realised steady-state transfer

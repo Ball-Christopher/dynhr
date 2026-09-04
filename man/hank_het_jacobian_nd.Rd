@@ -42,3 +42,4 @@ and re-runs the full nonlinear transition (\code{\link{hank_td_nonlinear}}),
 central-differencing the aggregate outputs.  Correct but \eqn{O(T)} solves
 per (input, date); used to validate \code{\link{hank_het_jacobian}}.
 }
+\keyword{internal}

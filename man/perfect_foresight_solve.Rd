@@ -6,7 +6,7 @@
 \usage{
 perfect_foresight_solve(
   compiled,
-  y0,
+  y0 = NULL,
   y_terminal,
   exo_path = NULL,
   params = NULL,
@@ -27,7 +27,11 @@ perfect_foresight_solve(
 \item{compiled}{dynhr_compiled (from \code{\link{compile_model}})}
 
 \item{y0}{Named numeric vector: endogenous state at t=0 (from
-\code{initval} block). Length must equal \code{n_endo}.}
+\code{initval} block). Length must equal \code{n_endo}.
+May be \code{NULL} when the model carries a \code{histval} block: the
+history is then taken from \code{compiled$model$histval} (lag 1, i.e. the
+\code{y(0)} entries), with any variable the block does not mention
+falling back to \code{y_terminal}. An explicit \code{y0} always wins.}
 
 \item{y_terminal}{Named numeric vector: terminal condition at t=T+1 (from
 \code{endval} block). Length must equal \code{n_endo}.}

@@ -14,7 +14,7 @@ make_log_posterior_sv_rbpf(
   n_particles = 1000L,
   me_variance = 0,
   seed = NULL,
-  power = 1
+  power = NULL
 )
 }
 \arguments{
@@ -38,12 +38,18 @@ least one SV shock).}
 
 \item{me_variance}{Optional baseline measurement-error variance (default 0;
 the RB-PF does not need it, but it is available for stochastically-singular
-observation blocks).}
+observation blocks). It is TRUE i.i.d. observation noise -- the same law
+\code{\link{kalman_filter}} implements -- entering both the forecast
+covariance and the Joseph state-covariance update (F4-A).}
 
 \item{seed}{Integer RNG seed (default \code{NULL} = fresh randomness
 each call; required for valid PMMH).}
 
-\item{power}{Power-posterior tempering exponent (default 1).}
+\item{power}{Power-posterior tempering exponent zeta:
+\code{logpost = zeta * loglik + logprior}. \code{NULL} (default) resolves
+the global \code{power_posterior} option ONCE at factory time (falling
+back to 1), matching \code{make_log_posterior()} and
+\code{make_log_posterior_tpf()}.}
 }
 \value{
 A \code{function(theta)} returning

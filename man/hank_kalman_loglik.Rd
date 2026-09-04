@@ -4,15 +4,15 @@
 \alias{hank_kalman_loglik}
 \title{Kalman log-likelihood of aggregate HANK data on a general state space}
 \usage{
-hank_kalman_loglik(Y, ss, me_var = 0)
+hank_kalman_loglik(data, ss, me_variance = 0)
 }
 \arguments{
-\item{Y}{\code{T_data x n_obs} matrix (or data frame) of demeaned
+\item{data}{\code{T_data x n_obs} matrix (or data frame) of demeaned
 observations, columns in the same order as \code{ss$obs_names}.}
 
 \item{ss}{A \code{\link{hank_state_space}} object.}
 
-\item{me_var}{Measurement-error variance added to every observable's
+\item{me_variance}{Measurement-error variance added to every observable's
 diagonal (default 0; needed when \code{n_obs > n_shock}, i.e. stochastic
 singularity).}
 }

@@ -162,7 +162,7 @@
       }
     }
     Phi[, col] <- val / ((2 * h)^k_x * h^p_sig)
-    # advance odometer (last index fastest, matching .build_phi_fd)
+    # advance odometer (last index fastest, matching the Phi-block layout)
     if (k_x > 0L) for (ki in rev(seq_len(k_x))) {
       idx[ki] <- idx[ki] + 1L
       if (idx[ki] <= n_s) break

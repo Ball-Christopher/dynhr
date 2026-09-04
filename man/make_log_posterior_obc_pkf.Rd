@@ -12,7 +12,8 @@ make_log_posterior_obc_pkf(
   compiled,
   specs = NULL,
   me_variance = 1e-08,
-  max_inner = 10L
+  max_inner = 10L,
+  power = NULL
 )
 }
 \arguments{
@@ -34,6 +35,12 @@ innovation covariance via \code{getOption("dynhr.me_floor_check", TRUE)};
 see \code{.obc_warn_me_floor_lock()} in R/obc-regime.R.}
 
 \item{max_inner}{Max inner iterations per period (default 10)}
+
+\item{power}{Power-posterior (generalised-Bayes) tempering exponent
+\eqn{\zeta}: \code{$logpost} becomes
+\eqn{\log p(\theta) + \zeta \cdot \log L(\theta)} while \code{$loglik}
+keeps the RAW (untempered) value. \code{NULL} (default) resolves the
+\code{power_posterior} package option ONCE, at factory time.}
 }
 \value{
 Function(theta) -> list(logpost, loglik, logprior, regime_path)

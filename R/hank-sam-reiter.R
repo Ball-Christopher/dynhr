@@ -157,7 +157,7 @@ hank_sam_reiter_linearize <- function(block, inputs = NULL, delta_fd = 1e-6) {
          gVa_x = gVa_x, ga_x = ga_x, gc_x = gc_x, D_x = D_x,
          Da = Da, va = va, inputs = inputs,
          n = n, n_e = n_e, n_a = n_a, delta_fd = delta_fd, block = blk),
-    class = "hank_sam_reiter_lin")
+    class = c("hank_sam_reiter_lin", "hank_block"))
 }
 
 
@@ -336,5 +336,5 @@ hank_sam_reiter_statespace <- function(x, input_derivs, rho_zm,
          input_derivs = input_derivs,
          calibration = list(r = blk$r, w = blk$w, beta = blk$beta,
                             eis = blk$eis, A = blk$A, C = blk$C)),
-    class = c("hank_sam_reiter_ss", "hank_reiter_ss"))
+    class = c("hank_sam_reiter_ss", "hank_reiter_ss", "hank_block"))
 }

@@ -4,7 +4,7 @@
 ##
 ## D11 historical decomposition diagnostic.
 ## NOTE: The exported historical_decomposition() is defined in smoother-monolith.R.
-## The internal helper here is .compute_hd_from_matrices() to avoid shadowing.
+## The matrix-level helper was removed 2026-09 (unused).
 ## --------------------------------------------------------------------------
 
 #' D11. Historical decomposition
@@ -117,8 +117,22 @@ d11_historical_decomposition <- function(hd_data,
     if (is.null(shock_names)) shock_names <- unique(hd_data$shock)
 
     n_shocks <- length(shock_names)
-    pal <- if (n_shocks <= length(dynhr_palette)) dynhr_palette[seq_len(n_shocks)]
-    else colorRampPalette(dynhr_palette)(n_shocks)
+
+    # ---- Fill palette --------------------------------------------------
+    # "initial" (the shock-free trajectory from the smoothed initial state)
+    # and "constraint" (accumulated OBC binding intercepts) are components of
+    # the decomposition, NOT structural shocks: they take neutral greys, and
+    # the shock palette is sized by the shock rows ALONE.  Sizing it by every
+    # row would recolour every shock the moment an "initial" row appears --
+    # the same decomposition would come out in different colours depending on
+    # whether the initial condition was supplied.
+    nonshock_fill <- c(initial = dynhr_na_fill, constraint = dynhr_na_colour)
+    shock_only    <- setdiff(shock_names, names(nonshock_fill))
+    fill_values   <- c(
+      stats::setNames(.dynhr_palette_fun(dynhr_palette_light)(length(shock_only)),
+                      shock_only),
+      nonshock_fill[intersect(names(nonshock_fill), shock_names)]
+    )
 
     # --- Plots ---
     plots <- list()
@@ -137,7 +151,8 @@ d11_historical_decomposition <- function(hd_data,
         ggplot2::geom_col(position = "stack", alpha = 0.85, width = 85) +
         ggplot2::geom_hline(yintercept = 0,
                             colour = dynhr_colours$grey, linewidth = 0.4) +
-        scale_fill_dynhr_light(name = "Shock") +
+        ggplot2::scale_fill_manual(name = "Shock", values = fill_values,
+                                   na.value = dynhr_na_fill) +
         theme_dynhr_diagnostic() +
         ggplot2::labs(title = sprintf("D11: Historical decomposition -- %s", v),
              x = NULL, y = "Contribution (% dev from SS)")
@@ -171,7 +186,8 @@ d11_historical_decomposition <- function(hd_data,
       ggplot2::geom_col(position = "stack", alpha = 0.80, width = 85) +
       ggplot2::geom_hline(yintercept = 0,
                           colour = dynhr_colours$grey, linewidth = 0.3) +
-      scale_fill_dynhr_light(name = "Shock") +
+      ggplot2::scale_fill_manual(name = "Shock", values = fill_values,
+                                 na.value = dynhr_na_fill) +
       ggplot2::facet_wrap(~ variable, scales = "free_y",
                           ncol = n_cols_overview) +
       # Quarterly x-axis: "2010 Q1" format on a Date axis
@@ -220,57 +236,4 @@ d11_historical_decomposition <- function(hd_data,
         ), collapse = "\n")
       }
     )
-}
-
-
-#' Historical decomposition via Kalman smoother
-#'
-#' Decomposes the path of each endogenous variable into contributions
-#' from each structural shock, using smoothed shocks and the state-space
-#' transition matrices.
-#'
-#' For x_{t+1} = F x_t + G eps_t, y_t = H x_t:
-#'   y_t = H * sum_{s=1}^{t} F^{t-s} G[:,j] eps_{j,s}  for each shock j
-#'
-#' @param smoothed_shocks  T x n_shock matrix (from kalman_smoother)
-#' @param F_mat            n_endo x n_endo state transition matrix
-#' @param G_mat            n_endo x n_shock shock impact matrix
-#' @param endo_names       character vector of endogenous variable names
-#' @param shock_names      character vector of shock names
-#' @return List with:
-#'   $contributions  named list of T x n_endo matrices, one per shock
-#'   $total          T x n_endo matrix (sum of all contributions; should equal the smoothed states)
-#' @noRd
-.compute_hd_from_matrices <- function(smoothed_shocks, F_mat, G_mat,
-                                      endo_names, shock_names) {
-
-  TT    <- nrow(smoothed_shocks)
-  n_end <- nrow(F_mat)
-  n_shk <- ncol(G_mat)
-
-  ## Pre-allocate: one T x n_endo matrix per shock
-  contributions <- setNames(
-    lapply(seq_len(n_shk), function(j) matrix(0, TT, n_end)),
-    shock_names
-  )
-
-  ## Run forward simulation for each shock independently
-  for (j in seq_len(n_shk)) {
-    x_j <- rep(0, n_end)   # state attributable to shock j
-    g_j <- G_mat[, j]      # impact column for shock j
-
-    for (t in seq_len(TT)) {
-      eps_jt <- smoothed_shocks[t, j]
-      if (is.na(eps_jt)) eps_jt <- 0
-      x_j <- F_mat %*% x_j + g_j * eps_jt
-      contributions[[j]][t, ] <- as.numeric(x_j)
-    }
-    colnames(contributions[[j]]) <- endo_names
-  }
-
-  ## Total (should reconstruct smoothed states)
-  total <- Reduce(`+`, contributions)
-  colnames(total) <- endo_names
-
-  list(contributions = contributions, total = total)
 }

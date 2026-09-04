@@ -5,21 +5,25 @@
 
 #' dynhr: DSGE Modelling Toolkit
 #'
-#' Parses Dynare `.mod` files, solves the resulting models by first-order
-#' perturbation, runs Bayesian estimation (random-walk Metropolis-Hastings,
-#' sequential Monte Carlo, NUTS), and reports a battery of identification,
-#' convergence, fit, and narrative diagnostics.
+#' Parses Dynare `.mod` files, solves the resulting models by perturbation
+#' at orders 1 to 5, evaluates the likelihood with Kalman, particle
+#' (bootstrap / tempered / Rao-Blackwellised) and skewed (pruned skewed
+#' Kalman) filters, and runs Bayesian estimation with random-walk
+#' Metropolis-Hastings, sequential Monte Carlo, NUTS, DIME, SMC-squared and
+#' particle-marginal Metropolis-Hastings. It then reports a battery of
+#' identification, convergence, fit, and narrative diagnostics.
 #'
-#' The public API is exported and documented. Over 90 functions are
-#' exported covering parsing, solving, estimation, filtering, diagnostics,
-#' optimal policy (Ramsey / OSR / discretionary), OBC, welfare analysis,
-#' and reporting. Functions still marked internal (no `@export`) remain
-#' accessible via `dynhr:::fn`.
+#' The public API is exported and documented, covering parsing, solving,
+#' estimation, filtering, diagnostics, optimal policy (Ramsey / OSR /
+#' discretionary), occasionally-binding constraints (OccBin), the
+#' heterogeneous-agent (HANK) line -- endogenous grid method, sequence-space
+#' Jacobians, reweighting and welfare -- and reporting. Functions still
+#' marked internal (no `@export`) remain accessible via `dynhr:::fn`.
 #'
 #' @keywords internal
 #' @useDynLib dynhr, .registration = TRUE
 #' @importFrom Rcpp sourceCpp
-#' @import parallel
+#' @importFrom parallel detectCores
 #' @importFrom stats acf approx coef complete.cases cor cov dbeta density dgamma dnorm dunif integrate lm.fit optim pchisq plogis pnorm predict qlogis qnorm quantile rbeta rcauchy rchisq reorder reshape rgamma rnorm runif sd setNames sigma simulate spline uniroot var
 #' @importFrom utils capture.output head modifyList read.csv tail
 #' @importFrom grDevices colorRampPalette

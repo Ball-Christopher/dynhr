@@ -603,8 +603,8 @@ print.dynhr_sbc_uniformity <- function(x, ...) {
   band_df <- data.frame(ymin = band[1], ymax = band[2])
 
   col_band <- "#CCCCCC"
-  col_bar  <- if (exists("rbnz_colours", mode = "list")) {
-    tryCatch(rbnz_colours$mid_blue %||% "#1B7CB6", error = function(e) "#1B7CB6")
+  col_bar  <- if (exists("dynhr_colours", mode = "list")) {
+    tryCatch(dynhr_colours$mid_blue %||% "#1B7CB6", error = function(e) "#1B7CB6")
   } else {
     "#1B7CB6"
   }
@@ -861,6 +861,18 @@ print.dynhr_sbc_uniformity <- function(x, ...) {
       }
     }
   }
+
+  ## ---- Step 3a: measurement error -----------------------------------------
+  ## Every likelihood in the package treats `me_variance` as GENUINE i.i.d.
+  ## observation noise (the multivariate Kalman filter since F3-D, 2026-09-03;
+  ## the univariate KF, pruned, TPF, PSKF, OBC and MS filters before that), so
+  ## the DGP must carry the same noise or the SBC tests model mismatch rather
+  ## than calibration. Before this step the harness simulated noise-free data
+  ## and scored it with a noisy likelihood: at me_variance = 1e-3 on the
+  ## Ireland (2004) NK model the shock-sd ranks had mean-rank z = +6
+  ## (posterior below the truth, the signature of variance attributed to
+  ## measurement error that the data never contained).
+  Y <- .sbc_add_me(Y, me_variance)
 
   ## ---- Step 3b (optional): per-draw KF innovation whiteness fast-fail ----
   ## Y was simulated from exactly this (dr, params) state-space -- this is
@@ -1579,4 +1591,18 @@ print.dynhr_sbc <- function(x, ...) {
   cat("(see x$plot for the rank histograms)\n")
 
   invisible(x)
+}
+
+
+## Add i.i.d. N(0, me_variance) measurement error to an n_obs x T panel.
+## Identity when me_variance == 0 (no RNG draw, so seeds are unchanged).
+#' @noRd
+.sbc_add_me <- function(Y, me_variance) {
+  if (!is.numeric(me_variance) || length(me_variance) != 1L ||
+      !is.finite(me_variance) || me_variance < 0)
+    stop(".sbc_add_me: `me_variance` must be a finite non-negative scalar.",
+         call. = FALSE)
+  if (me_variance == 0) return(Y)
+  Y + matrix(stats::rnorm(length(Y), sd = sqrt(me_variance)),
+             nrow = nrow(Y), ncol = ncol(Y))
 }

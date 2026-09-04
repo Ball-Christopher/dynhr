@@ -310,12 +310,17 @@ estimate_model <- function(config) {
                         config$n_chains, config$n_draws / 1000))
 
     n_par      <- length(theta_mode)
-    opt_scale  <- 2.38^2 / n_par
-    Sigma_prop <- if (!is.null(mode_res$V_mode))
-                    mode_res$V_mode * opt_scale
-                  else
-                    diag(prior_spec$std^2, nrow = n_par) * opt_scale
-    rownames(Sigma_prop) <- colnames(Sigma_prop) <- names(theta_mode)
+    ## See .sampler_proposal_cov(): the V_mode branch below is unreachable on
+    ## the .run_mode_finding() path, which is what made this proposal come
+    ## from the PRIOR rather than the posterior Hessian.
+    Sigma_prop <- if (!is.null(mode_res$V_mode)) {
+                    S <- mode_res$V_mode * (2.38^2 / n_par)
+                    dimnames(S) <- list(names(theta_mode), names(theta_mode))
+                    S
+                  } else {
+                    .sampler_proposal_cov(log_post_fn, theta_mode, prior_spec,
+                                          verbose = vb)
+                  }
 
     mcmc_raw <- .run_mcmc(log_post_fn, theta_mode, prior_spec, Sigma_prop,
                           config, parsed_model, Y, obs_names, compiled)

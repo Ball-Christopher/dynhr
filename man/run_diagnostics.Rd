@@ -23,7 +23,40 @@ When the first argument is a \code{dynhr_posterior_result} object, all
 required inputs are derived automatically.  In this mode, the \code{report}
 argument controls output format.
 }
+\section{Coverage}{
+
+The battery spans D0-D41.  \code{run_diagnostics()} wires D0-D37 and D41 and
+silently skips any stage whose inputs are absent, so it is safe to call with
+whatever pieces you have.  Three members are exported standalone instead,
+because they need only a model plus a parameter vector: D38
+(\code{\link{diag_sloppiness}}), D39 (\code{\link{diag_stability_map}}) and
+D40 (\code{\link{diag_near_unit_root}}).  See
+\code{vignette("diagnostics")} for the stage table.
+}
+
+\examples{
+model    <- parse_mod(system.file("extdata/models/rbc.mod",
+                                  package = "dynhr"), verbose = FALSE)
+compiled <- compile_model(model, verbose = FALSE)
+steady   <- solve_steady(compiled, model$param_values,
+                         endo_names = model$var_names,
+                         exo_names  = model$varexo_names, verbose = FALSE)
+dr <- solve_perturbation(model, compiled, steady$values,
+                         model$param_values, verbose = FALSE)
+set.seed(1)
+Y <- as.matrix(simulate_model(dr, n_periods = 100L, model = model,
+                              burn_in = 20L)[, "y", drop = FALSE])
+
+## Pre-estimation stages only: no draws, so D5-D7 and the fit block skip.
+diags <- suppressWarnings(
+  run_diagnostics(model = model, compiled = compiled, dr = dr,
+                  params = model$param_values, data = Y,
+                  obs_names = "y", verbose = FALSE))
+names(diags)
+}
 \seealso{
 \code{\link{run_full_estimation}}, \code{\link{write_report}},
-  \code{\link{solve_model}}, \code{\link{run_posterior_estimation}}
+  \code{\link{solve_model}}, \code{\link{run_posterior_estimation}},
+  \code{\link{diag_sloppiness}}, \code{\link{diag_stability_map}},
+  \code{\link{diag_near_unit_root}}, \code{\link{dm_diagnostics}}
 }

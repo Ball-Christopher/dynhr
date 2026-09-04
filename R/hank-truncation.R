@@ -157,7 +157,7 @@ hank_ks_coarse_anchored <- function(ks, n_a = 24L, a_grid = NULL) {
          mkt_residual = anch$block$A - ks$K,
          beta_base = ks$beta, anchor_lx = anch$lx,
          n_a_coarse = length(a_grid)),
-    class = "hank_ks")
+    class = c("hank_ks", "hank_block"))
 }
 
 
@@ -243,7 +243,7 @@ hank_ks_taxed_coarse_anchored <- function(ks_taxed, n_a = 24L, a_grid = NULL,
          mkt_residual = blk$A - K,
          beta_base = beta, anchor_lx = lx,
          n_a_coarse = length(a_grid)),
-    class = c("hank_ks_taxed", "hank_ks"))
+    class = c("hank_ks_taxed", "hank_ks", "hank_block"))
 }
 
 
@@ -394,7 +394,7 @@ hank_reiter_linearize <- function(ks, delta_fd = 1e-6) {
          Da = Da, va = va,
          r_K = r_K, r_Z = r_Z, w_K = w_K, w_Z = w_Z,
          L = L, n = n, n_e = n_e, n_a = n_a, delta_fd = delta_fd, ks = ks),
-    class = "hank_reiter_lin")
+    class = c("hank_reiter_lin", "hank_block"))
 }
 
 
@@ -495,7 +495,7 @@ hank_reiter_linearize <- function(ks, delta_fd = 1e-6) {
          rho_z = rho_z, sigma_z = sigma_z,
          drop_dist_coord = drop_dist_coord,
          n_e = n_e, n_a = n_a, ks = ks),
-    class = "hank_reiter_ss")
+    class = c("hank_reiter_ss", "hank_block"))
 }
 
 
@@ -525,35 +525,35 @@ hank_reiter_irf <- function(rss, T_h = 100L, shock = 0.01) {
 #' state space with the exact stationary (Lyapunov) initial covariance —
 #' the KF-filterable finite-state HANK payoff.
 #'
-#' @param Y \code{T x n_obs} matrix of DEMEANED observations (deviations from
-#'   steady state), columns in the order of \code{observables}.
+#' @param data \code{T x n_obs} matrix of DEMEANED observations (deviations from
+#'   steady state), columns in the order of \code{obs_vars}.
 #' @param rss A \code{hank_reiter_ss} (build with \code{drop_dist_coord = TRUE};
 #'   the Lyapunov initialization requires a strictly stable \code{T}).
-#' @param observables Which observation rows to use (subset of
+#' @param obs_vars Which observation rows to use (subset of
 #'   \code{rss$obs_names}).
-#' @param me_var Measurement-error variance added to each observable (needed
-#'   when \code{length(observables) > 1}: one structural shock, so more than
+#' @param me_variance Measurement-error variance added to each observable (needed
+#'   when \code{length(obs_vars) > 1}: one structural shock, so more than
 #'   one observable is stochastically singular without it).
 #'
 #' @return Scalar Gaussian log-likelihood.
 #' @export
-hank_reiter_kalman_loglik <- function(Y, rss, observables = "A",
-                                      me_var = 0) {
+hank_reiter_kalman_loglik <- function(data, rss, obs_vars = "A",
+                                      me_variance = 0) {
   if (!inherits(rss, "hank_reiter_ss"))
     stop("hank_reiter_kalman_loglik(): `rss` must be a hank_reiter_ss object.")
-  if (!all(observables %in% rss$obs_names))
+  if (!all(obs_vars %in% rss$obs_names))
     stop("hank_reiter_kalman_loglik(): unknown observable(s): ",
-         paste(setdiff(observables, rss$obs_names), collapse = ", "))
+         paste(setdiff(obs_vars, rss$obs_names), collapse = ", "))
   if (rss$spectral_radius >= 1 - 1e-10)
     stop("hank_reiter_kalman_loglik(): T is not strictly stable; build the ",
          "state space with drop_dist_coord = TRUE.")
-  Y <- as.matrix(Y)
-  if (ncol(Y) != length(observables))
-    stop("hank_reiter_kalman_loglik(): ncol(Y) must match observables.")
+  data <- as.matrix(data)
+  if (ncol(data) != length(obs_vars))
+    stop("hank_reiter_kalman_loglik(): ncol(data) must match obs_vars.")
 
   TT <- rss$T_mat
   RR <- rss$R_mat
-  ZZ <- rss$Z_mat[observables, , drop = FALSE]
+  ZZ <- rss$Z_mat[obs_vars, , drop = FALSE]
   ns <- nrow(TT)
 
   ## stationary covariance by doubling: P = T P T' + sigma_z^2 R R'
@@ -566,14 +566,14 @@ hank_reiter_kalman_loglik <- function(Y, rss, observables = "A",
   }
 
   out <- .kf_univariate_dispatch(
-    Y_minus_d = t(Y),
+    Y_minus_d = t(data),
     ZZ = ZZ, TT = TT, RR = RR,
-    DD = matrix(0, length(observables), 1L),
+    DD = matrix(0, length(obs_vars), 1L),
     Sigma_e = matrix(rss$sigma_z^2, 1L, 1L),
     s0 = rep(0, ns),
     P_state = P,
     P_inf_state = NULL,
-    me_variance = me_var)
+    me_variance = me_variance)
   out$loglik
 }
 
@@ -597,16 +597,16 @@ hank_reiter_kalman_loglik <- function(Y, rss, observables = "A",
 #' \eqn{\Delta_\eta = I} Schur fallback are both EXACT here (zero residual
 #' shock variance off the state range).
 #'
-#' @param Y \code{T x n_obs} matrix of DEMEANED observations (deviations from
-#'   steady state), columns in the order of \code{observables}.
+#' @param data \code{T x n_obs} matrix of DEMEANED observations (deviations from
+#'   steady state), columns in the order of \code{obs_vars}.
 #' @param rss A \code{hank_reiter_ss} (build with \code{drop_dist_coord =
 #'   TRUE}; the Lyapunov initialization requires a strictly stable \code{T}).
 #' @param alpha_z Skew-normal shape of the TFP innovation (0 = Gaussian;
 #'   positive = right-skewed).
-#' @param observables Which observation rows to use (subset of
+#' @param obs_vars Which observation rows to use (subset of
 #'   \code{rss$obs_names}).
-#' @param me_var Measurement-error variance added to each observable (needed
-#'   when \code{length(observables) > 1}, as in the Gaussian filter).
+#' @param me_variance Measurement-error variance added to each observable (needed
+#'   when \code{length(obs_vars) > 1}, as in the Gaussian filter).
 #' @param cut_tol,max_q Skewness-dimension pruning controls of the underlying
 #'   PSKF recursion (see the pinned \code{max_q = 5} Miwa-exact cap;
 #'   memory: pskf-multishock-pruning-bias). With ONE shock the growth is one
@@ -615,31 +615,31 @@ hank_reiter_kalman_loglik <- function(Y, rss, observables = "A",
 #' @return Scalar log-likelihood.
 #' @seealso \code{\link{hank_reiter_kalman_loglik}}
 #' @export
-hank_reiter_pskf_loglik <- function(Y, rss, alpha_z = 0, observables = "A",
-                                    me_var = 0, cut_tol = 0.01, max_q = 5L) {
+hank_reiter_pskf_loglik <- function(data, rss, alpha_z = 0, obs_vars = "A",
+                                    me_variance = 0, cut_tol = 0.01, max_q = 5L) {
   if (!inherits(rss, "hank_reiter_ss"))
     stop("hank_reiter_pskf_loglik(): `rss` must be a hank_reiter_ss object.")
-  if (!all(observables %in% rss$obs_names))
+  if (!all(obs_vars %in% rss$obs_names))
     stop("hank_reiter_pskf_loglik(): unknown observable(s): ",
-         paste(setdiff(observables, rss$obs_names), collapse = ", "))
+         paste(setdiff(obs_vars, rss$obs_names), collapse = ", "))
   if (rss$spectral_radius >= 1 - 1e-10)
     stop("hank_reiter_pskf_loglik(): T is not strictly stable; build the ",
          "state space with drop_dist_coord = TRUE.")
   if (!is.numeric(alpha_z) || length(alpha_z) != 1L || !is.finite(alpha_z))
     stop("hank_reiter_pskf_loglik(): `alpha_z` must be a finite scalar.")
-  Y <- as.matrix(Y)
-  if (ncol(Y) != length(observables))
-    stop("hank_reiter_pskf_loglik(): ncol(Y) must match observables.")
+  data <- as.matrix(data)
+  if (ncol(data) != length(obs_vars))
+    stop("hank_reiter_pskf_loglik(): ncol(data) must match obs_vars.")
 
-  ZZ <- rss$Z_mat[observables, , drop = FALSE]
+  ZZ <- rss$Z_mat[obs_vars, , drop = FALSE]
   lift <- .csn_state_noise_lift(
     RR = rss$R_mat,
-    DD = matrix(0, length(observables), 1L),
+    DD = matrix(0, length(obs_vars), 1L),
     Sigma_e = matrix(rss$sigma_z^2, 1L, 1L),
     alpha = alpha_z,
-    me_variance = me_var)
+    me_variance = me_variance)
 
-  .pskf_filter(t(Y), TT = rss$T_mat, ZZ = ZZ,
+  .pskf_filter(t(data), TT = rss$T_mat, ZZ = ZZ,
                mu_eta = lift$mu_eta, Sigma_eta = lift$Sigma_eta,
                Gamma_eta = lift$Gamma_eta, nu_eta = lift$nu_eta,
                Delta_eta = lift$Delta_eta, mu_eps = lift$mu_eps,
@@ -655,11 +655,11 @@ hank_reiter_pskf_loglik <- function(Y, rss, alpha_z = 0, observables = "A",
 #' \code{.kf_univariate_dispatch} (same \code{ZZ} row subset, same
 #' \code{Sigma_e = sigma_z^2}, \code{DD = 0}, \code{d = 0}).
 #' @noRd
-.hank_reiter_ss_to_kf <- function(rss, observables, me_var) {
-  ZZ <- rss$Z_mat[observables, , drop = FALSE]
+.hank_reiter_ss_to_kf <- function(rss, obs_vars, me_variance) {
+  ZZ <- rss$Z_mat[obs_vars, , drop = FALSE]
   list(TT = rss$T_mat, RR = rss$R_mat, ZZ = ZZ,
-       DD = matrix(0, length(observables), 1L),
-       d  = rep(0, length(observables)),
+       DD = matrix(0, length(obs_vars), 1L),
+       d  = rep(0, length(obs_vars)),
        Sigma_e = matrix(rss$sigma_z^2, 1L, 1L))
 }
 
@@ -681,33 +681,27 @@ hank_reiter_pskf_loglik <- function(Y, rss, alpha_z = 0, observables = "A",
 #' recipe of \code{\link{hank_ks_coarse_anchored}}, ~10s-100s of ms per
 #' evaluation).
 #'
-#' The adjoint leg (\code{.kf_loglik_adjoint}) requires a NA-free \code{Y}
+#' The adjoint leg (\code{.kf_loglik_adjoint}) requires a NA-free \code{data}
 #' (it has no univariate/missing-data dispatch); use
 #' \code{\link{hank_reiter_kalman_loglik}} directly (its
-#' \code{.kf_univariate_dispatch} path) when \code{Y} has gaps.
+#' \code{.kf_univariate_dispatch} path) when \code{data} has gaps.
 #'
-#' @section IMPORTANT -- \code{me_var} convention with \code{length(observables) > 1}:
-#' \code{\link{hank_reiter_kalman_loglik}} always routes through
-#' \code{.kf_univariate_dispatch}, which (per the documented convention in
-#' \code{R/kalman-filter.R}) treats \code{me_var > 0} as TRUE iid diagonal
-#' measurement noise (a real noise model). \code{.kf_loglik_adjoint} runs the
-#' plain multivariate recursion, which instead adds \code{me_var} to \code{F}
-#' ONLY as a positive-definiteness regularizer (never as a noise term in the
-#' state/covariance update). The two conventions are IDENTICAL at
-#' \code{me_var = 0} (verified here to ~1e-8, both exact evaluations of the
-#' same state space) but DIFFER by \code{O(me_var)} otherwise -- confirmed
-#' empirically: with 2 observables and \code{me_var = 1e-8} the two logliks
-#' differ by ~2 nats, NOT shrinking as \code{me_var -> 0} faster than that
-#' \code{O(me_var)} term implies. This function's \code{loglik}/\code{grad}
-#' are therefore an EXACT gradient of the adjoint's OWN (regularizer-
-#' convention) likelihood, not of \code{hank_reiter_kalman_loglik}'s, whenever
-#' \code{me_var > 0} and \code{length(observables) > 1}. Do not mix the two
-#' functions' outputs in the same estimation when that condition holds; the
-#' single-observable case (\code{length(observables) == 1}, where \code{F} is
-#' scalar and stochastic singularity does not arise) is unaffected.
+#' @section \code{me_variance} (RESOLVED in 0.9.2.x -- F3-D):
+#' \code{\link{hank_reiter_kalman_loglik}} routes through
+#' \code{.kf_univariate_dispatch} and \code{.kf_loglik_adjoint} runs the
+#' multivariate recursion. Up to 0.9.2.0004 these implemented DIFFERENT
+#' \code{me_variance} conventions -- true iid measurement noise vs. an
+#' \code{F}-only regulariser -- and with 2 observables at
+#' \code{me_variance = 1e-8} their logliks differed by ~2 nats, so their
+#' outputs could not be mixed. F3-D made \code{me_variance} TRUE iid diagonal
+#' measurement noise on the multivariate paths too (it now enters the Joseph
+#' covariance update as well as \code{F}), so the two agree at ANY
+#' \code{me_variance} (verified to ~1e-9 here) and this function's
+#' \code{loglik}/\code{grad} are an exact gradient of
+#' \code{hank_reiter_kalman_loglik}'s likelihood.
 #'
-#' @param Y \code{T x n_obs} matrix (or vector when \code{n_obs = 1}) of
-#'   DEMEANED observations, columns in the order of \code{observables}. Must
+#' @param data \code{T x n_obs} matrix (or vector when \code{n_obs = 1}) of
+#'   DEMEANED observations, columns in the order of \code{obs_vars}. Must
 #'   not contain \code{NA}.
 #' @param rss_fn \code{function(theta)} returning a \code{hank_reiter_ss}
 #'   object (e.g. \code{\link{hank_reiter_statespace}} closed over a fixed
@@ -718,9 +712,9 @@ hank_reiter_pskf_loglik <- function(Y, rss, alpha_z = 0, observables = "A",
 #'   or another household parameter).
 #' @param theta NAMED numeric vector of parameter values at which to
 #'   differentiate.
-#' @param observables Which observation rows of the state space to use
+#' @param obs_vars Which observation rows of the state space to use
 #'   (subset of \code{rss_fn(theta)$obs_names}).
-#' @param me_var Measurement-error variance added to each observable -- see
+#' @param me_variance Measurement-error variance added to each observable -- see
 #'   the convention warning above when combined with multiple observables.
 #' @param fd_step Relative central-FD step: \code{h_j = fd_step *
 #'   max(|theta_j|, 1e-2)}. Default \code{1e-5}, i.e. a few times
@@ -733,9 +727,9 @@ hank_reiter_pskf_loglik <- function(Y, rss, alpha_z = 0, observables = "A",
 #'
 #' @return \code{list(loglik, grad)}: \code{loglik} is the adjoint path's
 #'   log-likelihood at \code{theta} (matches
-#'   \code{\link{hank_reiter_kalman_loglik}} to ~1e-8 when \code{me_var = 0}
-#'   or \code{length(observables) == 1} -- both exact Gaussian-KF evaluations
-#'   of the SAME state space; see the \code{me_var} convention section
+#'   \code{\link{hank_reiter_kalman_loglik}} to ~1e-8 when \code{me_variance = 0}
+#'   or \code{length(obs_vars) == 1} -- both exact Gaussian-KF evaluations
+#'   of the SAME state space; see the \code{me_variance} convention section
 #'   otherwise); \code{grad} is a numeric vector named as \code{theta}.
 #'
 #' @section Cost model:
@@ -745,17 +739,17 @@ hank_reiter_pskf_loglik <- function(Y, rss, alpha_z = 0, observables = "A",
 #'
 #' @seealso \code{\link{hank_reiter_kalman_loglik}}, \code{\link{hank_ks_coarse_anchored}}
 #' @export
-hank_reiter_kalman_grad <- function(Y, rss_fn, theta, observables = "A",
-                                    me_var = 0, fd_step = NULL) {
+hank_reiter_kalman_grad <- function(data, rss_fn, theta, obs_vars = "A",
+                                    me_variance = 0, fd_step = NULL) {
   if (is.null(names(theta)) || any(!nzchar(names(theta))))
     stop("hank_reiter_kalman_grad(): `theta` must be a NAMED numeric vector.")
-  Y <- as.matrix(Y)
-  if (anyNA(Y))
+  data <- as.matrix(data)
+  if (anyNA(data))
     stop("hank_reiter_kalman_grad(): Y must not contain missing values ",
          "(the adjoint path has no univariate/NA dispatch; use ",
          "hank_reiter_kalman_loglik() directly for data with gaps).")
-  if (ncol(Y) != length(observables))
-    stop("hank_reiter_kalman_grad(): ncol(Y) must match observables.")
+  if (ncol(data) != length(obs_vars))
+    stop("hank_reiter_kalman_grad(): ncol(data) must match obs_vars.")
   if (is.null(fd_step)) fd_step <- 1e-5
 
   par_names <- names(theta)
@@ -765,14 +759,14 @@ hank_reiter_kalman_grad <- function(Y, rss_fn, theta, observables = "A",
   if (!inherits(rss0, "hank_reiter_ss"))
     stop("hank_reiter_kalman_grad(): rss_fn(theta) must return a ",
          "hank_reiter_ss object.")
-  if (!all(observables %in% rss0$obs_names))
+  if (!all(obs_vars %in% rss0$obs_names))
     stop("hank_reiter_kalman_grad(): unknown observable(s): ",
-         paste(setdiff(observables, rss0$obs_names), collapse = ", "))
+         paste(setdiff(obs_vars, rss0$obs_names), collapse = ", "))
   if (rss0$spectral_radius >= 1 - 1e-10)
     stop("hank_reiter_kalman_grad(): T is not strictly stable at theta; ",
          "build the state space with drop_dist_coord = TRUE.")
 
-  ss0 <- .hank_reiter_ss_to_kf(rss0, observables, me_var)
+  ss0 <- .hank_reiter_ss_to_kf(rss0, obs_vars, me_variance)
 
   ## -- central FD through rss_fn for each theta_j: dTT/dRR/dZZ/dSigma_e -----
   ## (dSigma_e = d(sigma_z^2) falls out automatically because rss carries
@@ -785,8 +779,8 @@ hank_reiter_kalman_grad <- function(Y, rss_fn, theta, observables = "A",
 
     rss_p <- rss_fn(theta_p)
     rss_m <- rss_fn(theta_m)
-    ss_p <- .hank_reiter_ss_to_kf(rss_p, observables, me_var)
-    ss_m <- .hank_reiter_ss_to_kf(rss_m, observables, me_var)
+    ss_p <- .hank_reiter_ss_to_kf(rss_p, obs_vars, me_variance)
+    ss_m <- .hank_reiter_ss_to_kf(rss_m, obs_vars, me_variance)
 
     d_ss_list[[j]] <- list(
       dTT      = (ss_p$TT - ss_m$TT) / (2 * h),
@@ -795,7 +789,7 @@ hank_reiter_kalman_grad <- function(Y, rss_fn, theta, observables = "A",
       dSigma_e = (ss_p$Sigma_e - ss_m$Sigma_e) / (2 * h))
   }
 
-  out <- .kf_loglik_adjoint(t(Y), ss0, d_ss_list, me_variance = me_var)
+  out <- .kf_loglik_adjoint(t(data), ss0, d_ss_list, me_variance = me_variance)
   names(out$grad) <- par_names
   out
 }

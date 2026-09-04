@@ -65,6 +65,9 @@ List kf_score_sigma_cpp(const arma::mat& Yd,        // n_obs x T (already Y - d)
   // Kalman filter uses, and it is what the per-step derivative recursion needs
   // to be competitive.
   bool ss = false;
+  // me_diag is TRUE observation noise (F3-D): it enters F AND the Joseph
+  // covariance update.
+  const bool has_me_true = arma::any(arma::vectorise(arma::abs(me_diag)) > 0.0);
   arma::mat K_ss, Fi_ss;
   double logdetF_ss = 0.0;
   std::vector<arma::mat> dFss(K), dKss(K);
@@ -135,6 +138,10 @@ List kf_score_sigma_cpp(const arma::mat& Yd,        // n_obs x T (already Y - d)
                     + dRmKD * Sigma_e * RmKD.t()
                     + RmKD * dSig[k] * RmKD.t()
                     + RmKD * Sigma_e * dRmKD.t();
+      // Tangent of the ME Joseph term P' += K me K' (me is data):
+      // dP' += dK me K' + K me dK'.
+      if (has_me_true)
+        dPn += dKg * me_diag * Kg.t() + Kg * me_diag * dKg.t();
       dPn = 0.5 * (dPn + dPn.t());
       dP_drift = std::max(dP_drift, arma::abs(dPn - dP[k]).max());
       dP[k]  = dPn;
@@ -143,6 +150,8 @@ List kf_score_sigma_cpp(const arma::mat& Yd,        // n_obs x T (already Y - d)
 
     s = TT * s + Kg * v;
     arma::mat Pn = TmKZ * P * TmKZ.t() + RmKD * Sigma_e * RmKD.t();
+    // TRUE measurement-noise law (F3-D): P' += K me K'.
+    if (has_me_true) Pn += Kg * me_diag * Kg.t();
     Pn = 0.5 * (Pn + Pn.t());
     double P_drift = arma::abs(Pn - P).max();
     P = Pn;

@@ -23,13 +23,14 @@ knitr::opts_chunk$set(
 Dynare-format `.mod` files, solves the model by first- through
 fifth-order perturbation, runs the Kalman filter and smoother (including
 block-Kalman and OBC PKF variants), and provides a suite of Bayesian
-estimation samplers (RWMH, SMC, NUTS).  A 30-diagnostic battery
-(D1–D30) helps you evaluate whether the estimated model is numerically
-and economically plausible.
+estimation samplers (RWMH, SMC, SMC², NUTS, DIME, PMMH).  A diagnostic
+battery (D0–D41) helps you evaluate whether the estimated model is
+numerically and economically plausible.
 
 The package ships with a small corpus of reference models (RBC, three-equation
-New Keynesian, Herbst–Schorfheide 2016, Lubik–Schorfheide 2003,
-Fagiolo–Schorfheide 2000, the `03j` NZ production model, and the
+New Keynesian, Herbst–Schorfheide 2016, Lubik–Schorfheide 2003, the
+three-equation New Keynesian model `nk_demo` — which also ships its
+own 192-quarter dataset — the `03j` NZ production model, and the
 Caldara et al. 2012 financial-accelerator model) with regression goldens
 produced from Dynare.jl and Octave Dynare 7.0.
 
@@ -153,48 +154,100 @@ cat("Log-likelihood:", round(kf$loglik, 3), "\n")
 
 For a model with an `estimated_params` block, `run_full_estimation()`
 runs the entire pipeline — parse → compile → mode-finding → MCMC →
-optional diagnostics — and saves outputs to a directory:
+optional diagnostics — and saves outputs to a directory.
 
-```{r rfe, eval = FALSE}
+A model *and* a dataset ship with the package, so this runs from a clean
+install with no data of your own — `nk_demo.mod` is a three-equation New
+Keynesian model (nine estimated parameters) and `nk_demo_data.csv` is
+192 quarters of US output- and price-growth observations:
+
+```{r rfe, results = "hide"}
+mod_file <- system.file("extdata/models/nk_demo.mod", package = "dynhr")
+est_data <- read.csv(system.file("extdata/models/nk_demo_data.csv",
+                                 package = "dynhr"))
+
 result <- run_full_estimation(
-  mod_file    = "mymodel.mod",
-  data        = Y,            # T × n_obs matrix
-  obs_vars    = c("YGR", "INFL", "INT"),
-  output_dir  = "output/",
-  sampler     = "rwmh",
-  n_draws     = 50000L,
-  n_warmup    = 10000L,
-  n_chains    = 4L,
-  seed        = 42L,
-  verbose     = TRUE
+  mod_file    = mod_file,
+  data        = est_data,                    # T × n_obs data.frame or matrix
+  obs_vars    = c("ygr", "infl", "intr"),
+  output_dir  = tempdir(),
+  sampler     = "smc",                       # no mode required; gives log p(Y|M)
+  n_particles = 500L,                        # raise for a production run
+  seed        = 1L,
+  verbose     = FALSE
 )
-print(result)
 ```
+
+```{r rfe-summary}
+summary(result$chains)              # posterior mean / sd / 5-50-95%
+result$chains$log_marginal_lik      # SMC estimate of log p(Y | M)
+```
+
+For a random-walk Metropolis run instead, pass `sampler = "rwmh"` with
+`n_draws`, `n_warmup` and `n_chains` (multi-chain runs add Gelman–Rubin
+convergence diagnostics).
 
 The returned `dynhr_estimation_result` object carries the parsed model,
 compiled model, prior specification, mode, chains, convergence
 diagnostics, and run metadata.
 
-Alternatively, use the stepwise API: `estimate_mode()` for mode-finding
-only, or `estimate_posterior()` for sampling from a pre-computed mode.
+Alternatively, use the stepwise API: `run_mode_finding()` for mode-finding
+only, or `run_posterior_estimation()` for sampling from a pre-computed mode.
 `make_posterior()` also accepts `likelihood = "cumulant"` to estimate
 using third- and fourth-order cumulants (skewness and kurtosis) alongside
 the usual Gaussian likelihood, following Mutschler (2015).
 
 ---
 
+## 6b  One pipeline object instead of six threaded calls
+
+The stepwise API above asks you to re-thread the same pieces — model,
+compiled model, data, `obs_vars`, prior spec — through every call.
+`dynhr_model()` bundles them once, and the `dm_*()` verbs take that object
+as their first argument and hand back a new one with the step's result
+stored in a slot, so the pipeline pipes:
+
+```{r dm-object, results = "hide"}
+obs_vars <- c("ygr", "infl", "intr")
+Y <- as.matrix(read.csv(system.file("extdata/models/nk_demo_data.csv",
+                                    package = "dynhr"))[, obs_vars])
+
+dm <- dynhr_model(system.file("extdata/models/nk_demo.mod", package = "dynhr"),
+                  data = Y, obs_vars = obs_vars) |>
+  dm_solve() |>
+  dm_posterior() |>
+  dm_mode(n_iter = 200L, verbose = FALSE)
+```
+
+```{r dm-print}
+dm
+dm$mode$logpost
+```
+
+The verbs are `dm_solve()`, `dm_posterior()`, `dm_mode()`, `dm_sample()`
+(`sampler = "rwmh"`, `"nuts"`, `"smc"` or `"dime"`), `dm_diagnostics()`,
+`dm_irf()` and `dm_forecast()`.  Each one is a pure re-threading of the
+stored fields into the function documented above — `dm_solve()` *is*
+`solve_perturbation()`, `dm_sample()` *is* `mcmc()`/`nuts()`/`smc()`/`dime()`
+— so results are identical to the functional pipeline, and the raw result
+objects (`dm$solution`, `dm$log_post`, `dm$chains`, …) are the same objects
+those functions return.  Nothing runs implicitly: a verb whose prerequisite
+is missing errors and names the step to run first.
+
+---
+
 ## 7  Diagnostics
 
-After estimation, run the 30-diagnostic battery (D1–D30) covering
+After estimation, run the diagnostic battery (D0–D41) covering
 pre-estimation identification, MCMC quality, post-estimation fit, OBC
-identification, regime-switching identification, and more:
+identification, regime-switching identification, and more.  Each stage is
+skipped when its inputs are absent, so you can call it with whatever you have:
 
 ```{r diag, eval = FALSE}
 diags <- run_diagnostics(
-  model    = model,
+  model    = model,       # the RBC pieces built above
   compiled = compiled,
   dr       = dr,
-  chains   = result$chains,
   data     = Y
 )
 ```
@@ -210,13 +263,14 @@ write_report(diags, file = "output/report.md")
 ## 8  What's next
 
 - `vignette("solving")` — steady-state solvers, perturbation through order 5, OBC, IRFs, moments, Kalman filter variants
-- `vignette("estimation")` — prior specification, mode-finding, RWMH/SMC/NUTS, cumulant-based likelihood
-- `vignette("diagnostics")` — the D1–D30 diagnostic battery explained
+- `vignette("estimation")` — prior specification, mode-finding, RWMH/SMC/NUTS, cumulant-based likelihood, exact-Hessian curvature (`posterior_hessian()`), Laplace evidence, and weak-identification tools
+- `vignette("hank")` — heterogeneous-agent (HANK) models: solving, mixture estimation over macro / cross-sectional-level / response channels, and consumption-equivalent welfare
+- `vignette("diagnostics")` — the D0–D41 diagnostic battery, plus standalone helpers (`chain_diagnostics()`, `bk_distance()`, `kf_innovation_diagnostics()`)
 - `?ramsey_model`, `?ramsey_nn1` — Ramsey optimal policy (augmented-system and Gross–Hansen (n, n+1) approximation)
 - `?osr`, `?discretionary_policy` — optimal simple rules and Markov-perfect discretionary policy
 - `?nash_ramsey_cooperative`, `?nash_ramsey_openloop` — Nash–Ramsey games
 - `?ramsey_obc_pf`, `?ramsey_obc_pwlinear` — Ramsey with occasionally binding constraints
-- `?ramsey_regime_deterministic`, `?ramsey_regime_markov` — regime-dependent Ramsey
+- `?ramsey_regime_deterministic`, `?ramsey_regime_independent` — regime-dependent Ramsey
 - `?opp_sufficient_stats` — sufficient-statistics optimal policy (Barnichon & Mesters 2023)
 - `?run_full_estimation` — complete argument reference for the one-call pipeline
 - `?run_diagnostics` — orchestrator and individual diagnostic docs

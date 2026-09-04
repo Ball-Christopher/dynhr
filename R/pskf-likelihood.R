@@ -461,6 +461,43 @@ dim_red4_r <- function(Gamma, nu, Delta, Sigma, cut_tol = 0.01, max_q = 5L) {
 }
 
 
+#' Scale-free Moore-Penrose pseudoinverse of a symmetric PSD matrix
+#'
+#' Used for \eqn{(RR \Sigma_e RR')^{+}} in \code{.csn_state_noise_lift}.
+#' The rank decision is made on the CORRELATION form
+#' \eqn{D^{-1/2} S D^{-1/2}} (\eqn{D = diag(S)}) rather than on \code{S}
+#' itself, so a state whose variance is genuinely small but nonzero (a shock
+#' with \code{stderr = 1e-5} alongside one with \code{stderr = 1}) is not
+#' truncated as a null direction the way \code{MASS::ginv} would. Exactly
+#' zero-variance rows/columns ARE null directions and are dropped outright.
+#'
+#' @param S    Symmetric positive-semidefinite matrix.
+#' @param rtol Relative eigenvalue cutoff on the correlation form
+#'   (default \code{sqrt(.Machine$double.eps)}, matching \code{MASS::ginv}).
+#' @return Matrix of the same dimension as \code{S}.
+#' @noRd
+.csn_sym_pinv <- function(S, rtol = sqrt(.Machine$double.eps)) {
+  n <- nrow(S)
+  P <- matrix(0, n, n)
+  if (n == 0L) return(P)
+  d <- sqrt(diag(S))
+  d[!is.finite(d)] <- 0
+  keep <- d > 0
+  if (!any(keep)) return(P)
+  ds <- d[keep]
+  C  <- S[keep, keep, drop = FALSE] / outer(ds, ds)   # correlation form
+  C  <- 0.5 * (C + t(C))
+  e  <- eigen(C, symmetric = TRUE)
+  ev_max <- max(e$values)
+  if (!is.finite(ev_max) || ev_max <= 0) return(P)
+  pos <- e$values > rtol * ev_max
+  if (!any(pos)) return(P)
+  V <- e$vectors[, pos, drop = FALSE]
+  P[keep, keep] <- (V %*% ((1 / e$values[pos]) * t(V))) / outer(ds, ds)
+  0.5 * (P + t(P))
+}
+
+
 #' Lift a skewed shock law through a linear state-space loading (generic core)
 #'
 #' The generic CSN state-noise construction shared by the DSGE path
@@ -495,25 +532,63 @@ dim_red4_r <- function(Gamma, nu, Delta, Sigma, cut_tol = 0.01, max_q = 5L) {
   ## q_eta = n_exo (one skewness dimension per shock)
   Gamma_e   <- diag(alpha / sigma_e, nrow = n_exo)  # n_exo x n_exo
 
-  ## Gamma_eta = Gamma_e Sigma_e RR' (RR Sigma_e RR')^{-1}   (n_exo x n_state)
-  ## If Sigma_eta is singular, use the pseudoinverse (models with
-  ## n_state > n_exo have redundant states that don't get shocked; a tall
-  ## full-loading RR -- the Reiter case -- ALWAYS lands here, and the
-  ## pseudoinverse Gamma_eta is exact: Gamma_eta (RR e) = Gamma_e e).
-  Gamma_eta <- tryCatch(
-    Gamma_e %*% Sigma_e %*% t(RR) %*% solve(Sigma_eta),
-    error = function(e)
-      Gamma_e %*% Sigma_e %*% t(RR) %*% MASS::ginv(Sigma_eta))
+  ## ---- Sigma_eta^{-1}: ONE rank-revealing pseudoinverse for BOTH terms -----
+  ##
+  ## Gamma_eta    = Gamma_e Sigma_e RR' S_eta^+                (n_exo x n_state)
+  ## Sigma_e_perp = Sigma_e - Sigma_e RR' S_eta^+ RR Sigma_e   (Schur complement)
+  ## Delta_eta    = I + Gamma_e Sigma_e_perp Gamma_e'
+  ##
+  ## Both used to be written as tryCatch(solve(Sigma_eta), <fallback>), with
+  ## DIFFERENT fallbacks: ginv for Gamma_eta, but a bare identity for
+  ## Delta_eta. That construction was wrong twice over:
+  ##
+  ##  (1) base::solve() only errors when rcond(Sigma_eta) < .Machine$double.eps
+  ##      (~2.2e-16). A NEARLY singular Sigma_eta -- rcond ~1e-14, which is the
+  ##      routine case when n_state > n_exo and the unshocked states are only
+  ##      weakly excited -- does NOT throw; it returns a wildly amplified
+  ##      "inverse". So the fallbacks fired almost never, and precisely in the
+  ##      regime they were written for the code returned garbage instead.
+  ##  (2) the identity fallback for Delta_eta is only correct when the Schur
+  ##      complement vanishes, i.e. when rank(RR) = n_exo. That precondition
+  ##      was documented but never checked.
+  ##
+  ## Using the SAME Moore-Penrose pseudoinverse in both places removes the
+  ## inconsistency and needs no fallback at all: when rank(RR) = n_exo the
+  ## Schur complement comes out numerically zero and Delta_eta = I falls out
+  ## automatically; when it does not, the (correct, nonzero) Schur complement
+  ## is carried. Rank is decided on the CORRELATION form of Sigma_eta so that
+  ## states with a genuinely small-but-nonzero variance are not mistaken for
+  ## null directions (a plain MASS::ginv, which thresholds on the largest
+  ## absolute singular value, does exactly that).
+  S_eta_pinv <- .csn_sym_pinv(Sigma_eta)
 
-  ## Delta_eta = I + Gamma_e Sigma_e_perp Gamma_e'
-  ## Sigma_e_perp = Sigma_e - Sigma_e RR' S_eta^{-1} RR Sigma_e (Schur
-  ## complement). Fallback I when Sigma_eta is singular -- EXACT whenever
-  ## every shock loads fully into the state (rank(RR) = n_exo), since the
-  ## Schur complement is then identically zero.
-  Delta_eta <- tryCatch({
-    Sigma_e_perp <- Sigma_e - Sigma_e %*% t(RR) %*% solve(Sigma_eta) %*% RR %*% Sigma_e
-    diag(n_exo) + Gamma_e %*% Sigma_e_perp %*% t(Gamma_e)
-  }, error = function(e) diag(n_exo))
+  Sigma_e_RRt <- Sigma_e %*% t(RR)                    # n_exo x n_state
+  Gamma_eta   <- Gamma_e %*% Sigma_e_RRt %*% S_eta_pinv
+
+  Sigma_e_perp <- Sigma_e - Sigma_e_RRt %*% S_eta_pinv %*% t(Sigma_e_RRt)
+  Sigma_e_perp <- 0.5 * (Sigma_e_perp + t(Sigma_e_perp))
+  Delta_eta    <- diag(n_exo) + Gamma_e %*% Sigma_e_perp %*% t(Gamma_e)
+  Delta_eta    <- 0.5 * (Delta_eta + t(Delta_eta))
+
+  ## Explicit precondition check (previously only a comment). Sigma_e_perp is
+  ## a Schur complement of the PSD matrix [[Sigma_e, Sigma_e RR'],
+  ## [RR Sigma_e, Sigma_eta]], hence PSD, so Delta_eta >= I always. A
+  ## violation means the pseudoinverse rank decision was wrong (Sigma_eta is
+  ## not the covariance of RR e, or Sigma_e is not PSD) and the CSN lift is
+  ## not trustworthy -- reject the draw rather than filter with it.
+  if (n_exo > 0L) {
+    if (!all(is.finite(Delta_eta)) || !all(is.finite(Gamma_eta)))
+      stop(".csn_state_noise_lift(): non-finite CSN skewness parameters; ",
+           "Sigma_eta is not usable.")
+    ev_min <- min(eigen(Delta_eta, symmetric = TRUE, only.values = TRUE)$values)
+    tol_D  <- 1e-8 * max(1, max(abs(Delta_eta)))
+    if (!is.finite(ev_min) || ev_min < 1 - tol_D)
+      stop(sprintf(paste0(".csn_state_noise_lift(): Delta_eta is not >= I ",
+                          "(min eigenvalue %.6g). The Schur complement ",
+                          "Sigma_e - Sigma_e RR' (RR Sigma_e RR')^+ RR Sigma_e ",
+                          "must be PSD; it is not, so the rank of Sigma_eta ",
+                          "was mis-determined."), ev_min))
+  }
 
   ## nu_eta = 0 (standard CSN for skew-normal shocks)
   nu_eta <- rep(0, n_exo)
@@ -575,11 +650,24 @@ dim_red4_r <- function(Gamma, nu, Delta, Sigma, cut_tol = 0.01, max_q = 5L) {
   ## ---- Initialisation -------------------------------------------------------
   ## Start from the Gaussian stationary distribution (Lyapunov initialization).
   ## The skewness is zero at t=0: Gamma = [], nu = [], Delta = [].
-  ## Solve P0 from P0 = TT P0 TT' + Sigma_eta via dlyap (iterative fallback).
-  P0 <- .lyapunov_solve_r(TT, Sigma_eta)
-  ## Fallback if Lyapunov solution failed
-  if (is.null(P0) || any(!is.finite(P0)))
-    P0 <- Sigma_eta
+  ## Solve P0 from P0 = TT P0 TT' + Sigma_eta with the package's shared
+  ## Lyapunov solver (R/stochsimul-monolith.R): doubling algorithm, RELATIVE
+  ## convergence test, NaN on a non-stationary TT.
+  ##
+  ## The former local .lyapunov_solve_r() ran at most 500 PLAIN fixed-point
+  ## steps against an ABSOLUTE 1e-10 tolerance and, on non-convergence,
+  ## returned the last iterate SILENTLY. Fixed-point convergence is geometric
+  ## at rate rho(TT)^2, so for rho = 0.999 the 500th iterate still carries
+  ## ~0.999^1000 = 37% of the stationary variance missing -- a badly wrong P0
+  ## that fed a finite, plausible-looking loglik. And for a non-stationary TT
+  ## (no stationary P0 exists) it returned a divergent iterate, which the old
+  ## `!is.finite` guard then replaced by Sigma_eta -- fabricating a finite
+  ## likelihood for an infeasible draw. A NaN P0 now rejects the draw.
+  P0 <- solve_lyapunov(TT, Sigma_eta)
+  if (is.null(P0) || any(!is.finite(P0))) {
+    if (store_path) return(list(ll = -Inf))
+    return(-Inf)
+  }
 
   mu_filt    <- rep(0, n_state)
   Sigma_filt <- P0
@@ -812,10 +900,19 @@ dim_red4_r <- function(Gamma, nu, Delta, Sigma, cut_tol = 0.01, max_q = 5L) {
     ## Standard Gaussian state update
     mu_upd    <- mu_pred    + as.numeric(K_gauss %*% v_t)
     I_KZ      <- diag(n_state) - K_gauss %*% ZZ_t
-    Sigma_upd <- I_KZ %*% Sigma_pred   # Joseph form below is more stable but slower
-    ## Joseph form for numerical stability (optional, use when needed):
-    ## Sigma_upd <- I_KZ %*% Sigma_pred %*% t(I_KZ) +
-    ##              K_gauss %*% Sigma_eps_t %*% t(K_gauss)
+    ## Joseph form. Algebraically identical to the short form
+    ## `I_KZ %*% Sigma_pred` at the exact Kalman gain, but it is a sum of two
+    ## explicitly symmetric PSD terms, so it stays symmetric and PSD under
+    ## round-off. The short form is neither: it is not symmetric even in exact
+    ## arithmetic as written (only S_upd = S_pred - K Omega K' is), and the
+    ## asymmetry was fed straight into D_top = Delta_pred + Gamma_pred
+    ## Sigma_upd Gamma_pred' -- symmetrised there, but only after the CDF
+    ## argument had already been built from an asymmetric covariance -- and
+    ## into the next period's prediction. Explicit symmetrisation on top costs
+    ## one n_state^2 add and removes the drift entirely.
+    Sigma_upd <- I_KZ %*% Sigma_pred %*% t(I_KZ) +
+                 K_gauss %*% Sigma_eps_t %*% t(K_gauss)
+    Sigma_upd <- 0.5 * (Sigma_upd + t(Sigma_upd))
 
     ## ---- LOGLIK CSN CORRECTION -----------------------------------------------
     ## The full CSN loglik is:
@@ -912,26 +1009,6 @@ dim_red4_r <- function(Gamma, nu, Delta, Sigma, cut_tol = 0.01, max_q = 5L) {
 
 
 ## ---------------------------------------------------------------------------
-## Discrete Lyapunov equation solver (pure R, for Sigma_eta initialisation)
-## ---------------------------------------------------------------------------
-## Solve  P = A P A' + Q  by Schur decomposition (Bartels-Stewart).
-## Falls back to fixed-point iteration for small matrices.
-#' @noRd
-.lyapunov_solve_r <- function(A, Q, max_iter = 500L, tol = 1e-10) {
-  n <- nrow(A)
-  ## Try a simple fixed-point iteration: P_{k+1} = A P_k A' + Q
-  P <- Q
-  for (i in seq_len(max_iter)) {
-    P_new <- A %*% P %*% t(A) + Q
-    if (max(abs(P_new - P)) < tol) return(P_new)
-    P <- P_new
-  }
-  ## Did not converge (unit root / non-stationary): return last iterate
-  P
-}
-
-
-## ---------------------------------------------------------------------------
 ## make_log_posterior_pskf: factory function (mirrors make_log_posterior_tpf)
 ## ---------------------------------------------------------------------------
 #' Create a PSKF log-posterior evaluator
@@ -950,6 +1027,12 @@ dim_red4_r <- function(Gamma, nu, Delta, Sigma, cut_tol = 0.01, max_q = 5L) {
 #' @param max_q       Hard cap on the retained skew dimension (default 5,
 #'   the Miwa-exact Phi_q range; see .pskf_filter). Inf = old uncapped
 #'   behavior (Mendell-Elston for q > 5; biased under strong multi-shock skew).
+#' @param power       Power-posterior exponent applied to the LIKELIHOOD only
+#'   (prior and system priors stay untempered). \code{NULL} (default) resolves
+#'   the \code{power_posterior} package option ONCE, at factory time, so every
+#'   draw evaluated by the returned closure uses the same tempering -- an
+#'   option flipped mid-chain can no longer silently change the target
+#'   distribution between draws.
 #' @param ...         Ignored (for interface compatibility)
 #' @return function(theta) -> list(logpost, loglik, logprior)
 #' @noRd
@@ -958,7 +1041,11 @@ make_log_posterior_pskf <- function(model, data, prior_spec, obs_vars,
                                      system_priors = NULL,
                                      cut_tol = 0.01,
                                      max_q = 5L,
+                                     power = NULL,
                                      ...) {
+  ## Resolve the power-posterior exponent ONCE, here, rather than on every
+  ## evaluation: the closure's target must not change under the caller's feet.
+  power <- .dynhr_opt("power_posterior", power, default = 1)
   ## Validate data orientation: need T x n_obs
   if (ncol(data) == length(obs_vars)) {
     Y <- t(data)   # -> n_obs x T
@@ -970,111 +1057,87 @@ make_log_posterior_pskf <- function(model, data, prior_spec, obs_vars,
       !is.null(compiled$model$lead_lag_incidence))
     compiled$lead_lag_incidence <- compiled$model$lead_lag_incidence
 
-  sys_cache <- cache_system_structure(compiled)
+  ## Adapter over the shared closure builder (R/posterior-closure.R). Specific
+  ## to this branch: the CSN state-space assembly + .pskf_filter (loglik hook)
+  ## and the system-prior convention -- the PSKF pair takes a BARE LIST of
+  ## `function(dr, params)` closures, summed with a short-circuit on the first
+  ## non-finite value, rather than the `system_prior_spec` objects the
+  ## Kalman/pruned branches take, and (mode "extra") keeps the result out of
+  ## $logprior. Both are pinned by test-posterior-closure-parity.R.
+  .make_posterior_closure(
+    model, data, prior_spec, obs_vars, compiled,
+    loglik_fn = function(sol, params, ss, theta, me_floor_check, ...) {
+      dr <- sol$dr
+      ## --- Assemble state space ---
+      state_idx <- dr$state_idx
+      obs_idx   <- match(obs_vars, dr$endo_names)
+      if (any(is.na(obs_idx))) return(NULL)
 
-  ## Warm-start cache for steady-state solve
-  ss_warm <- NULL
+      TT <- dr$ghx[state_idx, , drop = FALSE]
+      ZZ <- dr$ghx[obs_idx,   , drop = FALSE]
+      ## Observation mean: d_obs (includes SS value and any DR offset)
+      d_obs <- dr$ys[obs_vars]
+      ## Demean Y
+      Y_dm <- Y - d_obs   # n_obs x T (broadcasting over columns)
 
-  function(theta) {
-    lp <- log_prior(theta, prior_spec)
-    if (!is.finite(lp))
-      return(list(logpost = -Inf, loglik = -Inf, logprior = lp))
+      ## --- CSN shock parameters ---
+      ## (Estimated shock skewness arrives through `params`; for the v0 wiring
+      ## the shocks block provides a fixed alpha.)
+      csn <- tryCatch(
+        .get_csn_shock_params(model, dr$exo_names, obs_vars, dr, params,
+                              me_variance),
+        error = function(e) NULL
+      )
+      if (is.null(csn)) return(NULL)
 
-    params <- .apply_theta_to_params(model, theta)
+      ## --- Run PSKF ---
+      ll <- tryCatch(
+        .pskf_filter(
+          Y         = Y_dm,
+          TT        = TT,
+          ZZ        = ZZ,
+          mu_eta    = csn$mu_eta,
+          Sigma_eta = csn$Sigma_eta,
+          Gamma_eta = csn$Gamma_eta,
+          nu_eta    = csn$nu_eta,
+          Delta_eta = csn$Delta_eta,
+          mu_eps    = csn$mu_eps,
+          Sigma_eps = csn$Sigma_eps,
+          cut_tol   = cut_tol,
+          max_q     = max_q
+        ),
+        error = function(e) -Inf
+      )
+      if (!is.finite(ll)) return(NULL)
+      list(loglik = ll)
+    },
+    power             = power,
+    needs_me_floor    = FALSE,
+    system_prior      = system_priors,
+    system_prior_fn   = .pskf_system_prior_sum,
+    system_prior_mode = "extra")
+}
 
-    ## Also update estimated shock skewness from theta (v1 wiring;
-    ## for v0 the shocks block provides fixed alpha)
-    ## --- Steady state ---
-    ss_result <- solve_steady_state(model, compiled, params,
-                                    y0 = ss_warm, verbose = FALSE)
-    if (is.null(ss_result) || !isTRUE(ss_result$converged)) {
-      if (!is.null(ss_warm))
-        ss_result <- solve_steady_state(model, compiled, params,
-                                        verbose = FALSE)
-      if (is.null(ss_result) || !isTRUE(ss_result$converged)) {
-        ss_warm <<- NULL
-        return(list(logpost = -Inf, loglik = -Inf, logprior = lp))
-      }
+
+## System-prior evaluator for the PSKF pair.
+##
+## Unlike the Kalman / pruned / whittle / cumulant branches (which take a
+## `system_prior_spec` and go through `.eval_system_priors()`), both PSKF
+## factories accept a BARE LIST of `function(dr, params)` closures and sum
+## them, stopping at the first non-finite partial sum. Kept as its own hook
+## rather than unified: the two shapes are different public contracts, and
+## test-posterior-closure-parity.R pins both.
+#' @noRd
+.pskf_system_prior_sum <- function(spec, theta, sol, params, res) {
+  lsp <- 0
+  if (!is.null(spec) && length(spec) > 0L) {
+    for (fn in spec) {
+      v   <- tryCatch(fn(sol$dr, params), error = function(e) -Inf)
+      lsp <- lsp + v
+      if (!is.finite(lsp)) break
     }
-    ss_warm <<- ss_result$ss
-
-    ## Re-derive SSM-computed params for a consistent linearization point
-    ## (no-op for non-SSM-parameter models; Tier 13 #1).
-    params <- ss_result$params %||% params
-    sys <- extract_system_matrices_fast(sys_cache, ss_result$ss, params)
-    dr  <- .solve_from_system(sys, model, compiled, ss_result$ss, params, FALSE)
-    if (is.null(dr) || !isTRUE(dr$bk_satisfied))
-      return(list(logpost = -Inf, loglik = -Inf, logprior = lp))
-
-    ## Stationarity guard (mirrors gaussian path)
-    ns <- length(dr$state_idx)
-    ev <- dr$eigenvalues
-    spectral_radius <- if (!is.null(ev) && length(ev) >= ns)
-      max(Mod(ev[seq_len(ns)]))
-    else
-      max(Mod(eigen(dr$ghx[dr$state_idx, , drop = FALSE],
-                    only.values = TRUE)$values))
-    if (spectral_radius >= 1)
-      return(list(logpost = -Inf, loglik = -Inf, logprior = lp))
-
-    ## --- Assemble state space ---
-    state_idx <- dr$state_idx
-    obs_idx   <- match(obs_vars, dr$endo_names)
-    if (any(is.na(obs_idx)))
-      return(list(logpost = -Inf, loglik = -Inf, logprior = lp))
-
-    TT <- dr$ghx[state_idx, , drop = FALSE]
-    ZZ <- dr$ghx[obs_idx,   , drop = FALSE]
-    ## Observation mean: d_obs (includes SS value and any DR offset)
-    d_obs <- dr$ys[obs_vars]
-    ## Demean Y
-    Y_dm <- Y - d_obs   # n_obs x T (broadcasting over columns)
-
-    ## --- CSN shock parameters ---
-    exo_names <- dr$exo_names
-    csn <- tryCatch(
-      .get_csn_shock_params(model, exo_names, obs_vars, dr, params, me_variance),
-      error = function(e) NULL
-    )
-    if (is.null(csn))
-      return(list(logpost = -Inf, loglik = -Inf, logprior = lp))
-
-    ## --- Run PSKF ---
-    ll <- tryCatch(
-      .pskf_filter(
-        Y         = Y_dm,
-        TT        = TT,
-        ZZ        = ZZ,
-        mu_eta    = csn$mu_eta,
-        Sigma_eta = csn$Sigma_eta,
-        Gamma_eta = csn$Gamma_eta,
-        nu_eta    = csn$nu_eta,
-        Delta_eta = csn$Delta_eta,
-        mu_eps    = csn$mu_eps,
-        Sigma_eps = csn$Sigma_eps,
-        cut_tol   = cut_tol,
-        max_q     = max_q
-      ),
-      error = function(e) -Inf
-    )
-    if (!is.finite(ll))
-      return(list(logpost = -Inf, loglik = -Inf, logprior = lp))
-
-    ## --- System priors ---
-    lsp <- 0
-    if (!is.null(system_priors) && length(system_priors) > 0L) {
-      for (fn in system_priors) {
-        v <- tryCatch(fn(dr, params), error = function(e) -Inf)
-        lsp <- lsp + v
-        if (!is.finite(lsp)) break
-      }
-    }
-
-    ## power-posterior: temper the LIKELIHOOD only; lp (prior) and lsp (system
-    ## prior) are prior-side and untempered.
-    logpost <- lp + .dynhr_opt("power_posterior", default = 1) * ll + lsp
-    list(logpost = logpost, loglik = ll, logprior = lp)
   }
+  lsp
 }
 
 
@@ -1193,6 +1256,12 @@ make_log_posterior_pskf <- function(model, data, prior_spec, obs_vars,
 #' @param cut_tol     Pruning tolerance (default 0.01; see \code{.pskf_filter}).
 #' @param max_q       Hard cap on the retained skew dimension (default 5, the
 #'   Miwa-exact Phi_q range).
+#' @param power       Power-posterior exponent applied to the LIKELIHOOD only
+#'   (prior and system priors stay untempered). \code{NULL} (default) resolves
+#'   the \code{power_posterior} package option ONCE, at factory time, so every
+#'   draw evaluated by the returned closure uses the same tempering -- an
+#'   option flipped mid-chain can no longer silently change the target
+#'   distribution between draws.
 #' @param ...         Ignored (interface compatibility).
 #' @return function(theta) -> list(logpost, loglik, logprior)
 #' @export
@@ -1201,7 +1270,10 @@ make_log_posterior_pskf_order2 <- function(model, data, prior_spec, obs_vars,
                                             system_priors = NULL,
                                             cut_tol = 0.01,
                                             max_q = 5L,
+                                            power = NULL,
                                             ...) {
+  ## Resolved ONCE at factory time -- see make_log_posterior_pskf().
+  power <- .dynhr_opt("power_posterior", power, default = 1)
   ## Validate data orientation: need n_obs x T
   if (ncol(data) == length(obs_vars)) {
     Y <- t(data)   # -> n_obs x T
@@ -1213,115 +1285,71 @@ make_log_posterior_pskf_order2 <- function(model, data, prior_spec, obs_vars,
       !is.null(compiled$model$lead_lag_incidence))
     compiled$lead_lag_incidence <- compiled$model$lead_lag_incidence
 
-  sys_cache <- cache_system_structure(compiled)
-  ss_warm   <- NULL
+  ## Adapter over the shared closure builder (R/posterior-closure.R); the
+  ## order-2 twin of make_log_posterior_pskf's. The order-2 lift, the pruned-SS
+  ## object and the augmented CSN state space go in the SOLVE hook (they are
+  ## what this branch solves for); the skew lift and the filter go in the
+  ## loglik hook. Same bare-list system-prior contract, evaluated against dr2.
+  .make_posterior_closure(
+    model, data, prior_spec, obs_vars, compiled,
+    solve_fn = function(model, compiled, sys_cache, ss, params, theta) {
+      ## Order-1 solve first: BK + stationarity guard, and the order-2 input.
+      s1 <- .posterior_solve1(model, compiled, sys_cache, ss, params,
+                              "spectral")
+      if (is.null(s1)) return(NULL)
+      dr2 <- tryCatch(
+        solve_perturbation_order2(model, compiled, ss, params, s1$dr,
+                                  verbose = FALSE),
+        error = function(e) NULL
+      )
+      if (is.null(dr2)) return(NULL)
+      pss <- tryCatch(pruned_state_space(dr2, model, params),
+                      error = function(e) NULL)
+      if (is.null(pss)) return(NULL)
+      aug <- tryCatch(.pskf_order2_augment(pss, obs_vars),
+                      error = function(e) NULL)
+      if (is.null(aug)) return(NULL)
+      list(dr = dr2, pss = pss, aug = aug)
+    },
+    loglik_fn = function(sol, params, ss, theta, me_floor_check, ...) {
+      aug <- sol$aug
+      ## Per-shock skewness lifted onto the raw innovation r_t: only the first
+      ## n_u components (the eps block) carry alpha; augmentation blocks = 0.
+      alpha_shocks <- .get_shock_skewness(model, sol$dr$exo_names, params)
+      alpha_aug    <- c(as.numeric(alpha_shocks), rep(0, aug$Dr - aug$n_u))
 
-  function(theta) {
-    lp <- log_prior(theta, prior_spec)
-    if (!is.finite(lp))
-      return(list(logpost = -Inf, loglik = -Inf, logprior = lp))
+      csn <- tryCatch(
+        .csn_state_noise_lift(aug$RR, aug$DD, aug$Cr0, alpha_aug, me_variance),
+        error = function(e) NULL
+      )
+      if (is.null(csn)) return(NULL)
 
-    params <- .apply_theta_to_params(model, theta)
+      ## Demean Y by the Gaussian stationary observation mean (see timing note)
+      Y_dm <- Y - aug$obs_mean
 
-    ## --- Steady state ---
-    ss_result <- solve_steady_state(model, compiled, params,
-                                    y0 = ss_warm, verbose = FALSE)
-    if (is.null(ss_result) || !isTRUE(ss_result$converged)) {
-      if (!is.null(ss_warm))
-        ss_result <- solve_steady_state(model, compiled, params,
-                                        verbose = FALSE)
-      if (is.null(ss_result) || !isTRUE(ss_result$converged)) {
-        ss_warm <<- NULL
-        return(list(logpost = -Inf, loglik = -Inf, logprior = lp))
-      }
-    }
-    ss_warm <<- ss_result$ss
-    params  <- ss_result$params %||% params
-
-    ## --- Order-1 solve (for BK / stationarity guard + order-2 input) ---
-    sys <- extract_system_matrices_fast(sys_cache, ss_result$ss, params)
-    dr1 <- .solve_from_system(sys, model, compiled, ss_result$ss, params, FALSE)
-    if (is.null(dr1) || !isTRUE(dr1$bk_satisfied))
-      return(list(logpost = -Inf, loglik = -Inf, logprior = lp))
-
-    ns <- length(dr1$state_idx)
-    ev <- dr1$eigenvalues
-    spectral_radius <- if (!is.null(ev) && length(ev) >= ns)
-      max(Mod(ev[seq_len(ns)]))
-    else
-      max(Mod(eigen(dr1$ghx[dr1$state_idx, , drop = FALSE],
-                    only.values = TRUE)$values))
-    if (spectral_radius >= 1)
-      return(list(logpost = -Inf, loglik = -Inf, logprior = lp))
-
-    ## --- Order-2 solve + pruned-SS object ---
-    dr2 <- tryCatch(
-      solve_perturbation_order2(model, compiled, ss_result$ss, params, dr1,
-                                verbose = FALSE),
-      error = function(e) NULL
-    )
-    if (is.null(dr2))
-      return(list(logpost = -Inf, loglik = -Inf, logprior = lp))
-
-    pss <- tryCatch(
-      pruned_state_space(dr2, model, params),
-      error = function(e) NULL
-    )
-    if (is.null(pss))
-      return(list(logpost = -Inf, loglik = -Inf, logprior = lp))
-
-    ## --- Assemble augmented CSN order-2 state space ---
-    aug <- tryCatch(.pskf_order2_augment(pss, obs_vars),
-                    error = function(e) NULL)
-    if (is.null(aug))
-      return(list(logpost = -Inf, loglik = -Inf, logprior = lp))
-
-    ## Per-shock skewness lifted onto the raw innovation r_t: only the first
-    ## n_u components (the eps block) carry alpha; augmentation blocks = 0.
-    alpha_shocks <- .get_shock_skewness(model, dr2$exo_names, params)
-    alpha_aug    <- c(as.numeric(alpha_shocks), rep(0, aug$Dr - aug$n_u))
-
-    csn <- tryCatch(
-      .csn_state_noise_lift(aug$RR, aug$DD, aug$Cr0, alpha_aug, me_variance),
-      error = function(e) NULL
-    )
-    if (is.null(csn))
-      return(list(logpost = -Inf, loglik = -Inf, logprior = lp))
-
-    ## Demean Y by the Gaussian stationary observation mean (see timing note)
-    Y_dm <- Y - aug$obs_mean
-
-    ll <- tryCatch(
-      .pskf_filter(
-        Y         = Y_dm,
-        TT        = aug$TT,
-        ZZ        = aug$ZZ,
-        mu_eta    = csn$mu_eta,
-        Sigma_eta = csn$Sigma_eta,
-        Gamma_eta = csn$Gamma_eta,
-        nu_eta    = csn$nu_eta,
-        Delta_eta = csn$Delta_eta,
-        mu_eps    = csn$mu_eps,
-        Sigma_eps = csn$Sigma_eps,
-        cut_tol   = cut_tol,
-        max_q     = max_q
-      ),
-      error = function(e) -Inf
-    )
-    if (!is.finite(ll))
-      return(list(logpost = -Inf, loglik = -Inf, logprior = lp))
-
-    ## --- System priors ---
-    lsp <- 0
-    if (!is.null(system_priors) && length(system_priors) > 0L) {
-      for (fn in system_priors) {
-        v <- tryCatch(fn(dr2, params), error = function(e) -Inf)
-        lsp <- lsp + v
-        if (!is.finite(lsp)) break
-      }
-    }
-
-    logpost <- lp + .dynhr_opt("power_posterior", default = 1) * ll + lsp
-    list(logpost = logpost, loglik = ll, logprior = lp)
-  }
+      ll <- tryCatch(
+        .pskf_filter(
+          Y         = Y_dm,
+          TT        = aug$TT,
+          ZZ        = aug$ZZ,
+          mu_eta    = csn$mu_eta,
+          Sigma_eta = csn$Sigma_eta,
+          Gamma_eta = csn$Gamma_eta,
+          nu_eta    = csn$nu_eta,
+          Delta_eta = csn$Delta_eta,
+          mu_eps    = csn$mu_eps,
+          Sigma_eps = csn$Sigma_eps,
+          cut_tol   = cut_tol,
+          max_q     = max_q
+        ),
+        error = function(e) -Inf
+      )
+      if (!is.finite(ll)) return(NULL)
+      list(loglik = ll)
+    },
+    power             = power,
+    needs_me_floor    = FALSE,
+    system_prior      = system_priors,
+    system_prior_fn   = .pskf_system_prior_sum,
+    system_prior_mode = "extra")
 }

@@ -242,7 +242,7 @@ hank_het2_block <- function(b_grid, a_grid, Pi, e, beta, eis, rb, ra, w,
          last_value_gap = NA_real_,
          elapsed_solve = hh$elapsed, elapsed_dist = .elapsed_dist,
          Pi_fn = Pi_fn, Pi_inputs = Pi_inputs),
-    class = "hank_het2_block")
+    class = c("hank_het2_block", "hank_block"))
 }
 
 

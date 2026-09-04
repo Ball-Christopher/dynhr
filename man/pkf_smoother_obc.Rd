@@ -22,8 +22,12 @@ stored by kalman_filter_obc_pkf(..., return_store = TRUE).
 \details{
 For each period t = T, T-1, ..., 1 the recursion is:
 \preformatted{
+  Step 0 (Kalman gain, recomputed from the stored quantities):
+    K_t = (TT_t * P_{t-1|t-1} * ZZ_t' + RR_t * Sigma_e * DD_t') * F_t^{-1}
+
   Step 1 (smoothed shock):
-    eps_{t|T} = Sigma_e * (DD_t' * F_t^{-1} * v_t + RR_t' * r_t)
+    eps_{t|T} = Sigma_e * (DD_t' * F_t^{-1} * v_t
+                           + (RR_t - K_t * DD_t)' * r_t)
 
   Step 2 (backward update of smoother residual):
     r_{t-1} = ZZ_t' * F_t^{-1} * v_t + L_t' * r_t
@@ -34,9 +38,29 @@ For each period t = T, T-1, ..., 1 the recursion is:
 }
 Initialisation: r_T = 0 (Koopman & Durbin 2003, p.89).
 
+\strong{Correlated state/observation noise.}  In dynhr's lag-1 observation
+timing the SAME shock drives the transition and the observation
+(\eqn{s_t = TT s_{t-1} + RR \epsilon_t}, \eqn{y_t = ZZ s_{t-1} + DD \epsilon_t}), so
+\eqn{Cov(RR \epsilon_t, DD \epsilon_t) = RR \Sigma_e DD' \neq 0} and the Kalman gain
+carries that cross-term.  The future-information loading in step 1 is
+therefore \eqn{(RR_t - K_t DD_t)'}, not \eqn{RR_t'}: for \eqn{j > t} the innovation
+\eqn{v_j} sees \eqn{\epsilon_t} only through the prediction error
+\eqn{\alpha_{t+1} - a_{t+1}}, whose \eqn{\epsilon_t} loading is \eqn{RR_t - K_t DD_t}
+because \eqn{a_{t+1}} has already absorbed \eqn{K_t v_t}.  Dropping the
+\eqn{-K_t DD_t} term (the pre-0.9.2.0003 form) makes the smoothed shocks
+inconsistent with the smoothed states: the transition residual
+\eqn{s_{t|T} - (TT_t s_{t-1|T} + RR_t \epsilon_{t|T} + c_t)} was ~4e-4 on a
+1e-2-scale state, and is ~1e-18 with the cross-term restored.  This is the
+same \eqn{eps_{t|T} = Q (R' r_t + D' u_t)}, \eqn{u_t = F^{-1} v_t - K_t' r_t}
+form used by \code{\link{kalman_smoother}} (Durbin & Koopman 2012 §4.5).
+\eqn{K_t} is not stored by the filter, so it is recomputed in step 0 from
+the stored \eqn{TT, P_{in}, ZZ, RR, DD, F^{-1}} -- exactly the expression the
+filter used.
+
 When observations are missing at period t (v_t = NULL), the step reduces
 to pure backward propagation: \eqn{r_{t-1} = TT_t' \cdot r_t} (\eqn{L_t = TT_t} in that
-case), and the smoothed shock uses only the \eqn{RR_t' \cdot r_t} future-info term.
+case), and the smoothed shock uses only the \eqn{RR_t' \cdot r_t} future-info term
+(there is no gain to correct for: \eqn{K_t = 0} when nothing is observed).
 
 Note on indexing: smoothed_states[, t] is \eqn{s_{t-1|T}}, the smoothed state
 that appeared *lagged* in period t's observation equation.  This differs

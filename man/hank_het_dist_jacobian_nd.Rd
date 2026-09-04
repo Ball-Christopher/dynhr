@@ -32,3 +32,4 @@ at date \code{t} induced by a shock to aggregate input \code{i} at date
 keeping the full \code{Dpath} instead of aggregating it into \code{A}/\code{C}.
 Used to validate \code{\link{hank_het_dist_jacobian}}.
 }
+\keyword{internal}

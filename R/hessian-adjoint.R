@@ -188,7 +188,7 @@ kf_loglik_hessian <- function(Y, ss, dX_list, d2X_list, me_variance = 0,
 #' @param param_names character vector of parameter names to differentiate
 #'                    (the Hessian is \code{length(param_names) x length(param_names)}).
 #' @param obs_vars  character vector of observable variable names.
-#' @param Y         n_obs x T observation matrix (no NAs).
+#' @param data         n_obs x T observation matrix (no NAs).
 #' @param me_variance scalar measurement-error variance (default 0).
 #' @param include_prior logical; if TRUE, add the analytic Hessian of
 #'   \code{log p(theta)} (diagonal for independent priors) to the loglik Hessian.
@@ -310,7 +310,7 @@ kf_loglik_hessian <- function(Y, ss, dX_list, d2X_list, me_variance = 0,
 #'   itself, for diagnosis).
 #' @export
 posterior_hessian <- function(model, compiled, dr, params, param_names,
-                              obs_vars, Y,
+                              obs_vars, data,
                               me_variance = 0,
                               include_prior = FALSE,
                               prior_spec = NULL,
@@ -387,7 +387,7 @@ posterior_hessian <- function(model, compiled, dr, params, param_names,
       theta_full <- vapply(full_names, .resolve_param_value, 0.0)
       names(theta_full) <- full_names
 
-      grad_fn <- make_posterior_grad(model, Y, prior_spec, obs_vars, compiled,
+      grad_fn <- make_posterior_grad(model, data, prior_spec, obs_vars, compiled,
                                      me_variance = me_variance)
       g_full  <- grad_fn(theta_full)
 
@@ -637,16 +637,16 @@ posterior_hessian <- function(model, compiled, dr, params, param_names,
   ## ------------------------------------------------------------------
   if (t2_method == "hvp_solution") {
     H <- .posterior_hessian_hvp_solution(
-      model, compiled, params, param_names, struct_names, obs_vars, Y, ss0,
+      model, compiled, params, param_names, struct_names, obs_vars, data, ss0,
       dX_list, d2Se, base_val, me_variance = me_variance, eps = eps,
       h_t2 = h_t2, t1_method = t1_method)
   } else if (t2_method == "adjoint_solution") {
     H <- .posterior_hessian_adjoint_solution(
-      model, compiled, dr, params, param_names, struct_names, obs_vars, Y, ss0,
+      model, compiled, dr, params, param_names, struct_names, obs_vars, data, ss0,
       dX_list, d2Se, me_variance = me_variance, eps = eps,
       h_rel2 = h_rel2, t1_method = t1_method)
   } else {
-    H <- kf_loglik_hessian(Y, ss0, dX_list, d2X_list,
+    H <- kf_loglik_hessian(data, ss0, dX_list, d2X_list,
                            me_variance = me_variance, eps = eps,
                            t1_method = t1_method, t2_method = t2_method)
   }

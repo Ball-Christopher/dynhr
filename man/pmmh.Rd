@@ -13,12 +13,23 @@ pmmh(mode_result, ...)
 \code{pmmh()} warns in that case.)}
 
 \item{...}{Passed through to \code{\link{run_posterior_estimation}} (e.g.
-\code{ndraws}, \code{nburn}, \code{nchains}, \code{nparticles},
+\code{n_draws}, \code{n_warmup}, \code{n_chains}, \code{n_particles},
 \code{Sigma_prop}, \code{parallel}, \code{checkpoint_dir}). The
 \code{methods} argument is fixed to \code{"RWMH"} and must not be passed.}
 }
 \value{
-The list returned by \code{\link{run_posterior_estimation}}.
+The object returned by \code{\link{run_posterior_estimation}}:
+  a \code{dynhr_posterior_result}, \strong{not} a
+  \code{\link{dynhr_chains}}. This is deliberate. A
+  \code{dynhr_posterior_result} is a whole-run container -- it carries
+  \code{$mode_result}, a named \code{$chains} list (one entry per method,
+  each of which may itself be a \code{dynhr_chains}), \code{$pooled_draws},
+  \code{$convergence}, \code{$posterior_irfs}, \code{$posterior_moments},
+  \code{$tpf_preflight} and \code{$meta} -- whereas \code{dynhr_chains}
+  describes exactly one chain matrix. Wrapping it would have to discard
+  those fields (or lie about \code{$chain}), so the two classes stay
+  distinct; \code{dynhr_posterior_result} has its own \code{print()}
+  method. Reach the per-method chain objects via \code{result$chains}.
 }
 \description{
 Runs Particle Marginal Metropolis-Hastings: a Random-Walk Metropolis
@@ -48,7 +59,7 @@ computation. \code{run_posterior_estimation} runs a preflight
 (\code{\link{tpf_loglik_sd_preflight}} / the internal
 \code{.tpf_pmcmc_preflight}) before sampling and \strong{warns with an
 N-recommendation} when the SD exceeds 1. Set the particle count via
-\code{nparticles} (and/or the filter's own option list:
+\code{n_particles} (and/or the filter's own option list:
 \code{tpf_options$n_particles} for TPF, \code{obc_options$N} for OBC). Use
 \code{seed = NULL} in the likelihood closure (the default): each proposal
 must draw a \emph{fresh, independent} particle-filter estimate; a fixed seed
@@ -73,12 +84,12 @@ mode_res <- find_mode(model, data, prior_spec, obs_vars,
 
 ## 2. Run PMMH (RWMH over the unbiased TPF loglik). The variance preflight
 ##    runs automatically and warns if more particles are needed.
-post <- pmmh(mode_res, ndraws = 20000L, nburn = 5000L, nchains = 4L,
-             nparticles = 2000L)
+post <- pmmh(mode_res, n_draws = 20000L, n_warmup = 5000L, n_chains = 4L,
+             n_particles = 2000L)
 
 ## Equivalent long form:
 post <- run_posterior_estimation(mode_res, methods = "RWMH",
-                                 ndraws = 20000L, nparticles = 2000L)
+                                 n_draws = 20000L, n_particles = 2000L)
 }
 }
 \references{

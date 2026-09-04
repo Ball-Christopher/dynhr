@@ -4,12 +4,48 @@
 \alias{kalman_smoother}
 \title{Kalman smoother for DSGE state-space}
 \usage{
-kalman_smoother(Y, ss, Q = NULL, me_extra = NULL, shock_scale = NULL)
+kalman_smoother(
+  data,
+  dr,
+  model,
+  params = NULL,
+  obs_vars,
+  me_variance = 0,
+  d = NULL,
+  Q = NULL,
+  me_extra = NULL,
+  shock_scale = NULL,
+  lik_init = c("auto", "stationary", "kappa"),
+  kalman_tol = 1e-10
+)
 }
 \arguments{
-\item{Y}{T x n_obs data matrix}
+\item{data}{\code{T x n_obs} matrix of observables in \strong{levels},
+in the column order of \code{obs_vars}. The model's own steady state is
+subtracted, exactly as \code{\link{kalman_filter}()} does; pass
+\code{d = 0} for series already in deviations.}
 
-\item{ss}{State-space list from build_dsge_state_space()}
+\item{dr}{Decision rules from \code{\link{solve_perturbation}()} --
+the same second argument \code{\link{kalman_filter}()} takes.}
+
+\item{model}{Parsed model from \code{\link{parse_mod}()}.}
+
+\item{params}{Named parameter vector. Defaults to
+\code{model$param_values}.}
+
+\item{obs_vars}{Character vector naming the observables, in the column
+order of \code{data}.}
+
+\item{me_variance}{Base measurement-error variance, added to the diagonal
+of the innovation covariance for every observable and period -- the same
+argument, with the same meaning, as in \code{\link{kalman_filter}()}.
+Default \code{0}. Set it to the value you filtered with, or the two will
+describe different noise models.}
+
+\item{d}{Observation-intercept override, length \code{n_obs}.
+\code{NULL} (default) means the model's steady state
+\code{dr$ys[obs_vars]}, as in \code{\link{kalman_filter}()}. Pass
+\code{d = 0} to smooth data that is already in deviations.}
 
 \item{Q}{n_shock x n_shock shock covariance. Default \code{NULL}:
 use \code{ss$Sigma_e} (the covariance from the \code{shocks;} block),
@@ -17,7 +53,7 @@ which makes the forward-pass \code{loglik} identical to
 \code{kalman_filter()} on the same data. \code{ghu} holds unit-shock
 responses, so the identity is only correct when every shock has
 \code{stderr 1}; falls back to the identity (with a warning) only for
-hand-built \code{ss} lists lacking \code{Sigma_e}.}
+hand-built state spaces lacking \code{Sigma_e}.}
 
 \item{me_extra}{\code{n_obs x T} matrix of per-period additive
 measurement-error variances (from a \code{filter_tunes} block), or
@@ -26,9 +62,24 @@ measurement-error variances (from a \code{filter_tunes} block), or
 \item{shock_scale}{\code{n_exo x T} matrix of per-period shock
 standard-deviation scale factors (from a \code{heteroskedastic_shocks}
 block), or \code{NULL} (constant shock variances).}
+
+\item{lik_init}{Initialisation of \eqn{P_{0|0}}: \code{"auto"} (default)
+uses the unconditional Lyapunov covariance and falls back to a
+large-diagonal prior on a unit root; \code{"stationary"} demands the
+Lyapunov solution and errors if it does not exist; \code{"kappa"} forces
+the large-diagonal prior. There is no exact-diffuse option -- use
+\code{\link{kalman_filter}(lik_init = "diffuse")} for that.}
+
+\item{kalman_tol}{Conditional-variance floor below which an observation
+component is treated as carrying no information and dropped for that
+period, matching \code{\link{kalman_filter}}'s univariate fallback.}
 }
 \value{
-List with smoothed_states, smoothed_shocks, filtered_states, loglik
+List with \code{smoothed_states} (\eqn{T \times n_{state}}, row
+  \eqn{t} is \eqn{s_{t|T}}), \code{smoothed_shocks}, \code{filtered_states},
+  \code{filtered_cov} / \code{predicted_cov} / \code{smoothed_cov},
+  \code{smoothed_initial} (\eqn{s_{0|T}}),
+  \code{smoothed_initial_cov} (\eqn{V_{0|T}}) and \code{loglik}.
 }
 \description{
 DSGE form (note timing: \eqn{y_t} depends on \eqn{s_{t-1}}):
@@ -44,5 +95,74 @@ State and observation noise are correlated (shared eps_t):
   Cov(R eps, D eps) = R Q D'
 
 Forward pass: standard KF with correlated noise.
-Backward pass: Rauch-Tung-Striebel smoother.
+Backward pass: Durbin-Koopman (2012) fixed-interval smoother -- ONE
+adjoint recursion \eqn{(r_t, N_t)} delivers the smoothed shocks, the
+smoothed states and the smoothed state covariances.
+
+\strong{Why not Rauch-Tung-Striebel.}  RTS assumes \eqn{y_{t+1}} is
+conditionally independent of \eqn{s_t} given \eqn{s_{t+1}}.  Under this
+package's lag-1 observation timing that is FALSE: \eqn{y_{t+1} = Z s_t +
+D \varepsilon_{t+1}} loads \eqn{s_t} directly, so the RTS state pass is
+not exact here (measured up to 17\% of the state scale on a 2-shock
+fixture, ~7e-5 relative on the nk_2obc never-binding fixture).  Writing
+the observation on the LAGGED state instead -- \eqn{\alpha_t := s_{t-1}},
+\eqn{\alpha_{t+1} = T \alpha_t + R \varepsilon_t}, \eqn{y_t = Z \alpha_t +
+D \varepsilon_t} -- puts the model in exactly Durbin & Koopman's
+correlated-noise form (DK 2012 \eqn{\S}4.5, \eqn{\S}6.2), whose backward
+recursion IS exact:
+\preformatted{
+  r_{t-1} = Z_t' F_t^{-1} v_t + L_t' r_t,   L_t = T - K_t Z_t,  r_T = 0
+  N_{t-1} = Z_t' F_t^{-1} Z_t + L_t' N_t L_t,                   N_T = 0
+  s_{t-1|T} = s_{t-1|t-1} + P_{t-1|t-1} r_{t-1}
+  V_{t-1|T} = P_{t-1|t-1} - P_{t-1|t-1} N_{t-1} P_{t-1|t-1}
+}
+(the DK prediction pair \eqn{(a_t, P_t)} for \eqn{\alpha_t} is this
+filter's UPDATED pair \eqn{(s_{t-1|t-1}, P_{t-1|t-1})}; correlated noise
+changes \eqn{K_t}, and hence \eqn{L_t}, but not the form of the two
+recursions).  Because no observation loads \eqn{s_T}, the last smoothed
+state and covariance are the last FILTERED ones,
+\eqn{s_{T|T}} and \eqn{P_{T|T}}, and the recursion also yields the
+pre-sample \eqn{s_{0|T}} (returned as \code{smoothed_initial}) for free.
+The smoothed states produced this way satisfy the transition
+\eqn{s_{t|T} = T s_{t-1|T} + R \varepsilon_{t|T}} identically (~1e-16),
+and the smoothed shocks are unchanged by this route.
+
+\strong{Exact diffuse initialisation is NOT supported.}  There is no
+\code{lik_init} argument: \eqn{P_{0|0}} is the unconditional (Lyapunov)
+covariance, with a large-\eqn{\kappa} diagonal fallback when the Lyapunov
+solve fails on a unit root.  The smoothed moments are then exact for that
+proper large-variance prior, not for the exact-diffuse limit; use
+\code{kalman_filter(lik_init = "diffuse")} when the diffuse likelihood is
+what is needed.
+}
+\examples{
+mod <- system.file("extdata/models/nk_demo.mod", package = "dynhr")
+m   <- parse_mod(mod, verbose = FALSE)
+cp  <- compile_model(m, verbose = FALSE)
+ss  <- solve_steady(cp, m$param_values)
+dr  <- solve_perturbation(m, cp, ss$values, m$param_values)
+Y   <- as.matrix(read.csv(system.file("extdata/models/nk_demo_data.csv",
+                                      package = "dynhr")))
+obs <- c("ygr", "infl", "intr")
+
+## Filter and smooth take the same arguments.
+kf <- kalman_filter(Y, dr, m, m$param_values, obs_vars = obs)
+sm <- kalman_smoother(Y, dr, m, m$param_values, obs_vars = obs)
+
+dim(sm$smoothed_states)      # T x n_state, row t is s_{t|T}
+dim(sm$smoothed_shocks)      # T x n_shock
+
+## With measurement error, pass the SAME me_variance to both.
+kf2 <- kalman_filter(Y, dr, m, m$param_values, obs_vars = obs,
+                     me_variance = 0.01)
+sm2 <- kalman_smoother(Y, dr, m, m$param_values, obs_vars = obs,
+                       me_variance = 0.01)
+}
+\seealso{
+\code{\link{kalman_filter}} for the filtered pass and the exact
+  diffuse likelihood, \code{\link{build_dsge_state_space}} for the state
+  space this builds internally, \code{\link{smoother2histval}} to turn a
+  smoother run into an initial history, and
+  \code{\link{kf_innovation_diagnostics}} to check the innovations are
+  white.
 }

@@ -15,6 +15,7 @@ make_log_posterior_cumulant(
   cumulant_weight = "identity",
   weight_matrix = NULL,
   system_priors = NULL,
+  power = NULL,
   ...
 )
 }
@@ -45,6 +46,13 @@ falls back to \code{cumulant_weight}.}
 \item{system_priors}{Optional \code{system_prior_spec} object (from
 \code{\link{system_prior_spec}}) providing system-prior log-density
 contributions evaluated at each draw.  \code{NULL} disables system priors.}
+
+\item{power}{Power-posterior (generalised-Bayes) tempering exponent
+\eqn{\zeta}: the returned \code{$logpost} is
+\eqn{\log p(\theta) + \zeta \cdot \log L(\theta)} and \code{$loglik}
+always carries the RAW (untempered) likelihood. \code{NULL} (default)
+resolves the \code{power_posterior} package option ONCE, at factory time,
+so the exponent is a fixed property of the returned closure.}
 
 \item{...}{Additional arguments forwarded to the perturbation
 solve.  \code{order} selects the perturbation order (1 or 2); when

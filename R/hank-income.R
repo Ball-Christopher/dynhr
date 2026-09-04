@@ -370,6 +370,21 @@ hank_employment_income <- function(f, s, rho, sigma, n = 7L, b_ui = 0.5) {
 #' matrix (which returns an arbitrary member of a multi-dimensional
 #' eigenspace).
 #'
+#' \strong{Degenerate nesting at the BLOCK level.} The special-cased
+#' stationary \code{pi} above only fixes this function's own output; passing
+#' the resulting reducible \code{Pi} straight to \code{\link{hank_het_block}}
+#' is NOT enough on its own, because that block's household-level stationary
+#' distribution solve is a separate, generic power iteration
+#' (\code{\link{hank_stationary_dist}}) that has no way to know which of the
+#' chain's multiple invariant distributions is the economically sensible
+#' one. At \code{p_un = p_nu = 0} (with the default \code{f_ne = s_en = 0})
+#' \code{hank_het_block} DETECTS the reducible \code{Pi} and STOPS unless
+#' called with \code{dist_init = <this object>$pi} (i.e. \code{inc3$pi}
+#' above) -- see \code{\link{hank_het_block}}'s \code{dist_init} argument and
+#' \code{\link{.hank_pi_reducible}}. Passing \code{dist_init} correctly
+#' selects the zero-\code{N}-mass invariant distribution and reproduces the
+#' two-state block's aggregates.
+#'
 #' Income: employed households earn \eqn{w e}; unemployed earn replacement
 #' income \eqn{b_{ui} w e}; non-participants earn \eqn{b_n w e}, with
 #' \code{b_n} DEFAULTING to \code{b_ui} (a calibration choice, not a

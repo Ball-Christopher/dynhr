@@ -58,7 +58,7 @@ such argument).}
 chosen factory. For \code{"tpf"}: any of \code{n_particles} (PF particle
 count), \code{ess_target} (the FILTER's internal resampling threshold --
 distinct from this function's own \code{ess_target}, which governs the
-OUTER theta-tempering schedule), \code{n_mh}, \code{mh_scale},
+OUTER theta-tempering schedule), \code{n_mh},
 \code{max_stages_u}, \code{order}, \code{burn_in_init} (e.g. the
 SBC-certified order-3 config \code{list(n_particles = 150, n_mh = 1,
 burn_in_init = 50)}). For \code{"sv_rbpf"}: \code{n_particles},
@@ -116,11 +116,14 @@ fresh regardless; see Correctness above).}
 \code{dynhr_smc}.}
 }
 \value{
-List with the same shape as \code{dynhr_smc()}'s return
-  value (particles/chain, smc_weights, log_liks, log_marginal_lik,
-  lambda_schedule, ess_schedule, accept_schedule, n_eval, ...), plus
-  \code{$sampler = "smc2"} and \code{$likelihood} recording which particle
-  filter was used.
+A \code{\link{dynhr_chains}} object (so \code{print()},
+  \code{summary()} and \code{plot()} work exactly as for
+  \code{\link{mcmc}} / \code{\link{smc}} / \code{\link{nuts}} /
+  \code{\link{dime}}).  Every field of \code{dynhr_smc()}'s return value is
+  retained unchanged (particles/chain, smc_weights, log_liks,
+  log_marginal_lik, lambda_schedule, ess_schedule, accept_schedule,
+  n_eval, ...), plus \code{$sampler = "smc2"} and \code{$likelihood}
+  recording which particle filter was used.
 }
 \description{
 Likelihood-tempered SMC over the parameter vector theta, where the
@@ -157,6 +160,27 @@ forwarding to it. The returned list has the same shape as
 \code{dynhr_smc()}'s (same field names), so the internal helpers
 \code{dynhr:::smc_summary()}/\code{dynhr:::smc_plot_diagnostics()}
 (unexported) work on it directly.
+}
+\examples{
+\donttest{
+## Deliberately tiny: 20 theta-particles around a 100-particle inner TPF.
+## A real run needs hundreds of each, and the TPF needs me_variance > 0.
+model    <- parse_mod(system.file("extdata/models/nk_demo.mod",
+                                  package = "dynhr"), verbose = FALSE)
+compiled <- compile_model(model, max_order = 2L, verbose = FALSE)
+priors   <- prior_spec(model)
+obs_vars <- c("ygr", "infl", "intr")
+Y <- as.matrix(read.csv(system.file("extdata/models/nk_demo_data.csv",
+                                    package = "dynhr"))[, obs_vars])
+
+fit <- dynhr_smc2(model, Y, priors, obs_vars, compiled,
+                  likelihood      = "tpf",
+                  me_variance     = 1e-4,
+                  n_particles     = 20L,
+                  likelihood_args = list(n_particles = 100L),
+                  verbose = FALSE)
+fit
+}
 }
 \references{
 Chopin, N., Jacob, P.E. & Papaspiliopoulos, O. (2013). SMC^2: an efficient

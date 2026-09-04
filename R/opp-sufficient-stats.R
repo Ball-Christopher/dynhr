@@ -1129,10 +1129,10 @@ print.dynhr_opp_welfare <- function(x, digits = 4, ...) {
   invisible(x)
 }
 
-
 # ==========================================================================
 # 6. Internal helpers
 # ==========================================================================
+# `%||%` is defined once for the whole package in R/utils-pipe.R. The
+# duplicate definition that used to live here was silently overriding it
+# (Collate loads this file last), so it was removed.
 
-#' @noRd
-`%||%` <- function(a, b) if (is.null(a)) b else a

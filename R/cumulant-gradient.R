@@ -60,15 +60,29 @@
 #' .cumulant_loglik() — including the attr(dr, "order") guard for orders 3-4
 #' — so that the gradient is consistent with the function being differentiated.
 #'
+#' `lags` (E2-A) appends the model-implied autocovariances Gamma(h) =
+#' Cov(y_t, y_{t-h}) for the strictly-positive lags, AFTER the contemporaneous
+#' cumulant blocks -- the single definition of the moment ordering shared by
+#' `.cumulant_loglik()`, `estimate_gmm_weight_matrix()` and
+#' `method_of_moments()`. `lags = integer(0)` (the default) is byte-identical
+#' to the pre-E2-A function.
+#'
 #' Returns NULL if any quantity is non-finite.
 #' @noRd
 .build_moment_vector <- function(dr2, model, params, obs_vars, orders,
-                                 me_variance = 0) {
+                                 me_variance = 0, lags = integer(0)) {
   n_obs   <- length(obs_vars)
   obs_idx <- match(obs_vars, dr2$endo_names)
   if (any(is.na(obs_idx))) return(NULL)
 
   n_endo <- length(dr2$endo_names)
+  lags   <- .mom_lags(lags)
+
+  ## compute_moments() is the ONE source of Sigma_y / Sigma_state; it solves a
+  ## Lyapunov equation, so when BOTH the order-2 block and the autocovariance
+  ## block are requested it is evaluated once here and shared.
+  mom_cache <- if (2L %in% orders || length(lags))
+    compute_moments(dr2, model, params = params) else NULL
 
   m_model <- numeric(0)
 
@@ -83,7 +97,7 @@
 
   # ---- Order 2: variance — mirrors .cumulant_loglik lines 704-715 ----
   if (2L %in% orders) {
-    moments <- compute_moments(dr2, model, params = params)
+    moments <- mom_cache
     Sigma_y <- moments$var_cov[obs_vars, obs_vars, drop = FALSE]
     if (me_variance > 0) diag(Sigma_y) <- diag(Sigma_y) + me_variance
     m_model <- c(m_model, as.numeric(Sigma_y))
@@ -105,17 +119,12 @@
       error = function(e) NULL
     )
     if (is.null(c3_result)) return(NULL)
-    # Mirror .cumulant_loglik lines 727-738 EXACTLY (including row-then-col subset)
-    c3_model_raw <- c3_result$c3_obs[obs_idx, , drop = FALSE]  # n_obs × n_endo^2
-    c3_obs_only  <- matrix(0, n_obs, n_obs * n_obs)
-    for (a in seq_len(n_obs)) {
-      for (b in seq_len(n_obs)) {
-        src_col <- (obs_idx[a] - 1L) * n_endo + obs_idx[b]
-        dst_col <- (a - 1L) * n_obs + b
-        c3_obs_only[a, dst_col] <- c3_model_raw[a, src_col]
-      }
-    }
-    c3_model <- c3_obs_only
+    # Mirror .cumulant_loglik EXACTLY: project rows AND (j,k) columns onto the
+    # observables, giving n_obs × n_obs^2 in the sample_cumulants()$c3 layout.
+    # (Was a two-level for(a)/for(b) loop keeping only the (i,i,k) slice, so
+    # the model side was structurally zero off that slice -- see
+    # .project_c3_obs.)
+    c3_model <- .project_c3_obs(c3_result$c3_obs, obs_idx, n_endo)
   }
 
   if (any(orders >= 4L) && dr_order >= 2L) {
@@ -124,9 +133,11 @@
       error = function(e) NULL
     )
     if (is.null(c4_result)) return(NULL)
-    # Mirror .cumulant_loglik line 744 EXACTLY (row subset only, NOT col subset)
-    # NB: this means c4_model is n_obs × n_endo^3 (intentionally matches loglik)
-    c4_model <- c4_result$c4_obs[obs_idx, , drop = FALSE]
+    # Mirror .cumulant_loglik EXACTLY: project rows AND (j,k,l) columns onto
+    # the observables, giving n_obs × n_obs^3 in the sample_cumulants()$c4
+    # layout.  (Was a row-only subset -> n_obs × n_endo^3, which made the
+    # loglik's `m_emp - m_model` recycle when n_obs < n_endo.)
+    c4_model <- .project_c4_obs(c4_result$c4_obs, obs_idx, n_endo)
   }
 
   if (3L %in% orders && !is.null(c3_model)) {
@@ -135,6 +146,16 @@
 
   if (4L %in% orders && !is.null(c4_model)) {
     m_model <- c(m_model, as.numeric(c4_model))
+  }
+
+  ## ---- Autocovariances Gamma(h), h >= 1 (E2-A) ----
+  ## Measurement error is i.i.d., so it enters Gamma(0) (handled above) and
+  ## NOT Gamma(h) for h >= 1 -- do not propagate me_variance here.
+  if (length(lags)) {
+    ac <- .mom_model_autocov(dr2, model, params, obs_vars, lags,
+                             moments = mom_cache)
+    if (is.null(ac)) return(NULL)
+    for (A in ac) m_model <- c(m_model, as.numeric(A))
   }
 
   if (!all(is.finite(m_model))) return(NULL)
@@ -212,6 +233,7 @@ cumulant_loglik_grad <- function(model, compiled, dr, params, param_names,
   max_ord <- max(orders)
 
   # ---- 1. Sample cumulants (same as .cumulant_loglik) ----
+  data <- .cumulant_subset_obs(data, obs_vars)
   sc <- sample_cumulants(data, max_order = max_ord)
 
   # ---- 2. Base model-moment vector ----
@@ -241,16 +263,17 @@ cumulant_loglik_grad <- function(model, compiled, dr, params, param_names,
     if (!is.null(sc$c3)) m_emp <- c(m_emp, as.numeric(sc$c3))
   }
   if (c4_active) {
-    # .cumulant_loglik m_emp: sc$c4 (n_obs × n_obs^3)
-    # Note: length mismatch with m_model for order 4 when n_endo > n_obs;
-    # we replicate the exact same assembly so that delta = m_emp - m_base
-    # uses R's recycling just as .cumulant_loglik does.
+    # .cumulant_loglik m_emp: sc$c4 (n_obs × n_obs^3).  Since .build_moment_vector
+    # now projects the model c4 onto the observables too, the two blocks have
+    # matching length for any n_obs <= n_endo (they used to only line up when
+    # every endogenous variable was observed).
     if (!is.null(sc$c4)) m_emp <- c(m_emp, as.numeric(sc$c4))
   }
 
   n_moments <- length(m_base)
-  # Replicate .cumulant_loglik's delta = m_emp - m_model:
-  # when lengths differ, R recycles m_emp. Mirror that exactly.
+  # Defensive: with the corrected order-4 layout length(m_emp) == n_moments,
+  # so rep_len is the identity.  Kept so a future block-length regression
+  # degrades the same way .cumulant_loglik does rather than erroring here.
   m_emp_matched <- rep_len(m_emp, n_moments)
   delta_base <- m_emp_matched - m_base     # m_hat - m(theta), length = n_moments
 
@@ -365,6 +388,7 @@ cumulant_loglik_grad <- function(model, compiled, dr, params, param_names,
 
   ## ---- 1. Sample cumulants + base moment vector + delta -------------------
   max_ord <- max(orders)
+  data <- .cumulant_subset_obs(data, obs_vars)
   sc <- sample_cumulants(data, max_order = max_ord)
   m_base <- suppressWarnings(
     .build_moment_vector(dr, model, params, obs_vars, orders, me_variance))
@@ -436,18 +460,16 @@ cumulant_loglik_grad <- function(model, compiled, dr, params, param_names,
     n34 <- n_obs * n_obs * n_obs
     b3_obs <- bar_m[seq_len(n34) + idx]
     idx <- idx + n34
-    ## scatter into full c3_obs (n_endo x n_endo^2): forward mapping was
-    ##   c3_obs_only[a, (a-1)*n_obs+b] <- c3_obs[a_endo, (a_endo-1)*n_endo+b_endo]
-    ## with a_endo = obs_idx[a], b_endo = obs_idx[b]. Reverse (scatter).
+    ## Scatter into full c3_obs (n_endo x n_endo^2).  The forward gather is
+    ##   c3_model <- c3_obs[obs_idx, .c3_obs_col_index(obs_idx, n_endo)]
+    ## (a pure sub-selection with no repeated source entry), so its reverse is
+    ## the transposed scatter onto exactly those rows/columns.  It used to be a
+    ## two-level for(a)/for(b) loop hitting only the (i,i,k) slice, which left
+    ## the (i,j,k), j != i, cotangents at zero -- the adjoint mirror of the
+    ## forward E4-B bug.
     bar_c3_obs <- matrix(0, n_endo, n_endo * n_endo)
     b3_full <- matrix(b3_obs, n_obs, n_obs * n_obs)
-    for (a in seq_len(n_obs)) {
-      for (b in seq_len(n_obs)) {
-        src_col <- (obs_idx[a] - 1L) * n_endo + obs_idx[b]
-        dst_col <- (a - 1L) * n_obs + b
-        bar_c3_obs[obs_idx[a], src_col] <- b3_full[a, dst_col]
-      }
-    }
+    bar_c3_obs[obs_idx, .c3_obs_col_index(obs_idx, n_endo)] <- b3_full
     rev3 <- tryCatch(
       .compute_third_cumulant_adjoint(dr, model, params, bar_c3_obs),
       error = function(e) NULL)
@@ -467,6 +489,11 @@ cumulant_loglik_grad <- function(model, compiled, dr, params, param_names,
   ## Sigma_state = A Sigma_state A' + Q, A = hx, Q = hu Sigma_e hu'.
   if (n_s > 0 && any(bar_Sigma_state != 0)) {
     lyr <- .lyap_solve_adjoint(hx, Sigma_state, bar_Sigma_state)
+    ## NULL => the transposed Lyapunov had no stationary solution (explosive or
+    ## unit-root hx). `.solve_lyapunov` signals that with NaN, not a condition,
+    ## so without this test a non-stationary draw silently yields a NaN
+    ## gradient. Mirror the adjoint-KF siblings: return the all-NA gradient.
+    if (is.null(lyr)) return(na_out)
     bar_hx_ly <- lyr$bar_A                       # n_s x n_s
     bar_Q     <- lyr$bar_Q                       # n_s x n_s
     ## Q = hu Sigma_e hu'
@@ -558,6 +585,7 @@ cumulant_loglik_grad <- function(model, compiled, dr, params, param_names,
 
   ## ---- 1. Sample cumulants ----
   max_ord <- max(orders)
+  data <- .cumulant_subset_obs(data, obs_vars)
   sc <- sample_cumulants(data, max_order = max_ord)
 
   ## ---- 2. Base model-moment vector ----
@@ -744,7 +772,12 @@ cumulant_loglik_grad <- function(model, compiled, dr, params, param_names,
         }
 
         if (4L %in% orders_34) {
-          dm34_c4 <- as.numeric(cd_k$d_c4_obs_sub)
+          ## cumulant_moment_derivs_3_4() returns d_c4_obs_sub row-subset only
+          ## (n_obs x n_endo^3).  The moment block is n_obs x n_obs^3, so
+          ## project the (j,k,l) columns here with the SAME index map
+          ## .build_moment_vector / .cumulant_loglik use for the forward c4.
+          dm34_c4 <- as.numeric(
+            cd_k$d_c4_obs_sub[, .c4_obs_col_index(obs_idx, n), drop = FALSE])
           n34_c4  <- length(dm34_c4)
           dm[seq_len(n34_c4) + idx] <- dm34_c4
           idx <- idx + n34_c4

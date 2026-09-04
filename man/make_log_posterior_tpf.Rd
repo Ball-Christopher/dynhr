@@ -14,12 +14,12 @@ make_log_posterior_tpf(
   n_particles = 1000L,
   ess_target = 0.5,
   n_mh = 1L,
-  mh_scale = 1,
   seed = NULL,
   system_priors = NULL,
   max_stages_u = 16L,
   order = 2L,
-  burn_in_init = 50L
+  burn_in_init = 50L,
+  power = NULL
 )
 }
 \arguments{
@@ -44,9 +44,6 @@ This is the TPF tempering instrument; me_variance = 0 is not allowed.}
 stage (default 1); each step is an independence proposal on the
 period-t shock only (ancestor state fixed) -- see the internal
 \code{tpf_run_period()} mutation step.}
-
-\item{mh_scale}{Unused since the mutation step fix (ancestor state is
-never moved); kept for API/back-compat only.}
 
 \item{seed}{Integer RNG seed for reproducibility (NULL = no fixed seed).}
 
@@ -83,6 +80,13 @@ old Lyapunov-only init). Incompatible with an externally supplied
 \code{rwmh_cpm}/\code{U_list} use MUST pass \code{burn_in_init = 0L}
 explicitly, since the CPM slot layout has no burn-in slots — the
 closure errors at the boundary if this is violated.}
+
+\item{power}{Power-posterior exponent zeta applied to the log-likelihood:
+\code{logpost = zeta * loglik + logprior}. \code{NULL} (default) resolves
+the global \code{power_posterior} option ONCE at factory time (falling
+back to 1), so the closure's contract is fixed for its lifetime rather
+than silently changing under an option set mid-chain. Same contract as
+\code{make_log_posterior()} and \code{make_log_posterior_sv_rbpf()}.}
 }
 \value{
 A \code{function(theta)} returning

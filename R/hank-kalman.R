@@ -54,7 +54,7 @@
 #' @param shock_specs Named list, one entry per \code{model$exogenous} shock,
 #'   each \code{list(rho = <AR(1) persistence>, sigma = <innovation std>)}.
 #'   Names must match \code{model$exogenous} exactly (order-independent).
-#' @param observables Character vector of variable names (must be produced by
+#' @param obs_vars Character vector of variable names (must be produced by
 #'   the model, i.e. appear in \code{names(model$G)}) to treat as the
 #'   observation vector, in order.
 #' @param q Integer state length per shock (number of MA terms retained);
@@ -62,21 +62,21 @@
 #'
 #' @return A lagged-timing \code{\link{new_dsge_ss}} object. Its
 #'   \code{shock_names} field records \code{model$exogenous} order and
-#'   \code{obs_names} records \code{observables}; \code{Theta_list},
+#'   \code{obs_names} records \code{obs_vars}; \code{Theta_list},
 #'   \code{rho_vec} and \code{q} record the per-shock MA coefficients,
 #'   AR(1) persistences and truncation (consumed by
 #'   \code{\link{hank_loglik_ar}}).
 #' @seealso \code{\link{hank_kalman_loglik}}, \code{\link{hank_loglik_ar}},
 #'   \code{\link{make_log_posterior_hank}}
 #' @export
-hank_state_space <- function(model, shock_specs, observables, q = NULL) {
+hank_state_space <- function(model, shock_specs, obs_vars, q = NULL) {
   if (!inherits(model, "hank_model"))
     stop("hank_state_space: `model` must be a hank_model object.")
   exo <- model$exogenous
   if (!setequal(names(shock_specs), exo))
     stop("hank_state_space: `shock_specs` names must exactly match ",
          "model$exogenous = {", paste(exo, collapse = ", "), "}.")
-  missing_obs <- setdiff(observables, names(model$G))
+  missing_obs <- setdiff(obs_vars, names(model$G))
   if (length(missing_obs))
     stop("hank_state_space: observable(s) not produced by model: ",
          paste(missing_obs, collapse = ", "))
@@ -84,10 +84,10 @@ hank_state_space <- function(model, shock_specs, observables, q = NULL) {
   T_h <- model$T_h
   if (is.null(q)) q <- T_h
   q <- min(q, T_h)
-  n_obs   <- length(observables)
+  n_obs   <- length(obs_vars)
   n_shock <- length(exo)
 
-  Theta_list <- .hank_theta_list(model, shock_specs, observables)
+  Theta_list <- .hank_theta_list(model, shock_specs, obs_vars)
 
   ## Block-diagonal shift registers, one length-q block per shock.
   n_state <- q * n_shock
@@ -114,7 +114,7 @@ hank_state_space <- function(model, shock_specs, observables, q = NULL) {
 
   new_dsge_ss(T_mat = TT, R_mat = RR, Z_mat = Z_lag, D_mat = D_lag,
               Sigma_e = diag(sigma_vec^2, n_shock, n_shock),
-              state_names = state_names, obs_names = observables,
+              state_names = state_names, obs_vars = obs_vars,
               shock_names = exo, timing = "lagged",
               Theta_list = Theta_list, q = q,
               rho_vec = setNames(rho_vec, exo))
@@ -128,18 +128,18 @@ hank_state_space <- function(model, shock_specs, observables, q = NULL) {
 ## Shared by hank_state_space() and the exact_ar branch of
 ## make_log_posterior_hank() (which needs only Theta, not the companion-form
 ## matrices).  No validation; callers validate model/shock_specs/observables.
-.hank_theta_list <- function(model, shock_specs, observables) {
+.hank_theta_list <- function(model, shock_specs, obs_vars) {
   T_h <- model$T_h
   exo <- model$exogenous
-  n_obs <- length(observables)
+  n_obs <- length(obs_vars)
   Theta_list <- setNames(vector("list", length(exo)), exo)
   for (z in exo) {
     rho_z <- shock_specs[[z]]$rho
     dZ    <- setNames(list(rho_z^(seq_len(T_h) - 1L)), z)
     irf   <- hank_model_irf(model, dZ)
-    Theta_list[[z]] <- matrix(sapply(observables, function(o) irf[[o]]),
+    Theta_list[[z]] <- matrix(sapply(obs_vars, function(o) irf[[o]]),
                               T_h, n_obs,
-                              dimnames = list(NULL, observables))
+                              dimnames = list(NULL, obs_vars))
   }
   Theta_list
 }
@@ -155,20 +155,20 @@ hank_state_space <- function(model, shock_specs, observables, q = NULL) {
 #' nilpotent shift-register state (exact, not approximate, since each block's
 #' transition is strictly nilpotent).
 #'
-#' @param Y \code{T_data x n_obs} matrix (or data frame) of demeaned
+#' @param data \code{T_data x n_obs} matrix (or data frame) of demeaned
 #'   observations, columns in the same order as \code{ss$obs_names}.
 #' @param ss A \code{\link{hank_state_space}} object.
-#' @param me_var Measurement-error variance added to every observable's
+#' @param me_variance Measurement-error variance added to every observable's
 #'   diagonal (default 0; needed when \code{n_obs > n_shock}, i.e. stochastic
 #'   singularity).
 #'
 #' @return The scalar Gaussian log-likelihood.
 #' @seealso \code{\link{hank_state_space}}, \code{\link{make_log_posterior_hank}}
 #' @export
-hank_kalman_loglik <- function(Y, ss, me_var = 0) {
+hank_kalman_loglik <- function(data, ss, me_variance = 0) {
   if (!inherits(ss, "dsge_ss"))
     stop("hank_kalman_loglik: `ss` must be a hank_state_space()/dsge_ss object.")
-  Y <- as.matrix(Y)
+  data <- as.matrix(data)
   n_state <- ss$n_state
   q       <- ss$q
   n_shock <- ss$n_shock
@@ -184,13 +184,13 @@ hank_kalman_loglik <- function(Y, ss, me_var = 0) {
   }
 
   out <- .kf_univariate_dispatch(
-    Y_minus_d = t(Y),                      # core expects n_obs x T
+    Y_minus_d = t(data),                      # core expects n_obs x T
     ZZ = ss$Z_mat, TT = ss$T_mat, RR = ss$R_mat, DD = ss$D_mat,
     Sigma_e = ss$Sigma_e,
     s0 = rep(0, n_state),
     P_state = P0,
     P_inf_state = NULL,
-    me_variance = me_var)
+    me_variance = me_variance)
   out$loglik
 }
 
@@ -210,13 +210,22 @@ hank_kalman_loglik <- function(Y, ss, me_var = 0) {
 #' \code{sigma}.
 #'
 #' @param model A \code{\link{hank_model}}.
-#' @param Y \code{T_data x n_obs} matrix of demeaned observations.
-#' @param observables Character vector of observable names (see
+#' @param data \code{T_data x n_obs} matrix of demeaned observations.
+#' @param obs_vars Character vector of observable names (see
 #'   \code{\link{hank_state_space}}).
 #' @param q Optional truncation horizon passed to \code{\link{hank_state_space}}
 #'   (\code{likelihood = "kalman"}) or \code{\link{hank_loglik_ar}}
 #'   (\code{likelihood = "exact_ar"}).
-#' @param me_var Measurement-error variance (see \code{\link{hank_kalman_loglik}}).
+#' @param me_variance Measurement-error VARIANCE, scalar or length-\code{n_obs}
+#'   (see \code{\link{hank_kalman_loglik}}). Both \code{likelihood} options
+#'   read the SAME argument, so they always describe the same measurement
+#'   error: the exact-AR branch passes it straight to
+#'   \code{\link{hank_loglik_ar}}. Before 0.9.2.0003 this function took a
+#'   variance \code{me_var} AND an independently-overridable standard
+#'   deviation \code{me_sd} (defaulting to \code{sqrt(me_var)}); the two
+#'   were collapsed into this one argument, so a caller that used to pass a
+#'   \code{me_sd} different from \code{sqrt(me_var)} must now pass
+#'   \code{me_sd^2} here and accept that the Kalman branch sees it too.
 #' @param likelihood \code{"kalman"} (default) runs the Kalman filter on the
 #'   truncated-MA companion form (\code{\link{hank_kalman_loglik}});
 #'   \code{"exact_ar"} uses the exact-AR(1) stacked-covariance likelihood
@@ -228,10 +237,6 @@ hank_kalman_loglik <- function(Y, ss, me_var = 0) {
 #'   A draw whose likelihood evaluation fails (e.g. a non-positive-definite
 #'   stacked covariance at extreme \code{rho}) is rejected with
 #'   \code{logpost = -Inf} rather than erroring the chain.
-#' @param me_sd Per-observable measurement-error standard deviation for
-#'   \code{likelihood = "exact_ar"} (scalar or length-\code{n_obs}); default
-#'   \code{sqrt(me_var)}, so the two likelihood options describe the same
-#'   measurement error unless overridden.
 #' @param prior_rho_mean,prior_rho_sd Named numeric vectors (by shock name) or
 #'   scalars (recycled) giving the Normal prior mean/sd for each shock's
 #'   \code{rho}. Defaults \code{mean = 0.5, sd = 0.3}.
@@ -258,10 +263,9 @@ hank_kalman_loglik <- function(Y, ss, me_var = 0) {
 #' @seealso \code{\link{hank_state_space}}, \code{\link{hank_kalman_loglik}},
 #'   \code{\link{hank_loglik_ar}}, \code{rwmh}
 #' @export
-make_log_posterior_hank <- function(model, Y, observables, q = NULL,
-                                    me_var = 0,
+make_log_posterior_hank <- function(model, data, obs_vars, q = NULL,
+                                    me_variance = 0,
                                     likelihood = c("kalman", "exact_ar"),
-                                    me_sd = NULL,
                                     prior_rho_mean = 0.5, prior_rho_sd = 0.3,
                                     prior_sigma_sd = 0.05,
                                     boundary = c("warn", "reject", "ignore"),
@@ -274,11 +278,10 @@ make_log_posterior_hank <- function(model, Y, observables, q = NULL,
          "scalar.")
   boundary_state <- new.env(parent = emptyenv())
   exo <- model$exogenous
-  missing_obs <- setdiff(observables, names(model$G))
+  missing_obs <- setdiff(obs_vars, names(model$G))
   if (length(missing_obs))
     stop("make_log_posterior_hank: observable(s) not produced by model: ",
          paste(missing_obs, collapse = ", "))
-  if (is.null(me_sd)) me_sd <- sqrt(me_var)
   rep_named <- function(x, nm) {
     if (is.null(names(x))) setNames(rep(x, length.out = length(nm)), nm)
     else x[nm]
@@ -311,8 +314,8 @@ make_log_posterior_hank <- function(model, Y, observables, q = NULL,
     shock_specs <- setNames(
       lapply(exo, function(z) list(rho = rho[[z]], sigma = sigma[[z]])), exo)
     if (likelihood == "kalman") {
-      ss <- hank_state_space(model, shock_specs, observables, q = q)
-      loglik <- hank_kalman_loglik(Y, ss, me_var = me_var)
+      ss <- hank_state_space(model, shock_specs, obs_vars, q = q)
+      loglik <- hank_kalman_loglik(data, ss, me_variance = me_variance)
     } else {
       ## Representability: reject/flag BEFORE spending a likelihood on a Theta
       ## the sequence-space solve cannot represent at this persistence.
@@ -321,10 +324,10 @@ make_log_posterior_hank <- function(model, Y, observables, q = NULL,
         return(list(logpost = -Inf, loglik = NA_real_, logprior = logprior))
       ## exact_ar needs only the MA coefficients, not the (potentially large)
       ## q*n_shock-dimensional companion-form matrices.
-      Theta_list <- .hank_theta_list(model, shock_specs, observables)
+      Theta_list <- .hank_theta_list(model, shock_specs, obs_vars)
       loglik <- tryCatch(
-        hank_loglik_ar(Y, Theta_list, rho = rho, sigma = sigma,
-                       me_sd = me_sd, q = q, check_boundary = FALSE,
+        hank_loglik_ar(data, Theta_list, rho = rho, sigma = sigma,
+                       me_variance = me_variance, q = q, check_boundary = FALSE,
                        cache = ar_cache),
         error = function(e) -Inf)
       if (!is.finite(loglik))

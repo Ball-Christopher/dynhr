@@ -7,7 +7,7 @@
 ## and stoch_simul at the posterior mean.
 ##
 ## Dispatch rule:
-##   - Vector arguments (methods, nburn, ndraws, nchains) are paired with
+##   - Vector arguments (methods, n_warmup, n_draws, n_chains) are paired with
 ##     each method. Recycled to length(methods).
 ##   - Scalar arguments apply to ALL methods.
 ## --------------------------------------------------------------------------
@@ -25,15 +25,15 @@
 #' @param methods      Character vector of sampler names:
 #'   \code{"RWMH"}, \code{"HMC"}, \code{"NUTS"}, \code{"SMC"}.
 #'   Default \code{c("RWMH")}.
-#' @param nburn        Burn-in / warmup draws per method. Recycled to
+#' @param n_warmup     Burn-in / warmup draws per method. Recycled to
 #'   \code{length(methods)}.  Default \code{5000}.
-#' @param ndraws       Post-warmup draws to retain per method. Recycled.
+#' @param n_draws      Post-warmup draws to retain per method. Recycled.
 #'   Default \code{20000}.
-#' @param nchains      Number of MCMC chains per method (for RWMH). Recycled.
+#' @param n_chains     Number of MCMC chains per method (for RWMH). Recycled.
 #'   Default \code{4}.
-#' @param nparticles   Number of SMC particles (only for \code{"SMC"}).
+#' @param n_particles  Number of SMC particles (only for \code{"SMC"}).
 #'   Recycled.  Default \code{2000}.
-#' @param nwalkers     Number of ensemble walkers for the DIME sampler
+#' @param n_walkers    Number of ensemble walkers for the DIME sampler
 #'   (\code{NULL} = \code{max(5 * n_par, 20)}).  Ignored for all other
 #'   samplers.
 #' @param parallel     Run multi-chain \code{"RWMH"}/\code{"NUTS"} batches and
@@ -47,7 +47,7 @@
 #' @param parallel_backend Parallel backend for RWMH chains: \code{"mirai"}
 #'   (default).
 #' @param n_cores      Worker (daemon) count when \code{parallel = TRUE}
-#'   (\code{NULL} = auto-detect, capped at \code{nchains}).
+#'   (\code{NULL} = auto-detect, capped at \code{n_chains}).
 #' @param analytic_grad For \code{"NUTS"} on a standard Gaussian model, use the
 #'   exact analytic gradient (\code{\link{make_posterior_grad}}) instead of a
 #'   numerical one. Default \code{FALSE}. Applies to the serial NUTS path; the
@@ -126,13 +126,13 @@
 #'   mirai path for RWMH and NUTS). When set, each chain streams its draws to
 #'   per-chain files (\code{chain_<id>.draws} / \code{.lp} / \code{.state.rds}) in
 #'   flush-sized chunks, so RAM during sampling is bounded by the flush window
-#'   rather than \code{ndraws * n_par}, and a restart state is saved after each
+#'   rather than \code{n_draws * n_par}, and a restart state is saved after each
 #'   flush. The files are per-chain, so parallel chains never collide. Flush size
 #'   is set via \code{dynhr_set_options(checkpoint_flush_every = ...)} (default 1000).
 #' @param resume  When \code{TRUE} and \code{checkpoint_dir} points at a prior
 #'   run, continue each chain from its saved state -- RNG, position, scale and
 #'   proposal covariance are restored exactly, so the continuation is identical
-#'   to a single longer run -- adding \code{ndraws} more retained draws. The
+#'   to a single longer run -- adding \code{n_draws} more retained draws. The
 #'   saved model / prior / parameter configuration must match (it is enforced).
 #' @param verbose      Print progress messages.
 #' @param seed         Optional integer. When non-\code{NULL},
@@ -170,13 +170,13 @@
 #' mode <- run_mode_finding(mod, data, obs_vars = c("y", "pi", "r"))
 #'
 #' # Single method
-#' post <- run_posterior_estimation(mode, methods = "RWMH", ndraws = 50000)
+#' post <- run_posterior_estimation(mode, methods = "RWMH", n_draws = 50000)
 #'
 #' # Multi-method dispatch
 #' post <- run_posterior_estimation(mode,
 #'   methods = c("RWMH", "HMC", "NUTS", "RWMH"),
-#'   nburn   = c(10000,  1000,  500,    500),
-#'   ndraws  = 50000)
+#'   n_warmup = c(10000,  1000,  500,    500),
+#'   n_draws  = 50000)
 #' }
 #'
 #' @seealso \code{\link{solve_model}}, \code{\link{run_mode_finding}},
@@ -185,11 +185,11 @@
 #' @export
 run_posterior_estimation <- function(mode_result,
                                      methods               = c("RWMH"),
-                                     nburn                 = 5000L,
-                                     ndraws                = 20000L,
-                                     nchains               = 4L,
-                                     nparticles            = 2000L,
-                                     nwalkers              = NULL,
+                                     n_warmup              = 5000L,
+                                     n_draws               = 20000L,
+                                     n_chains              = 4L,
+                                     n_particles           = 2000L,
+                                     n_walkers             = NULL,
                                      parallel              = FALSE,
                                      parallel_backend      = "mirai",
                                      n_cores               = NULL,
@@ -385,19 +385,24 @@ run_posterior_estimation <- function(mode_result,
   if (par_ctx$likelihood %in% c("tpf", "ppf", "copf")) {
     ## TPF reads tpf_options; OBC PFs read obc_options (with the same
     ## pmcmc_preflight_* keys). Particle count lives in n_particles (TPF) or
-    ## N (OBC); fall back to the `nparticles` arg, then 1000.
+    ## N (OBC); fall back to the `n_particles` arg, then 1000.
     tpf_opts  <- if (identical(par_ctx$likelihood, "tpf"))
                    par_ctx$tpf_options %||% list()
                  else par_ctx$obc_options %||% list()
     pf_K      <- tpf_opts$pmcmc_preflight_K    %||% 30L
     pf_skip   <- isTRUE(tpf_opts$pmcmc_preflight_skip)
-    pf_n_part <- tpf_opts$n_particles %||% tpf_opts$N %||% nparticles %||% 1000L
+    pf_n_part <- tpf_opts$n_particles %||% tpf_opts$N %||% n_particles %||% 1000L
 
     if (!pf_skip && pf_K > 0L && !is.null(log_post_fn) &&
         !is.null(theta_mode)) {
       .vcat(sprintf("-- TPF PMCMC preflight (K = %d) --\n", pf_K))
-      ## Use .tpf_pmcmc_preflight which calls set.seed(k) externally for each
-      ## replicate, ensuring varied RNG even if the closure has a fixed seed.
+      ## .tpf_pmcmc_preflight calls set.seed(k) externally before each
+      ## replicate. That only VARIES the filter noise when the closure was
+      ## built with seed = NULL: a fixed-seed closure re-seeds itself on every
+      ## call, so all K evaluations are bit-identical and the measured SD is a
+      ## meaningless 0 (which would then be reported as "< 1 threshold, OK").
+      ## The preflight now detects that degenerate case and stops with an
+      ## explicit "fixed seed" error rather than certifying it.
       tpf_preflight_result <- .tpf_pmcmc_preflight(
         log_post_fn, theta_mode, K = pf_K, verbose = verbose)
 
@@ -428,12 +433,12 @@ run_posterior_estimation <- function(mode_result,
   }
 
   methods    <- toupper(as.character(methods))
-  nburn_vec  <- as.integer(recycle(nburn))
-  ndraws_vec <- as.integer(recycle(ndraws))
-  nchains_vec <- as.integer(recycle(nchains))
-  npart_vec  <- as.integer(recycle(nparticles))
-  ## nwalkers is scalar (DIME only) -- not recycled per method
-  nwalkers_val <- nwalkers  # may be NULL (auto-sized in run_dime)
+  nburn_vec  <- as.integer(recycle(n_warmup))
+  ndraws_vec <- as.integer(recycle(n_draws))
+  nchains_vec <- as.integer(recycle(n_chains))
+  npart_vec  <- as.integer(recycle(n_particles))
+  ## n_walkers is scalar (DIME only) -- not recycled per method
+  nwalkers_val <- n_walkers  # may be NULL (auto-sized in run_dime)
 
   valid_methods <- c("RWMH", "HMC", "NUTS", "MALA", "SMC", "DIME", "CHEES")
   bad <- setdiff(methods, valid_methods)
@@ -510,7 +515,7 @@ run_posterior_estimation <- function(mode_result,
         # on the parallel mirai branch (transform = NULL there).
         rwmh_Sigma <- if (transform_params && !is.null(Sigma_prop_eta)) Sigma_prop_eta else Sigma_prop
         .run_rwmh_batch(log_post_fn, current_theta, rwmh_Sigma,
-                                prior_spec, nchains = nc,
+                                prior_spec, n_chains = nc,
                                 n_draws = nd, n_burn = nb,
                                 verbose = verbose,
                                 parallel = parallel,
@@ -1111,9 +1116,9 @@ run_posterior_estimation <- function(mode_result,
     tpf_preflight     = tpf_preflight_result,
     meta = list(
       methods       = methods,
-      nburn         = nburn_vec,
-      ndraws        = ndraws_vec,
-      nchains       = nchains_vec,
+      n_warmup      = nburn_vec,
+      n_draws       = ndraws_vec,
+      n_chains      = nchains_vec,
       n_methods     = n_methods
     )
   )
@@ -1182,7 +1187,7 @@ print.dynhr_posterior_result <- function(x, ...) {
 #'   `n_blocks` argument -- randomized parameter blocking.
 #' @noRd
 .run_rwmh_batch <- function(log_post_fn, theta_mode, Sigma_prop,
-                             prior_spec, nchains = 4L,
+                             prior_spec, n_chains = 4L,
                              n_draws = 20000L, n_burn = 5000L,
                              verbose = TRUE,
                              parallel = FALSE, parallel_backend = "mirai",
@@ -1201,18 +1206,18 @@ print.dynhr_posterior_result <- function(x, ...) {
   # Parallel path: a single mirai pool runs all chains. Either the parsed
   # model + data (standard Gaussian, recompiled per daemon) or a pre-built
   # log-posterior closure (OBC/PKF, cumulant; shipped once) is required.
-  use_par <- isTRUE(parallel) && nchains > 1L &&
+  use_par <- isTRUE(parallel) && n_chains > 1L &&
              identical(parallel_backend, "mirai") &&
              requireNamespace("mirai", quietly = TRUE) &&
              (isTRUE(use_closure) ||
               (!is.null(parsed_model) && !is.null(Y) && !is.null(obs_names)))
   if (use_par) {
-    if (verbose) cat(sprintf("    Parallel RWMH (mirai): %d chains\n", nchains))
+    if (verbose) cat(sprintf("    Parallel RWMH (mirai): %d chains\n", n_chains))
     par_res <- run_mcmc_mirai(
       parsed_model = parsed_model, Y = Y,
       prior_spec   = prior_spec, obs_names = obs_names,
       theta_mode   = theta_mode, Sigma_prop = Sigma_prop,
-      n_chains     = nchains, n_draws = n_draws, n_burn = n_burn,
+      n_chains     = n_chains, n_draws = n_draws, n_burn = n_burn,
       seed_base    = seed_base, n_cores = n_cores,
       me_variance  = me_variance,
       me_extra     = me_extra,
@@ -1230,20 +1235,20 @@ print.dynhr_posterior_result <- function(x, ...) {
       new_dynhr_chains(list(
         chain           = conv$combined,
         acceptance_rate = mean(par_res$chain_stats$accept_rate, na.rm = TRUE),
-        sampler         = "rwmh", n_chains = nchains,
+        sampler         = "rwmh", n_chains = n_chains,
         chain_list      = chain_list, chain_stats = par_res$chain_stats), "rwmh")
     } else NULL
     return(list(chains = chain_list, chain_stats = par_res$chain_stats,
                 combined = combined, convergence = conv))
   }
 
-  chain_list  <- vector("list", nchains)
+  chain_list  <- vector("list", n_chains)
   chain_stats <- data.frame(
     chain = integer(), accept_rate = numeric(),
     final_logpost = numeric(), stringsAsFactors = FALSE
   )
 
-  for (ch in seq_len(nchains)) {
+  for (ch in seq_len(n_chains)) {
     if (ch == 1L) {
       th0 <- theta_mode
     } else if (!is.null(transform)) {
@@ -1266,7 +1271,7 @@ print.dynhr_posterior_result <- function(x, ...) {
       if (!is.finite(log_post_fn(th0)$logpost)) th0 <- theta_mode
     }
 
-    if (verbose) cat(sprintf("    Chain %d/%d...\n", ch, nchains))
+    if (verbose) cat(sprintf("    Chain %d/%d...\n", ch, n_chains))
     chain_list[[ch]] <- rwmh(log_post_fn, th0, Sigma_prop,
                                n_draws = n_draws + n_burn, n_burn = n_burn,
                                transform = transform, chain_id = ch,
@@ -1291,7 +1296,7 @@ print.dynhr_posterior_result <- function(x, ...) {
       chain           = conv$combined,
       acceptance_rate = mean(chain_stats$accept_rate, na.rm = TRUE),
       sampler         = "RWMH",
-      n_chains        = nchains,
+      n_chains        = n_chains,
       chain_list      = chain_list,
       chain_stats     = chain_stats
     )
@@ -1321,7 +1326,7 @@ print.dynhr_posterior_result <- function(x, ...) {
     if (verbose) cat("    HMC not available, falling back to NUTS...\n")
     return(.run_rwmh_batch(log_post_fn, theta_mode,
                             diag(length(theta_mode)), NULL,
-                            nchains = 1L, n_draws = n_draws,
+                            n_chains = 1L, n_draws = n_draws,
                             n_burn = n_warmup, verbose = verbose, ...))
   }
 
@@ -1361,8 +1366,10 @@ print.dynhr_posterior_result <- function(x, ...) {
   m      <- length(chain_list)
   combined <- do.call(rbind, chain_list)
 
-  chain_means <- sapply(chain_list, colMeans, simplify = "matrix")
-  if (is.list(chain_means)) chain_means <- do.call(cbind, chain_means)
+  ## n_par x m matrix even when n_par == 1 (sapply would drop to a vector and
+  ## rowMeans() then errors: "'x' must be an array of at least two dimensions").
+  chain_means <- matrix(vapply(chain_list, colMeans, numeric(n_par)),
+                        nrow = n_par, ncol = m)
   grand_mean  <- rowMeans(chain_means)
 
   rhat <- ess <- setNames(numeric(n_par), colnames(combined))

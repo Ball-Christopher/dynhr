@@ -7,10 +7,10 @@
 conditional_forecast(
   model,
   dr,
-  Y,
+  data,
   conditions = NULL,
   horizon = 8L,
-  obs_names = NULL,
+  obs_vars = NULL,
   type = c("anticipated", "unanticipated"),
   method = c("hard", "soft"),
   n_draws = 0L,
@@ -27,10 +27,15 @@ conditional_forecast(
 
 \item{dr}{Decision rules from \code{solve_perturbation()}.}
 
-\item{Y}{\code{T x n_obs} data matrix used to anchor the forecast
-(filtered terminal state \code{s_{T|T}} is extracted internally). May
-also be a list output from \code{kalman_smoother()} (then its
-\code{filtered_states} and \code{P_filt_last} fields are used directly).}
+\item{data}{\code{T x n_obs} matrix of observables in
+\strong{levels}, used to anchor the forecast (the filtered terminal
+state \code{s_{T|T}} is extracted internally, subtracting the model's
+steady state as \code{\link{kalman_filter}()} does). May also be a list
+output from \code{\link{kalman_smoother}()} (then its
+\code{filtered_states} and \code{P_filt_last} fields are used directly).
+Note that the FORECAST PATHS and the \code{conditions} remain in
+deviations from steady state: only the anchoring data is in levels, and
+only because every filtering entry point now is.}
 
 \item{conditions}{Data frame with columns:
 \describe{
@@ -45,8 +50,8 @@ Pass \code{NULL} or a zero-row data frame for an unconditional forecast.}
 
 \item{horizon}{Integer: total forecast horizon H.}
 
-\item{obs_names}{Character vector: names of observables in \code{Y}
-(column order). Defaults to \code{colnames(Y)} if available.}
+\item{obs_vars}{Character vector: names of observables in \code{data}
+(column order). Defaults to \code{colnames(data)} if available.}
 
 \item{type}{\code{"anticipated"} (default): the whole shock path is
 chosen at time T (Waggoner-Zha stacked solution). \code{"unanticipated"}:
@@ -110,8 +115,34 @@ Computes conditional forecasts for a DSGE model by imposing linear
 restrictions on future observables, finding the (minimum-norm) shock path
 that delivers the conditions.
 }
+\examples{
+model    <- parse_mod(system.file("extdata/models/rbc.mod",
+                                  package = "dynhr"), verbose = FALSE)
+compiled <- compile_model(model, verbose = FALSE)
+steady   <- solve_steady(compiled, model$param_values,
+                         endo_names = model$var_names,
+                         exo_names  = model$varexo_names, verbose = FALSE)
+dr <- solve_perturbation(model, compiled, steady$values,
+                         model$param_values, verbose = FALSE)
+
+set.seed(1)
+Y <- as.matrix(simulate_model(dr, n_periods = 100L, model = model,
+                              burn_in = 20L)[, "y", drop = FALSE])
+
+## Hard-condition output growth for the first two forecast quarters
+conds <- data.frame(var = "y", horizon = 1:2, value = c(0.01, 0.008))
+cf <- conditional_forecast(model, dr, Y, conditions = conds,
+                           horizon = 8L, obs_vars = "y")
+cf
+head(cf$shock_paths)        # the shock path that delivers the conditions
+
+}
 \references{
 Waggoner, D. F. & Zha, T. (1999). Conditional Forecasts in Dynamic
     Multivariate Models. \emph{Review of Economics and Statistics}, 81(4),
     639-651.
+}
+\seealso{
+\code{\link{plan_condition}}, \code{\link{bayesian_conditional_forecast}},
+  \code{\link{kalman_smoother}}
 }

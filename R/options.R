@@ -137,3 +137,70 @@ dynhr_reset_options <- function(...) {
     return(get(name, envir = .dynhr_opts))
   default
 }
+
+# Internal: resolve the power-posterior (generalised-Bayes) tempering exponent
+# ONCE, at log-posterior FACTORY time.
+#
+# Every `make_log_posterior_<x>()` factory takes `power = NULL` meaning "resolve
+# `power_posterior` from the option store now". Resolving at factory time (not
+# per evaluation) is what makes the exponent a property of the closure: an MCMC
+# run cannot silently change target distribution half-way through because some
+# other code called `dynhr_set_options(power_posterior = )`, the resolution cost
+# leaves the per-draw hot path, and -- since a mirai daemon has its own
+# `.dynhr_opts` (see `.dynhr_daemon_state`) -- a closure built on the host keeps
+# the host's exponent wherever it is evaluated.
+#
+# `where` names the calling factory in the error message.
+.resolve_power_posterior <- function(power, where) {
+  power <- .dynhr_opt("power_posterior", power, default = 1)
+  if (!is.numeric(power) || length(power) != 1L || !is.finite(power) ||
+      power <= 0)
+    stop(where, ": `power` must be a finite scalar in (0, 1].", call. = FALSE)
+  if (power > 1)
+    warning(where, ": `power` > 1 produces a 'cold' (over-confident) ",
+            "posterior. This is valid but unusual; set power <= 1 for ",
+            "standard generalised-Bayes tempering.", call. = FALSE)
+  power
+}
+
+# ---------------------------------------------------------------------------
+# Shipping package options to parallel workers
+# ---------------------------------------------------------------------------
+# `.dynhr_opts` is a namespace-private ENVIRONMENT, not base `options()`, so a
+# mirai daemon (a fresh R process that merely `library(dynhr)`s) starts with an
+# EMPTY option store: every `dynhr_set_options(power_posterior = 0.5,
+# me_variance = 1e-4, debug_kf_errors = TRUE, ...)` set in the host session was
+# silently invisible to the workers, and the parallel path then evaluated a
+# DIFFERENT posterior from the serial one. Base `options(dynhr.* = )` (e.g.
+# `dynhr.use_rcpp`, `dynhr.me_floor_check`) has the same problem: R does not
+# inherit the host's options into a spawned process.
+#
+# `.dynhr_daemon_state()` snapshots both stores on the host; the snapshot rides
+# in the `.args` of every `everywhere()` pool-init block and is replayed there
+# by `.dynhr_daemon_apply()`. Snapshot at pool-init time and apply ONCE PER
+# DAEMON -- never per task -- so the cost is O(n_daemons), not O(n_draws).
+
+# Snapshot the host's dynhr option state for shipping to a worker process.
+# Returns list(opts = <as.list(.dynhr_opts)>, base = <the dynhr.* base options>).
+.dynhr_daemon_state <- function() {
+  base_all <- options()
+  list(opts = as.list(.dynhr_opts),
+       base = base_all[grep("^dynhr\\.", names(base_all))])
+}
+
+# Replay a `.dynhr_daemon_state()` snapshot in the current process.
+# Idempotent, and AUTHORITATIVE for the package store: `.dynhr_opts` is cleared
+# before the snapshot is written, so re-initialising a LIVE pool (e.g.
+# `.mirai_rebind_worker_lp`) cannot leave a stale value from a previous run
+# behind. Base options are merged, not cleared -- the daemon's own R defaults
+# for unrelated `dynhr.*` keys are none of our business.
+.dynhr_daemon_apply <- function(state) {
+  if (is.null(state) || !is.list(state)) return(invisible(NULL))
+  if (!is.null(state$opts)) {
+    old <- ls(.dynhr_opts, all.names = TRUE)
+    if (length(old)) rm(list = old, envir = .dynhr_opts)
+    if (length(state$opts)) list2env(state$opts, envir = .dynhr_opts)
+  }
+  if (length(state$base)) do.call(options, state$base)
+  invisible(NULL)
+}

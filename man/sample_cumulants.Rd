@@ -16,7 +16,9 @@ List:
   \item{mean}{n-vector of sample mean}
   \item{var_cov}{n × n sample variance-covariance}
   \item{c3}{n × n^2 sample third cumulant (K_3)}
-  \item{c4}{n × n^3 sample fourth cumulant (K_4)}
+  \item{c4}{n × n^3 sample fourth cumulant (Fisher's k_4).  Corrected in
+    E3-D: the previous normalisation was short by a factor \eqn{(T+1)}
+    (invisible on Gaussian data, where \eqn{\kappa_4 = 0}).}
   \item{n_obs}{number of observations}
 }
 \description{

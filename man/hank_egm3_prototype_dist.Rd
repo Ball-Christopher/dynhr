@@ -55,3 +55,4 @@ z$mass
 \code{\link{hank_egm3_prototype}},
   \code{\link{hank_forward_operator3}}, \code{\link{hank_stationary_dist}}
 }
+\keyword{internal}

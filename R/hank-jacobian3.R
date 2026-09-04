@@ -109,6 +109,7 @@
 #'                        chi1 = .2, phi1 = .1, maxit = 250)
 #' J <- hank_het3_jacobian_nd(blk, T_h = 2, delta = 3e-6)
 #' dim(J$D$rd)
+#' @keywords internal
 #' @export
 hank_het3_jacobian_nd <- function(block,T_h,inputs=NULL,outputs=.hank3_jac_outputs,delta=1e-5,
                                   threads=NULL) {

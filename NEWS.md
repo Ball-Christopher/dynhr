@@ -1,3 +1,406 @@
+# dynhr 0.9.3
+
+This release adds four new estimation and solution capabilities — global
+(projection) solutions with their own likelihood, Markov-switching DSGE
+filtering and smoothing, mixed-frequency observation blocks, and
+moment-based estimation.
+
+It also carries a substantial correctness pass on the parts of the package
+you reach for when fitting a model to data. Three of those are worth
+singling out, because each was silent:
+
+- `run_full_estimation()` built its sampler proposal from the **prior**
+  rather than the posterior curvature — a structurally unreachable branch —
+  which mixed poorly on most models and froze the chain outright on a
+  well-identified one.
+- `kalman_smoother()` never subtracted the **observation intercept**, so it
+  silently required data in deviations and disagreed with `kalman_filter()`
+  on the same series by tens of thousands of log points — and the historical
+  decomposition behind diagnostics D11/D12 was running on exactly that
+  mismatch.
+- A parameter named **`sigma_e`** was deleted from the calibration before it
+  was read, leaving it `NA` while compilation and solving continued.
+
+Measurement error is now one noise model across every filter,
+`kalman_smoother()` takes the same arguments as `kalman_filter()`, and every
+filtering and smoothing entry point takes observables in **levels**.
+
+The release carries breaking API changes; read the first section before
+upgrading.
+
+## Breaking changes
+
+- **Three empty pass-through aliases are removed**, with no deprecation
+  shims: use `solve_model()` for `solve_dsge()`, `run_mode_finding()` for
+  `estimate_mode()`, and `run_posterior_estimation()` for
+  `estimate_posterior()`.
+- **Argument spellings are unified across every exported likelihood,
+  filter and forecast function.** The data argument is `data` (was `Y`),
+  the observable-name argument is `obs_vars` (was `obs_names` or
+  `observables`), and the measurement-error argument is `me_variance` (was
+  `me_var` or `me_sd`) — matching `make_posterior()` and
+  `run_full_estimation()`. Matrix orientation is unchanged and is now
+  stated per function.
+- **Two of those renames change what you pass, not just the name.**
+  `hank_loglik_ar()`, `hank_loglik_ar_grad()`,
+  `hank_loglik_ar_structural_grad()` and `hank_simulate_aggregate()` now
+  take a VARIANCE where they took a standard deviation — pass `me_sd^2`.
+  `make_log_posterior_hank()`, `make_posterior_grad_hank_ar()` and
+  `hank_ar_target()` took both `me_var` and an independently overridable
+  `me_sd`; they now take the single `me_variance`, so their two likelihood
+  branches always describe the same measurement error.
+  `hank_loglik_ar_grad()$me` is still the score with respect to the
+  standard deviation.
+- **`run_posterior_estimation()`'s count arguments follow the
+  sampler-level convention**: `nburn`/`ndraws`/`nchains`/`nparticles`/
+  `nwalkers` are now `n_warmup`/`n_draws`/`n_chains`/`n_particles`/
+  `n_walkers`, matching `run_full_estimation()` and `mcmc()`.
+- **The inert `mh_scale` argument is removed** from
+  `make_log_posterior_tpf()` and `dynhr_smc2()`'s `likelihood_args`, which
+  now rejects unrecognised keys instead of silently dropping them. It had
+  done nothing since the tempered particle filter's mutation step was
+  corrected to hold the ancestor state fixed.
+- **`dynhr_smc2()` returns a `dynhr_chains` object** like every other
+  sampler entry point, so `print()`, `summary()` and `plot()` work on it.
+  All previous fields are retained.
+- **`kalman_smoother()`'s second argument is a decision-rule object, and
+  every filtering and smoothing entry point takes observables in LEVELS.**
+  Passing a pre-built `dsge_ss` — the original signature — is an error that
+  names its replacement; the deprecated `ss = ` alias is gone with it. The
+  data convention changed with the shape: a state space now carries its own
+  observation intercept in the `d` field `new_dsge_ss()` has documented all
+  along, so `kalman_smoother()`, `realtime_decomposition()`,
+  `forecast_backtest()` and `conditional_forecast()`'s anchoring data are all
+  in levels and the model's steady state is subtracted for you. If your
+  series are already in deviations, pass `d = 0` to `kalman_smoother()`.
+  Two entry points to the same recursion silently requiring different data
+  was the defect; one release of polymorphic shim would have kept it alive
+  in a second form, so it is settled here instead.
+
+## New features
+
+### Global (projection) solutions
+
+- **`solve_global()` is usable as an estimation target.**
+  `make_log_posterior(likelihood = "global_pf")` runs a bootstrap particle
+  filter over a projection solution, so the model is never linearised. The
+  estimate is unbiased for the marginal likelihood, making `pmmh()` over it
+  a valid pseudo-marginal sampler. `global_pf_sbc()` is the matching
+  rank-uniformity certification.
+- **The default collocation domain is measured, not guessed.** It is
+  derived from the model's own shock process and unconditional state
+  dispersion, so an AR(1) with a large innovation gets a wider grid
+  automatically; a four-fixture cover study set the default. `solve_global()`
+  also validates its model class structurally and fails loud rather than
+  silently returning a bad approximation.
+- **`euler_errors()` is model-agnostic** — it reads the Euler equations from
+  the parsed model instead of assuming RBC parameter names — and
+  **`den_haan_marcet()`** is new. Both work on perturbation solutions too,
+  so they can be used to decide whether a global solve is needed at all.
+- `simulate()` on a `GlobalSolution` had an off-by-one in shock timing: the
+  shock drawn in period `t` was applied to the wrong period. Fixed.
+
+### Markov-switching DSGE
+
+- **Filtering, smoothing and IRFs across regimes**: `ms_kim_filter()`,
+  `ms_kim_smoother()`, `ms_kim_smoother_struct()` (structural switching) and
+  `ms_irf()`.
+- **GPB(3) collapse** (`collapse = "gpb3"`) keeps the pair
+  `(s_{t-1}, s_t)` and collapses over two lags instead of one. It is
+  strictly weaker as an approximation than GPB(2) and markedly more accurate
+  when regimes are persistent: against an all-regime-path enumeration
+  oracle, smoothed regime probabilities improved from 1.00 away to 2e-15 and
+  states from 25 sd to 3e-15 sd on the GPB(2) breakdown draw. It is not a
+  pointwise improvement — on 7 of 48 grid draws its error is up to 2.1x
+  GPB(2)'s, at absolute levels below 3e-5 — and costs about 1.75x at
+  `T = 300`, `h = 2`. `"gpb2"` remains the default and is bit-identical to
+  before.
+- The filter's covariance update is now Joseph-form, and a collapse
+  diagnostic is available via `return_collapse_diag`.
+
+### Mixed-frequency observations
+
+- **`obs_aggregation`** declares an observable as the *k*-period temporal
+  aggregate of a higher-frequency model variable, so a monthly model can be
+  estimated on quarterly data without leaving the monthly frequency. Four
+  aggregators: `flow_sum`, `flow_mean`, `stock_end` and `triangle`
+  (Mariano–Murasawa). Implemented as fixed-weight state augmentation
+  (Harvey 1989 §6.3), so `ZZ` and `TT` stay constant, the filter's hot path
+  and both C++ kernels are untouched, and a model without `obs_aggregation`
+  returns a byte-identical log-likelihood. `mf_augment_state_space()`,
+  `mf_expand_observations()` and `mf_aggregation_weights()` expose the
+  machinery directly.
+
+### Estimation
+
+- **`method_of_moments()`** — GMM and SMM by moment matching over the
+  model-implied autocovariance structure, with identity / optimal /
+  Newey–West / diagonal weighting, optional two-step, and analytic moment
+  Jacobians where dynhr has them.
+- **`forecast_backtest()`** — recursive expanding-window out-of-sample
+  scoring with CRPS, log score, PIT and interval coverage; re-estimate at
+  each origin or roll a single fit forward.
+- **Delayed acceptance**: `mcmc(..., screen_fn = )` evaluates a cheap
+  approximate likelihood first and only runs the expensive one on proposals
+  that survive. The two-stage acceptance ratio keeps the exact posterior
+  invariant.
+- **Resumable chains**: `mcmc(checkpoint_dir =, resume =, flush_every =)`
+  writes a checksummed, atomically-written state pack carrying the position,
+  log-posterior, adaptation state and `.Random.seed`, so a resumed chain is
+  statistically identical to the uninterrupted run. `mcmc_chain_state()`,
+  `mcmc_chain_save()`, `mcmc_chain_restore()` and `mcmc_chain_extend()` are
+  the sampler-agnostic primitives; restore refuses a tampered pack or one
+  saved mid-adaptation.
+- **`dynhr_model()` and the `dm_*()` verbs** (`dm_solve`, `dm_posterior`,
+  `dm_mode`, `dm_sample`, `dm_diagnostics`, `dm_forecast`, `dm_irf`,
+  `dm_test`) — one pipeline object carrying model, compiled, steady state,
+  decision rules, data and priors, instead of threading six arguments
+  through every call. Every vignette pipeline routed through the object
+  returns bit-identical numbers to the functional path.
+
+### Model input and output
+
+- **`write_mod()`** serialises a parsed model back to Dynare `.mod` source.
+  A `parse_mod()` -> `write_mod()` -> `parse_mod()` round trip is a cheap
+  check that dynhr read a file the way you meant it.
+- **`histval` blocks are parsed** into `model$histval` (lag-indexed), and
+  **`smoother2histval()`** builds that history from a completed smoother run
+  — the standard way to start a forecast or counterfactual from where the
+  data left off.
+- **`shock_groups` blocks are parsed** into `model$shock_groups`, consumed
+  by the decomposition functions.
+
+### Heterogeneous agents
+
+- **`hank_ks_aggregate_risk()`** — Krusell–Smith with genuine aggregate
+  risk, plus `hank_ks_risk_irf()` for generalised impulse responses and
+  `hank_ks_ergodic_mean()` for the aggregate precautionary term without a
+  full simulation. `hank_tfp_chain()` builds the aggregate productivity
+  chain.
+
+### Decompositions
+
+- **Shock decompositions add up exactly.** `historical_decomposition()` and
+  its OBC variant gain an `initial` column for the contribution of the
+  initial state, which is not zero unless the sample starts at the steady
+  state; the columns now reproduce the data to machine precision. Both take
+  `shock_groups`. **`realtime_decomposition()`** re-runs the decomposition
+  across data vintages, so a given quarter's story can be tracked as it was
+  revised.
+
+## Correctness
+
+### Measurement error is one noise model everywhere
+
+Measurement error was implemented inconsistently across filters: on several
+paths it entered the forecast covariance only, acting as a regulariser
+rather than as observation noise, which made those likelihoods disagree with
+the exact Kalman filter by O(`me_variance`).
+
+- The **multivariate Kalman filter**, the **Markov-switching filters** and
+  the **SV Rao-Blackwellised particle filter** (`kf_step()` and its compiled
+  kernel) now all implement the true i.i.d. law: `me_variance` enters the
+  forecast covariance AND the Joseph state-covariance update.
+- **`dynhr_sbc()`'s data-generating process now adds measurement error**, so
+  the DGP and the likelihood describe the same model. An SBC on a filter
+  with `me_variance > 0` against a noiseless DGP was certifying a
+  mis-specification.
+
+### Filtering and smoothing
+
+- **`kalman_filter(method = "chandrasekhar")` is exact again**, and is
+  re-admitted to `method = "auto"` above `n_state = 100`.
+- **`kalman_smoother()`'s state pass is exact** under dynhr's timing
+  convention.
+- **`pkf_smoother_obc()`** uses the correlated-noise disturbance smoother.
+- The Kim smoothers gained a joint-probability regime pass
+  (`regime_pass = "joint"`).
+- **`kalman_smoother()` rejected systems `kalman_filter()` handled.** Reported
+  for a unit-root, `shock_scale`d model with a non-positive innovation
+  covariance. The two functions treated a singular `F` by different
+  mechanisms: `kalman_filter()` falls back to the univariate (Koopman-Durbin)
+  filter, which skips any component whose conditional variance is below
+  `kalman_tol` -- the correct treatment, since such a component is predictable
+  exactly and carries no information -- while `kalman_smoother()` added JITTER
+  on an absolute ladder (`1e-8` ... `1e-2`, then an unguarded
+  `chol(F + 0.1 I)`). `F` is not O(1): a unit-root smoother starts from
+  `P = 1e6 I` and `shock_scale` multiplies `Q` on top, so the ladder was
+  either far too small -- and the unguarded rung threw, which is the reported
+  rejection -- or it "worked" and silently corrupted the result. Switching one
+  shock off via `shock_scale` (the `u_k = 0` idiom for forcing a series to its
+  observed value, and what a hard `filter_tunes` tune does underneath) moved
+  the smoother's log-likelihood to **-8.5e+09** where the filter returned
+  **-63.7**. The smoother now makes the filter's decision: a zero-variance
+  component is dropped for that period, exactly as it already treats a
+  *missing* observable, and the update proceeds on the informative subset,
+  whose `F` is positive definite by construction. The value becomes -70.0,
+  and the smoother's offset from the filter is now the same constant whether
+  or not a shock is switched off. Dropped components are reported, naming how
+  many periods and components and stating that the log-likelihood is not
+  comparable with an undropped run.
+- **`kalman_smoother()` silently required data in DEVIATIONS.**
+  `kalman_filter()` takes raw level data and subtracts the observation
+  intercept `d = dr$ys[obs_vars]`; the smoother never did, and
+  `build_dsge_state_space()` carries no steady state at all, so the
+  requirement was unstated and its violation silent. On any model whose
+  observables have non-zero steady states -- which is most of them --
+  filtering and smoothing the same series disagreed wildly: on the bundled
+  `nk_demo` (observable steady states 0.5, 2 and 4) the filter returned
+  -757.6 and the smoother -33990.3. Hand-demeaning the data closes the gap to
+  2e-13, confirming the intercept was the whole of it. The state space now
+  carries the intercept (`build_dsge_state_space()$d`, rescaled by `sum(w)`
+  under a mixed-frequency aggregator exactly as `kalman_filter()` rescales
+  its own), every entry point subtracts it, and `d = 0` is the explicit
+  escape hatch for data already in deviations.
+- **The historical decomposition behind D11/D12 was running on levels
+  through the deviations-only path.** `run_all_diagnostics(posterior)` built
+  a state space, handed it the raw observable columns and smoothed them, so
+  on any model with non-zero observable steady states the smoothed shocks
+  absorbed the level offset: on `nk_demo`, `max |eps|` 4.83 against 0.80 —
+  six times too large — and a log-likelihood of -33990.3 against -757.6. D12
+  reports the mean of each smoothed shock and passes it at `|mean| < 0.1`, so
+  the diagnostic was reporting the bug as a model failure. **Any historical
+  decomposition or smoothed-shock series produced through
+  `run_all_diagnostics()` before this release, on a model whose observables
+  have non-zero steady states, should be recomputed.** The same latent defect
+  is closed in `realtime_decomposition()`, `forecast_backtest()` (whose
+  predictive mean now carries the intercept back so it is scored against the
+  realised level) and `conditional_forecast()`, whose Gaussian branch alone
+  took deviations while its `tpf` and `pskf` branches demeaned for
+  themselves — the same call needed different data depending on
+  `ctx$likelihood`.
+
+- **`kalman_smoother()` takes the same arguments as `kalman_filter()`.** Every
+  other filter/smoother entry point -- `kalman_filter()`, `ms_kim_filter()`,
+  `ms_kim_smoother()`, `kf_innovation_diagnostics()` -- takes
+  `(data, dr, model, params, obs_vars, me_variance, ...)`. The Gaussian
+  smoother took `(data, ss, Q, me_extra, shock_scale)`, so the obvious call by
+  analogy after filtering failed and the only signpost to the required
+  `build_dsge_state_space()` step was a single `@param` line; `?kalman_smoother`
+  had no example and no `\\seealso`. It now accepts the filter's arguments,
+  including **`me_variance`**, which it previously lacked entirely -- so a
+  model filtered with measurement error could not be smoothed under the same
+  noise model. Filter and smoother now agree to 1e-8 across `me_variance`
+  values. The pre-built state space is no longer accepted: see the breaking
+  changes above for the one-line migration.
+- **`kalman_smoother(lik_init = )`.** `kalman_filter()` refuses
+  `lik_init = "auto"` together with `shock_scale` on a nonstationary model and
+  instructs the caller to pass `"kappa"` or `"stationary"` explicitly -- which
+  the smoother had no way to accept, so the two could not be made comparable
+  even in principle. `"stationary"` now errors on a unit root instead of
+  silently returning a kappa-initialised answer. There is still no exact
+  *diffuse* initialisation in the smoother.
+- **The same defect is fixed in `conditional_forecast()`**, in four places.
+  Its internal Kalman pass added a `1e-10` ridge on every period (so it was
+  never an unregularised filter) and fell back to an unguarded
+  `chol(F + 1e-6 I)`; and its three condition-system solves used unguarded
+  `chol(M + 1e-12 I)`. Those Gram matrices lose rank exactly when the
+  conditions are collinear, over-specified, or routed through a switched-off
+  shock -- normal things to ask for. All four now drop uninformative
+  components or take the minimum-norm solution via a relative-cutoff
+  pseudo-inverse, and warn rather than throwing.
+
+### Parsing
+
+- **A parameter named `sigma_e` was silently dropped** (reported against
+  0.9.1). `remove_blocks()` strips Dynare *command* statements before the
+  calibration is read, and its keyword list ends with `Sigma_e` — Dynare's
+  shock-covariance assignment — but the loop matched case-INSENSITIVELY. A
+  user's `sigma_e = 1;` was therefore deleted as if it were that command, and
+  the parameter survived declared but `NA`, after which `compile_model()` and
+  the solvers happily proceeded on an invalid calibration behind a warning.
+  Dynare identifiers are case-sensitive and its command is spelled with a
+  capital S, so lower-case `sigma_e` is an ordinary parameter name; it is now
+  matched case-sensitively. `Sigma_e` was the only entry in that list whose
+  lower-case form is a legal user identifier — the rest (`stoch_simul`,
+  `steady`, `check`, …) are genuine Dynare reserved words and stay
+  case-insensitive.
+
+### Sampling
+
+- **The one-call estimation API proposed from the PRIOR, not the posterior.**
+  `run_full_estimation()` and the estimation runner both built the RWMH
+  proposal as `if (!is.null(mode_res$V_mode)) ... else diag(prior_spec$std^2)`,
+  but the mode result on that path comes from the optimiser core
+  `.run_mode_finding()`, which returns only the mode and its convergence
+  record and never sets `V_mode`. The condition was structurally unreachable,
+  so every proposal was a prior-variance diagonal and the posterior curvature
+  the mode-finder had just located was silently discarded. On a model whose
+  prior and posterior sit at a similar scale this merely mixed poorly
+  (`fs2000`: 10.2% acceptance); on a well-identified one it froze the chain
+  outright — 0% acceptance and exactly zero posterior variance, every draw
+  equal to the mode. The Hessian-based proposal logic
+  (`.make_pd` regularisation plus eigen-basis capping at the prior scale) is
+  now shared with `run_mode_finding()` rather than duplicated, and the
+  samplers compute the Hessian at the mode and use it. Measured after the
+  fix: the nine-parameter `nk_demo` fixture goes 0% -> 34.3% acceptance with
+  every posterior mean within one standard deviation of the values the data
+  were simulated at, and `fs2000` goes 10.2% -> 29.4%. If the Hessian genuinely
+  cannot be evaluated the proposal still degrades to the prior diagonal, but
+  now **warns**: a silent version of that fallback is what hid this for three
+  releases. `test-sampler-proposal.R` pins the property no test had asserted —
+  that the chain moves at all.
+
+### Numerics
+
+- **The SV RB-PF agrees between R and C++ past the volatility overflow
+  point.** The two diverged without bound once a volatility particle left
+  the useful double range. The overflow was not the cause: the forecast
+  covariance and its Cholesky factor are bit-identical in both, but
+  `chol2inv()` and `arma::inv_sympd()` differ by one ulp in `F^-1`, and when
+  the observation block is perfectly informative the exact Kalman gain is
+  the identity, so the Joseph factors are exactly zero. That one ulp made
+  them entirely rounding noise, the state covariance rounding noise squared,
+  and the next period's inverse amplified it without limit. Both kernels now
+  snap a Joseph entry lying within a few ulps of the magnitudes that
+  cancelled to the exact zero it approximates; `kf_step()` also rejects a
+  non-finite forecast covariance before `chol()`, as the compiled kernel
+  already did. Verified over 864 parameter/seed/length combinations:
+  0 divergent, worst relative gap 4.1e-16.
+- **Order-3 cumulant moments were projected onto only the `(i,i,k)` slice**
+  of the third-moment tensor. Fixed, along with three further cumulant/GMM
+  defects (the analytic GMM weight matrix's lag handling among them).
+- **Seeded particle-filter closures no longer reset the caller's RNG
+  stream** — a seeded closure used to reseed the global stream on every
+  evaluation, silently correlating an outer sampler's own draws.
+- **`power` (power-posterior tempering) reaches every likelihood, exactly
+  once**, and is shipped to parallel workers.
+- **Stationary initial covariances (PSKF, TPF) come from the real Lyapunov
+  solution** rather than a truncated series.
+- **Order-2 shortcuts no longer discard shock correlations**: `.linear_dr2`
+  dropped the off-diagonal of `Sigma_e`.
+- **`kalman_filter()`'s singularity fallback is conditional and audible**
+  instead of silent, and `.safe_inv()` truncates on a relative singular-value
+  cutoff rather than an absolute one.
+- **`hank_het_block()` fails loud on reducible income chains** and gains
+  `dist_init` — at `p_un = p_nu = 0` the non-participation state is a closed
+  class, and a uniform-seeded power iteration stranded about a third of the
+  mass there.
+- **`dynhr_set_options()` values now reach mirai daemons**, and parallel
+  workers receive the host's option state.
+- The cumulant gradient no longer returns a silent `NaN` for an explosive or
+  non-stationary draw.
+
+### API and structure
+
+- Two exported functions failed on every call and had no test:
+  `ramsey_obc_pwlinear()` built its shock sequence transposed, and
+  `diag_prior_sensitivity()` referenced an undeclared argument. Both fixed,
+  with smoke tests added for every previously untested export.
+- Five `print()`/`summary()` methods were written but never registered, so
+  from an installed package they fell through to `print.default()` and
+  dumped the whole object. All registered, with a structural guard against
+  recurrence.
+- `run_posterior_estimation()` with `n_chains >= 2` crashed on any
+  one-parameter model. Fixed.
+- The HANK result classes share one compact `print.hank_block()`, so
+  printing a block no longer dumps the stationary distribution. Nineteen
+  internal-but-exported oracles are marked `@keywords internal`.
+- One discrete-Lyapunov solver (`solve_lyapunov()`); the removed
+  direct-Kronecker variant returned a false `NaN` on highly non-normal
+  stable matrices and a negative variance for a scalar explosive root.
+- `ast_to_string()` under-parenthesised `a - (b - c)`.
+
 # dynhr 0.9.2
 
 The headline addition is **SMC² (`dynhr_smc2()`)**: sequential Monte Carlo

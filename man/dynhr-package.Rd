@@ -6,17 +6,21 @@
 \alias{dynhr-package}
 \title{dynhr: DSGE Modelling Toolkit}
 \description{
-Parses Dynare `.mod` files, solves the resulting models by first-order
-perturbation, runs Bayesian estimation (random-walk Metropolis-Hastings,
-sequential Monte Carlo, NUTS), and reports a battery of identification,
-convergence, fit, and narrative diagnostics.
+Parses Dynare `.mod` files, solves the resulting models by perturbation
+at orders 1 to 5, evaluates the likelihood with Kalman, particle
+(bootstrap / tempered / Rao-Blackwellised) and skewed (pruned skewed
+Kalman) filters, and runs Bayesian estimation with random-walk
+Metropolis-Hastings, sequential Monte Carlo, NUTS, DIME, SMC-squared and
+particle-marginal Metropolis-Hastings. It then reports a battery of
+identification, convergence, fit, and narrative diagnostics.
 }
 \details{
-The public API is exported and documented. Over 90 functions are
-exported covering parsing, solving, estimation, filtering, diagnostics,
-optimal policy (Ramsey / OSR / discretionary), OBC, welfare analysis,
-and reporting. Functions still marked internal (no `@export`) remain
-accessible via `dynhr:::fn`.
+The public API is exported and documented, covering parsing, solving,
+estimation, filtering, diagnostics, optimal policy (Ramsey / OSR /
+discretionary), occasionally-binding constraints (OccBin), the
+heterogeneous-agent (HANK) line -- endogenous grid method, sequence-space
+Jacobians, reweighting and welfare -- and reporting. Functions still
+marked internal (no `@export`) remain accessible via `dynhr:::fn`.
 }
 \seealso{
 Useful links:

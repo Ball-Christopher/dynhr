@@ -4,17 +4,17 @@
 \alias{hank_loglik_aggregate}
 \title{Gaussian log-likelihood of aggregate HANK data (ABRS autocovariance form)}
 \usage{
-hank_loglik_aggregate(Y, Theta, sigma_eps, me_var = 0)
+hank_loglik_aggregate(data, Theta, sigma_eps, me_variance = 0)
 }
 \arguments{
-\item{Y}{\code{T_data x n_obs} matrix of demeaned aggregate observations
+\item{data}{\code{T_data x n_obs} matrix of demeaned aggregate observations
 (deviations from steady state), columns in the same order as \code{Theta}.}
 
 \item{Theta}{MA coefficients (see \code{\link{hank_ma_coefficients}}).}
 
 \item{sigma_eps}{Shock innovation standard deviation.}
 
-\item{me_var}{Measurement-error variance (default 0).}
+\item{me_variance}{Measurement-error variance (default 0).}
 }
 \value{
 The scalar Gaussian log-likelihood.

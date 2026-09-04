@@ -104,6 +104,15 @@
 #'   \code{\link{ms_kim_filter_struct}}.  Incompatible with \code{ms_spec},
 #'   \code{me_extra}, \code{shock_scale}, and analytic gradient.  Default
 #'   \code{NULL} (non-structural-MS path).
+#' @param ms_collapse  Character; GPB collapse depth for the Markov-switching
+#'   likelihood, forwarded to \code{\link{ms_kim_filter}} /
+#'   \code{\link{ms_kim_filter_struct}}: \code{"gpb2"} (default, Kim's
+#'   filter) or \code{"gpb3"} (collapse on the last TWO regimes; about
+#'   \code{n_regimes} times the cost per period, and exact wherever GPB(2)'s
+#'   error is entirely the one-period collapse).  Meaningful only when
+#'   \code{ms_spec} or \code{ms_struct_spec} is supplied; supplying
+#'   \code{"gpb3"} without either is an error.  Diagnose the need for it with
+#'   \code{ms_kim_filter(..., return_collapse_diag = TRUE)$collapse_max}.
 #' @param student_df  Positive finite scalar; degrees of freedom for the
 #'   multivariate Student-t per-period log-likelihood.  Required when
 #'   \code{likelihood = "student_t"}, ignored otherwise.
@@ -119,7 +128,8 @@
 estimation_context <- function(
     me_variance     = 0,
     likelihood      = c("gaussian", "cumulant", "whittle", "tpf", "pskf",
-                        "student_t", "pkf", "ppf", "copf", "pruned", "sv_rbpf"),
+                        "student_t", "pkf", "ppf", "copf", "pruned", "sv_rbpf",
+                        "global_pf"),
     lik_init        = "auto",
     me_extra        = NULL,
     shock_scale     = NULL,
@@ -133,6 +143,7 @@ estimation_context <- function(
     sample_start    = NULL,
     ms_spec         = NULL,
     ms_struct_spec  = NULL,
+    ms_collapse     = c("gpb2", "gpb3"),
     student_df      = NULL,
     pruned_order    = 2L
 ) {
@@ -226,6 +237,8 @@ estimation_context <- function(
     )
   }
 
+  ms_collapse <- match.arg(ms_collapse)
+
   ## Validation: exactly one of ms_spec / ms_struct_spec (or neither)
   if (!is.null(ms_spec) && !is.null(ms_struct_spec))
     stop("estimation_context: supply at most one of 'ms_spec' (shock-variance ",
@@ -273,6 +286,14 @@ estimation_context <- function(
            "Use \"numerical\" or \"auto\".", call. = FALSE)
   }
 
+  ## ms_collapse only means something on an MS path; silently accepting it
+  ## elsewhere would let a caller believe a deeper collapse was in force.
+  if (!identical(ms_collapse, "gpb2") &&
+      is.null(ms_spec) && is.null(ms_struct_spec))
+    stop("estimation_context: ms_collapse = \"", ms_collapse, "\" requires ",
+         "ms_spec or ms_struct_spec (it is the Markov-switching filter's ",
+         "collapse depth).", call. = FALSE)
+
   structure(
     list(
       me_variance     = me_variance,
@@ -289,6 +310,7 @@ estimation_context <- function(
       plan            = stored_plan,
       ms_spec         = ms_spec,
       ms_struct_spec  = ms_struct_spec,
+      ms_collapse     = ms_collapse,
       student_df      = student_df,
       pruned_order    = pruned_order
     ),

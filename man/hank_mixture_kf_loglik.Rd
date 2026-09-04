@@ -7,8 +7,8 @@
 hank_mixture_kf_loglik(
   betas,
   omega,
-  Y,
-  observables = c("C", "K"),
+  data,
+  obs_vars = c("C", "K"),
   shock_specs,
   a_grid,
   Pi,
@@ -19,7 +19,7 @@ hank_mixture_kf_loglik(
   Z = 1,
   T_h,
   q = NULL,
-  me_var
+  me_variance
 )
 }
 \arguments{
@@ -28,11 +28,11 @@ type (see \code{\link{hank_mixture_ks_steady}}).}
 
 \item{omega}{Numeric length-K mixture weights, non-negative, summing to 1.}
 
-\item{Y}{\code{T_data x length(observables)} matrix of demeaned
-observations, columns in the order of \code{observables} (as expected by
+\item{data}{\code{T_data x length(observables)} matrix of demeaned
+observations, columns in the order of \code{obs_vars} (as expected by
 \code{\link{hank_kalman_loglik}}).}
 
-\item{observables}{Character vector of observable names produced by the
+\item{obs_vars}{Character vector of observable names produced by the
 mixture model (default \code{c("C","K")}).}
 
 \item{shock_specs}{Named list, one entry per exogenous shock, each
@@ -58,7 +58,7 @@ shock \code{"Z"}, so \code{shock_specs} is typically
 \item{q}{Optional truncation horizon passed to \code{\link{hank_state_space}}
 (default \code{T_h}, i.e. no truncation beyond the GE horizon).}
 
-\item{me_var}{Measurement-error variance added to every observable's
+\item{me_variance}{Measurement-error variance added to every observable's
 diagonal in the Kalman filter (see \code{\link{hank_kalman_loglik}}).
 \strong{Required to be strictly positive} whenever
 \code{length(observables) > 1} for a single-shock model (see Details).}
@@ -71,7 +71,7 @@ The eta-dependent structural macro log-likelihood at a candidate
 beta-mixture calibration \code{eta = (betas, omega)}: solves the mixture
 steady state and GE model at \code{eta}, converts it to a truncated-MA
 state space, and evaluates dynhr's Gaussian Kalman filter on the observed
-aggregate time series \code{Y}. Unlike \code{\link{hank_macro_loss}}'s
+aggregate time series \code{data}. Unlike \code{\link{hank_macro_loss}}'s
 noiseless-IRF-moment proxy (Phase-1 Wave-1), this is a genuine Gaussian
 likelihood over a STOCHASTIC time series of finite length, integrating
 over the shock's own realization via the state-space recursion -- the
@@ -82,7 +82,7 @@ over the shock's own realization via the state-space recursion -- the
 single exogenous shock (\code{n_obs = 2 > n_shock = 1} for the default
 \code{observables = c("C","K")}), the model-implied observation covariance
 is rank-\code{n_shock} and thus singular whenever \code{n_obs > n_shock}.
-\code{me_var > 0} is therefore \strong{required} in that regime (as in
+\code{me_variance > 0} is therefore \strong{required} in that regime (as in
 \code{\link{hank_kalman_loglik}}'s own singularity note) -- it is not
 optional measurement-error realism here, it is what keeps the observation
 covariance non-singular so the Gaussian density is well-defined.

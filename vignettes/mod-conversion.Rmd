@@ -523,6 +523,54 @@ See `?inject_params` and `?read_mat_params` for full documentation.
 
 ---
 
+## 9b  Going the other way: `write_mod()`
+
+Conversion is not one-directional. `write_mod()` serialises a parsed model
+back to Dynare `.mod` source, so a model that was built or edited
+programmatically in R can be handed to Dynare, diffed against the original,
+or checked into version control in its canonical form:
+
+```{r write-mod, eval = FALSE}
+model <- parse_mod(mod_path)
+
+# ... modify the model object programmatically ...
+
+write_mod(model, file = "output/model_roundtrip.mod")
+
+# Or capture the source as a character vector without writing:
+src <- write_mod(model)
+```
+
+A round trip through `parse_mod()` -> `write_mod()` -> `parse_mod()` is the
+cheapest available check that dynhr read your file the way you meant it: if
+the re-parsed model differs, the disagreement is in the round trip, not in
+your head. `header = FALSE` omits the generated-by banner when you want a
+byte-comparable diff.
+
+### Initial conditions: `histval` and `smoother2histval`
+
+`histval` blocks are parsed into `model$histval` (lag-indexed), so a
+deterministic simulation can start from a supplied history rather than the
+steady state. `smoother2histval()` builds that history from a completed
+smoother run — the standard way to start a forecast or a counterfactual
+from where the data actually left the economy:
+
+```{r histval, eval = FALSE}
+sm <- kalman_smoother(Y, dr, model, params, obs_vars = obs)
+
+# Take the smoothed state at the last observed period as the initial history
+hv <- smoother2histval(sm, period = nrow(Y), lags = 1L)
+```
+
+### Shock groups
+
+`shock_groups` blocks are parsed into `model$shock_groups` and consumed by
+`historical_decomposition()` and `realtime_decomposition()`, so the grouping
+used in a chart lives with the model rather than in the plotting call. See
+`vignette("diagnostics")`.
+
+---
+
 ## 10  Completing a conversion checklist
 
 When porting an existing Dynare `.mod` file to dynhr, follow these
@@ -531,7 +579,7 @@ steps for full functionality:
 | Step | What to add | Why |
 |------|-------------|-----|
 | 1 | Basic `.mod` file | `parse_mod()` reads it as-is |
-| 2 | `@dynhr:expectations` | Quantitative sanity checks in D1–D30 |
+| 2 | `@dynhr:expectations` | Quantitative sanity checks in D0–D41 |
 | 3 | `@dynhr:benchmarks` | IRF plausibility check (D8) |
 | 4 | `@dynhr:variable_labels` | Better plot labels in diagnostics |
 | 5 | `@dynhr:shock_categories` | Narrative analysis (D17) |
@@ -541,11 +589,12 @@ steps for full functionality:
 | 9 | `%(long_name='...')` annotations | Richer variable labels |
 | 10 | `estimated_params;` block | Bayesian estimation pipeline |
 
-The models bundled in `inst/extdata/models/` show real-world patterns.
-Inspect one for the block/tag conventions above:
+The `03j_no_omega_cp_est.mod` model in `inst/extdata/models/` is a
+complete example that uses all metadata block types.  Inspect it for
+real-world patterns:
 
 ```{r full-example, eval = FALSE}
-file.show(system.file("extdata", "models", "nk_zlb_dynare.mod",
+file.show(system.file("extdata", "models", "03j_no_omega_cp_est.mod",
                       package = "dynhr"))
 ```
 

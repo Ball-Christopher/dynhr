@@ -435,6 +435,7 @@ hank_reweighting_loss <- function(dD_hat, JD_mix, dZ, W = NULL) {
 #'     loss surface.}
 #'   \item{dD_hat,dD_star}{The observed (survey-calibrated) and truth
 #'     (model, noiseless) net reweighting vectors, for direct inspection.}
+#' @keywords internal
 #' @export
 hank_phase0_reweight_gate <- function(betas = c(0.95, 0.98),
                                        omega = c(0.5, 0.5),
@@ -903,6 +904,7 @@ hank_macro_loss <- function(AC_hat, blocks_cand, omega, T_h, shock,
 #'   \item{argmin_macro,argmin_rw,argmin_joint}{Each a list
 #'     \code{list(centre, spread)} at the grid argmin of the corresponding
 #'     loss surface.}
+#' @keywords internal
 #' @export
 hank_phase1_joint_gate <- function(betas = c(0.95, 0.98),
                                     omega = c(0.5, 0.5),

@@ -7,7 +7,7 @@
 build_dsge_state_space(
   m,
   dr,
-  obs_names,
+  obs_vars,
   verbose = TRUE,
   params = m$param_values
 )
@@ -17,7 +17,7 @@ build_dsge_state_space(
 
 \item{dr}{Decision rules (from stoch_simul()$dr)}
 
-\item{obs_names}{Character vector of observable names}
+\item{obs_vars}{Character vector of observable names}
 
 \item{verbose}{Print diagnostic info (default TRUE)}
 
@@ -28,7 +28,10 @@ was solved at non-default parameters.}
 }
 \value{
 List with T_mat, R_mat, Z_mat, D_mat, Sigma_e, ghx, ghu,
-  indices, names
+  indices, names, and the observation intercept \code{d =
+  dr$ys[obs_vars]} (with the full steady state in \code{ys}). The
+  intercept is what makes a state space self-contained: everything that
+  consumes one takes observables in LEVELS and subtracts \code{d}.
 }
 \description{
 Extracts T, R, Z, D matrices from ghx/ghu using lead_lag_incidence

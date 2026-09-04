@@ -60,6 +60,7 @@
 #'                          beta = .97, eis = .5, chi1 = .2, phi1 = .1,
 #'                          tol = 1e-5, maxit = 250)
 #' x$converged
+#' @keywords internal
 #' @export
 hank_egm3_prototype <- function(d_grid, f_grid, a_grid, y, Pi, rd, rf, ra,
                                 beta, eis, chi0=.25, chi1=6.5, chi2=2,
@@ -82,7 +83,7 @@ hank_egm3_prototype <- function(d_grid, f_grid, a_grid, y, Pi, rd, rf, ra,
     }
     if(max(abs(W-V))<tol){V<-W;ok<-TRUE;break};V<-W
   }
-  structure(list(d_grid=d_grid,f_grid=f_grid,a_grid=a_grid,y=y,Pi=Pi,rd=rd,rf=rf,ra=ra,beta=beta,eis=eis,chi0=chi0,chi1=chi1,chi2=chi2,phi0=phi0,phi1=phi1,phi2=phi2,d=D,f=F,a=A,c=C,V=V,iterations=it,converged=ok,state_count=ns),class="hank_egm3_prototype")
+  structure(list(d_grid=d_grid,f_grid=f_grid,a_grid=a_grid,y=y,Pi=Pi,rd=rd,rf=rf,ra=ra,beta=beta,eis=eis,chi0=chi0,chi1=chi1,chi2=chi2,phi0=phi0,phi1=phi1,phi2=phi2,d=D,f=F,a=A,c=C,V=V,iterations=it,converged=ok,state_count=ns),class=c("hank_egm3_prototype", "hank_block"))
 }
 
 #' Stationary distribution for the three-asset prototype
@@ -127,6 +128,7 @@ hank_egm3_prototype <- function(d_grid, f_grid, a_grid, y, Pi, rd, rf, ra,
 #'                          tol = 1e-5, maxit = 250)
 #' z <- hank_egm3_prototype_dist(x)
 #' z$mass
+#' @keywords internal
 #' @export
 hank_egm3_prototype_dist <- function(x, tol=1e-12, maxit=100000L) {
   if(!inherits(x,"hank_egm3_prototype"))stop("hank_egm3_prototype_dist: x must be a prototype solve")

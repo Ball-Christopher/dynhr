@@ -36,3 +36,4 @@ A dynhr_diagnostic object with plots
 Plots IRFs from first-order (ghx/ghu only) and second-order (pruned
 state space) side by side, highlighting the quadratic correction.
 }
+\keyword{internal}

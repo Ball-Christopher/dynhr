@@ -40,6 +40,21 @@
 #' @return A list of class \code{hank_ks} with \code{r}, \code{w}, \code{K},
 #'   \code{Z}, the calibration, and the steady-state \code{block}
 #'   (\code{\link{hank_het_block}}).
+#' @seealso \code{\link{hank_income_rouwenhorst}}, \code{\link{hank_asset_grid}},
+#'   \code{\link{hank_het_block}}, \code{\link{hank_ks_model}},
+#'   \code{\link{hank_het_jacobian}}
+#' @examples
+#' ## Small grids keep the example quick; production calibrations use
+#' ## n = 7 income states and 500+ asset points.
+#' inc    <- hank_income_rouwenhorst(rho = 0.95, sigma = 0.5, n = 3)
+#' a_grid <- hank_asset_grid(amax = 50, n = 100, amin = 0)
+#'
+#' ks <- hank_ks_steady(a_grid, inc$Pi, inc$e, beta = 0.98, eis = 1,
+#'                      alpha = 0.36, delta = 0.025)
+#' c(r = ks$r, w = ks$w, K = ks$K)
+#'
+#' ## Asset-market clearing is the equilibrium condition that was solved
+#' all.equal(ks$block$A, ks$K, tolerance = 1e-6)
 #' @export
 hank_ks_steady <- function(a_grid, Pi, e, beta, eis, alpha, delta, Z = 1,
                            r_bracket = NULL) {
@@ -59,7 +74,7 @@ hank_ks_steady <- function(a_grid, Pi, e, beta, eis, alpha, delta, Z = 1,
   structure(list(r = r, w = w, K = K, Z = Z, alpha = alpha, delta = delta,
                  beta = beta, eis = eis, block = blk,
                  mkt_residual = blk$A - K),
-            class = "hank_ks")
+            class = c("hank_ks", "hank_block"))
 }
 
 
@@ -173,7 +188,7 @@ hank_mixture_ks_steady <- function(a_grid, Pi, e, betas, omega, eis = 1,
   structure(list(r = r, w = w, K = K, Z = Z, alpha = alpha, delta = delta,
                  betas = betas, omega = omega, eis = eis, blocks = blocks,
                  mkt_residual = A_mix - K),
-            class = "hank_mixture_ks")
+            class = c("hank_mixture_ks", "hank_block"))
 }
 
 
@@ -309,7 +324,7 @@ hank_mixture_ks_steady_hetinc <- function(a_grid, types, omega, eis = 1,
   structure(list(r = r, w = w, K = K, Z = Z, alpha = alpha, delta = delta,
                  betas = betas, omega = omega, eis = eis, blocks = blocks,
                  mkt_residual = A_mix - K),
-            class = "hank_mixture_ks")
+            class = c("hank_mixture_ks", "hank_block"))
 }
 
 
@@ -373,7 +388,7 @@ hank_mixture_ks_assemble <- function(a_grid, types, omega, r, w,
   structure(list(r = r, w = w, K = K, Z = Z, alpha = alpha, delta = delta,
                  betas = betas, omega = omega, eis = eis, blocks = blocks,
                  a_grid = a_grid, mkt_residual = A_mix - K),
-            class = "hank_mixture_ks")
+            class = c("hank_mixture_ks", "hank_block"))
 }
 
 

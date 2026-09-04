@@ -102,16 +102,16 @@ joint objective "recovers" the truth -- that judgment is left to the
 caller/orchestrator.
 
 \strong{Measurement-error choice}: for each simulated \code{T_data} series,
-\code{me_var} is set to \code{(me_frac * sd(column))^2} PER OBSERVABLE
+\code{me_variance} is set to \code{(me_frac * sd(column))^2} PER OBSERVABLE
 COLUMN of that simulated series (i.e. a fixed fraction of the realized
 series' own variation, analogous to \code{hank_phase1_joint_gate}'s
 \code{sigma_macro_frac} convention) -- a simple scale-invariant way to
 inject "the macro series is observed with some noise" without hand-picking
 absolute noise units per observable. Because
 \code{\link{hank_kalman_loglik}}/\code{\link{hank_mixture_kf_loglik}} take
-a single scalar \code{me_var} (one measurement-error variance shared
+a single scalar \code{me_variance} (one measurement-error variance shared
 across observables, not a per-observable vector), the LARGER of the two
-per-observable \code{me_var} values is used, so the shared scalar is never
+per-observable \code{me_variance} values is used, so the shared scalar is never
 smaller than what either observable's own noise fraction would imply
 (conservative: avoids an under-dispersed, potentially singular effective
 covariance for the noisier observable).
@@ -126,3 +126,4 @@ non-convergence at/above the discounting boundary.
 \code{\link{hank_mixture_kf_loglik}}, \code{\link{hank_mixture_simulate}},
   \code{\link{hank_phase1_joint_gate}}, \code{\link{hank_reweighting_loss}}
 }
+\keyword{internal}

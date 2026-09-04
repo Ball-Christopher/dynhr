@@ -234,7 +234,7 @@ thames_mdd <- function(draws,
     ## log(1/Z)^ = -log(N_e) - log(Vol) + logsumexp(-lp_in)
     ## => logZ^ = log(N_e) + log(Vol) - logsumexp(-lp_in)
     neg_lp_in  <- -lp_in
-    lse        <- max(neg_lp_in) + log(sum(exp(neg_lp_in - max(neg_lp_in))))
+    lse        <- .logsumexp(neg_lp_in)
     log_recip  <- -log(N_e) - log_vol + lse
 
     ## SE on log(1/Z)^, two methods:

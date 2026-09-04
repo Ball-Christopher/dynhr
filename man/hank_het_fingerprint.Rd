@@ -51,3 +51,4 @@ hank_het_fingerprint(blk)
 \code{\link{hank_het_manifest}} (run provenance, not identity),
   \code{\link{hank_het2_fingerprint}}, \code{\link{hank_het3_fingerprint}}
 }
+\keyword{internal}

@@ -8,10 +8,10 @@ bayesian_conditional_forecast(
   draws,
   model,
   compiled,
-  Y,
+  data,
   plan,
   horizon = 8L,
-  obs_names = NULL,
+  obs_vars = NULL,
   n_subsample = 400L,
   ci_bands = c(0.1, 0.9),
   inner_bands = c(0.16, 0.84),
@@ -27,7 +27,7 @@ column names must match estimated parameter names from the model.}
 
 \item{compiled}{dynhr_compiled from \code{compile_model()}.}
 
-\item{Y}{Observed data matrix (\eqn{T \times n\_obs}) or a
+\item{data}{Observed data matrix (\eqn{T \times n\_obs}) or a
 named list of observable variable matrices.  Passed as-is to
 \code{\link{conditional_forecast}}.}
 
@@ -39,8 +39,8 @@ entries in the plan are ignored on the forecast side (consistent with
 
 \item{horizon}{Forecast horizon (integer, default \code{8L}).}
 
-\item{obs_names}{Character vector of observable variable names
-(column order in \code{Y}).  Inferred from \code{colnames(Y)} when
+\item{obs_vars}{Character vector of observable variable names
+(column order in \code{data}).  Inferred from \code{colnames(data)} when
 \code{NULL}.}
 
 \item{n_subsample}{Maximum number of draws to use (default \code{400L}).

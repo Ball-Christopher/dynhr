@@ -34,14 +34,14 @@
 ##
 ## OBSERVATION MODEL: obs_spec is a character vector naming which household
 ## variables are observed, drawn from c("a", "c") (mirrors hank_state_space()'s
-## `observables` character-vector convention, R/hank-kalman.R). me_var is the
+## `obs_vars` character-vector convention, R/hank-kalman.R). me_variance is the
 ## per-observable measurement-error VARIANCE: either a single scalar (recycled
-## across obs_spec, mirroring hank_kalman_loglik()'s scalar me_var,
+## across obs_spec, mirroring hank_kalman_loglik()'s scalar me_variance,
 ## R/hank-kalman.R) or a named numeric vector keyed by the same names as
 ## obs_spec (needed here because "a" and "c" live on very different scales and
 ## a single shared variance is rarely appropriate). Observation weights are
 ## Gaussian, independent across observed variables conditional on the (e,a)
-## cell: b_t(y_t)[cell] = prod_{v in obs_spec} dnorm(y_t[v]; x_v(cell), sqrt(me_var[v])),
+## cell: b_t(y_t)[cell] = prod_{v in obs_spec} dnorm(y_t[v]; x_v(cell), sqrt(me_variance[v])),
 ## where x_v(cell) is the type's period-t policy value (a_pol/c_pol, or the
 ## grid level a itself for "a") at that cell. A NA entry in y_t for a given
 ## variable/period contributes a uniform (weight-1) factor for that variable
@@ -81,26 +81,26 @@
 }
 
 
-#' Normalize \code{me_var} to a named per-\code{obs_spec} standard-deviation vector
+#' Normalize \code{me_variance} to a named per-\code{obs_spec} standard-deviation vector
 #' @keywords internal
-.hank_hh_me_sd <- function(me_var, obs_spec) {
-  if (is.null(names(me_var))) {
-    if (length(me_var) == 1L) {
-      me_var <- setNames(rep(me_var, length(obs_spec)), obs_spec)
-    } else if (length(me_var) == length(obs_spec)) {
-      me_var <- setNames(me_var, obs_spec)
+.hank_hh_me_sd <- function(me_variance, obs_spec) {
+  if (is.null(names(me_variance))) {
+    if (length(me_variance) == 1L) {
+      me_variance <- setNames(rep(me_variance, length(obs_spec)), obs_spec)
+    } else if (length(me_variance) == length(obs_spec)) {
+      me_variance <- setNames(me_variance, obs_spec)
     } else {
-      stop("hank_hh_hmm_loglik: unnamed 'me_var' must have length 1 or ",
+      stop("hank_hh_hmm_loglik: unnamed 'me_variance' must have length 1 or ",
            "length(obs_spec).")
     }
   }
-  missing_v <- setdiff(obs_spec, names(me_var))
+  missing_v <- setdiff(obs_spec, names(me_variance))
   if (length(missing_v))
-    stop("hank_hh_hmm_loglik: 'me_var' is missing entries for: ",
+    stop("hank_hh_hmm_loglik: 'me_variance' is missing entries for: ",
          paste(missing_v, collapse = ", "))
-  if (any(me_var[obs_spec] <= 0) || any(!is.finite(me_var[obs_spec])))
-    stop("hank_hh_hmm_loglik: 'me_var' entries must be finite and > 0.")
-  sqrt(me_var[obs_spec])
+  if (any(me_variance[obs_spec] <= 0) || any(!is.finite(me_variance[obs_spec])))
+    stop("hank_hh_hmm_loglik: 'me_variance' entries must be finite and > 0.")
+  sqrt(me_variance[obs_spec])
 }
 
 
@@ -201,7 +201,7 @@
 #' @param aggregate_path \code{NULL} for the steady-state path, or a list
 #'   \code{list(r_path, w_path)} of length-\code{T} level paths for a
 #'   time-varying path (see Details).
-#' @param me_var Measurement-error variance: a scalar (recycled across
+#' @param me_variance Measurement-error variance: a scalar (recycled across
 #'   \code{obs_spec}) or a named numeric vector keyed by \code{obs_spec}.
 #' @param a0_dist Optional length-\code{n_e*n_a} initial distribution over
 #'   \code{(e, a)} cells for period 1 (defaults to the type-conditional
@@ -216,7 +216,7 @@
 #'   \code{\link{hank_td_nonlinear}}, \code{\link{hank_mixture_panel_loglik}}
 #' @export
 hank_hh_hmm_loglik <- function(y_i, obs_spec, blocks_k, Pi, aggregate_path,
-                               me_var, a0_dist = NULL) {
+                               me_variance, a0_dist = NULL) {
   if (!inherits(blocks_k, "hank_het_block"))
     stop("hank_hh_hmm_loglik: 'blocks_k' must be a hank_het_block.")
   obs_spec <- match.arg(obs_spec, c("a", "c"), several.ok = TRUE)
@@ -231,7 +231,7 @@ hank_hh_hmm_loglik <- function(y_i, obs_spec, blocks_k, Pi, aggregate_path,
 
   n_e <- blocks_k$n_e; n_a <- blocks_k$n_a
   n_cell <- n_e * n_a
-  me_sd <- .hank_hh_me_sd(me_var, obs_spec)
+  me_sd <- .hank_hh_me_sd(me_variance, obs_spec)
 
   a0 <- if (is.null(a0_dist)) blocks_k$D else a0_dist
   if (length(a0) != n_cell)
@@ -256,7 +256,7 @@ hank_hh_hmm_loglik <- function(y_i, obs_spec, blocks_k, Pi, aggregate_path,
     ct <- sum(alpha)
     if (!is.finite(ct) || ct <= 0)
       stop("hank_hh_hmm_loglik: filter mass collapsed to zero at t = ", t,
-           " (check me_var / grid coverage of observed values).")
+           " (check me_variance / grid coverage of observed values).")
     alpha <- alpha / ct
     loglik <- loglik + log(ct)
   }
@@ -297,7 +297,7 @@ hank_hh_hmm_loglik <- function(y_i, obs_spec, blocks_k, Pi, aggregate_path,
 #'   per particle (one \code{aggregate_path} draw) and combine the per-
 #'   particle household log-likelihoods with particle weights, without any
 #'   change to this function's contract.
-#' @param me_var Measurement-error variance: scalar or named vector keyed by
+#' @param me_variance Measurement-error variance: scalar or named vector keyed by
 #'   \code{obs_spec} (see \code{\link{hank_hh_hmm_loglik}}).
 #'
 #' @return A list with \code{loglik} (scalar, summed over households),
@@ -309,7 +309,7 @@ hank_hh_hmm_loglik <- function(y_i, obs_spec, blocks_k, Pi, aggregate_path,
 #'   \code{\link{hank_mixture_dist}}
 #' @export
 hank_mixture_panel_loglik <- function(panel, obs_spec, blocks_by_type, omega,
-                                      Pi, aggregate_path, me_var) {
+                                      Pi, aggregate_path, me_variance) {
   .hank_mixture_check_omega(blocks_by_type, omega)
   M <- length(panel)
   K <- length(blocks_by_type)
@@ -320,16 +320,13 @@ hank_mixture_panel_loglik <- function(panel, obs_spec, blocks_by_type, omega,
     for (k in seq_len(K)) {
       loglik_ik[i, k] <- hank_hh_hmm_loglik(
         y_i = panel[[i]], obs_spec = obs_spec, blocks_k = blocks_by_type[[k]],
-        Pi = Pi, aggregate_path = aggregate_path, me_var = me_var,
+        Pi = Pi, aggregate_path = aggregate_path, me_variance = me_variance,
         a0_dist = NULL)$loglik
     }
   }
 
   log_omega <- log(omega)
-  loglik_i <- apply(loglik_ik, 1L, function(row) {
-    m <- max(row + log_omega)
-    m + log(sum(exp(row + log_omega - m)))
-  })
+  loglik_i <- apply(loglik_ik, 1L, function(row) .logsumexp(row + log_omega))
 
   list(loglik = sum(loglik_i), loglik_i = loglik_i, loglik_ik = loglik_ik)
 }
@@ -389,7 +386,7 @@ hank_mixture_panel_loglik <- function(panel, obs_spec, blocks_by_type, omega,
 #' known variance-control upgrade, deliberately NOT implemented here
 #' (P-panel research scope).
 #'
-#' @param panel,obs_spec,blocks_by_type,omega,Pi,me_var As in
+#' @param panel,obs_spec,blocks_by_type,omega,Pi,me_variance As in
 #'   \code{\link{hank_mixture_panel_loglik}}.
 #' @param shock_specs The aggregate-path prior. Either
 #'   \itemize{
@@ -421,7 +418,7 @@ hank_mixture_panel_loglik <- function(panel, obs_spec, blocks_by_type, omega,
 #'   \code{\link{hank_ks_linear_irf}}
 #' @export
 hank_mixture_panel_loglik_marginal <- function(panel, obs_spec, blocks_by_type,
-                                               omega, Pi, shock_specs, me_var,
+                                               omega, Pi, shock_specs, me_variance,
                                                T_h = NULL, n_particles = 100L,
                                                ks = NULL, ge = NULL,
                                                seed = NULL) {
@@ -455,7 +452,7 @@ hank_mixture_panel_loglik_marginal <- function(panel, obs_spec, blocks_by_type,
     hank_mixture_panel_loglik(panel = panel, obs_spec = obs_spec,
                               blocks_by_type = blocks_by_type, omega = omega,
                               Pi = Pi, aggregate_path = pth,
-                              me_var = me_var)$loglik
+                              me_variance = me_variance)$loglik
   }, numeric(1))
 
   ## Equal-weight prior particles: log L-hat = logmeanexp(loglik_p).

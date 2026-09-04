@@ -68,3 +68,4 @@ dim(JD_nd$rd)
   Jacobian this validates), \code{\link{hank_het_dist_jacobian_nd}}
   (one-asset)
 }
+\keyword{internal}

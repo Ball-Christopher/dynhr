@@ -283,6 +283,12 @@
   mirai::everywhere(
     {
       suppressMessages(library(dynhr))
+      ## Replay the host's dynhr option state FIRST: `.dynhr_opts` is a
+      ## namespace-private env, so `dynhr_set_options(power_posterior=,
+      ## me_variance=, debug_kf_errors=, ...)` does not survive into a fresh
+      ## daemon process on its own. It must land before `.worker_lp` is built,
+      ## because the factories resolve their options once at FACTORY time.
+      utils::getFromNamespace(".dynhr_daemon_apply", "dynhr")(.dynhr_state)
       ## make_log_posterior is internal (non-exported); the `:::` operator does
       ## not resolve it reliably in the installed build, so reach it (and the
       ## compiler) via getFromNamespace, which does.
@@ -323,7 +329,8 @@
                  shock_scale = shock_scale,
                  system_priors = system_priors,
                  lik_init = lik_init,
-                 tpf_options = tpf_options)
+                 tpf_options = tpf_options,
+                 .dynhr_state = .dynhr_daemon_state())
   )[]
   ## ^ COLLECT (block) the everywhere() init. It recompiles the model on every
   ## daemon (seconds of work); leaving it uncollected returns while daemons are
@@ -359,6 +366,11 @@
                                     tpf_options = list()) {
   mirai::everywhere(
     {
+      ## Re-apply the host option state before rebuilding the closure: the
+      ## caller may have changed dynhr_set_options() between stages, and the
+      ## factories resolve their options once at factory time (see
+      ## .dynhr_daemon_state).
+      utils::getFromNamespace(".dynhr_daemon_apply", "dynhr")(.dynhr_state)
       .mk_lp <- utils::getFromNamespace("make_log_posterior", "dynhr")
       ## Reuse the already-compiled model + mapped Y from the daemon globals;
       ## only the lik_init (and thus the filter setup) changes. `<<-` for the
@@ -373,7 +385,8 @@
     .args = list(prior_spec = prior_spec, obs_names = obs_names,
                  me_variance = me_variance, me_extra = me_extra,
                  shock_scale = shock_scale, system_priors = system_priors,
-                 lik_init = lik_init, tpf_options = tpf_options)
+                 lik_init = lik_init, tpf_options = tpf_options,
+                 .dynhr_state = .dynhr_daemon_state())
   )[]
   invisible(NULL)
 }
@@ -1435,12 +1448,18 @@ run_mode_mirai <- function(
   mirai::everywhere(
     {
       suppressMessages(library(dynhr))
+      ## Replay the host's dynhr option state (see .dynhr_daemon_state). The
+      ## shipped closure already resolved its own factory-time options on the
+      ## host, but anything it reads per-evaluation (e.g. debug_kf_errors) and
+      ## any downstream dynhr call made on the daemon still needs them.
+      utils::getFromNamespace(".dynhr_daemon_apply", "dynhr")(.dynhr_state)
       ## `<<-` so the bindings reach the daemon globalenv (see the note in
       ## .mirai_pool_init); tasks retrieve them via get0(envir = globalenv()).
       .worker_lp <<- log_post_fn
       .worker_ps <<- prior_sampler
     },
-    .args = list(log_post_fn = log_post_fn, prior_sampler = prior_sampler)
+    .args = list(log_post_fn = log_post_fn, prior_sampler = prior_sampler,
+                 .dynhr_state = .dynhr_daemon_state())
   )[]  # collect: block until every daemon has the closure (see .mirai_pool_init)
   invisible(NULL)
 }
@@ -1468,7 +1487,16 @@ run_mode_mirai <- function(
   .restore_blas <- .mirai_pin_blas_threads()
   on.exit(.restore_blas(), add = TRUE)
   mirai::daemons(n_cores)
-  mirai::everywhere({ suppressMessages(library(dynhr)) })[]  # collect: see .mirai_pool_init
+  ## Load dynhr and replay the host's option state on every daemon (the SMC
+  ## task closures reach into the dynhr namespace, so they see `.dynhr_opts`
+  ## on the DAEMON, not the host's -- see .dynhr_daemon_state).
+  mirai::everywhere(
+    {
+      suppressMessages(library(dynhr))
+      utils::getFromNamespace(".dynhr_daemon_apply", "dynhr")(.dynhr_state)
+    },
+    .args = list(.dynhr_state = .dynhr_daemon_state())
+  )[]  # collect: see .mirai_pool_init
   invisible(NULL)
 }
 

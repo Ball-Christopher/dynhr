@@ -557,7 +557,7 @@
 #' (alias for \code{"dare"}), \code{"chandrasekhar"}, \code{"univariate"}.
 #' There is no \code{"block"} method.
 #'
-#' @param Y observation matrix (\code{n_obs} x \code{T}).
+#' @param data observation matrix (\code{n_obs} x \code{T}).
 #' @param dr decision rule (output of \code{\link{solve_perturbation}}).
 #' @param model compiled model object (output of \code{\link{compile_model}}).
 #' @param params named numeric vector of parameter values.
@@ -565,15 +565,21 @@
 #' @param return_filtered logical; if \code{TRUE}, return filtered state estimates
 #'   (one column per time step).
 #' @param ss_tol tolerance for steady-state lock detection (default \code{.LYAP_TOL}).
-#' @param me_variance scalar measurement-error variance added to the innovation
-#'   covariance \code{F} in every likelihood evaluation (default \code{0}).
-#'   See Details for implications.
+#' @param me_variance scalar variance of iid Gaussian measurement error on
+#'   every observable (default \code{0}). It enters the innovation covariance
+#'   \code{F} AND the state-covariance (Joseph) update on every method --
+#'   the exact likelihood of the noise-augmented model. See Details.
 #' @param return_ll_contrib logical; if \code{TRUE}, return per-step
 #'   log-likelihood contributions (prediction-error decomposition).
 #' @param method character; filtering algorithm: \code{"auto"} (default; picks
 #'   \code{"standard"} or \code{"chandrasekhar"}), \code{"dare"} (textbook
 #'   Kalman filter, no steady-state shortcut), \code{"chandrasekhar"}
-#'   (low-rank recursion), \code{"standard"} (per-step Riccati with steady-state
+#'   (Morf--Sidhu--Kailath low-rank increment recursion; requires
+#'   \code{lik_init = "stationary"}, a fully observed panel and no
+#'   \code{me_extra} / \code{shock_scale}, and errors otherwise --
+#'   \code{"auto"} selects it only when \code{n_state > 100}, the measured
+#'   crossover against the C++ \code{"standard"} loop),
+#'   \code{"standard"} (per-step Riccati with steady-state
 #'   lock), \code{"reference"} (alias for \code{"dare"}), or
 #'   \code{"univariate"} (Koopman--Durbin 2000 sequential filter on the
 #'   augmented state \code{[s; eps]}; handles singular innovation
@@ -584,13 +590,13 @@
 #'   See Details.
 #' @param me_extra \code{n_obs x T} matrix of additional per-observable,
 #'   per-period measurement-error variances (default \code{NULL}, no extra
-#'   variance).  Unlike the scalar \code{me_variance} regularizer,
-#'   \code{me_extra} is treated as TRUE per-period measurement noise on all
-#'   paths: it enters the innovation covariance \code{F_t} AND the
-#'   Joseph-form state-covariance update
-#'   (\code{P += K_t diag(me_extra[, t]) t(K_t)}), so the \code{"standard"},
-#'   \code{"dare"}/\code{"reference"}, and \code{"univariate"} methods agree
-#'   exactly under \code{me_extra} (at \code{me_variance = 0}).
+#'   variance).  Like the scalar \code{me_variance}, \code{me_extra} is TRUE
+#'   per-period measurement noise on all paths: it enters the innovation
+#'   covariance \code{F_t} AND the Joseph-form state-covariance update
+#'   (\code{P += K_t \%*\% (diag(me_variance + me_extra[, t]) \%*\% t(K_t))}), so the
+#'   \code{"standard"}, \code{"dare"}/\code{"reference"}, and
+#'   \code{"univariate"} methods agree exactly under any combination of
+#'   \code{me_variance} and \code{me_extra}.
 #'   Intended for \code{filter_tunes} soft tunes: the expanded
 #'   observable's column carries \code{stderr^2} at the tune periods and 0
 #'   elsewhere.  When \code{me_extra} is non-\code{NULL} and has any nonzero
@@ -618,10 +624,36 @@
 #'   Incompatible with \code{method = "chandrasekhar"}, \code{"univariate"},
 #'   and \code{lik_init = "diffuse"}. \code{P0} always uses the baseline
 #'   (unscaled) \eqn{\\Sigma_e}.
+#' @param obs_aggregation Optional named list declaring one or more
+#'   observables as TEMPORAL AGGREGATES of a higher-frequency model variable,
+#'   e.g. \code{list(gdp_q = list(of = "gdp_m", type = "flow_sum", k = 3L))}
+#'   ("the observable \code{gdp_q} is the 3-period sum of the model variable
+#'   \code{gdp_m}").  \code{NULL} (default) falls back to
+#'   \code{model$obs_aggregation}, and when that is also \code{NULL} the
+#'   filter is byte-identical to the non-aggregated one.  Names must appear in
+#'   \code{obs_vars}; \code{of} must be a model variable; \code{type} is one of
+#'   \code{"flow_sum"}, \code{"flow_mean"}, \code{"stock_end"} or
+#'   \code{"triangle"} (see \code{\link{mf_aggregation_weights}}).
+#'   Implemented by fixed-weight state augmentation (Harvey 1989;
+#'   Mariano--Murasawa 2003): the aggregator's \code{m-1} lags become extra
+#'   states, so \code{ZZ} and \code{TT} stay constant.  Supply the data at the
+#'   HIGH frequency with the aggregate observed at the last period of each
+#'   window and \code{NA} in between (\code{\link{mf_expand_observations}}
+#'   builds such a column); the existing missing-data path handles the gaps.
+#'   The steady-state offset of an aggregated row is scaled by the sum of its
+#'   weights, so the data must be on the aggregate's own scale.
+#'   Consumed by the Gaussian Kalman likelihood only: the other likelihoods in
+#'   \code{\link{make_log_posterior}} (particle filters, pruned/PSKF,
+#'   \code{whittle}, \code{cumulant}, \code{student_t}) and the
+#'   Markov-switching Kim filter reject it, and the ANALYTIC score
+#'   (\code{make_posterior_grad}) has no aggregation awareness -- sample a
+#'   mixed-frequency posterior with a gradient-free sampler.
 #' @param me_floor_check Logical: when \code{me_variance > 0}, compare it
 #'   against the smallest eigenvalue of the model-implied (ME-free) steady-
-#'   state innovation covariance \code{F} and warn if the floor is large
-#'   relative to that eigenvalue (near-collinear observables; see
+#'   state innovation covariance \code{F} and warn when the assumed
+#'   measurement-noise variance is large relative to that eigenvalue -- i.e.
+#'   when the observation noise, not the model, dominates some near-collinear
+#'   combination of observables (see
 #'   \code{.pruned_me_floor_ratio}). Default
 #'   \code{getOption("dynhr.me_floor_check", TRUE)}. Only evaluated on the
 #'   stationary (non-\code{shock_scale}) baseline system; scoped to the
@@ -634,23 +666,64 @@
 #' (which adds no regularisation). Through dynhr 0.7 the default was
 #' \code{1e-8} as a positive-definiteness safeguard; this is no longer
 #' needed because a singular or ill-conditioned \code{F} on any
-#' multivariate path now triggers an automatic fallback to the univariate
-#' (sequential) filter, which processes observables one at a time and skips
-#' zero-variance components instead of inverting \code{F} (the analog of
-#' Dynare's \code{univariate_kalman_filter_if_singularity_is_detected}).
+#' multivariate path triggers a \emph{conditional} automatic fallback to the
+#' univariate (sequential) filter, which processes observables one at a time
+#' and skips zero-variance components instead of inverting \code{F} (the
+#' analog of Dynare's
+#' \code{univariate_kalman_filter_if_singularity_is_detected}); see
+#' \strong{Singularity-fallback contract} below.
 #' Set \code{me_variance > 0} to deliberately add measurement noise, e.g.
 #' for stochastically singular models where the singularity is a modelling
 #' choice rather than a numerical artifact. When comparing marginal
 #' likelihoods (model comparison) across models, ensure all use the same
 #' \code{me_variance} setting; the ranking is otherwise invalidated.
-#' Convention note for \code{me_variance > 0}: the multivariate methods add
-#' the jitter to \code{F} only (likelihood and gain), never to the
-#' state-covariance update -- a regularisation, not a noise model. The
-#' \code{"univariate"} method instead treats \code{me_variance} as TRUE
-#' iid diagonal measurement noise (the statistically exact filter for the
-#' noise-augmented model), so the two conventions agree exactly at
-#' \code{me_variance = 0} but differ by \code{O(me_variance)} otherwise.
-#' Do not mix methods across draws when \code{me_variance > 0}.
+#' \code{me_variance > 0} is a genuine noise model on EVERY method: the
+#' observation equation becomes \code{y_t = ZZ x_t + DD e_t + u_t} with
+#' \code{u_t ~ N(0, me_variance I)}, so the variance enters both \code{F}
+#' and the state-covariance update
+#' (\code{P += K \%*\% (me_variance * t(K))}). All methods --
+#' \code{"standard"}, \code{"dare"}, \code{"chandrasekhar"},
+#' \code{"univariate"} -- and \code{\link{kalman_smoother}} therefore
+#' evaluate the SAME likelihood at any \code{me_variance}, and it equals the
+#' brute-force joint-Gaussian projection of the whole sample. (Before dynhr 0.9.2.x the multivariate
+#' methods added \code{me_variance} to \code{F} only -- a regulariser --
+#' which understated the state uncertainty and biased the log-likelihood
+#' UPWARD by \code{O(me_variance)} per period against the package's own
+#' data-generating process; \code{me_variance = 0} results are unchanged.)
+#'
+#' \strong{Singularity-fallback contract:}
+#' When a multivariate method (\code{"standard"}, \code{"dare"},
+#' \code{"chandrasekhar"}) hits a singular / non-positive-definite innovation
+#' covariance \code{F}, a failed DARE/Chandrasekhar step, or a non-finite
+#' per-period contribution, the filter retries on the \code{"univariate"}
+#' filter \strong{only when the two paths evaluate the SAME likelihood},
+#' namely when all of
+#' \itemize{
+#'   \item \code{me_variance == 0} (a conservative gate retained from the
+#'     pre-F3-D regulariser convention: the two paths now evaluate the same
+#'     likelihood at any \code{me_variance}, but the gate still refuses to
+#'     switch estimator mid-chain),
+#'   \item \code{me_extra} is \code{NULL} or all zero,
+#'   \item the resolved \code{lik_init} is not \code{"diffuse"} (the
+#'     univariate diffuse filter keeps the divergent \code{0.5*log(F_inf)}
+#'     term that the multivariate exact-diffuse recursion renormalises away;
+#'     the two conventions can differ by more than 15 nats on unit-root
+#'     models)
+#' }
+#' hold.  In that case a \code{warning()} is emitted \strong{once per
+#' \code{kalman_filter()} call} naming the method that failed, and the
+#' returned \code{$method} is \code{"univariate"}.
+#' \strong{Otherwise the draw is rejected: the function returns
+#' \code{loglik = -Inf} and \code{$method} names the failed multivariate
+#' method}, which is what Dynare does without
+#' \code{univariate_kalman_filter_if_singularity_is_detected}.  The point is
+#' that an MCMC chain in which only \emph{some} draws trip the fallback must
+#' not silently sample a mixture of two different likelihood definitions.
+#' (One routing decision is deliberately \emph{not} a fallback and is not
+#' covered by this contract: with \code{lik_init = "diffuse"} and an
+#' \code{F_inf} that is singular but nonzero -- "Case C" -- the multivariate
+#' exact-diffuse recursion is undefined and the univariate diffuse filter is
+#' the algorithm for that model, not a substitute for it.)
 #'
 #' \strong{Likelihood initialization (\code{lik_init}):}
 #' \code{"stationary"} initialises \code{P0} via the discrete Lyapunov
@@ -702,8 +775,29 @@
 #'     Analysis}, 21(3), 281-296.
 #'   Strid, I., & Walentin, K. (2011). Block Kalman filtering for large-scale
 #'     DSGE models. \emph{Computational Economics}, 39(2), 145-160.
+#' @seealso \code{\link{kalman_smoother}}, \code{\link{make_posterior}},
+#'   \code{\link{kf_innovation_diagnostics}}
+#' @examples
+#' model    <- parse_mod(system.file("extdata/models/rbc.mod",
+#'                                   package = "dynhr"), verbose = FALSE)
+#' compiled <- compile_model(model, verbose = FALSE)
+#' steady   <- solve_steady(compiled, model$param_values,
+#'                          endo_names = model$var_names,
+#'                          exo_names  = model$varexo_names, verbose = FALSE)
+#' dr <- solve_perturbation(model, compiled, steady$values,
+#'                          model$param_values, verbose = FALSE)
+#'
+#' ## Simulated data standing in for observations. rbc.mod has ONE shock, so
+#' ## one observable keeps the innovation covariance non-singular.
+#' set.seed(1)
+#' paths <- simulate_model(dr, n_periods = 100L, model = model, burn_in = 20L)
+#' Y <- as.matrix(paths[, "y", drop = FALSE])
+#'
+#' kf <- kalman_filter(Y, dr, model, model$param_values, obs_vars = "y",
+#'                     me_variance = 1e-6)
+#' kf$loglik
 #' @export
-kalman_filter <- function(Y, dr, model, params, obs_vars,
+kalman_filter <- function(data, dr, model, params, obs_vars,
                           return_filtered = FALSE, ss_tol = .LYAP_TOL,
                           me_variance = 0,
                           return_ll_contrib = FALSE,
@@ -714,6 +808,7 @@ kalman_filter <- function(Y, dr, model, params, obs_vars,
                                        "diffuse", "kappa"),
                           me_extra = NULL,
                           shock_scale = NULL,
+                          obs_aggregation = NULL,
                           me_floor_check = getOption("dynhr.me_floor_check",
                                                      TRUE)) {
 
@@ -752,16 +847,43 @@ kalman_filter <- function(Y, dr, model, params, obs_vars,
   if (n_obs > n_exo)
     warning(sprintf("Stochastic singularity: %d obs but only %d shocks.", n_obs, n_exo))
 
-  obs_idx <- match(obs_vars, endo)
+  ## ---- Mixed-frequency / temporal aggregation ----------------------------
+  ## Resolve the aggregation spec BEFORE the observation rows are cut: an
+  ## aggregated observable's NAME (e.g. "gdp_q") is not a model variable, the
+  ## higher-frequency variable it aggregates (`of`, e.g. "gdp_m") is. With no
+  ## spec (the corpus case) .mf_resolve() returns NULL and every line below is
+  ## the pre-aggregation one, byte for byte -- including the `obs_vars` used
+  ## as the row selector. See R/mixed-frequency.R for the algebra.
+  mf <- .mf_resolve(obs_aggregation %||% model$obs_aggregation, obs_vars,
+                    known = endo)
+  obs_base <- if (is.null(mf)) obs_vars else mf$base
+
+  obs_idx <- match(obs_base, endo)
   if (any(is.na(obs_idx)))
-    stop("Observed variables not found: ", paste(obs_vars[is.na(obs_idx)], collapse = ", "))
+    stop("Observed variables not found: ", paste(obs_base[is.na(obs_idx)], collapse = ", "))
 
   ghx <- dr$ghx; ghu <- dr$ghu
   TT  <- ghx[state_idx, , drop = FALSE]
   RR  <- ghu[state_idx, , drop = FALSE]
   ZZ  <- ghx[obs_idx,   , drop = FALSE]
   DD  <- ghu[obs_idx,   , drop = FALSE]
-  d   <- dr$ys[obs_vars]
+  d   <- dr$ys[obs_base]
+  state_names_out <- endo[state_idx]
+
+  if (!is.null(mf)) {
+    ## Fixed-weight state augmentation: carry the m-1 lags each aggregator
+    ## needs as extra states, so ZZ and TT stay CONSTANT and the recursions
+    ## (and both C++ kernels) are untouched. The aggregate is observed only
+    ## every k-th period; the NA periods take the existing missing-data path.
+    aug <- .mf_augment_matrices(TT, RR, ZZ, DD, mf$w_list, obs_vars)
+    TT <- aug$TT; RR <- aug$RR; ZZ <- aug$ZZ; DD <- aug$DD
+    state_names_out <- c(state_names_out, aug$aug_names)
+    n_state <- n_state + aug$n_aug
+    ## An aggregate's steady state is sum(w) times the underlying variable's
+    ## (3 * ys for a 3-period flow sum, 1 * ys for a mean or an end-of-period
+    ## stock), so the demeaning offset has to be rescaled with it.
+    d <- d * mf$scale
+  }
 
   Sigma_e <- .get_shock_cov(model, exo, params)
   QQ      <- tcrossprod(RR %*% Sigma_e, RR)
@@ -790,12 +912,17 @@ kalman_filter <- function(Y, dr, model, params, obs_vars,
     }
   }
 
-  if (is.null(dim(Y))) Y <- matrix(Y, nrow = n_obs)
-  if (nrow(Y) != n_obs) Y <- t(Y)
-  n_T <- ncol(Y)
+  if (is.null(dim(data))) data <- matrix(data, nrow = n_obs)
+  if (nrow(data) != n_obs) data <- t(data)
+  n_T <- ncol(data)
+
+  ## A low-frequency series stored on the high-frequency grid must be spaced
+  ## in multiples of its aggregation length; a misaligned column would
+  ## otherwise be filtered as if it were high-frequency, silently.
+  if (!is.null(mf)) .mf_check_pattern(data, mf, obs_vars)
 
   ll_const <- -0.5 * n_obs * log(2 * pi)
-  has_missing <- anyNA(Y)
+  has_missing <- anyNA(data)
 
   ## ---- me_extra validation and routing ------------------------------------
   ## me_extra must be n_obs x T when non-NULL.
@@ -861,7 +988,7 @@ kalman_filter <- function(Y, dr, model, params, obs_vars,
   ## then need only one matrix-vector subtraction. Safe with missing data: NA
   ## propagates through Y - d and is caught by the same anyNA / is.finite
   ## checks downstream.
-  Y_minus_d <- Y - d
+  Y_minus_d <- data - d
 
   ## -- Resolve lik_init = "auto" --------------------------------------
   ## Inspect the eigenvalues of TT. Roots well inside the unit circle => the
@@ -957,21 +1084,30 @@ kalman_filter <- function(Y, dr, model, params, obs_vars,
       ## recursion natively (kalman_univariate_loop_cpp handles F_inf of any
       ## rank) at ~2x the speed.
       ##
-      ## CONVENTION GATE: route to univariate only at me_variance == 0, where
-      ## the univariate and multivariate diffuse log-likelihoods are identical
-      ## (verified to 3e-11). For me_variance > 0 they DIVERGE by O(me_variance)
-      ## -- the multivariate path adds the jitter to F only (regularisation)
-      ## while univariate treats it as true iid measurement noise -- and the
-      ## exact-diffuse ADJOINT gradient (make_posterior_grad) implements the
-      ## multivariate convention, so rerouting the loglik would desync it from
-      ## its own gradient. me_extra likewise forces the univariate R loop. Keep
-      ## "standard" in both cases.
+      ## ROUTING GATE (conservative): route to univariate only at
+      ## me_variance == 0. Since F3-D both paths implement the SAME true-ME
+      ## law, so this is no longer a correctness requirement -- it is kept so
+      ## that turning on a measurement-error floor cannot silently change
+      ## which ALGORITHM (and hence which round-off/steady-state behaviour)
+      ## a diffuse-init likelihood runs through. me_extra likewise forces the
+      ## univariate R loop. Keep "standard" in both cases.
       method <- if (.HAS_RCPP_KALMAN_UNI() && is.null(me_extra) &&
                     me_variance == 0)
         "univariate" else "standard"
     }
-    else if (n_state > 50) method <- "chandrasekhar"
-    else                   method <- "standard"
+    ## F4-B: the Chandrasekhar branch is exact again (see METHOD 2), so it is
+    ## back in "auto" -- but only above the MEASURED crossover. The increment
+    ## recursion runs in R at O(n_state^2 n_obs) per step, the "standard"
+    ## filter in C++ at O(n_state^3); on this machine (T = 200, random dense
+    ## systems, R CMD INSTALL build) chandrasekhar/standard wall clock was
+    ##   n_state   50    100    200    300      (n_obs = 3)
+    ##   ratio   1.85   1.01   0.64   0.33
+    ##   n_state  100    200                    (n_obs = 7)
+    ##   ratio   1.11   0.61
+    ## i.e. the old n_state > 50 rule was a ~1.9x PESSIMIZATION and the
+    ## crossover sits near n_state = 100 (weakly dependent on n_obs).
+    else if (n_state > 100) method <- "chandrasekhar"
+    else                    method <- "standard"
   }
 
   ## A diffuse phase requires the per-step R loop (no Rcpp / Chandrasekhar
@@ -1024,6 +1160,12 @@ kalman_filter <- function(Y, dr, model, params, obs_vars,
     TmKZ <- TT - K %*% ZZ
     RmKD <- RR - K %*% DD
     P_n  <- tcrossprod(TmKZ %*% P, TmKZ) + tcrossprod(RmKD %*% Sigma_e, RmKD)
+    ## TRUE measurement-noise law (F3-D): y_t = ZZ x_t + DD e_t + u_t with
+    ## Var(u_t) = me_variance * I requires P' += K me_variance I K' for ANY
+    ## gain K. Before F3-D `me_variance` entered F only (a regulariser), which
+    ## made the multivariate paths disagree with the univariate filter, the
+    ## smoother and the DARE fixed point by O(me_variance).
+    if (me_variance != 0) P_n <- P_n + me_variance * tcrossprod(K)
     P_n  <- (P_n + t(P_n)) * 0.5
     list(ll = ll, s = s_n, P = P_n, K = K, F_inv = Fi, log_det_F = ldf, F_mat = Ft)
   }
@@ -1081,7 +1223,7 @@ kalman_filter <- function(Y, dr, model, params, obs_vars,
     filt <- NULL
     if (return_filtered && !is.null(out$filtered)) {
       filt <- out$filtered
-      rownames(filt) <- endo[state_idx]
+      rownames(filt) <- state_names_out
     }
     dd <- out$d_diffuse
     if (is.null(dd) || length(dd) != 1L) dd <- NA_integer_
@@ -1092,18 +1234,70 @@ kalman_filter <- function(Y, dr, model, params, obs_vars,
          lik_init = li, d_diffuse = as.integer(dd))
   }
 
-  ## A multivariate path hit a singular / non-PD innovation covariance (or
-  ## a numerically exploded step): retry on the univariate filter before
+  ## -- A5: the singularity-fallback CONTRACT ----------------------------
+  ##
+  ## A multivariate path hit a singular / non-PD innovation covariance (or a
+  ## numerically exploded step): retry on the univariate filter before
   ## declaring -Inf -- the analog of Dynare's
-  ## univariate_kalman_filter_if_singularity_is_detected. A genuinely bad
-  ## draw fails the same per-period ll floor there too, so this never turns
-  ## a true -Inf into a finite value.
+  ## univariate_kalman_filter_if_singularity_is_detected.
+  ##
+  ## But the univariate filter does NOT always evaluate the same likelihood
+  ## as the multivariate paths, and switching conventions mid-chain is worse
+  ## than rejecting the draw: an MCMC chain in which SOME draws trip the
+  ## fallback would then be sampling a mixture of two different densities,
+  ## silently. The two conventions coincide only when ALL of the following
+  ## hold (each condition documented elsewhere in this file):
+  ##   * me_variance == 0 -- a CONSERVATIVE gate retained from the pre-F3-D
+  ##     regulariser convention. Since F3-D the multivariate paths treat
+  ##     me_variance as TRUE iid measurement noise, exactly like the
+  ##     univariate filter (test-kf-true-me.R pins agreement to 1e-10 at
+  ##     me_variance in {1e-3, 1e-2}), so the fallback would now be sound at
+  ##     me_variance > 0 too; it is left closed so this wave changes the
+  ##     LIKELIHOOD only, not the failure policy;
+  ##   * me_extra inactive -- gated for the same reason (per-observable,
+  ##     per-period ME, and the me_extra routing block forces the R loops);
+  ##   * lik_init has not resolved to the EXACT-DIFFUSE init -- the
+  ##     univariate diffuse filter keeps the divergent 0.5*log(F_inf) term
+  ##     that the multivariate exact-diffuse recursion renormalises away
+  ##     (see the M23 warning above: the gap exceeds 15 nats on double-unit-
+  ##     root models). "kappa" and "stationary" are fine: both paths build
+  ##     the same P0.
+  ## Read lik_init LAZILY (not captured at closure-creation time): the
+  ## diffuse block below may downgrade lik_init to "kappa" before the
+  ## METHOD 1/3 loops run, and the fallback is legitimate again after that.
+  ##
+  ## Otherwise the draw is rejected with loglik = -Inf -- which is exactly
+  ## what Dynare does when
+  ## univariate_kalman_filter_if_singularity_is_detected is not set.
+  ##
+  ## A genuinely bad draw fails the same per-period ll floor inside the
+  ## univariate filter too, so a permitted fallback never turns a true -Inf
+  ## into a finite value.
+  ##
+  ## `.kf_fallback_warned` is a LOCAL latch of this kalman_filter() call (not
+  ## a package-level env): one warning per call, no cross-call state.
+  .kf_fallback_warned <- FALSE
+
   .kf_fail <- function(failed_method) {
+    hard_fail <- list(loglik = -Inf, filtered_states = NULL,
+                      n_obs = n_obs, n_T = n_T, method = failed_method,
+                      lik_init = lik_init, d_diffuse = d_diffuse)
+    if (!(me_variance == 0 && !has_me_extra && lik_init != "diffuse"))
+      return(hard_fail)
     out <- tryCatch(.run_univariate(lik_init), error = function(e) NULL)
-    if (!is.null(out)) return(out)
-    list(loglik = -Inf, filtered_states = NULL,
-         n_obs = n_obs, n_T = n_T, method = failed_method,
-         lik_init = lik_init, d_diffuse = d_diffuse)
+    if (is.null(out)) return(hard_fail)
+    if (!.kf_fallback_warned) {
+      .kf_fallback_warned <<- TRUE
+      warning("kalman_filter: method = \"", failed_method, "\" hit a ",
+              "singular / non-positive-definite innovation covariance ",
+              "(or a non-finite step); the log-likelihood was evaluated ",
+              "with the UNIVARIATE (Koopman-Durbin) filter instead. The two ",
+              "agree exactly under the current settings (me_variance = 0, ",
+              "no me_extra, lik_init = \"", lik_init, "\"), but $method is ",
+              "reported as \"univariate\" -- expect this on some draws only.",
+              call. = FALSE)
+    }
+    out
   }
 
   if (method == "univariate") return(.run_univariate(lik_init, ss_lock = ss_lock_req))
@@ -1129,7 +1323,7 @@ kalman_filter <- function(Y, dr, model, params, obs_vars,
       init_P <- .build_P0(TT, QQ)
     } else {
       P0 <- .kf_diffuse_P0(TT, QQ)
-      diff_out <- .kf_diffuse_phase(Y, d, ZZ, TT, RR, DD, QQ, HH, SS, Sigma_e,
+      diff_out <- .kf_diffuse_phase(data, d, ZZ, TT, RR, DD, QQ, HH, SS, Sigma_e,
                                     me_diag, init_s, P0$P_inf, P0$P_star,
                                     n_obs, n_T, ll_const, .kf_step)
       if (!isTRUE(diff_out$ok))
@@ -1199,7 +1393,7 @@ kalman_filter <- function(Y, dr, model, params, obs_vars,
     t_start <- init_t_start
     if (t_start > n_T) {
       ## The diffuse phase consumed the entire sample.
-      if (return_filtered) rownames(filtered) <- endo[state_idx]
+      if (return_filtered) rownames(filtered) <- state_names_out
       return(list(loglik = loglik, filtered_states = filtered,
                   loglik_contrib = ll_contrib,
                   n_obs = n_obs, n_T = n_T, method = "dare",
@@ -1208,7 +1402,7 @@ kalman_filter <- function(Y, dr, model, params, obs_vars,
     }
 
     for (t in t_start:n_T) {
-      v    <- Y[, t] - as.numeric(ZZ %*% s) - d
+      v    <- data[, t] - as.numeric(ZZ %*% s) - d
       ## me_extra active at this period? Per-period F diagonal + Joseph term
       ## below -- previously the dare path silently IGNORED me_extra whenever
       ## F was nonsingular (.kf_step closure-captures the time-invariant
@@ -1244,12 +1438,12 @@ kalman_filter <- function(Y, dr, model, params, obs_vars,
         s     <- as.numeric(TT %*% s) + drop(K_t %*% v)
         TmKZ  <- TT - K_t %*% ZZ; RmKD <- RR - K_t %*% DD
         P     <- tcrossprod(TmKZ %*% P, TmKZ) + tcrossprod(RmKD %*% Se_t, RmKD)
-        ## Joseph true-noise term for the me_extra part only:
-        ## P' += K_t diag(me_extra[, t]) K_t'. me_variance (the base me_diag)
-        ## stays on the documented F-only-regularizer convention (no term) --
-        ## mirrors the fixed "standard" branch, so dare == standard ==
-        ## univariate under me_extra.
-        if (me_x_t) P <- P + K_t %*% (me_extra[, t] * t(K_t))
+        ## Joseph true-noise term for the FULL measurement-error diagonal
+        ## (base me_variance + this period's me_extra):
+        ## P' += K_t diag(me_variance + me_extra[, t]) K_t'.
+        me_vec_t <- rep(me_variance, n_obs)
+        if (me_x_t) me_vec_t <- me_vec_t + me_extra[, t]
+        if (any(me_vec_t != 0)) P <- P + K_t %*% (me_vec_t * t(K_t))
         P     <- (P + t(P)) * 0.5
         loglik <- loglik + ll_t
         if (return_ll_contrib) ll_contrib[t] <- ll_t
@@ -1266,7 +1460,7 @@ kalman_filter <- function(Y, dr, model, params, obs_vars,
 
     final_drift <- if (isTRUE(dare$converged)) max(abs(P - dare$P)) else NA_real_
 
-    if (return_filtered) rownames(filtered) <- endo[state_idx]
+    if (return_filtered) rownames(filtered) <- state_names_out
     return(list(loglik = loglik, filtered_states = filtered,
                 loglik_contrib = ll_contrib,
                 n_obs = n_obs, n_T = n_T, method = "dare",
@@ -1277,200 +1471,142 @@ kalman_filter <- function(Y, dr, model, params, obs_vars,
 
 
   ## ===================================================================
-  ## METHOD 2: Chandrasekhar (bootstrapped initialization)
+  ## METHOD 2: Chandrasekhar recursions (Morf-Sidhu-Kailath; Herbst 2015)
   ## ===================================================================
   ##
-  ## Problem with W???=K???, M???=-F???: the first F update
-  ##   F??? = F??? - Z K??? F??? K???' Z'
-  ## nearly cancels when H is small (me_variance ~ 1e-8), losing PD.
+  ## For a TIME-INVARIANT system started at the stationary covariance
+  ## P_1 = P_0 = solve_lyapunov(TT, QQ) the Riccati INCREMENT
+  ##   dP_t = P_{t+1} - P_t
+  ## has rank <= n_obs for every t, so the filter can propagate the low-rank
+  ## factors (W_t, M_t) of dP_t = W_t M_t W_t' (n_state x n_obs and
+  ## n_obs x n_obs) instead of the n_state x n_state matrix P_t. With
+  ##   F_t = ZZ P_t ZZ' + HH + me_diag,   K_t = (TT P_t ZZ' + SS) F_t^{-1}
+  ## the EXACT recursions are (ZW = ZZ W_t, TW = TT W_t):
+  ##   F_{t+1} = F_t + ZW M_t ZW'
+  ##   K_{t+1} = K_t + (TW - K_t ZW) M_t ZW' F_{t+1}^{-1}
+  ##   W_{t+1} = TW - K_{t+1} ZW
+  ##   M_{t+1} = M_t + M_t ZW' F_t^{-1} ZW M_t        <-- OLD F_t, M on BOTH sides
+  ## and the likelihood contributions are the standard filter's,
+  ##   ll_t = ll_const - 0.5 (log|F_t| + v_t' F_t^{-1} v_t).
+  ## Initialisation needs no bootstrap: with P_1 = P_0 the Riccati gives
+  ## dP_1 = TT P_0 TT' + QQ - K_1 F_1 K_1' - P_0 = -K_1 F_1 K_1', i.e.
+  ##   W_1 = K_1,  M_1 = -F_1  (exactly rank n_obs).
   ##
-  ## Fix: run N_BOOT standard Riccati steps from P???, then initialise
-  ## Chandrasekhar from (K_b, F_b, ??P_b) where ??P is small enough
-  ## that the F update doesn't catastrophically cancel.
-  ##
-  ## N_BOOT is chosen adaptively: keep going until |??P| < 0.1 * |P|.
+  ## F4-B (2026-09-04) rewrote this branch. The previous implementation
+  ## bootstrapped with standard Riccati steps and an eigen-factorisation of
+  ## dP, and was wrong in four independent ways:
+  ##   (D1) when the bootstrap loop finished the whole sample without its
+  ##        |dP| < 0.1|P| break firing (short samples), boot_steps stayed 0
+  ##        and the Chandrasekhar phase restarted at t = 1 -- every
+  ##        observation's contribution was counted TWICE (rbc, T = 8: 23.1
+  ##        nats off the exact likelihood);
+  ##   (D2) the gain update used K_{t+1} = K_t + TW M ZW' F_{t+1}^{-1},
+  ##        dropping the -K_t ZW M ZW' F_{t+1}^{-1} term implied by
+  ##        K_{t+1} F_{t+1} = K_t F_t + TW M ZW';
+  ##   (D3) the increment update used M_{t+1} = M_t + ZW' F_{t+1}^{-1} ZW M_t
+  ##        -- the NEW F instead of F_t, and only ONE factor of M_t (the
+  ##        correct form is quadratic in M_t, and is what keeps M_t
+  ##        symmetric);
+  ##   (D4) the eigen-factorisation of dP at the bootstrap endpoint kept up
+  ##        to n_state directions with a relative 1e-14 cut, so the carried
+  ##        rank (and hence the recursion) depended on round-off; combined
+  ##        with (D2)/(D3) this is what drove F to lose positive-definiteness
+  ##        on fs2000 at me_variance = 1e-4 (chol failure -> -Inf).
+  ## The recursions above are exact, so no bootstrap, no eigen and no
+  ## near-cancellation heuristic is needed.
 
   if (method == "chandrasekhar") {
-    HH_full <- HH + me_diag
+    ## -- Scope guards: refuse LOUDLY rather than return a wrong number. -----
+    ## me_extra / shock_scale are already rejected upstream (both make the
+    ## innovation structure time-varying, which breaks the increment
+    ## recursion); missing observations and a non-stationary initialisation
+    ## do the same, so they must not fall through to a silent -Inf.
+    if (anyNA(data))
+      stop("kalman_filter: method = 'chandrasekhar' is incompatible with ",
+           "missing observations (the increment recursion assumes a ",
+           "time-invariant observation equation); use method = 'auto', ",
+           "'standard' or 'univariate'.", call. = FALSE)
+    if (lik_init != "stationary")
+      stop("kalman_filter: method = 'chandrasekhar' requires lik_init = ",
+           "\"stationary\" (the increment recursion is initialised from the ",
+           "Lyapunov P0); got lik_init = \"", lik_init, "\". Use method = ",
+           "'standard' or 'dare' for a diffuse/kappa initialisation.",
+           call. = FALSE)
 
-    ## --- Bootstrap: standard KF steps until ??P is small ---
-    P <- .solve_lyapunov_stationary()
+    HH_full <- HH + me_diag
+    P0      <- .solve_lyapunov_stationary()
+
+    ## --- Exact initialisation: F_1, K_1 at P_1 = P_0, W_1 = K_1, M_1 = -F_1
+    PZ0   <- P0 %*% tZZ
+    F_mat <- ZZ %*% PZ0 + HH_full
+    F_mat <- (F_mat + t(F_mat)) * 0.5
+    Fc    <- tryCatch(chol(F_mat), error = function(e) NULL)
+    if (is.null(Fc)) return(.kf_fail("chandrasekhar"))
+    F_inv     <- chol2inv(Fc)
+    log_det_F <- 2 * sum(log(diag(Fc)))
+    K         <- (TT %*% PZ0 + SS) %*% F_inv
+    W         <- K
+    M         <- -F_mat
 
     s <- numeric(n_state); loglik <- 0
-    K_prev <- NULL; F_prev <- NULL; F_inv_prev <- NULL; ldf_prev <- NULL
-    boot_steps <- 0L
-    ss_reached <- FALSE
-
-    ## Process observations with standard KF until ??P is small
-    for (t in seq_len(n_T)) {
-      v <- Y[, t] - drop(ZZ %*% s) - d
-
-      step <- .kf_step(s, P, v)
-      if (is.null(step))
-        return(.kf_fail("chandrasekhar"))
-
-      loglik <- loglik + step$ll
-      s <- step$s
-
-      delta_P <- max(abs(step$P - P))
-      scale_P <- max(abs(P))
-
-      if (return_filtered) filtered[, t] <- s
-
-      ## Check if P has self-converged (then skip Chandrasekhar entirely)
-      if (t > 1L && delta_P < ss_tol) {
-        ss_reached  <- TRUE
-        boot_steps  <- t
-        K_prev      <- step$K
-        F_inv_prev  <- step$F_inv
-        ldf_prev    <- step$log_det_F
-        P <- step$P
-        break
-      }
-
-      ## Check if ??P is small enough to start Chandrasekhar safely
-      ## Threshold: |??P| < 10% of |P| ensures F update doesn't cancel
-      if (t >= 3L && delta_P < 0.1 * scale_P) {
-        boot_steps <- t
-        K_prev     <- step$K
-        F_prev     <- step$F_mat
-        F_inv_prev <- step$F_inv
-        ldf_prev   <- step$log_det_F
-        P <- step$P
-        break
-      }
-
-      P <- step$P
-      K_prev     <- step$K
-      F_prev     <- step$F_mat
-      F_inv_prev <- step$F_inv
-      ldf_prev   <- step$log_det_F
-    }
-
-    if (ss_reached || boot_steps >= n_T) {
-      ## Already converged during bootstrap -- finish with steady-state
-      if (ss_reached && boot_steps < n_T) {
-        ll_ss_const <- ll_const - 0.5 * ldf_prev
-        TT_K_ss     <- cbind(TT, K_prev)
-        sv           <- numeric(n_state + n_obs)
-
-        for (t2 in (boot_steps + 1L):n_T) {
-          v2   <- Y[, t2] - as.numeric(ZZ %*% s) - d
-          Fv2  <- F_inv_prev %*% v2
-          ll_t <- ll_ss_const - 0.5 * sum(v2 * Fv2)
-          if (!is.finite(ll_t) || ll_t < .KF_LL_MIN)
-            return(.kf_fail("chandrasekhar"))
-          loglik <- loglik + ll_t
-          s <- as.numeric(TT %*% s + K_prev %*% v2)
-          if (return_filtered) filtered[, t2] <- s
-        }
-      }
-
-      if (return_filtered) rownames(filtered) <- endo[state_idx]
-      return(list(loglik = loglik, filtered_states = filtered,
-                  n_obs = n_obs, n_T = n_T, method = "chandrasekhar",
-                  boot_steps = boot_steps,
-                  ss_reached_at = if (ss_reached) boot_steps else NA_integer_,
-                  lik_init = lik_init, d_diffuse = d_diffuse))
-    }
-
-    ## --- Chandrasekhar phase: initialise from bootstrap endpoint ---
-    ## We have K_b, F_b, P_b from the last bootstrap step.
-    ## Do one more Riccati step to get P_{b+1} and compute ??P.
-
-    ## One explicit Riccati step to get the next P
-    PZ_b  <- P %*% tZZ
-    F_b   <- ZZ %*% PZ_b + HH_full
-    F_b   <- (F_b + t(F_b)) * 0.5
-    Fc_b  <- tryCatch(chol(F_b), error = function(e) NULL)
-    if (is.null(Fc_b)) return(.kf_fail("chandrasekhar"))
-    Fi_b  <- chol2inv(Fc_b)
-    K_b   <- (TT %*% PZ_b + SS) %*% Fi_b
-    P_next <- tcrossprod(TT %*% P, TT) + QQ - tcrossprod(K_b %*% F_b, K_b)
-    P_next <- (P_next + t(P_next)) * 0.5
-
-    delta_P_mat <- P_next - P   # small by construction (bootstrap ensured this)
-
-    ## Low-rank factorisation of ??P via eigen
-    eig  <- eigen(delta_P_mat, symmetric = TRUE)
-    keep <- abs(eig$values) > 1e-14 * max(abs(eig$values))
-    r    <- max(1L, sum(keep))
-    W <- eig$vectors[, keep, drop = FALSE]
-    M <- diag(eig$values[keep], nrow = r, ncol = r)
-
-    ## Current Chandrasekhar state
-    K         <- K_b
-    F_mat     <- F_b
-    F_inv     <- Fi_b
-    log_det_F <- 2 * sum(log(diag(Fc_b)))
-
-    ## Pre-allocate
-    TT_K_ss <- NULL; sv <- numeric(n_state + n_obs)
-    K_ss <- NULL; F_inv_ss <- NULL; log_det_F_ss <- NULL; ll_ss_const <- NULL
     ch_ss_step <- NA_integer_
 
-    start_t <- boot_steps + 1L
-
-    for (t in start_t:n_T) {
-      v <- Y[, t] - drop(ZZ %*% s) - d
-
-      if (!ss_reached) {
-        ## Likelihood with current K, F
-        ll_t <- ll_const - 0.5 * (log_det_F + drop(crossprod(v, F_inv %*% v)))
-        if (!is.finite(ll_t) || ll_t < .KF_LL_MIN)
-          return(.kf_fail("chandrasekhar"))
-        loglik <- loglik + ll_t
-        s <- drop(TT %*% s) + drop(K %*% v)
-
-        ## Chandrasekhar update (low-rank)
-        ZW  <- ZZ %*% W                       # n_obs x r
-        TW  <- TT %*% W                       # n_s x r
-        ZWM <- ZW %*% M                       # n_obs x r
-
-        F_new <- F_mat + ZWM %*% t(ZW)
-        F_new <- (F_new + t(F_new)) * 0.5
-        F_new_chol <- tryCatch(chol(F_new), error = function(e) NULL)
-        if (is.null(F_new_chol)) return(.kf_fail("chandrasekhar"))
-
-        F_new_inv     <- chol2inv(F_new_chol)
-        log_det_F_new <- 2 * sum(log(diag(F_new_chol)))
-
-        K_new <- K + TW %*% M %*% t(ZW) %*% F_new_inv
-        W_new <- TW - K_new %*% ZW
-        M_new <- M + t(ZW) %*% F_new_inv %*% ZWM
-        M_new <- (M_new + t(M_new)) * 0.5
-
-        ZW_new <- ZZ %*% W_new
-
-        if (max(abs(K_new - K)) < ss_tol) {
-          ss_reached   <- TRUE
-          ch_ss_step   <- t
-          K_ss         <- K_new
-          F_inv_ss     <- F_new_inv
-          log_det_F_ss <- log_det_F_new
-          ll_ss_const  <- ll_const - 0.5 * log_det_F_ss
-          TT_K_ss      <- cbind(TT, K_ss)
-        }
-
-        K <- K_new; F_mat <- F_new; F_inv <- F_new_inv
-        log_det_F <- log_det_F_new; W <- W_new; M <- M_new
-
-      } else {
-        ## Steady-state phase
-        Fv   <- F_inv_ss %*% v
-        ll_t <- ll_ss_const - 0.5 * sum(v * Fv)
-        if (!is.finite(ll_t) || ll_t < -1e8)
-          return(.kf_fail("chandrasekhar"))
-        loglik <- loglik + ll_t
-        s <- as.numeric(TT %*% s + K_ss %*% v)
-      }
+    for (t in seq_len(n_T)) {
+      v    <- Y_minus_d[, t] - as.numeric(ZZ %*% s)
+      ll_t <- ll_const - 0.5 * (log_det_F + drop(crossprod(v, F_inv %*% v)))
+      if (!is.finite(ll_t) || ll_t < .KF_LL_MIN)
+        return(.kf_fail("chandrasekhar"))
+      loglik <- loglik + ll_t
+      s <- as.numeric(TT %*% s) + drop(K %*% v)
       if (return_filtered) filtered[, t] <- s
+      if (t == n_T) break
+
+      ## Shared low-rank blocks. WM is n_state x n_obs, ZWM is n_obs x n_obs.
+      ZW  <- ZZ %*% W
+      TW  <- TT %*% W
+      WM  <- W %*% M
+      ZWM <- ZZ %*% WM
+
+      ## Steady-state lock: dP_t = W M W' is exactly the quantity the
+      ## standard filter compares against ss_tol (max|P_{t+1} - P_t|), and
+      ## the frozen (K_t, F_t) are the same ones -- so the two methods lock
+      ## at the same period with the same gain.
+      if (t > 1L && max(abs(tcrossprod(WM, W))) < ss_tol) {
+        ch_ss_step  <- t
+        ll_ss_const <- ll_const - 0.5 * log_det_F
+        tail_start  <- t + 1L
+        out <- .kf_ss_dispatch(Y_minus_d, ZZ, TT, K, F_inv, ll_ss_const,
+                               s, tail_start, n_T, filtered)
+        if (!out$ok) return(.kf_fail("chandrasekhar"))
+        loglik <- loglik + out$loglik
+        s      <- out$s
+        if (return_filtered) filtered <- out$filtered
+        break
+      }
+
+      ## --- Chandrasekhar increment update -------------------------------
+      F_new <- F_mat + ZWM %*% t(ZW)
+      F_new <- (F_new + t(F_new)) * 0.5
+      Fc_n  <- tryCatch(chol(F_new), error = function(e) NULL)
+      if (is.null(Fc_n)) return(.kf_fail("chandrasekhar"))
+      F_new_inv     <- chol2inv(Fc_n)
+      log_det_F_new <- 2 * sum(log(diag(Fc_n)))
+
+      tZWM  <- t(ZWM)                       # = M ZW'
+      K_new <- K + (TW - K %*% ZW) %*% (tZWM %*% F_new_inv)
+      W_new <- TW - K_new %*% ZW
+      ## M_{t+1} = M + M ZW' F_t^{-1} ZW M -- quadratic in M, hence symmetric.
+      M_new <- M + tZWM %*% F_inv %*% ZWM
+      M_new <- (M_new + t(M_new)) * 0.5
+
+      K <- K_new; F_mat <- F_new; F_inv <- F_new_inv
+      log_det_F <- log_det_F_new; W <- W_new; M <- M_new
     }
 
-    if (return_filtered) rownames(filtered) <- endo[state_idx]
+    if (return_filtered) rownames(filtered) <- state_names_out
     return(list(loglik = loglik, filtered_states = filtered,
                 n_obs = n_obs, n_T = n_T, method = "chandrasekhar",
-                boot_steps = boot_steps,
+                boot_steps = 0L,
                 ss_reached_at = ch_ss_step,
                 lik_init = lik_init, d_diffuse = d_diffuse))
   }
@@ -1503,13 +1639,14 @@ kalman_filter <- function(Y, dr, model, params, obs_vars,
       .HAS_RCPP_KALMAN()) {
     out <- kalman_standard_loop_cpp(Y_minus_d, ZZ, TT, RR, DD, HH + me_diag,
                                     Sigma_e, SS, P, ll_const, ss_tol,
-                                    .KF_LL_MIN, return_filtered)
+                                    .KF_LL_MIN, return_filtered,
+                                    rep(me_variance, n_obs))
     if (!out$ok)
       return(.kf_fail("standard"))
     filt <- NULL
     if (return_filtered) {
       filt <- out$filtered
-      rownames(filt) <- endo[state_idx]
+      rownames(filt) <- state_names_out
     }
     return(list(loglik = out$loglik, filtered_states = filt,
                 n_obs = n_obs, n_T = n_T, method = "standard",
@@ -1518,7 +1655,7 @@ kalman_filter <- function(Y, dr, model, params, obs_vars,
 
   if (init_t_start > n_T) {
     ## The diffuse phase consumed the entire sample.
-    if (return_filtered) rownames(filtered) <- endo[state_idx]
+    if (return_filtered) rownames(filtered) <- state_names_out
     return(list(loglik = loglik, filtered_states = filtered,
                 n_obs = n_obs, n_T = n_T, method = "standard",
                 lik_init = lik_init, d_diffuse = d_diffuse))
@@ -1567,12 +1704,12 @@ kalman_filter <- function(Y, dr, model, params, obs_vars,
       s <- drop(TT %*% s) + drop(K %*% v)
       TmKZ <- TT - K %*% ZZ_t; RmKD <- RR - K %*% DD_t
       P <- tcrossprod(TmKZ %*% P, TmKZ) + tcrossprod(RmKD %*% Se_miss, RmKD)
-      ## Joseph true-noise term for the me_extra part (observed subset only):
-      ## y = Z s + D e + u with Var(u) = diag(me_extra[obs_ok, t]) requires
-      ## P' += K diag(me_extra[obs_ok, t]) K' for ANY gain K. me_variance
-      ## stays on the documented F-only-regularizer convention (no term).
-      if (has_me_extra && any(me_extra[obs_ok, t] != 0))
-        P <- P + K %*% (me_extra[obs_ok, t] * t(K))
+      ## Joseph true-noise term for the FULL ME diagonal (observed subset
+      ## only): y = Z s + D e + u with Var(u) = diag(me_variance +
+      ## me_extra[obs_ok, t]) requires P' += K diag(.) K' for ANY gain K.
+      me_vec_t <- rep(me_variance, n_obs_t)
+      if (has_me_extra) me_vec_t <- me_vec_t + me_extra[obs_ok, t]
+      if (any(me_vec_t != 0)) P <- P + K %*% (me_vec_t * t(K))
       P <- (P + t(P)) * 0.5; ss_reached <- FALSE
       if (return_filtered) filtered[, t] <- s; next
     }
@@ -1604,11 +1741,11 @@ kalman_filter <- function(Y, dr, model, params, obs_vars,
         s     <- as.numeric(TT %*% s) + drop(K_t %*% v)
         TmKZ  <- TT - K_t %*% ZZ; RmKD <- RR - K_t %*% DD
         P     <- tcrossprod(TmKZ %*% P, TmKZ) + tcrossprod(RmKD %*% Se_t, RmKD)
-        ## Joseph true-noise term for the me_extra part of me_diag_t only:
-        ## P' += K diag(me_extra[, t]) K'. me_variance (the base me_diag)
-        ## stays on the documented F-only-regularizer convention (no term).
-        if (has_me_extra && any(me_extra[, t] != 0))
-          P <- P + K_t %*% (me_extra[, t] * t(K_t))
+        ## Joseph true-noise term for the FULL ME diagonal me_diag_t
+        ## (base me_variance + this period's me_extra).
+        me_vec_t <- rep(me_variance, n_obs)
+        if (has_me_extra) me_vec_t <- me_vec_t + me_extra[, t]
+        if (any(me_vec_t != 0)) P <- P + K_t %*% (me_vec_t * t(K_t))
         P     <- (P + t(P)) * 0.5
         loglik <- loglik + ll_t
       ## When me_extra is active at this period (and no shock_scale), use a
@@ -1630,10 +1767,9 @@ kalman_filter <- function(Y, dr, model, params, obs_vars,
         s     <- as.numeric(TT %*% s) + drop(K_t %*% v)
         TmKZ  <- TT - K_t %*% ZZ; RmKD <- RR - K_t %*% DD
         P     <- tcrossprod(TmKZ %*% P, TmKZ) + tcrossprod(RmKD %*% Sigma_e, RmKD)
-        ## Joseph true-noise term for me_extra (this branch only runs when
-        ## me_extra[, t] has a nonzero entry): P' += K diag(me_extra[, t]) K'.
-        ## me_variance stays F-only (regularizer convention; no Joseph term).
-        P     <- P + K_t %*% (me_extra[, t] * t(K_t))
+        ## Joseph true-noise term for the FULL ME diagonal (base me_variance
+        ## + me_extra[, t]): P' += K diag(.) K'.
+        P     <- P + K_t %*% ((me_variance + me_extra[, t]) * t(K_t))
         P     <- (P + t(P)) * 0.5
         loglik <- loglik + ll_t
       } else {
@@ -1676,7 +1812,7 @@ kalman_filter <- function(Y, dr, model, params, obs_vars,
     if (return_filtered) filtered[, t] <- s
   }
 
-  if (return_filtered) rownames(filtered) <- endo[state_idx]
+  if (return_filtered) rownames(filtered) <- state_names_out
   list(loglik = loglik, filtered_states = filtered,
        n_obs = n_obs, n_T = n_T, method = "standard",
        lik_init = lik_init, d_diffuse = d_diffuse)

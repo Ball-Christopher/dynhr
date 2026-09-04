@@ -22,6 +22,32 @@
 ## v1 scope: STATIONARY models only (shock_scale + diffuse init is a hard stop
 ## in kalman_filter; the same restriction applies here) and order-1 (linear)
 ## solutions.
+##
+## DEGENERATE PARTICLES PAST THE VOLATILITY OVERFLOW POINT (decided 2026-09-04,
+## user; do not re-litigate without new evidence).  At extreme sigma_eta the
+## filter returns a FINITE but meaningless value (-1.6e+132 nats at
+## sigma_eta = 3000).  These are deliberately NOT converted to -Inf:
+##
+##   * Gating on rcond(Ft) -- the convention the other compiled KF kernels use
+##     -- was MEASURED and is harmful twice over.  It moves the loglik by
+##     18-48 nats at sigma_eta = 100, which the SBC's inv_gamma(0.35, 4) prior
+##     genuinely reaches (max of 120k draws: 99.87); and it BIASES rather than
+##     sanitises, because a near-singular Ft has a tiny determinant so
+##     -0.5 log|F| is large POSITIVE -- the singular particles are
+##     systematically the ones holding the cloud maximum, and gating them made
+##     the sigma_eta = 300 estimate WORSE (-1974 -> -9.8e62).
+##   * -Inf is strictly worse than finite garbage downstream.  The MH accept
+##     step guards with `is.finite(log_alpha)` (R/sampler-rwmh.R:230), so a
+##     chain that ever lands on -Inf can NEVER leave it (+Inf is not finite),
+##     whereas from -1e132 a sane proposal gives a finite +1e132 and is
+##     accepted immediately.
+##   * The genuinely infeasible end already self-handles: once every particle
+##     fails, the existing fail_period path returns -Inf with a warning.
+##
+## Full options table, the measured sweep and the falsifiers that WOULD
+## justify revisiting are in memory/sv-rbpf-degenerate-particle-decision.md.
+## Deferred there: a degenerate-particle COUNTER (visibility only, changes no
+## number) -- worth adding next time src/sv_rbpf.cpp is open.
 ## --------------------------------------------------------------------------
 
 
@@ -69,6 +95,8 @@
 #' @param n_exo      Number of shocks.
 #' @param n_particles Number of volatility particles.
 #' @param me_diag    Optional length-n_obs baseline ME variances (NULL = none).
+#'   TRUE i.i.d. observation noise: it enters F AND the Joseph state-covariance
+#'   term (F4-A), matching \code{\link{kf_step}} and \code{\link{kalman_filter}}.
 #' @return Scalar log-likelihood estimate, or \code{-Inf} if every particle is
 #'   infeasible at some period.
 #' @noRd
@@ -78,14 +106,29 @@
   ## Compiled full-sweep kernel (same RNG draw order as the R reference below,
   ## so a given set.seed produces the same particle cloud; parity-tested).
   if (.HAS_RCPP_SV_RBPF()) {
-    return(sv_rbpf_loglik_cpp(
+    res <- sv_rbpf_loglik_cpp(
       Y, TT, ZZ, RR, DD, Sigma_e,
       if (is.null(d)) numeric(nrow(Y)) else as.numeric(d),
       P0, as.integer(sv_idx),
       as.numeric(hyper[, "mu"]), as.numeric(hyper[, "rho"]),
       as.numeric(hyper[, "sigma_eta"]),
       as.integer(n_particles),
-      if (is.null(me_diag)) numeric(0) else as.numeric(me_diag)))
+      if (is.null(me_diag)) numeric(0) else as.numeric(me_diag))
+    ## The kernel REPORTS a fully infeasible cloud instead of warning from
+    ## C++: Rcpp::warning() under options(warn = 2) becomes an R error, and
+    ## R errors longjmp -- straight past ~RNGScope, leaving .Random.seed
+    ## stale (and Armadillo buffers leaked) on exactly the runs a user asked
+    ## to be strict. Warning here costs nothing and is longjmp-safe.
+    if (isTRUE(as.integer(res$fail_period) > 0L))
+      warning(sprintf(
+        paste0("sv_rbpf_loglik: all %d particles failed at period %d ",
+               "(non-PD forecast covariance or non-finite likelihood for ",
+               "every particle) -- returning -Inf. This may indicate ",
+               "linear-algebra failure rather than a genuine ",
+               "zero-likelihood region."),
+        as.integer(n_particles), as.integer(res$fail_period)),
+        call. = FALSE)
+    return(res$loglik)
   }
 
   N     <- as.integer(n_particles)
@@ -183,10 +226,16 @@
 #' @param n_particles Number of volatility particles (default 1000).
 #' @param me_variance Optional baseline measurement-error variance (default 0;
 #'   the RB-PF does not need it, but it is available for stochastically-singular
-#'   observation blocks).
+#'   observation blocks). It is TRUE i.i.d. observation noise -- the same law
+#'   \code{\link{kalman_filter}} implements -- entering both the forecast
+#'   covariance and the Joseph state-covariance update (F4-A).
 #' @param seed        Integer RNG seed (default \code{NULL} = fresh randomness
 #'   each call; required for valid PMMH).
-#' @param power       Power-posterior tempering exponent (default 1).
+#' @param power       Power-posterior tempering exponent zeta:
+#'   \code{logpost = zeta * loglik + logprior}. \code{NULL} (default) resolves
+#'   the global \code{power_posterior} option ONCE at factory time (falling
+#'   back to 1), matching \code{make_log_posterior()} and
+#'   \code{make_log_posterior_tpf()}.
 #' @return A \code{function(theta)} returning
 #'   \code{list(logpost, loglik, logprior)}.
 #' @seealso \code{\link{stochastic_volatility}}, \code{\link{kf_step}},
@@ -198,9 +247,18 @@ make_log_posterior_sv_rbpf <- function(model, data, prior_spec, obs_vars,
                                         n_particles = 1000L,
                                         me_variance = 0,
                                         seed = NULL,
-                                        power = 1) {
+                                        power = NULL) {
   force(data); force(prior_spec); force(obs_vars)
   force(n_particles); force(me_variance); force(seed); force(power)
+
+  ## Power-posterior exponent: explicit arg > global option > 1, resolved ONCE
+  ## here (same contract as make_log_posterior() / make_log_posterior_tpf()).
+  power <- .dynhr_opt("power_posterior", power, default = 1)
+  if (!is.numeric(power) || length(power) != 1L || !is.finite(power) ||
+      power < 0)
+    stop("make_log_posterior_sv_rbpf: 'power' must be a finite non-negative ",
+         "scalar.", call. = FALSE)
+  power <- as.numeric(power)
 
   model <- .resolve_stochastic_volatility(model, stochastic_volatility)
   sv_spec <- model$stochastic_volatility
@@ -241,88 +299,60 @@ make_log_posterior_sv_rbpf <- function(model, data, prior_spec, obs_vars,
       !is.null(compiled$model$lead_lag_incidence))
     compiled$lead_lag_incidence <- compiled$model$lead_lag_incidence
 
-  sys_cache <- cache_system_structure(compiled)
-
   if (is.null(dim(data))) data <- matrix(data, nrow = length(obs_vars))
   n_obs   <- length(obs_vars)
   me_diag <- if (me_variance > 0) rep(me_variance, n_obs) else NULL
 
-  ss_warm <- NULL
+  ## Inner evaluator over the shared closure builder (R/posterior-closure.R).
+  ## Kept separate from the returned closure because .with_local_seed() forces
+  ## its `expr` as a promise, and a promise containing a top-level `return()`
+  ## cannot be forced from another frame. `pass_dots = TRUE` returns the raw
+  ## `function(theta, ...)` inner; the wrapper below restores the public
+  ## `function(theta)` signature.
+  eval_one <- .make_posterior_closure(
+    model, data, prior_spec, obs_vars, compiled,
+    loglik_fn = function(sol, params, ss, theta, me_floor_check, ...) {
+      dr <- sol$dr
+      ## ---- State-space matrices (identical extraction to kalman_filter) ---
+      endo <- dr$endo_names; exo <- dr$exo_names
+      state_idx <- dr$state_idx
+      obs_idx   <- match(obs_vars, endo)
+      if (any(is.na(obs_idx))) return(NULL)
+
+      TT <- dr$ghx[state_idx, , drop = FALSE]
+      RR <- dr$ghu[state_idx, , drop = FALSE]
+      ZZ <- dr$ghx[obs_idx,   , drop = FALSE]
+      DD <- dr$ghu[obs_idx,   , drop = FALSE]
+      d  <- dr$ys[obs_vars]
+      Sigma_e <- .get_shock_cov(model, exo, params)
+
+      ## ---- Resolve SV spec against dr shock order + params ----------------
+      sv_idx <- .sv_shock_index(sv_spec, exo)
+      hyper  <- .sv_resolve_hyperparams(sv_spec, params)
+      if (is.character(hyper)) return(NULL)   # domain-infeasible hyperparams
+
+      P0 <- tryCatch(kf_stationary_init(TT, RR, Sigma_e),
+                     error = function(e) NULL)
+      if (is.null(P0) || !all(is.finite(P0))) return(NULL)
+
+      Y <- if (nrow(data) != n_obs) t(data) else data
+
+      loglik <- tryCatch(
+        .sv_rbpf_loglik(Y, TT, ZZ, RR, DD, Sigma_e, d, P0,
+                        sv_idx, hyper, length(exo), n_particles,
+                        me_diag = me_diag),
+        error = function(e) -Inf)
+      if (!is.finite(loglik)) return(NULL)
+      list(loglik = loglik)
+    },
+    power          = power,
+    needs_me_floor = FALSE,
+    pass_dots      = TRUE)
 
   function(theta) {
-    if (!is.null(seed)) set.seed(seed)
-
-    lp <- log_prior(theta, prior_spec)
-    if (!is.finite(lp))
-      return(list(logpost = -Inf, loglik = -Inf, logprior = lp))
-
-    params <- .apply_theta_to_params(model, theta)
-
-    ## ---- Steady state (warm-started) -----------------------------------
-    ss_result <- solve_steady_state(model, compiled, params,
-                                    y0 = ss_warm, verbose = FALSE)
-    if (is.null(ss_result) || !isTRUE(ss_result$converged)) {
-      if (!is.null(ss_warm))
-        ss_result <- solve_steady_state(model, compiled, params, verbose = FALSE)
-      if (is.null(ss_result) || !isTRUE(ss_result$converged)) {
-        ss_warm <<- NULL
-        return(list(logpost = -Inf, loglik = -Inf, logprior = lp))
-      }
-    }
-    ss_warm <<- ss_result$ss
-
-    ## ---- First-order perturbation --------------------------------------
-    params <- ss_result$params %||% params
-    sys <- extract_system_matrices_fast(sys_cache, ss_result$ss, params)
-    dr  <- .solve_from_system(sys, model, compiled, ss_result$ss, params, FALSE)
-    if (is.null(dr) || !isTRUE(dr$bk_satisfied))
-      return(list(logpost = -Inf, loglik = -Inf, logprior = lp))
-
-    ## Stationarity guard (SV-on-shocks is stationary-only, mirroring the
-    ## shock_scale + diffuse hard stop in kalman_filter).
-    ns <- length(dr$state_idx)
-    ev <- dr$eigenvalues
-    spectral_radius <- if (!is.null(ev) && length(ev) >= ns)
-      max(Mod(ev[seq_len(ns)]))
-    else
-      max(Mod(eigen(dr$ghx[dr$state_idx, , drop = FALSE],
-                    only.values = TRUE)$values))
-    if (spectral_radius >= 1)
-      return(list(logpost = -Inf, loglik = -Inf, logprior = lp))
-
-    ## ---- State-space matrices (identical extraction to kalman_filter) ---
-    endo <- dr$endo_names; exo <- dr$exo_names
-    state_idx <- dr$state_idx
-    obs_idx   <- match(obs_vars, endo)
-    if (any(is.na(obs_idx)))
-      return(list(logpost = -Inf, loglik = -Inf, logprior = lp))
-
-    TT <- dr$ghx[state_idx, , drop = FALSE]
-    RR <- dr$ghu[state_idx, , drop = FALSE]
-    ZZ <- dr$ghx[obs_idx,   , drop = FALSE]
-    DD <- dr$ghu[obs_idx,   , drop = FALSE]
-    d  <- dr$ys[obs_vars]
-    Sigma_e <- .get_shock_cov(model, exo, params)
-
-    ## ---- Resolve SV spec against dr shock order + params ----------------
-    sv_idx <- .sv_shock_index(sv_spec, exo)
-    hyper  <- .sv_resolve_hyperparams(sv_spec, params)
-    if (is.character(hyper))                    # domain-infeasible hyperparams
-      return(list(logpost = -Inf, loglik = -Inf, logprior = lp))
-
-    P0 <- tryCatch(kf_stationary_init(TT, RR, Sigma_e), error = function(e) NULL)
-    if (is.null(P0) || !all(is.finite(P0)))
-      return(list(logpost = -Inf, loglik = -Inf, logprior = lp))
-
-    Y <- if (nrow(data) != n_obs) t(data) else data
-
-    loglik <- tryCatch(
-      .sv_rbpf_loglik(Y, TT, ZZ, RR, DD, Sigma_e, d, P0,
-                      sv_idx, hyper, length(exo), n_particles, me_diag = me_diag),
-      error = function(e) -Inf)
-    if (!is.finite(loglik))
-      return(list(logpost = -Inf, loglik = -Inf, logprior = lp))
-
-    list(logpost = lp + power * loglik, loglik = loglik, logprior = lp)
+    ## Seeding is LOCAL: a non-NULL seed makes THIS evaluation reproducible
+    ## without resetting the caller's global .Random.seed (A1) -- an outer
+    ## sampler that draws around the likelihood keeps its own stream.
+    .with_local_seed(seed, eval_one(theta))
   }
 }

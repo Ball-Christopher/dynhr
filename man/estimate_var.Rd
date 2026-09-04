@@ -4,10 +4,10 @@
 \alias{estimate_var}
 \title{Estimate a reduced-form VAR(p) by OLS}
 \usage{
-estimate_var(Y, p = 1L, type = c("const", "none", "trend"))
+estimate_var(data, p = 1L, type = c("const", "none", "trend"))
 }
 \arguments{
-\item{Y}{A \code{T x K} numeric matrix or data frame: rows are time periods
+\item{data}{A \code{T x K} numeric matrix or data frame: rows are time periods
 (in order), columns are the \code{K} endogenous variables.  Column names,
 if present, are carried through to the IRFs.}
 

@@ -281,6 +281,7 @@
 #'
 #' @return Nested list \code{J[[output]][[input]]}, each a \code{T x T} matrix
 #'   with \code{[t, s] = dO_t/dI_s}.
+#' @keywords internal
 #' @export
 hank_het_jacobian_nd <- function(block, T_h,
                                  inputs = c("r", "w"),
@@ -366,6 +367,7 @@ hank_het_jacobian_nd <- function(block, T_h,
 #' @return Named list \code{JD_nd[[input]]}, each a 3-D array of dimension
 #'   \code{T_h x T_h x (n_e*n_a)} with \code{JD_nd[[i]][t, s, ] =
 #'   dD_t/dI_s} (central difference).
+#' @keywords internal
 #' @export
 hank_het_dist_jacobian_nd <- function(block, T_h,
                                       inputs = c("r", "w"),

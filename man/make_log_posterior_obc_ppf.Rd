@@ -15,7 +15,8 @@ make_log_posterior_obc_ppf(
   N = 1000L,
   proposal = c("bootstrap", "copf"),
   regime_guess = c("ancestor", "slack"),
-  seed = NULL
+  seed = NULL,
+  power = NULL
 )
 }
 \arguments{
@@ -44,6 +45,14 @@ each particle's regime from its resampled ancestor's verified regime
 reduction — weights are valid for any guess.}
 
 \item{seed}{Integer RNG seed (NULL = not fixed; each call differs)}
+
+\item{power}{Power-posterior (generalised-Bayes) tempering exponent
+\eqn{\zeta}: \code{$logpost} becomes
+\eqn{\log p(\theta) + \zeta \cdot \log L(\theta)} while \code{$loglik}
+keeps the RAW (untempered) particle-filter estimate -- so PMMH's
+unbiasedness argument and any marginal-likelihood use of \code{$loglik}
+are unaffected. \code{NULL} (default) resolves the \code{power_posterior}
+package option ONCE, at factory time.}
 }
 \value{
 Function(theta) -> list(logpost, loglik, logprior)

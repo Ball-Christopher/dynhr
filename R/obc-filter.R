@@ -360,7 +360,7 @@ pkf_check_binding <- function(s_backward, eps_hat, specs, dr_slack) {
 #' Unlike kalman_filter_obc() + obc_guess_verify(), there is no separate
 #' outer loop over the full sample; regime discovery is fully local to each t.
 #'
-#' @param Y               n_obs x T observation matrix
+#' @param data               n_obs x T observation matrix
 #' @param dr_slack        Slack-regime DecisionRules
 #' @param regime_cache    R environment of per-regime policies (modified
 #'                        in-place; will be populated lazily as needed)
@@ -396,7 +396,7 @@ pkf_check_binding <- function(s_backward, eps_hat, specs, dr_slack) {
 #'     occasionally binding constraints. \emph{Deutsche Bundesbank Discussion
 #'     Paper}, 38/2020.
 #' @export
-kalman_filter_obc_pkf <- function(Y, dr_slack, regime_cache, sys,
+kalman_filter_obc_pkf <- function(data, dr_slack, regime_cache, sys,
                                    model, params, obs_vars, specs,
                                    obs_idx          = NULL,
                                    regime_path_init = NULL,
@@ -434,9 +434,9 @@ kalman_filter_obc_pkf <- function(Y, dr_slack, regime_cache, sys,
   assign("0", list(QQ = QQ_s, HH = HH_s, SS = SS_s), envir = noise_cache)
 
   # ---- Data setup ----------------------------------------------------------
-  if (is.null(dim(Y))) Y <- matrix(Y, nrow = n_obs)
-  if (nrow(Y) != n_obs) Y <- t(Y)
-  n_T <- ncol(Y)
+  if (is.null(dim(data))) data <- matrix(data, nrow = n_obs)
+  if (nrow(data) != n_obs) data <- t(data)
+  n_T <- ncol(data)
 
   # Warm-start regime path (or all-slack)
   regime_path <- if (!is.null(regime_path_init) &&
@@ -508,7 +508,7 @@ kalman_filter_obc_pkf <- function(Y, dr_slack, regime_cache, sys,
       QQ <- nc$QQ; HH <- nc$HH; SS <- nc$SS
 
       # ---- Identify available observations ---------------------------------
-      v_full  <- Y[, t] - drop(ZZ %*% s) - d_eff
+      v_full  <- data[, t] - drop(ZZ %*% s) - d_eff
       obs_ok  <- which(!is.na(v_full))
       n_obs_t <- length(obs_ok)
 

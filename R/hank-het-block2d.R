@@ -173,7 +173,7 @@ hank_het2d_block <- function(b_grid, a_grid, Pi, e, beta, eis, rb, ra, w,
            adj_freq = sum(D * Pv),
            n_e = length(e), n_b = length(b_grid), n_a = length(a_grid),
            dist_converged = sd$converged, two_start_gap = gap2)),
-    class = "hank_het2d_block")
+    class = c("hank_het2d_block", "hank_block"))
 }
 
 

@@ -53,6 +53,7 @@
 #'                        rd = .01, rf = .015, ra = .02, w = 1,
 #'                        chi1 = .2, phi1 = .1, maxit = 250)
 #' hank_het3_fingerprint(blk)
+#' @keywords internal
 #' @export
 hank_het3_fingerprint <- function(block, n = 16L) {
   if (!inherits(block, "hank_het3_block"))
@@ -219,6 +220,7 @@ hank_walras3 <- function(block, td,
 #' J <- hank_het3_jacobian_checkpoint(blk, T_h = 2, dir = dir,
 #'                                    inputs = "rd", outputs = "C")
 #' dim(J$C$rd)
+#' @keywords internal
 #' @export
 hank_het3_jacobian_checkpoint <- function(block, T_h, dir, inputs = NULL,
                                           outputs = .hank3_jac_outputs,
@@ -326,6 +328,7 @@ hank_het3_jacobian_checkpoint <- function(block, T_h, dir, inputs = NULL,
 #'                        rd = .01, rf = .015, ra = .02, w = 1,
 #'                        chi1 = .2, phi1 = .1, maxit = 250)
 #' hank_het3_jacobian_spot(blk, T_h = 3, inputs = "rd", outputs = "C")
+#' @keywords internal
 #' @export
 hank_het3_jacobian_spot <- function(block, T_h, inputs = NULL,
                                     outputs = .hank3_jac_outputs,

@@ -7,7 +7,7 @@
 var_irf_bootstrap(
   varfit,
   horizon = 20L,
-  Y = NULL,
+  data = NULL,
   n_boot = 1000L,
   ci = c(0.16, 0.84),
   shock = NULL,
@@ -19,7 +19,7 @@ var_irf_bootstrap(
 
 \item{horizon}{Number of IRF periods.}
 
-\item{Y}{The original \code{T x K} data used to fit \code{varfit} (needed to
+\item{data}{The original \code{T x K} data used to fit \code{varfit} (needed to
 recover the \code{p} initial-condition rows for the recursive DGP).}
 
 \item{n_boot}{Number of bootstrap replications.  Default \code{1000}.}
@@ -55,7 +55,7 @@ given \code{seed}.
 set.seed(1)
 Y <- matrix(rnorm(400), 200, 2)
 fit <- estimate_var(Y, p = 1)
-bands <- var_irf_bootstrap(fit, horizon = 8, Y = Y, n_boot = 200, seed = 42)
+bands <- var_irf_bootstrap(fit, horizon = 8, data = Y, n_boot = 200, seed = 42)
 bands$lower$shock1[1, ]   # lower band, impact, shock 1
 
 }

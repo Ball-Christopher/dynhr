@@ -5,18 +5,18 @@
 \title{PSKF (skewed-shock) log-likelihood on a Reiter state space}
 \usage{
 hank_reiter_pskf_loglik(
-  Y,
+  data,
   rss,
   alpha_z = 0,
-  observables = "A",
-  me_var = 0,
+  obs_vars = "A",
+  me_variance = 0,
   cut_tol = 0.01,
   max_q = 5L
 )
 }
 \arguments{
-\item{Y}{\code{T x n_obs} matrix of DEMEANED observations (deviations from
-steady state), columns in the order of \code{observables}.}
+\item{data}{\code{T x n_obs} matrix of DEMEANED observations (deviations from
+steady state), columns in the order of \code{obs_vars}.}
 
 \item{rss}{A \code{hank_reiter_ss} (build with \code{drop_dist_coord =
 TRUE}; the Lyapunov initialization requires a strictly stable \code{T}).}
@@ -24,11 +24,11 @@ TRUE}; the Lyapunov initialization requires a strictly stable \code{T}).}
 \item{alpha_z}{Skew-normal shape of the TFP innovation (0 = Gaussian;
 positive = right-skewed).}
 
-\item{observables}{Which observation rows to use (subset of
+\item{obs_vars}{Which observation rows to use (subset of
 \code{rss$obs_names}).}
 
-\item{me_var}{Measurement-error variance added to each observable (needed
-when \code{length(observables) > 1}, as in the Gaussian filter).}
+\item{me_variance}{Measurement-error variance added to each observable (needed
+when \code{length(obs_vars) > 1}, as in the Gaussian filter).}
 
 \item{cut_tol, max_q}{Skewness-dimension pruning controls of the underlying
 PSKF recursion (see the pinned \code{max_q = 5} Miwa-exact cap;

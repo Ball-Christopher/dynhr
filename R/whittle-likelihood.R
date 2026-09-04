@@ -523,13 +523,22 @@
 #'   Whittle log-likelihood. Default \code{c(0, pi)} uses the full spectrum.
 #'   Use \code{whittle_business_cycle_band()} for the standard 6-32 quarter
 #'   business-cycle band.
+#' @param power Power-posterior (generalised-Bayes) tempering exponent
+#'   \eqn{\zeta}. \code{NULL} (default) resolves the \code{power_posterior}
+#'   option once, at factory time (see \code{.resolve_power_posterior}).
 #' @return function(theta) -> list(logpost, loglik, logprior)
 #' @noRd
 make_log_posterior_whittle <- function(model, data, prior_spec, obs_vars,
                                         compiled, me_variance = 0,
                                         freq_band = c(0, pi),
                                         system_priors = NULL,
-                                        debias = TRUE) {
+                                        debias = TRUE,
+                                        power = NULL) {
+  ## Resolve zeta ONCE here. It used to be re-read from the option store on
+  ## EVERY evaluation, so a mid-run dynhr_set_options() silently changed the
+  ## target distribution and a mirai daemon (own `.dynhr_opts`) used a
+  ## different exponent than the host (see .resolve_power_posterior).
+  power <- .resolve_power_posterior(power, "make_log_posterior_whittle")
   ## Guard: filter_tunes are a time-domain feature (they insert NA data at
   ## specific periods); the Whittle likelihood assumes a complete, stationary
   ## panel. Stop early with a clear message rather than silently wrong results.
@@ -577,127 +586,79 @@ make_log_posterior_whittle <- function(model, data, prior_spec, obs_vars,
       !is.null(compiled$model$lead_lag_incidence))
     compiled$lead_lag_incidence <- compiled$model$lead_lag_incidence
 
-  sys_cache <- cache_system_structure(compiled)
-
-  ## Warm-start cache for steady-state solve (same trick as gaussian path)
-  ss_warm <- NULL
-
   ## Observable indices (used to slice ghx, ghu identically to kalman_filter)
   exo_names <- model$varexo_names
 
-  function(theta) {
-    lp <- log_prior(theta, prior_spec)
-    if (!is.finite(lp))
-      return(list(logpost = -Inf, loglik = -Inf, logprior = lp))
+  ## Adapter over the shared closure builder (R/posterior-closure.R). Specific
+  ## to this branch: the spectral-density assembly, the debiasing pre-compute
+  ## and .whittle_loglik(). The stationarity guard is the shared "spectral"
+  ## one -- the Whittle spectral density is undefined at a unit root, so
+  ## unlike the gaussian path there is no diffuse escape hatch.
+  .make_posterior_closure(
+    model, data, prior_spec, obs_vars, compiled,
+    loglik_fn = function(sol, params, ss, theta, me_floor_check, ...) {
+      dr <- sol$dr
+      ## Extract state-space matrices (same slicing as kalman_filter)
+      state_idx <- dr$state_idx
+      endo      <- dr$endo_names
+      ghx       <- dr$ghx
+      ghu       <- dr$ghu
+      obs_idx   <- match(obs_vars, endo)
+      if (any(is.na(obs_idx))) return(NULL)
 
-    params <- .apply_theta_to_params(model, theta)
+      ## Construct dsge_ss at the Whittle boundary (timing = "lagged").
+      ## Unpack to locals immediately — .whittle_spectral_density is a hot
+      ## kernel that must not incur S3 dispatch per frequency. (Named
+      ## `ss_mats`, not `ss`: `ss` is the builder's steady-state argument.)
+      Sigma_e <- .get_shock_cov(model, exo_names, params)
+      ss_mats <- new_dsge_ss(
+        T_mat   = ghx[state_idx, , drop = FALSE],
+        R_mat   = ghu[state_idx, , drop = FALSE],
+        Z_mat   = ghx[obs_idx,   , drop = FALSE],
+        D_mat   = ghu[obs_idx,   , drop = FALSE],
+        Sigma_e = Sigma_e,
+        timing  = "lagged"
+      )
+      TT <- ss_mats$T_mat; RR <- ss_mats$R_mat
+      ZZ <- ss_mats$Z_mat; DD <- ss_mats$D_mat
 
-    ss_result <- solve_steady_state(model, compiled, params,
-                                    y0 = ss_warm, verbose = FALSE)
-    if (is.null(ss_result) || !isTRUE(ss_result$converged)) {
-      if (!is.null(ss_warm))
-        ss_result <- solve_steady_state(model, compiled, params,
-                                        verbose = FALSE)
-      if (is.null(ss_result) || !isTRUE(ss_result$converged)) {
-        ss_warm <<- NULL
-        return(list(logpost = -Inf, loglik = -Inf, logprior = lp))
+      ## Build spectral-density function for this parameter draw
+      me_var <- me_variance    # capture in closure
+      S_fn   <- function(omega)
+        .whittle_spectral_density(omega, TT, RR, ZZ, DD, Sigma_e, me_var)
+
+      ## Debiased Whittle: precompute E[I(omega_j)] for all J frequencies.
+      ## Re-computed every draw because TT, ZZ, Sigma_e (and hence P0) vary
+      ## with theta.  Cost: O(T * n_state^2) for c(tau) + O(T * J * n_obs^2)
+      ## for the Fejer sum — both negligible vs the steady-state solve.
+      EI_list_draw <- if (isTRUE(debias)) {
+        tryCatch({
+          c_arr <- .whittle_compute_ctau(TT, RR, ZZ, DD, Sigma_e, T_len, me_var)
+          .whittle_compute_EI(c_arr, pdgm$omega, T_len)
+        }, error = function(e) NULL)
+      } else {
+        NULL
       }
-    }
-    ss_warm <<- ss_result$ss
 
-    ## Re-derive SSM-computed params for a consistent linearization point
-    ## (no-op for non-SSM-parameter models; Tier 13 #1).
-    params <- ss_result$params %||% params
-    sys <- extract_system_matrices_fast(sys_cache, ss_result$ss, params)
-    dr  <- .solve_from_system(sys, model, compiled, ss_result$ss, params, FALSE)
-    if (is.null(dr) || !isTRUE(dr$bk_satisfied))
-      return(list(logpost = -Inf, loglik = -Inf, logprior = lp))
-
-    ## Stationarity guard: Whittle spectral density is undefined at unit roots.
-    ## Same logic as the gaussian path in make_log_posterior().
-    ns <- length(dr$state_idx)
-    ev <- dr$eigenvalues
-    spectral_radius <- if (!is.null(ev) && length(ev) >= ns)
-      max(Mod(ev[seq_len(ns)]))
-    else
-      max(Mod(eigen(dr$ghx[dr$state_idx, , drop = FALSE],
-                    only.values = TRUE)$values))
-    if (spectral_radius >= 1)
-      return(list(logpost = -Inf, loglik = -Inf, logprior = lp))
-
-    ## Extract state-space matrices (same slicing as kalman_filter)
-    state_idx <- dr$state_idx
-    endo      <- dr$endo_names
-    ghx       <- dr$ghx
-    ghu       <- dr$ghu
-    obs_idx   <- match(obs_vars, endo)
-    if (any(is.na(obs_idx)))
-      return(list(logpost = -Inf, loglik = -Inf, logprior = lp))
-
-    ## Construct dsge_ss at the Whittle boundary (timing = "lagged").
-    ## Unpack to locals immediately — .whittle_spectral_density is a hot kernel
-    ## that must not incur S3 dispatch per frequency.
-    Sigma_e  <- .get_shock_cov(model, exo_names, params)
-    ss <- new_dsge_ss(
-      T_mat   = ghx[state_idx, , drop = FALSE],
-      R_mat   = ghu[state_idx, , drop = FALSE],
-      Z_mat   = ghx[obs_idx,   , drop = FALSE],
-      D_mat   = ghu[obs_idx,   , drop = FALSE],
-      Sigma_e = Sigma_e,
-      timing  = "lagged"
-    )
-    TT <- ss$T_mat; RR <- ss$R_mat; ZZ <- ss$Z_mat; DD <- ss$D_mat
-
-    ## Build spectral-density function for this parameter draw
-    me_var   <- me_variance    # capture in closure
-    S_fn     <- function(omega)
-      .whittle_spectral_density(omega, TT, RR, ZZ, DD, Sigma_e, me_var)
-
-    ## Debiased Whittle: precompute E[I(omega_j)] for all J frequencies.
-    ## Re-computed every draw because TT, ZZ, Sigma_e (and hence P0) vary
-    ## with theta.  Cost: O(T * n_state^2) for c(tau) + O(T * J * n_obs^2)
-    ## for the Fejer sum — both negligible vs the steady-state solve.
-    EI_list_draw <- if (isTRUE(debias)) {
-      tryCatch({
-        c_arr <- .whittle_compute_ctau(TT, RR, ZZ, DD, Sigma_e, T_len, me_var)
-        .whittle_compute_EI(c_arr, pdgm$omega, T_len)
-      }, error = function(e) NULL)
-    } else {
-      NULL
-    }
-
-    ll <- tryCatch(
-      .whittle_loglik(pdgm, S_fn, freq_band,
-                      debias = isTRUE(debias) && !is.null(EI_list_draw),
-                      EI_list = EI_list_draw),
-      error = function(e) {
-        ## Re-throw configuration errors (empty band) immediately; only swallow
-        ## numerical errors that arise during spectral density evaluation.
-        if (grepl("no Fourier frequencies", conditionMessage(e), fixed = TRUE))
-          stop(e)
-        -Inf
-      }
-    )
-    if (!is.finite(ll))
-      return(list(logpost = -Inf, loglik = -Inf, logprior = lp))
-
-    ## System priors: penalty on model features evaluated from the solved dr.
-    if (!is.null(system_priors)) {
-      sp_lp <- .eval_system_priors(
-        system_priors,
-        list(theta   = theta,
-             model   = model,
-             dr      = dr,
-             Sigma_e = .get_shock_cov(model, exo_names, params),
-             params  = params))
-      if (!is.finite(sp_lp))
-        return(list(logpost = -Inf, loglik = ll, logprior = lp))
-      lp <- lp + sp_lp
-    }
-
-    list(logpost = .dynhr_opt("power_posterior", default = 1) * ll + lp,
-         loglik = ll, logprior = lp)
-  }
+      ll <- tryCatch(
+        .whittle_loglik(pdgm, S_fn, freq_band,
+                        debias = isTRUE(debias) && !is.null(EI_list_draw),
+                        EI_list = EI_list_draw),
+        error = function(e) {
+          ## Re-throw configuration errors (empty band) immediately; only
+          ## swallow numerical errors from the spectral density evaluation.
+          if (grepl("no Fourier frequencies", conditionMessage(e), fixed = TRUE))
+            stop(e)
+          -Inf
+        }
+      )
+      if (!is.finite(ll)) return(NULL)
+      list(loglik = ll, Sigma_e = Sigma_e)
+    },
+    power             = power,
+    needs_me_floor    = FALSE,
+    system_prior      = system_priors,
+    system_prior_mode = "lp")
 }
 
 

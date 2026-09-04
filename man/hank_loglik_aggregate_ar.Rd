@@ -5,11 +5,11 @@
 \title{Exact-AR(1) Gaussian log-likelihood of aggregate HANK data (scalar shock)}
 \usage{
 hank_loglik_aggregate_ar(
-  Y,
+  data,
   Theta,
   rho,
   sigma_eps,
-  me_var = 0,
+  me_variance = 0,
   q = NULL,
   check_boundary = TRUE,
   boundary_tol = 0.001,
@@ -17,7 +17,7 @@ hank_loglik_aggregate_ar(
 )
 }
 \arguments{
-\item{Y}{\code{T_data x n_obs} matrix of demeaned aggregate observations
+\item{data}{\code{T_data x n_obs} matrix of demeaned aggregate observations
 (deviations from steady state), columns in the same order as
 \code{Theta}; \code{NA}/\code{NaN} entries allowed.}
 
@@ -27,7 +27,7 @@ hank_loglik_aggregate_ar(
 
 \item{sigma_eps}{Shock innovation standard deviation.}
 
-\item{me_var}{Measurement-error variance added to every observable
+\item{me_variance}{Measurement-error variance added to every observable
 (default 0).}
 
 \item{q}{Number of quasi-differenced MA terms retained (default all rows of
@@ -41,7 +41,7 @@ hank_loglik_aggregate_ar(
 \code{1e-3}).}
 
 \item{cache}{Optional environment (\code{new.env()}) reused across calls
-with the same \code{Y} shape and missing-data pattern.  Two
+with the same \code{data} shape and missing-data pattern.  Two
 exactness-preserving layers (a cache hit returns identical floats to
 the uncached path): per-shock unscaled autocovariance slabs keyed on
 \code{(rho, q, Theta)} -- so a one-coordinate optimizer/gradient
@@ -71,7 +71,7 @@ agree bit-exactly.
 }
 \details{
 Unlike \code{\link{hank_loglik_aggregate}}, missing observations
-(\code{NA}/\code{NaN} entries of \code{Y}) are handled exactly, by row
+(\code{NA}/\code{NaN} entries of \code{data}) are handled exactly, by row
 deletion of the stacked system.
 }
 \section{Representability bound}{

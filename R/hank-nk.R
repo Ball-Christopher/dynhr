@@ -106,7 +106,7 @@ hank_nk_hank <- function(a_grid, Pi, e, beta, eis, r_ss = 0.005,
 
   structure(list(model = model, block = block, B = B, Y_ss = Y_ss,
                  r_ss = r_ss, phi = phi, kappa = kappa, beta_p = beta_p),
-            class = "hank_nk")
+            class = c("hank_nk", "hank_block"))
 }
 
 
@@ -235,5 +235,5 @@ hank_nk_hank_mixture <- function(a_grid, Pi, e, betas, omega, eis,
   structure(list(model = model, blocks = blocks, omega = omega, betas = betas,
                  B = B, Y_ss = Y_ss, r_ss = r_ss, phi = phi, kappa = kappa,
                  beta_p = beta_p),
-            class = c("hank_nk_mixture", "hank_nk"))
+            class = c("hank_nk_mixture", "hank_nk", "hank_block"))
 }

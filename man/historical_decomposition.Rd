@@ -4,16 +4,54 @@
 \alias{historical_decomposition}
 \title{Historical decomposition: per-shock contributions to ALL endo variables}
 \usage{
-historical_decomposition(smoothed_shocks, ss)
+historical_decomposition(
+  smoothed_shocks,
+  ss,
+  s0 = NULL,
+  smoothed_states = NULL,
+  shock_groups = NULL,
+  model = NULL
+)
 }
 \arguments{
-\item{smoothed_shocks}{T x n_shock matrix}
+\item{smoothed_shocks}{\code{T x n_shock} matrix of smoothed structural
+shocks, OR the whole \code{\link{kalman_smoother}} result list -- in
+which case the smoothed states and the smoothed initial state
+\eqn{s_{0|T}} are taken from it too (this is the form that makes the
+adding-up exact without any further arguments).}
 
-\item{ss}{State-space list from build_dsge_state_space()}
+\item{ss}{State-space list from
+\code{\link{build_dsge_state_space}()}. Contributions are in
+DEVIATIONS from the steady state (add \code{ss$ys[v]} to read variable
+\code{v} back in levels); only the data going INTO the smoother is in
+levels.}
+
+\item{s0}{Numeric length-\code{n_state} initial state (in
+\code{ss$state_names} order). Default \code{NULL}: taken from the
+smoother result when one was passed, otherwise zero (the pre-0.9.2
+behaviour -- the shock columns are unaffected either way).}
+
+\item{smoothed_states}{Optional \code{T x n_state} matrix of
+\eqn{s_{t|T}}; when supplied (or carried by the smoother result) the
+returned object also gains \code{$smoothed} (the smoothed series
+reconstructed directly from the states) and
+\code{$adding_up_residual}.}
+
+\item{shock_groups}{Optional named list grouping shocks, e.g.
+\code{list(supply = c("e_a", "e_z"), demand = "e_g")} (Dynare
+\code{shock_groups} semantics). Grouped output replaces the per-shock
+columns by group sums; shocks in no group land in an \code{"other"}
+column. Defaults to \code{model$shock_groups} when \code{model} is given.}
+
+\item{model}{Optional parsed model, used only as the fallback
+source of \code{shock_groups} (the explicit argument wins).}
 }
 \value{
-List with $contributions (named list of T x n_endo matrices)
-        and $total (T x n_endo)
+List of class \code{dynhr_shock_decomposition} with
+  \code{$contributions} (named list of \code{T x n_endo} matrices: one per
+  shock or group, plus \code{"initial"}), \code{$total} (\code{T x n_endo},
+  the sum of all components = the smoothed series in deviations from
+  steady state), \code{$initial}, \code{$s0} and \code{$components}.
 }
 \description{
 Uses the full ghx/ghu (not just the compact state-space) to recover
@@ -23,4 +61,17 @@ contributions to all n_endo variables, not just states.
 For each shock j:
   \deqn{s_t^{(j)} = T s_{t-1}^{(j)} + R[:,j] \epsilon_{j,t}}
   \deqn{y_t^{(j)} = ghx \cdot s_{t-1}^{(j)} + ghu[:,j] \epsilon_{j,t}}
+
+The per-shock recursions all start at \eqn{s_0^{(j)} = 0}, so on their own
+they reconstruct the smoothed path only when the smoothed initial state is
+the steady state. The \code{"initial"} component closes that gap: it is the
+shock-free trajectory started at \eqn{s_{0|T}},
+
+  \deqn{s_t^{(0)} = T s_{t-1}^{(0)}, \quad s_0^{(0)} = s_{0|T}, \qquad
+        y_t^{(0)} = ghx \cdot s_{t-1}^{(0)},}
+
+which makes the adding-up
+\eqn{\sum_j y_t^{(j)} + y_t^{(0)} = ghx s_{t-1|T} + ghu \varepsilon_{t|T}}
+exact at every \eqn{t} (to smoother round-off, ~1e-15), not just
+asymptotically once the initial condition has decayed.
 }

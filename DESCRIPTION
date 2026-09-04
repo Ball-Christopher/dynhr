@@ -1,16 +1,24 @@
 Package: dynhr
 Title: DSGE Modelling Toolkit (Parsing, Solving, Estimating, Diagnosing)
-Version: 0.9.2
+Version: 0.9.3
 Authors@R: c(
     person("Chris", "Ball", role = c("aut", "cre"),
            email = "chrispball1@gmail.com"))
-Description: Parses Dynare .mod files, solves the resulting models by
-    first-order perturbation, runs Bayesian estimation (random-walk
-    Metropolis-Hastings, sequential Monte Carlo, NUTS), and reports a
-    battery of identification, convergence, fit, and narrative
-    diagnostics. A self-contained R alternative to Dynare for medium
-    scale DSGE models, with a parity test suite against Dynare and
-    Dynare.jl.
+Description: Parses Dynare '.mod' files, solves the resulting models by
+    perturbation at orders one through five or by global projection
+    methods, evaluates the likelihood with Kalman, Markov-switching,
+    particle (bootstrap, tempered, Rao-Blackwellised) and pruned skewed
+    Kalman filters, runs Bayesian estimation (random-walk
+    Metropolis-Hastings, sequential Monte Carlo, 'SMC-squared', the
+    no-U-turn sampler, differential-evolution samplers, and
+    particle-marginal Metropolis-Hastings) as well as moment-based
+    estimation ('GMM' and 'SMM'), and reports a battery of
+    identification, convergence, fit, and narrative diagnostics. Also
+    covers optimal policy (Ramsey, optimal simple rules, discretion),
+    occasionally-binding constraints, mixed-frequency observations, and
+    heterogeneous-agent ('HANK') models. A self-contained R alternative
+    to Dynare for medium scale DSGE models, with a parity test suite
+    against Dynare and Dynare.jl.
 License: MIT + file LICENSE
 URL: https://github.com/Ball-Christopher/dynhr
 BugReports: https://github.com/Ball-Christopher/dynhr/issues
@@ -83,7 +91,7 @@ Collate:
     'parse-heteroskedastic-shocks.R'
     'parse-stochastic-volatility.R'
     'parse-mod.R'
-    'log-parser-monolith.R'
+    'write-mod.R'
     'ast-simplify.R'
     'ast-differentiate.R'
     'ast-codegen.R'
@@ -120,12 +128,15 @@ Collate:
     'solve-perturbation-order4-5-sigma.R'
     'solve-perturbation-sigma-analytic.R'
     'global-cheb-utils.R'
+    'global-likelihood.R'
+    'global-sbc.R'
     'global-solve.R'
     'global-solution-methods.R'
     'stochsimul-monolith.R'
     'stochastic-ss.R'
     'transform-monolith.R'
     'backend-monolith.R'
+    'mixed-frequency.R'
     'kalman-filter.R'
     'kf-step.R'
     'kalman-filter-student.R'
@@ -133,6 +144,8 @@ Collate:
     'ms-spec.R'
     'ms-solve.R'
     'ms-filter.R'
+    'ms-smoother.R'
+    'ms-irf.R'
     'filter-tunes.R'
     'heteroskedastic-shocks.R'
     'stochastic-volatility.R'
@@ -157,12 +170,15 @@ Collate:
     'state-space.R'
     'spectral-density.R'
     'smoother-monolith.R'
+    'shock-decomposition.R'
     'conditional-forecast.R'
     'param-transform.R'
     'param-set.R'
     'checkpoint.R'
+    'chain-state.R'
     'prior-density.R'
     'prior-spec.R'
+    'posterior-closure.R'
     'posterior.R'
     'mdd-thames.R'
     'system-priors.R'
@@ -173,10 +189,12 @@ Collate:
     'fd-safe-hessian.R'
     'mode-trust-region.R'
     'mode-orchestrate.R'
+    'method-of-moments.R'
     'profile-ci.R'
     'parallel-cluster.R'
     'parallel-mirai.R'
     'sampler-rwmh.R'
+    'sampler-da.R'
     'sampler-smc.R'
     'parallel-smc-mirai.R'
     'smc2.R'
@@ -247,6 +265,7 @@ Collate:
     'diag-expectations.R'
     'diag-posterior-predictive.R'
     'diag-scoring-rules.R'
+    'forecast-eval.R'
     'diag-model-structure.R'
     'diag-obc-d31-scenario.R'
     'diag-obc-d32-binding.R'
@@ -254,7 +273,6 @@ Collate:
     'diag-data.R'
     'diag-bayesian-irf.R'
     'bayesian-cfcst.R'
-    'diag-shock-dominant.R'
     'diag-model-compare.R'
     'diag-orchestrate.R'
     'diag-report-llm.R'
@@ -337,7 +355,9 @@ Collate:
     'hank-jacobian.R'
     'hank-jacobian2.R'
     'hank-jacobian2d.R'
+    'hank-print.R'
     'hank-ge.R'
+    'hank-aggregate-risk.R'
     'hank-model.R'
     'hank-model-dtheta.R'
     'hank-twoasset-model.R'
@@ -367,6 +387,7 @@ Collate:
     'run-posterior-estimation.R'
     'pmmh.R'
     'api.R'
+    'dynhr-model.R'
     'mdd-calibration.R'
     'run-full-estimation.R'
     'options.R'

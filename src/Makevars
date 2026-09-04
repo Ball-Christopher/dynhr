@@ -1,2 +1,19 @@
+## CXX_STD: src/hank_egm2.cpp and src/hank_egm3.cpp use std::barrier (C++20).
+## Without this line some toolchains fall back to C++17 and fail on <barrier>.
+## Keep it FIRST: tools/hooks/pre-commit-cxx-std.sh and
+## tests/testthat/test-build-config.R both police this declaration.
 CXX_STD = CXX20
-PKG_LIBS = $(LAPACK_LIBS) $(BLAS_LIBS) $(FLIBS)
+## -pthread: the HANK EGM kernels use std::thread UNCONDITIONALLY
+## (hank_egm2.cpp Egm2Pool, hank_egm3.cpp Egm3Pool / hank_egm3_step_cpp). On
+## glibc < 2.34 libstdc++ needs the flag at BOTH compile and link time; without
+## it std::thread's constructor throws
+##   "Enable multithreading to use std::thread: Operation not permitted"
+## at RUN time, so the default (threaded) HANK path fails on older Linux even
+## though the package compiled and installed cleanly. macOS/clang accepts
+## -pthread as a no-op, so a local build proves nothing about this -- exactly
+## the 0.9.1.1 CXX_STD lesson, one flag over.
+##
+## Deliberately NOT mirrored in src/Makevars.win: Rtools links winpthreads
+## implicitly and -pthread is unnecessary there.
+PKG_CXXFLAGS = -pthread
+PKG_LIBS = -pthread $(LAPACK_LIBS) $(BLAS_LIBS) $(FLIBS)

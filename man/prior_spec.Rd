@@ -18,6 +18,17 @@ Reads the \code{estimated_params} block from \code{model} and returns a
 data.frame suitable for \code{\link{make_posterior}} and
 \code{\link{find_mode}}.
 }
+\examples{
+## nk_demo.mod carries a nine-parameter estimated_params block
+model  <- parse_mod(system.file("extdata/models/nk_demo.mod",
+                                package = "dynhr"), verbose = FALSE)
+priors <- prior_spec(model)
+priors[, c("name", "distribution", "p1", "p2")]
+
+## prior means are the conventional starting point for find_mode()
+theta0 <- setNames(priors$mean, priors$name)
+}
 \seealso{
-\code{\link{make_posterior}}, \code{\link{find_mode}}
+\code{\link{make_posterior}}, \code{\link{find_mode}},
+  \code{\link{dynhr_model}} (the pipeline-object equivalent)
 }

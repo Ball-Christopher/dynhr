@@ -355,23 +355,3 @@ ast_differentiate2 <- function(node, var1_name, var1_ll = 0L,
     d1 <- ast_differentiate(node, var1_name, var1_ll)
     ast_differentiate(d1, var2_name, var2_ll)  # already simplified inside
 }
-
-
-#' Compute the third partial derivative of an AST w.r.t. three variables
-#'
-#' Applies ast_differentiate three times.  By Schwarz/Clairaut symmetry the
-#' result is invariant to the order of the three (var, ll) arguments for
-#' smooth f.
-#'
-#' @param node      AST node to differentiate (already simplified).
-#' @param var1_name,var1_ll First variable name and lead/lag.
-#' @param var2_name,var2_ll Second variable name and lead/lag.
-#' @param var3_name,var3_ll Third variable name and lead/lag.
-#' @return Simplified AST of d³f/(dvar1 dvar2 dvar3).
-#' @noRd
-ast_differentiate3 <- function(node, var1_name, var1_ll = 0L,
-                                      var2_name, var2_ll = 0L,
-                                      var3_name, var3_ll = 0L) {
-    d12 <- ast_differentiate2(node, var1_name, var1_ll, var2_name, var2_ll)
-    ast_differentiate(d12, var3_name, var3_ll)
-}

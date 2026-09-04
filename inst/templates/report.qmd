@@ -132,7 +132,7 @@ show_explanations <- isTRUE(params$show_explanations)
     ggplot2::geom_hline(yintercept = 0, colour = "grey60", linewidth = 0.25) +
     ggplot2::geom_line(colour = palette, linewidth = 0.5) +
     ggplot2::facet_wrap(~ variable, scales = "free_y") +
-    theme_rbnz_diagnostic() +
+    theme_dynhr_diagnostic() +
     ggplot2::labs(title = sprintf("IRF: shock = %s", shock_nm),
                   x = "Horizon (quarters)", y = "Response")
   attr(p, "dynhr_fig_height") <- 7.5

@@ -482,3 +482,69 @@ combined_optimize <- function(fn, par, lower = -Inf, upper = Inf,
   }
   out
 }
+
+
+#' RWMH proposal covariance for the one-call estimation entry points
+#'
+#' \code{.run_mode_finding()} deliberately returns only the mode and its
+#' convergence record -- it is also the optimiser core for
+#' \code{method_of_moments()} and the HANK AR runner, neither of which wants
+#' to pay for a Hessian. The samplers, however, need posterior curvature.
+#'
+#' HISTORY (fixed 2026-09-04). \code{run_full_estimation()} and
+#' \code{estimate-runner.R} both wrote
+#' \code{if (!is.null(mode_res$V_mode)) ... else diag(prior_spec$std^2)}.
+#' Because \code{.run_mode_finding()} never sets \code{V_mode}, that condition
+#' was NEVER true: the one-call API always proposed from PRIOR variances and
+#' silently discarded the posterior curvature. It survived on models whose
+#' priors happen to sit at the posterior scale (fs2000: 10\% acceptance) and
+#' froze outright on a well-identified one (a 9-parameter NK fixture: 0\%
+#' acceptance, ZERO posterior variance -- every draw equal to the mode), where
+#' the inverse-Hessian proposal samples at 23.5\%.
+#'
+#' This helper computes the Hessian at the mode and runs it through exactly the
+#' same regularisation \code{run_mode_finding()} uses
+#' (\code{.proposal_cov_from_hessian()}: \code{.make_pd} for a non-finite or
+#' ill-conditioned Hessian, then eigen-basis capping at the prior scale). If
+#' the Hessian cannot be computed at all it falls back to the prior-variance
+#' diagonal as before -- but LOUDLY, because a silent fallback here is
+#' indistinguishable from a working sampler until someone checks the
+#' acceptance rate.
+#'
+#' @param log_post_fn Log-posterior closure.
+#' @param theta_mode Named mode vector.
+#' @param prior_spec Prior specification.
+#' @param verbose Print progress.
+#' @return An n_par x n_par proposal covariance with dimnames.
+#' @noRd
+.sampler_proposal_cov <- function(log_post_fn, theta_mode, prior_spec,
+                                  verbose = TRUE) {
+  n_par     <- length(theta_mode)
+  opt_scale <- 2.38^2 / n_par
+  prior_fallback <- function() {
+    S <- diag(prior_spec$std^2, nrow = n_par) * opt_scale
+    dimnames(S) <- list(names(theta_mode), names(theta_mode))
+    S
+  }
+
+  h    <- max(1e-4, 1e-4 * max(abs(theta_mode)))
+  hess <- tryCatch(num_hessian(log_post_fn, theta_mode, h = h),
+                   error = function(e) NULL)
+  if (is.null(hess) || !any(is.finite(hess))) {
+    warning("run_full_estimation: could not evaluate the posterior Hessian at ",
+            "the mode, so the RWMH proposal falls back to the PRIOR variances. ",
+            "That is only a sensible proposal when the prior and posterior are ",
+            "on a similar scale; on a well-identified posterior it can freeze ",
+            "the chain (acceptance ~0). Check `acceptance_rate`, and supply a ",
+            "proposal covariance explicitly (mcmc(..., Sigma_prop = )) if it ",
+            "is low.", call. = FALSE)
+    return(prior_fallback())
+  }
+
+  S <- tryCatch(
+    .proposal_cov_from_hessian(hess, prior_spec, theta_mode, verbose)$Sigma,
+    error = function(e) NULL)
+  if (is.null(S)) return(prior_fallback())
+  dimnames(S) <- list(names(theta_mode), names(theta_mode))
+  S
+}

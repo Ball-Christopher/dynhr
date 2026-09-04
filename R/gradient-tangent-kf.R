@@ -110,6 +110,9 @@
   n_T <- ncol(Y)
 
   has_me_extra    <- !is.null(me_extra)
+  ## Any TRUE observation noise (base me_variance or per-period me_extra):
+  ## both feed F AND the Joseph covariance term (F3-D).
+  has_me_true     <- has_me_extra || me_variance != 0
   has_shock_scale <- !is.null(shock_scale)
 
   ## -- Fast path: compiled per-step recursion (kf_tangent_cpp) -------------
@@ -260,11 +263,9 @@
     } else {
       Se_t <- Sigma_e; HH_t <- HH; SS_t <- SS
     }
-    if (has_me_extra) {
-      me_diag_t <- me_diag + diag(me_extra[, t], n_obs)
-    } else {
-      me_diag_t <- me_diag
-    }
+    me_x_t    <- if (has_me_extra) me_variance + me_extra[, t]
+                 else rep(me_variance, n_obs)
+    me_diag_t <- diag(me_x_t, n_obs)
 
     ## -- Base step (mirrors .kf_step exactly) ------------------------------
     PZ <- P %*% tZZ
@@ -289,14 +290,12 @@
 
     s_n <- as.numeric(TT %*% s) + as.numeric(K %*% v)
     P_n <- tcrossprod(A %*% P, A) + tcrossprod(B %*% Se_t, B)
-    ## Joseph true-noise term for me_extra (mirrors kalman_filter's standard
-    ## path): P' += K diag(me_extra[, t]) K'. me_variance stays F-only
-    ## (regularizer convention; no Joseph term). Kme is hoisted for the
-    ## per-parameter tangent recursion below.
+    ## Joseph true-noise term for the FULL ME diagonal (mirrors
+    ## kalman_filter's standard path): P' += K diag(me_x_t) K'. Kme is
+    ## hoisted for the per-parameter tangent recursion below.
     Kme <- NULL
-    if (has_me_extra) {
-      me_x_t <- me_extra[, t]
-      Kme    <- K %*% diag(me_x_t, n_obs)          # K diag(me_x_t)
+    if (has_me_true) {
+      Kme    <- K %*% me_diag_t                    # K diag(me_x_t)
       P_n    <- P_n + tcrossprod(Kme, K)           # + K me_x K'
     }
     P_n <- .sym(P_n)
@@ -368,11 +367,10 @@
               tcrossprod(dB %*% Se_t, B) +
               B %*% tcrossprod(dSig_t, B) +
               BSig %*% t(dB)
-      ## Tangent of the me_extra Joseph term P' += K me_x K' (me_extra is
+      ## Tangent of the ME Joseph term P' += K me_x K' (the ME diagonal is
       ## data, not differentiated): dP' += dK me_x K' + K me_x dK'.
-      if (has_me_extra)
-        dP_n <- dP_n + tcrossprod(dK %*% diag(me_x_t, n_obs), K) +
-                Kme %*% t(dK)
+      if (has_me_true)
+        dP_n <- dP_n + tcrossprod(dK %*% me_diag_t, K) + Kme %*% t(dK)
       dP_n <- .sym(dP_n)
 
       ds_l[[j]] <- ds_n

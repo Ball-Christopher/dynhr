@@ -24,7 +24,16 @@ rows/cols of \code{ZZ}/\code{HH}/\code{SS} and the corresponding
 log-density normalizing constant); a period with ALL observables missing
 falls back to a predict-only step (no update). Fully-observed and
 fully-missing periods are unaffected by this and match the previous
-behavior exactly.}
+behavior exactly.
+\code{Y} must be in LEVELS: the observation intercept is
+\code{ys + ghss/2 + c_v} (the order-2 mean), not zero.  Passing
+deviations from the steady state -- e.g. raw \code{simulate_model()} /
+\code{simulate_model_order2()} output, which are deviations -- makes
+every innovation carry the whole steady state and silently inflates
+\eqn{v_t^2/F_t} by orders of magnitude (F4-C: it turned an
+\eqn{O(\sigma^2)} model difference into a \eqn{\sigma}-invariant 2.8-nat
+offset against the linear Kalman filter).  Add \code{dr$ys[obs_vars]}
+to simulated deviations before filtering.}
 
 \item{obs_vars}{Character vector of observed variable names (must be a
 subset of \code{pss$endo_names}).}

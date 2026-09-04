@@ -360,93 +360,6 @@ pf_boundary_exo <- function(model, which = c("init", "terminal")) {
 # Backtracking line search
 # =============================================================================
 
-#' Armijo backtracking line search for perfect-foresight merit function
-#'
-#' Finds step length α ∈ (0, 1] such that:
-#'   θ(Y + α·Δ) ≤ θ(Y) + σ·α·∇θ(Y)·Δ
-#' where θ(Y) = ½||R(Y)||².
-#'
-#' @param Y            T × n_endo matrix: current path
-#' @param delta_vec    Numeric vector (length T*n_endo): Newton direction
-#' @param R_stack      Numeric vector (length T*n_endo): current residual
-#' @param J_stack      dgCMatrix: current Jacobian
-#' @param theta_cur    Scalar: current merit value = ½||R||²
-#' @param fn_merit     Function to evaluate θ at a new Y
-#' @param sigma        Armijo parameter (default 1e-4)
-#' @param max_ls       Maximum line search iterations (default 20)
-#' @param n_endo       Integer: number of endogenous variables
-#' @param T            Integer: horizon
-#' @return List with:
-#'   $alpha      — step length
-#'   $theta_new  — merit value at Y + alpha*delta
-#'   $Y_new      — updated path matrix (or NULL if no tried step reduced merit)
-#'   $ls_iter    — iterations used
-#'   $accepted   — logical: TRUE if the Armijo condition was met
-#'
-#' @details
-#' On Armijo failure the search no longer returns \code{NULL} with a discarded
-#' step. Instead it tracks the smallest-merit trial point actually evaluated and
-#' returns it whenever that point strictly improves on the incumbent. This is
-#' critical for cold-start robustness: the previous behaviour (return NULL →
-#' caller applies a blind half Newton step) could send the path to ~1e9 in a
-#' single iteration and singularise the next Jacobian (issue M15). Returning the
-#' best vetted point guarantees monotone non-increase of the merit function.
-#' @noRd
-.pf_line_search <- function(Y, delta_vec, R_stack, J_stack,
-                             theta_cur, fn_merit,
-                             sigma = 1e-4, max_ls = 20L,
-                             n_endo, T) {
-  # Compute gradient: ∇θ = J' · R
-  grad <- as.numeric(Matrix::crossprod(J_stack, R_stack))
-  directional_deriv <- sum(grad * delta_vec)
-
-  # If directional derivative is positive, Newton direction is not a descent
-  # direction. Fall back to steepest descent: Δ = -∇θ
-  if (directional_deriv >= 0) {
-    delta_vec <- -grad
-    directional_deriv <- -sum(grad * grad)
-  }
-
-  alpha <- 1.0
-
-  # Track the best (lowest-merit) trial point that strictly improves on the
-  # incumbent, so an Armijo failure still yields a usable (merit-decreasing)
-  # step rather than discarding all work (M15).
-  best_theta <- theta_cur
-  best_Y     <- NULL
-  best_alpha <- 0
-
-  for (ls_iter in seq_len(max_ls)) {
-    # Trial point
-    Y_trial <- Y
-    for (t in seq_len(T)) {
-      idx_t <- (t - 1L) * n_endo + seq_len(n_endo)
-      Y_trial[t, ] <- Y[t, ] + alpha * delta_vec[idx_t]
-    }
-
-    theta_new <- fn_merit(Y_trial)
-
-    if (is.finite(theta_new) && theta_new < best_theta) {
-      best_theta <- theta_new
-      best_Y     <- Y_trial
-      best_alpha <- alpha
-    }
-
-    # Armijo condition (isTRUE guards NaN merit values from invalid steps).
-    if (isTRUE(theta_new <= theta_cur + sigma * alpha * directional_deriv)) {
-      return(list(alpha = alpha, theta_new = theta_new,
-                  Y_new = Y_trial, ls_iter = ls_iter, accepted = TRUE))
-    }
-
-    alpha <- alpha * 0.5
-  }
-
-  # Armijo never satisfied: fall back to the best merit-decreasing trial point
-  # seen during backtracking (may be NULL if none improved — caller decides).
-  list(alpha = best_alpha, theta_new = best_theta,
-       Y_new = best_Y, ls_iter = max_ls, accepted = FALSE)
-}
-
 
 # =============================================================================
 # Robust Newton-step solver (Levenberg-Marquardt fallback)
@@ -534,6 +447,52 @@ pf_boundary_exo <- function(model, which = c("init", "terminal")) {
 # Main perfect-foresight solver
 # =============================================================================
 
+#' Build a perfect-foresight y0 from a parsed histval block
+#'
+#' `histval` stores, per variable, a vector indexed by LAG (element k = k
+#' periods before the first simulation period).  The stacked-time solver has a
+#' single-period initial condition, so only lag 1 is used; a deeper history is
+#' a hard error rather than a silent truncation.
+#'
+#' @param histval    Named list from `model$histval`.
+#' @param endo_names Endogenous variable ordering of the compiled model.
+#' @param exo_names  Exogenous names (histval entries for these are ignored).
+#' @param fallback   Named numeric vector supplying values for endogenous
+#'   variables the histval block does not mention (typically `y_terminal`).
+#' @return Named numeric vector over `endo_names`.
+#' @noRd
+.pf_y0_from_histval <- function(histval, endo_names, exo_names, fallback) {
+  unknown <- setdiff(names(histval), c(endo_names, exo_names))
+  if (length(unknown) > 0L)
+    stop("perfect_foresight_solve: histval names variable(s) that are ",
+         "neither endogenous nor exogenous in the compiled model: ",
+         paste(unknown, collapse = ", "), ".", call. = FALSE)
+
+  deep <- names(histval)[vapply(histval, function(v)
+    length(v) > 1L && any(!is.na(v[-1L])), logical(1))]
+  deep <- intersect(deep, endo_names)
+  if (length(deep) > 0L)
+    stop("perfect_foresight_solve: histval carries more than one lag for ",
+         paste(deep, collapse = ", "),
+         ". The stacked-time solver takes a single-period initial condition ",
+         "(lag 1 = the `y(0)` entries); pass `y0` explicitly instead.",
+         call. = FALSE)
+
+  y0 <- as.numeric(fallback[endo_names])
+  names(y0) <- endo_names
+  for (nm in intersect(names(histval), endo_names)) {
+    v <- histval[[nm]]
+    if (length(v) >= 1L && !is.na(v[1L])) y0[nm] <- v[1L]
+  }
+  if (anyNA(y0))
+    stop("perfect_foresight_solve: histval does not cover ",
+         paste(endo_names[is.na(y0)], collapse = ", "),
+         " and no fallback value is available; pass `y0` explicitly.",
+         call. = FALSE)
+  y0
+}
+
+
 #' Perfect-foresight stacked Newton path solver for non-stationary models
 #'
 #' Solves the T-period deterministic transition path for DSGE models that
@@ -562,6 +521,10 @@ pf_boundary_exo <- function(model, which = c("init", "terminal")) {
 #' @param compiled    dynhr_compiled (from \code{\link{compile_model}})
 #' @param y0          Named numeric vector: endogenous state at t=0 (from
 #'   \code{initval} block). Length must equal \code{n_endo}.
+#'   May be \code{NULL} when the model carries a \code{histval} block: the
+#'   history is then taken from \code{compiled$model$histval} (lag 1, i.e. the
+#'   \code{y(0)} entries), with any variable the block does not mention
+#'   falling back to \code{y_terminal}. An explicit \code{y0} always wins.
 #' @param y_terminal  Named numeric vector: terminal condition at t=T+1 (from
 #'   \code{endval} block). Length must equal \code{n_endo}.
 #' @param exo_path    T × n_exo numeric matrix: time path of exogenous variables.
@@ -624,7 +587,7 @@ pf_boundary_exo <- function(model, which = c("init", "terminal")) {
 #'                                    n_periods = T)
 #' }
 perfect_foresight_solve <- function(compiled,
-                                     y0,
+                                     y0 = NULL,
                                      y_terminal,
                                      exo_path        = NULL,
                                      params          = NULL,
@@ -648,6 +611,15 @@ perfect_foresight_solve <- function(compiled,
     params <- compiled$model$param_values
     if (is.null(params))
       stop("perfect_foresight_solve: params must be provided.")
+  }
+
+  ## `histval` as the default initial history (an explicit `y0` always wins).
+  if (is.null(y0)) {
+    hv <- compiled$model$histval
+    if (is.null(hv) || length(hv) == 0L)
+      stop("perfect_foresight_solve: `y0` is missing and the model has no ",
+           "histval block to take the initial history from.", call. = FALSE)
+    y0 <- .pf_y0_from_histval(hv, dyn$endo_names, dyn$exo_names, y_terminal)
   }
 
   if (n_eq != n_endo) {
@@ -867,7 +839,7 @@ perfect_foresight_solve <- function(compiled,
 
       # Line search or direct step
       if (line_search) {
-        ls <- .pf_line_search(
+        ls <- .line_search(
           Y_loc, delta_vec, sys$R, sys$J, theta_cur, merit_fn,
           sigma = 1e-4, max_ls = 20L, n_endo = n_endo, T = T
         )
@@ -965,3 +937,9 @@ perfect_foresight_solve <- function(compiled,
     merit_history = result$merit_history
   )
 }
+
+
+## Back-compat alias: the damped-Newton Armijo line search now lives once in
+## R/solve-helpers.R as .line_search().  Kept because tests call it by name.
+#' @noRd
+.pf_line_search <- function(...) .line_search(...)

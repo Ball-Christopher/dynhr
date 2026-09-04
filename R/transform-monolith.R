@@ -552,32 +552,6 @@
 ## Diagnostic plot
 ## ====================================================================
 
-dynhr_plot_comparison <- function(gaps, ncol = 4) {
-  comp <- attr(gaps, "comparison")
-  if (is.null(comp)) stop("No comparison data. Run dynhr_transform with nzsim_ref_path.")
-  
-  our <- comp$our
-  ref <- comp$ref
-  n   <- comp$n_compared
-  cols <- intersect(names(our), names(ref))
-  cols <- setdiff(cols, "date")
-  
-  nrow_plot <- ceiling(length(cols) / ncol)
-  par(mfrow = c(nrow_plot, ncol), mar = c(2, 3, 2, 1), cex = 0.7)
-  
-  for (col in cols) {
-    o <- our[[col]][1:n]
-    r <- ref[[col]][1:n]
-    cc <- cor(o, r, use = "complete.obs")
-    ylim <- range(c(o, r), na.rm = TRUE)
-    
-    plot(seq_len(n), r, type = "l", col = "black", lwd = 1.5,
-         ylim = ylim, main = sprintf("%s (r=%.3f)", col, cc),
-         xlab = "", ylab = "")
-    lines(seq_len(n), o, col = "steelblue", lwd = 1.5, lty = 2)
-    abline(h = 0, col = "grey60", lty = 3)
-  }
-}
 
 ## ======================================================================
 ## COVID lockdown smoothing -- new helper + dynhr_transform v3 patch

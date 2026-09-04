@@ -2,7 +2,7 @@
 ## --------------------------------------------------------------------------
 ## Phase-3 split from diagnostics-monolith.R.
 ##
-## Shared statistical helpers: .effective_sample_size(), .gelman_rubin(),
+## Shared statistical helpers: .effective_sample_size(),
 ## .ljung_box(), .svd_rank(), .safe_sym_inv(),
 ## .nz_events(), .add_nz_event_markers(), .numerical_jacobian()
 ## --------------------------------------------------------------------------
@@ -43,70 +43,6 @@
 }
 
 
-#' Gelman-Rubin R-hat diagnostic for multiple MCMC chains
-#'
-#' Computes the potential scale reduction factor (PSRF) for each parameter
-#' across m >= 2 chains.
-#'
-#' @param chains_list A list of matrices, each of dimension (n_draws x n_params).
-#'                    All matrices must have the same dimensions.
-#' @return A named list:
-#'   $rhat       -- numeric vector of R-hat values (one per parameter)
-#'   $pass       -- logical: all R-hat < 1.05
-#'   $pass_strict -- logical: all R-hat < 1.01
-#' @noRd
-.gelman_rubin <- function(chains_list) {
-  m <- length(chains_list)
-  if (m < 2) {
-    return(list(
-      rhat = NA_real_,
-      pass = NA,
-      pass_strict = NA,
-      message = "Gelman-Rubin requires >= 2 chains. Single-chain detected."
-    ))
-  }
-
-  n <- nrow(chains_list[[1]])
-  p <- ncol(chains_list[[1]])
-
-  # Chain means: m x p matrix
-  chain_means <- do.call(rbind, lapply(chains_list, colMeans))
-
-  # Grand mean: 1 x p
-
-  grand_mean <- colMeans(chain_means)
-
-  # Between-chain variance
-  B <- (n / (m - 1)) * colSums(sweep(chain_means, 2, grand_mean)^2)
-
-  # Within-chain variance
-  W <- rep(0, p)
-  for (j in seq_len(m)) {
-    W <- W + apply(chains_list[[j]], 2, var)
-  }
-  W <- W / m
-
-  # Pooled variance estimate
-  V_hat <- ((n - 1) / n) * W + (1 / n) * B
-
-  # R-hat
-  rhat <- sqrt(V_hat / W)
-  rhat[is.nan(rhat)] <- 1.0  # constant chains
-
-  if (!is.null(colnames(chains_list[[1]]))) {
-    names(rhat) <- colnames(chains_list[[1]])
-  }
-
-  list(
-    rhat        = rhat,
-    pass        = all(rhat < 1.05),
-    pass_strict = all(rhat < 1.01),
-    message     = sprintf("Max R-hat = %.4f across %d parameters, %d chains",
-                          max(rhat), p, m)
-  )
-}
-
-
 #' Ljung-Box test for serial correlation
 #'
 #' @param x       Numeric vector (e.g. smoothed shocks).
@@ -134,7 +70,6 @@
     message   = sprintf("Ljung-Box Q(%d) = %.2f, p = %.4f", max_lag, Q, p_val)
   )
 }
-
 
 
 #' Numerical rank of a matrix from its singular values
@@ -477,4 +412,46 @@
   }
 
   J
+}
+
+
+## ---------------------------------------------------------------------------
+## Shared identification-diagnostic helpers (D27 / D28)
+##
+## Both diagnostics used to carry byte-identical private copies
+## (.stoch_simul_internal_d27 / _d28 and .moments_from_dr_d27 /
+## .compute_moments_from_dr).  One implementation each, 2026-09.
+## ---------------------------------------------------------------------------
+
+#' Compile + solve a model at a parameter draw (identification diagnostics)
+#'
+#' @param dr_order Perturbation order (default 1).
+#' @return DecisionRules, or NULL if compilation / steady state / perturbation
+#'   failed.
+#' @noRd
+.stoch_simul_internal_diag <- function(model, params, dr_order = 1L) {
+  compiled <- compile_model(model, verbose = FALSE)
+  if (is.null(compiled)) return(NULL)
+  ss <- solve_steady(compiled, params = params, verbose = FALSE)
+  if (is.null(ss) || !isTRUE(ss$converged)) return(NULL)
+  dr <- solve_perturbation(model, compiled, ss$values, params, order = dr_order, verbose = FALSE)
+  dr
+}
+
+#' Model-implied moments from decision rules (identification diagnostics)
+#'
+#' @param dr DecisionRules object.
+#' @return List with $sigma_y, $acf_y, or NULL.
+#' @noRd
+.moments_from_dr <- function(dr, model = NULL, params = NULL) {
+  if (!is.null(model)) {
+    moments <- compute_moments(dr, model, params = params)
+  } else {
+    moments <- compute_moments(dr)
+  }
+  if (!is.list(moments) || is.null(moments$var_cov)) return(NULL)
+  list(
+    sigma_y = moments$var_cov,
+    acf_y = if (!is.null(moments$autocorr)) moments$autocorr else NULL
+  )
 }

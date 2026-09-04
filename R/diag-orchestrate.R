@@ -921,9 +921,18 @@ run_model_diagnostics <- function(model, dr = NULL, ss = NULL, verbose = TRUE) {
                       error = function(e) NULL)
     if (!is.null(sp_sm)) {
       ## data is T x n_obs (same orientation cov(data)/colMeans(data) use); the
-      ## smoother takes Y as T x n_obs (nrow = T).
+      ## smoother takes Y as T x n_obs (nrow = T), in LEVELS -- the state space
+      ## carries the observation intercept and subtracts it.
+      ##
+      ## Until 0.9.3 it did not: the smoother reached through a pre-built state
+      ## space silently required DEVIATIONS, and this call handed it the raw
+      ## level series, so D11/D12 ran on an un-demeaned likelihood. On nk_demo
+      ## (observable steady states 0.5, 2, 4) that put the smoothed shocks out
+      ## by 6x -- max |eps| 4.83 against 0.80 -- and the loglik at -33990.3
+      ## against -757.6. Any historical decomposition produced by this path
+      ## before 0.9.3 on a model with non-zero observable steady states is wrong.
       Y_sm <- as.matrix(data[, obs_names, drop = FALSE])
-      sm_out <- tryCatch(kalman_smoother(Y_sm, sp_sm), error = function(e) NULL)
+      sm_out <- tryCatch(.kalman_smoother_ss(Y_sm, sp_sm), error = function(e) NULL)
       if (!is.null(sm_out)) {
         smoothed_shocks <- sm_out$smoothed_shocks
         hd <- tryCatch(historical_decomposition(smoothed_shocks, sp_sm),

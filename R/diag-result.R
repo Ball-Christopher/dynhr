@@ -4,7 +4,7 @@
 ##
 ## .make_result() constructor for dynhr_diagnostic S3 class;
 ## format_llm_report() suite -> LLM-ready text;
-## print methods; .pass_badge()
+## print methods
 ##
 ## LLM summary design
 ## ------------------
@@ -114,10 +114,6 @@ format_llm_report <- function(suite, model_name = NULL, include_plots = FALSE) {
   paste(lines, collapse = "\n")
 }
 
-# tiny helpers
-is.na_pass <- function(r) is.na(r$pass)
-is_errored <- function(r) isTRUE(r$errored)
-
 
 # ---------------------------------------------------------------------------
 #' Write an LLM-ready diagnostic report to file
@@ -168,24 +164,6 @@ write_llm_suite_report <- function(diagnostics, file = "dynhr_report.md",
   else if (is.na(r$pass)) "INFO"
   else if (isTRUE(r$pass)) "PASS"
   else "FAIL"
-}
-
-#' @noRd
-.pass_badge <- function(pass, errored = FALSE) {
-  if (isTRUE(errored)) {
-    '<span style="background:#CC6600;color:white;padding:2px 8px;border-radius:4px;font-weight:bold;">ERROR</span>'
-  } else if (is.na(pass)) {
-    '<span style="background:#737373;color:white;padding:2px 8px;border-radius:4px;font-weight:bold;">INFO</span>'
-  } else if (pass) {
-    '<span style="background:#107C10;color:white;padding:2px 8px;border-radius:4px;font-weight:bold;">PASS</span>'
-  } else {
-    '<span style="background:#A80000;color:white;padding:2px 8px;border-radius:4px;font-weight:bold;">FAIL</span>'
-  }
-}
-
-#' @noRd
-.pass_callout <- function(pass, errored = FALSE) {
-  if (isTRUE(errored)) "danger" else if (is.na(pass)) "note" else if (pass) "tip" else "warning"
 }
 
 

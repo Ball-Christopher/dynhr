@@ -36,6 +36,7 @@
 #' @param ss     Named numeric steady state (for magnitude scaling)
 #' @param params Named numeric parameter vector (for shock variances)
 #' @return A dynhr_diagnostic object
+#' @keywords internal
 #' @export
 d19_second_order_accuracy <- function(dr2, model = NULL,
                                        ss = NULL, params = NULL) {
@@ -217,6 +218,7 @@ d19_second_order_accuracy <- function(dr2, model = NULL,
 #' @param params      Named parameter vector
 #' @param meta        Optional metadata list attached to the diagnostic result
 #' @return A dynhr_diagnostic object with plots
+#' @keywords internal
 #' @export
 d19_irf_comparison <- function(dr2, model, shock_name = NULL,
                                 vars = NULL, n_periods = 40L,

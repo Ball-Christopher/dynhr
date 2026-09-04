@@ -68,7 +68,10 @@ List kalman_ss_loop_cpp(const arma::mat& Y_minus_d,
 // which dominate the per-draw MCMC cost on small state vectors (the
 // n_state x n_state matrices are tiny, so the cost is call overhead, not BLAS).
 //
-// HH_full must already include the measurement-error ridge (HH + me_diag).
+// HH_full must already include the measurement-error diagonal (HH + me_diag);
+// me_diag_vec carries that same diagonal SEPARATELY because the Joseph
+// covariance update needs it as TRUE observation noise (P' += K diag(me) K').
+// Pass an empty vector for me_diag_vec when there is no measurement error.
 // Bit-parity with the R path is covered by test-kalman-rcpp-parity.R.
 //
 // [[Rcpp::export]]
@@ -84,7 +87,8 @@ List kalman_standard_loop_cpp(const arma::mat& Y_minus_d,
                               double ll_const,
                               double ss_tol,
                               double ll_min,
-                              bool return_filtered) {
+                              bool return_filtered,
+                              const arma::vec& me_diag_vec) {
   const arma::uword n_state = TT.n_rows;
   const arma::uword n_T     = Y_minus_d.n_cols;
   arma::vec s(n_state, arma::fill::zeros);
@@ -94,6 +98,8 @@ List kalman_standard_loop_cpp(const arma::mat& Y_minus_d,
   arma::mat filtered;
   if (return_filtered) filtered.zeros(n_state, n_T);
   const arma::mat ZZt = ZZ.t();
+  const bool has_me = me_diag_vec.n_elem > 0 &&
+                      arma::any(arma::abs(me_diag_vec) > 0.0);
   arma::mat  K_ss, F_inv_ss;
   double     ll_ss_const = 0.0;
 
@@ -141,6 +147,8 @@ List kalman_standard_loop_cpp(const arma::mat& Y_minus_d,
       P_n  = tmpA * TmKZ.t();
       tmpB = RmKD * Sigma_e;
       P_n += tmpB * RmKD.t();
+      // TRUE measurement-noise law (F3-D): P' += K diag(me) K'.
+      if (has_me) P_n += (K * arma::diagmat(me_diag_vec)) * K.t();
       P_n = 0.5 * (P_n + P_n.t());
       s = s_n;
       if (t > 0 && arma::abs(P_n - P).max() < ss_tol) {

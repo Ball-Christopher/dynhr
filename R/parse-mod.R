@@ -202,8 +202,18 @@ new_dynhr_mod <- function(...) {
     model_options       = list(),
     initval             = numeric(0),
     endval              = numeric(0),
+    ## histval: named list  var -> numeric vector indexed by LAG (element k is
+    ## the value k periods before the first simulation period).  See
+    ## parse_histval_block() for the Dynare index convention.
+    histval             = list(),
     steady_state_model  = NULL,
     shocks              = list(variances = data.frame(), correlations = data.frame()),
+    ## shock_groups: named list  group label -> character vector of shocks,
+    ## taken from the FIRST shock_groups block (the fallback grouping used by
+    ## historical_decomposition()).  shock_groups_blocks keeps every block,
+    ## keyed by its `name=` option.  See parse_shock_groups().
+    shock_groups        = list(),
+    shock_groups_blocks = list(),
     det_shocks          = data.frame(name = character(0), period = integer(0),
                                      value = numeric(0), stringsAsFactors = FALSE),
     filter_tunes        = list(tunes = data.frame()),
@@ -242,8 +252,20 @@ new_dynhr_mod <- function(...) {
 }
 
 
-#' Print method for dynhr_mod
-#' @noRd
+#' Print a parsed dynhr model
+#'
+#' Prints a one-screen summary of a `dynhr_mod` object: the source file,
+#' variable / shock / parameter / equation counts, the variable
+#' classification (static, predetermined, forward-looking, mixed), and any
+#' shock, filter-tune, estimated-parameter or command blocks that were
+#' parsed.
+#'
+#' @param x A `dynhr_mod` object, as returned by [parse_mod()].
+#' @param ... Ignored; present for S3 generic compatibility.
+#'
+#' @return `x`, invisibly. Called for the side effect of printing.
+#'
+#' @export
 print.dynhr_mod <- function(x, ...) {
   cat("=== dynhr_mod ===\n")
   if (!is.na(x$source_file))
@@ -280,8 +302,19 @@ print.dynhr_mod <- function(x, ...) {
 }
 
 
-#' Summary method for dynhr_mod
-#' @noRd
+#' Summarise a parsed dynhr model
+#'
+#' Prints everything [print.dynhr_mod()] shows, then the detail behind it:
+#' the variables in each timing class, calibrated parameter values, the
+#' shock variance / correlation tables, the estimated-parameter block, and
+#' the model equations rendered back to source form.
+#'
+#' @param object A `dynhr_mod` object, as returned by [parse_mod()].
+#' @param ... Ignored; present for S3 generic compatibility.
+#'
+#' @return `object`, invisibly. Called for the side effect of printing.
+#'
+#' @export
 summary.dynhr_mod <- function(object, ...) {
   print(object)
   cat("\n--- Variable Details ---\n")
@@ -367,12 +400,20 @@ summary.dynhr_mod <- function(object, ...) {
 #' \code{variance}, \code{corr}, \code{covar}, deterministic period shocks,
 #' \code{shocks(overwrite)}.  Multiple \code{shocks} blocks are merged.
 #'
+#' \emph{Shock groups:} \code{shock_groups(name = g);} \code{'supply' = e_a,
+#' e_z;} ... \code{end;} --- parsed into \code{model$shock_groups} (the first
+#' block, which \code{\link{historical_decomposition}} uses as its default
+#' grouping) and \code{model$shock_groups_blocks} (every block, keyed by its
+#' \code{name=} option).  A group that names an undeclared shock is an error.
+#'
 #' \emph{Macro language:} \code{@#define}, \code{@#for}/\code{@#endfor},
 #' \code{@#if}/\code{@#else}/\code{@#endif},
 #' \code{@#ifdef}/\code{@#ifndef}, \code{@#include}, and
 #' \code{@\{expr\}} interpolation.  Expanded before any other parsing.
 #'
-#' \emph{Other:} \code{initval}/\code{endval}, \code{estimated_params},
+#' \emph{Other:} \code{initval}/\code{endval}, \code{histval} (pre-sample
+#' history; \code{y(0)} is lag 1, \code{y(-1)} is lag 2, stored lag-indexed in
+#' \code{model$histval}), \code{estimated_params},
 #' \code{estimated_params_init}, \code{occbin_constraints},
 #' \code{planner_objective}, \code{verbatim} blocks.
 #' Comments: \code{//}, \code{/* ... */}, \code{\%}.
@@ -593,6 +634,15 @@ parse_mod <- function(file_or_text, verbose = FALSE) {
   endval <- if (endval_block$found)
     parse_initval_block(endval_block$body, env = initval_env)
   else numeric(0)
+
+  # ---- 6b. Histval (pre-sample history) --------------------------------
+  # A separate env so that histval assignments do not leak into initval/endval
+  # resolution (histval names ARE variables, not parameters).
+  histval_env <- list2env(as.list(param_values), parent = baseenv())
+  histval_block <- extract_paired_block(txt, "histval")
+  histval <- if (histval_block$found)
+    parse_histval_block(histval_block$body, env = histval_env)
+  else list()
 
   # ---- 7. Steady state model -------------------------------------------
   ssm_block <- extract_paired_block(txt, "steady_state_model")
@@ -885,6 +935,16 @@ parse_mod <- function(file_or_text, verbose = FALSE) {
     out_sv
   }
 
+  # ---- 8e. shock_groups block(s) -------------------------------------------
+  # Dynare allows several named shock_groups blocks; keep them all keyed by
+  # their name= option and expose the first as m$shock_groups, which is the
+  # fallback historical_decomposition() reads when no shock_groups argument
+  # is supplied.  Membership is validated against the declared shocks.
+  shock_groups_blocks <- parse_shock_groups(
+    txt, shock_names = c(varexo_names, varexo_det_names))
+  shock_groups <- if (length(shock_groups_blocks) > 0L)
+    shock_groups_blocks[[1L]] else list()
+
   # ---- 9. Estimated params ---------------------------------------------
   ep_block <- extract_paired_block(txt, "estimated_params")
   estimated_params <- if (ep_block$found)
@@ -1070,9 +1130,12 @@ parse_mod <- function(file_or_text, verbose = FALSE) {
     model_options        = model_opts,
     initval              = initval,
     endval               = endval,
+    histval              = histval,
     steady_state_model   = ssm,
     shocks               = shocks,
     shocks_blocks        = shocks_blocks_parsed,
+    shock_groups         = shock_groups,
+    shock_groups_blocks  = shock_groups_blocks,
     det_shocks           = det_shocks,
     filter_tunes         = filter_tunes,
     heteroskedastic_shocks = heteroskedastic_shocks_parsed,

@@ -75,11 +75,18 @@ run_sbc_mirai <- function(model, prior_spec, prior_sampler,
   mirai::everywhere(
     {
       suppressMessages(library(dynhr))
+      ## Replay the host's dynhr option state: `.dynhr_opts` is a
+      ## namespace-private env, so `dynhr_set_options(...)` from the calling
+      ## session does not reach a freshly spawned daemon on its own, and each
+      ## SBC replication would then build its posterior from DIFFERENT options
+      ## than the serial path (see .dynhr_daemon_state).
+      utils::getFromNamespace(".dynhr_daemon_apply", "dynhr")(.dynhr_state)
       .cmpl        <- utils::getFromNamespace("compile_model", "dynhr")
       .worker_cm  <<- .cmpl(.worker_model, verbose = FALSE)
       .worker_model <<- .worker_model
     },
-    .args = list(.worker_model = model)
+    .args = list(.worker_model = model,
+                 .dynhr_state = .dynhr_daemon_state())
   )
 
   ## ---- dispatch ----------------------------------------------------------

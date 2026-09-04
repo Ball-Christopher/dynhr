@@ -49,7 +49,19 @@
 #' @param verbose   Logical; print iteration diagnostics (default FALSE).
 #' @return A \code{GlobalSolution} S3 object with fields \code{coefs},
 #'   \code{state_names}, \code{all_endo_names}, \code{shock_names},
-#'   \code{state_domain}, \code{poly_degree}, \code{converged}, etc.
+#'   \code{state_domain}, \code{poly_degree}, \code{converged}, the order-1
+#'   stationary state sds \code{state_sd}, and two domain-clipping
+#'   diagnostics.  \code{predict.GlobalSolution()} CLIPS a state outside
+#'   \code{state_domain} to the boundary, silently, so the Euler quadrature's
+#'   own \eqn{t+1} points leaving the box would corrupt the solution
+#'   invisibly; both diagnostics report the FRACTION of those \eqn{t+1} state
+#'   coordinates that do so, at the converged policy.
+#'   \code{domain_clip_solve} measures it over the collocation grid (whose
+#'   corners are the extremes of the box, so a small positive value is
+#'   normal); \code{domain_clip_frac} measures it over the ergodic box
+#'   (steady state \eqn{\pm 3} order-1 stationary sds of each state), where
+#'   it is expected to be ZERO and a positive value raises a warning.  Both
+#'   are \code{NA} when no order-1 solution is available.
 #' @export
 solve_global <- function(compiled,
                          ss,
@@ -76,7 +88,26 @@ solve_global <- function(compiled,
   col_map <- dyn$dyn_col_map     # data.frame: name, lead_lag, col
   tot_cols <- dyn$total_cols
 
+  ## ---- Argument sanity, BEFORE anything can fail obscurely ---------------
+  ## The signature is solve_global(compiled, ss, params, ...). A two-argument
+  ## call -- solve_global(cm, model$param_values) -- silently binds the
+  ## PARAMETER vector to `ss` and leaves `params` a missing promise, which
+  ## used to surface hundreds of Newton solves later as "NA/NaN/Inf in 'x'"
+  ## out of lm.fit. Say what is actually wrong instead.
+  if (missing(params) || is.null(params) || !is.numeric(params) ||
+      is.null(names(params)))
+    stop("solve_global: `params` must be a NAMED numeric parameter vector. ",
+         "Note the argument order -- solve_global(compiled, ss, params, ...) ",
+         "-- so a two-argument call passes the parameters as `ss`.",
+         call. = FALSE)
+
   ss_vals <- if (inherits(ss, "dynhr_steady")) ss$values else ss
+  if (!is.numeric(ss_vals) || is.null(names(ss_vals)) ||
+      !all(endo %in% names(ss_vals)))
+    stop("solve_global: `ss` must be a solve_steady() result or a NAMED ",
+         "numeric steady state covering every endogenous variable (missing: ",
+         paste(setdiff(endo, names(ss_vals)), collapse = ", "), ").",
+         call. = FALSE)
 
   ## Build dy key lookup from col_map
   ## dy_keys[col] = "varname__timing" for each column position
@@ -91,17 +122,7 @@ solve_global <- function(compiled,
   ## ------------------------------------------------------------------
   ## 1. Classify state (predetermined) vs control (jump) variables
   ## ------------------------------------------------------------------
-  lli        <- compiled$lead_lag_incidence %||% model$lead_lag_incidence
-  ## LLI rownames are like "t-1", "t", "t+1" — parse to integers
-  row_labels <- vapply(rownames(lli), function(rn) {
-    rn <- trimws(rn)
-    if (rn == "t") return(0L)
-    m <- regmatches(rn, regexec("^t([+-]?\\d+)$", rn))[[1]]
-    if (length(m) == 2L) return(as.integer(m[2L]))
-    0L
-  }, integer(1L), USE.NAMES = FALSE)
-  sl         <- .structural_lag_lead(lli, row_labels)
-  state_names  <- endo[sl$has_lag]    # vars that appear at t-1
+  state_names  <- .global_state_names(compiled, endo)
   n_state      <- length(state_names)
 
   if (n_state == 0L)
@@ -128,6 +149,17 @@ solve_global <- function(compiled,
   names(idx_exo) <- exo
 
   ## ------------------------------------------------------------------
+  ## 2b. VALIDATE the model class, before anything can fail obscurely.
+  ## ------------------------------------------------------------------
+  ## The projection scheme represents only a narrow class of models (see
+  ## .global_shock_pairing() below for the exact contract). Anything outside
+  ## it used to produce either a converged-but-WRONG deterministic policy
+  ## (when the name-based `eps_<state>` pairing silently found nothing) or an
+  ## opaque "NA/NaN/Inf in 'x'" from nleqslv/lm.fit several hundred Newton
+  ## solves later. Fail here instead, naming the offending shock/equation.
+  pairing <- .global_shock_pairing(compiled, params, ss_vals, state_names)
+
+  ## ------------------------------------------------------------------
   ## 3. Shock standard deviations
   ## ------------------------------------------------------------------
   shock_sds <- .get_shock_sds(model, params)
@@ -135,12 +167,37 @@ solve_global <- function(compiled,
   ## ------------------------------------------------------------------
   ## 4. State domain
   ## ------------------------------------------------------------------
+  ## The order-1 solution is needed TWICE -- for the shock-aware default
+  ## domain (the stationary sd of the endogenous, capital-like states) and,
+  ## further down, for the warm start -- so it is solved once, here, and
+  ## carried forward.  A failure is non-fatal in both places, and a caller
+  ## who supplies `state_domain` AND opts out of the warm start pays nothing.
+  dr1 <- if (is.null(state_domain) || isTRUE(init_from_perturbation)) {
+    tryCatch(
+      solve_perturbation(model, compiled, ss_vals, params, verbose = FALSE),
+      error = function(e) {
+        if (verbose) cat("solve_global: order-1 perturbation failed:",
+                         conditionMessage(e), "\n")
+        NULL
+      })
+  } else NULL
+
+  ## The order-1 stationary state sds size BOTH the default box and the
+  ## post-solve clipping diagnostic (§ "domain clipping" below), so they are
+  ## computed once here rather than in the `is.null(state_domain)` branch --
+  ## a caller who supplies an explicit box still gets the diagnostic.
+  sd_state <- .dr_state_sd(dr1, model, params)
+
   if (is.null(state_domain)) {
     state_domain <- .auto_state_domain(
       state_names = state_names,
       ss_vals     = ss_vals,
       shock_sds   = shock_sds,
-      model       = model
+      model       = model,
+      pairing     = pairing,
+      exo         = exo,
+      state_sd    = sd_state,
+      n_quad      = n_quad
     )
   } else {
     for (nm in state_names)
@@ -201,13 +258,6 @@ solve_global <- function(compiled,
   rownames(coefs) <- endo
 
   if (init_from_perturbation) {
-    dr1 <- tryCatch(
-      solve_perturbation(model, compiled, ss_vals, params, verbose = FALSE),
-      error = function(e) {
-        if (verbose) cat("solve_global: perturbation warm-start failed:",
-                         conditionMessage(e), "\n")
-        NULL
-      })
     if (!is.null(dr1)) {
       coefs <- .init_coefs_from_dr1(dr1, endo, state_names, ss_vals,
                                     grid_nat, state_domain, Phi, n_coll, n_basis)
@@ -311,21 +361,16 @@ solve_global <- function(compiled,
   ##   next_lag_k[j] = y_cur[state_names[j]]     if no corresponding shock
   ##   next_lag_k[j] = rho_j*y_cur[j] + eps_k    if AR(1) shock state
 
-  ## Get AR(1) parameters for each state (NULL if not AR(1) shock state)
-  ar1_rho       <- setNames(vector("list", n_state), state_names)
-  ar1_shock_idx <- setNames(rep(NA_integer_, n_state), state_names)
-  for (j in seq_len(n_state)) {
-    nm       <- state_names[j]
-    shock_nm <- paste0("eps_", nm)
-    si       <- match(shock_nm, exo)
-    if (!is.na(si)) {
-      rho_nm <- paste0("rho_", nm)
-      rho_val <- if (rho_nm %in% names(params)) params[[rho_nm]] else
-                 if ("rho" %in% names(params)) params[["rho"]] else 0.9
-      ar1_rho[[nm]]       <- rho_val
-      ar1_shock_idx[nm]   <- si
-    }
-  }
+  ## AR(1) parameters per state, from .global_shock_pairing() -- read off the
+  ## compiled Jacobian, NOT off the parameter names. The old code required a
+  ## shock literally called `eps_<state>` and a parameter called `rho_<state>`
+  ## or `rho`, silently DEFAULTING rho to 0.9 when neither existed, and
+  ## silently leaving the state unshocked when the name did not match.
+  ## `ar1_psi` is the shock loading (1 for `z = rho*z(-1) + eps_z`, sigma for
+  ## `nu = rho*nu(-1) + sigma*eps_nu`), which the old code assumed was 1.
+  ar1_rho       <- pairing$rho
+  ar1_psi       <- pairing$psi
+  ar1_shock_idx <- pairing$shock_idx
 
   ## Compute the "next lag" vector given y_cur and shock_eps_next (next-period shocks).
   ##
@@ -349,9 +394,11 @@ solve_global <- function(compiled,
       if (!is.na(si)) {
         rho_j <- ar1_rho[[nm]]
         ## Feed z_lag that, when processed by the policy, gives
-        ## z_{t+1} = rho*z_t + eps_{t+1}:
-        ## z_lag_feed = (rho*y_cur[nm] + eps) / rho = y_cur[nm] + eps/rho
-        next_lag[nm] <- y_cur[nm] + shock_eps_next[si] / rho_j
+        ## z_{t+1} = rho*z_t + psi*eps_{t+1}:
+        ## z_lag_feed = (rho*y_cur[nm] + psi*eps) / rho = y_cur[nm] + psi*eps/rho
+        ## psi == 1 for the plain `z = rho*z(-1) + eps_z` form, in which case
+        ## `(1*eps)/rho` is bit-identical to the previous `eps/rho`.
+        next_lag[nm] <- y_cur[nm] + ar1_psi[[nm]] * shock_eps_next[si] / rho_j
       }
       ## For non-AR(1) states (like k): next_lag[nm] = y_cur[nm] (carry forward)
     }
@@ -553,6 +600,49 @@ solve_global <- function(compiled,
       max_iter, last_delta, n_fail))
 
   ## ------------------------------------------------------------------
+  ## 12. Domain-clipping diagnostic (F3-B)
+  ## ------------------------------------------------------------------
+  ## `norm_state_lag()` CLAMPS its argument to `state_domain`, so whenever
+  ## the Euler quadrature's own t+1 feed point s_t + psi*eps_{t+1}/rho leaves
+  ## the box, `eval_policy()` returns the value AT the boundary and the
+  ## residual driven to zero is not the model's.  The clamp stays (an
+  ## unclamped Chebyshev extrapolation diverges), but it is no longer
+  ## invisible: the fraction of t+1 state COORDINATES that leave the box is
+  ## measured at the converged policy and reported.
+  ##
+  ## Two boxes are measured, because they answer different questions:
+  ##   `domain_clip_solve` -- over the COLLOCATION grid, i.e. what the solver
+  ##      itself did.  Its corners are the extremes of the box, so a small
+  ##      positive value is normal and is not a defect.
+  ##   `domain_clip_frac`  -- over the ERGODIC box (steady state +- `n_sd`
+  ##      order-1 stationary sds of each state), i.e. where the data live.
+  ##      This one is expected to be ZERO; anything positive means the box is
+  ##      too narrow for its own quadrature and a warning is issued.
+  clip_at <- .gs_clip_frac(state_names = state_names,
+                           state_domain = state_domain,
+                           eval_policy = eval_policy,
+                           norm_state_lag = norm_state_lag,
+                           compute_next_lag = compute_next_lag,
+                           endo = endo, exo = exo,
+                           shock_sds = shock_sds, n_quad = n_quad)
+  domain_clip_solve <- clip_at(grid_nat)
+
+  erg_grid <- .gs_ergodic_grid(state_names, ss_vals, sd_state,
+                               n_sd = .gs_clip_n_sd, n_grid = 5L)
+  domain_clip_frac <- if (is.null(erg_grid)) NA_real_ else clip_at(erg_grid)
+
+  if (isTRUE(is.finite(domain_clip_frac) && domain_clip_frac > 0))
+    .gs_warn_once("domain_clip", sprintf(
+      paste0("solve_global: %.2f%% of the Euler-quadrature t+1 state ",
+             "coordinates leave `state_domain` over the ergodic +-%g ",
+             "stationary-sd box, where predict() CLIPS them silently. The ",
+             "collocation box is too narrow for its own quadrature; widen ",
+             "it (`state_domain=`, or a larger `endo_cover`/`domain_cover` ",
+             "through .auto_state_domain()). See `$domain_clip_frac`. ",
+             "This warning fires at most once per session."),
+      100 * domain_clip_frac, .gs_clip_n_sd))
+
+  ## ------------------------------------------------------------------
   ## Return GlobalSolution
   ## ------------------------------------------------------------------
   structure(
@@ -573,8 +663,21 @@ solve_global <- function(compiled,
       n_iter         = if (converged) iter else max_iter,
       last_delta     = last_delta,
       tol            = tol,
+      ## Domain-clipping diagnostics; see § 12 above.
+      domain_clip_frac  = domain_clip_frac,
+      domain_clip_solve = domain_clip_solve,
+      state_sd          = sd_state,
       assemble_dy    = assemble_dy,     # exposed for Euler error computation
       residuals_fn   = dyn$residuals_fn,
+      ## AR(1) "feed" parameters, per state (NA for capital-like states).
+      ## compute_next_lag() applies them one state vector at a time; the
+      ## global particle filter (R/global-likelihood.R) needs the SAME map
+      ## applied to an N x n_state particle matrix at once, so the pieces are
+      ## exposed rather than re-derived (a second derivation is a second
+      ## chance to disagree with the solver about the timing convention).
+      ar1_rho        = ar1_rho,
+      ar1_psi        = ar1_psi,
+      ar1_shock_idx  = ar1_shock_idx,
       compute_next_lag = compute_next_lag,
       norm_state_lag = norm_state_lag,
       eval_policy    = eval_policy
@@ -589,48 +692,382 @@ solve_global <- function(compiled,
 
 ## Get shock standard deviations from the model's shocks block.
 ## Returns a named numeric vector of length n_exo.
+##
+## Delegates to `.get_shock_stderr()` -- the package's canonical, estimation-
+## aware resolver (parameter-named stderr > shocks-block *_expr re-evaluated
+## against the CURRENT params > frozen parse-time numerics).  Two bugs are
+## fixed by that delegation:
+##   * The old body looped `for (sh in model$shocks)`, but `model$shocks` is
+##     `list(variances = <data.frame>, correlations = <data.frame>)`, so `sh`
+##     was a WHOLE data.frame and `sh$name` its whole name COLUMN.  With one
+##     shock the length-1 column happened to work; with two or more,
+##     `nm %in% names(sds)` is length > 1 and the condition ERRORED -- i.e.
+##     solve_global() could not run on any multi-shock model.
+##   * Even on the single-shock path it read the frozen numeric `stderr`, so
+##     an ESTIMATED shock standard deviation (`stderr sig_a;`) had no effect
+##     on the projection solution -- the P0 bug, in the global solver.
+## The 0.01 fallback is kept for shocks whose std resolves to 0 (no shocks
+## block at all): a zero-variance shock would collapse the quadrature.
 .get_shock_sds <- function(model, params) {
   exo <- model$varexo_names
   sds <- setNames(rep(0.01, length(exo)), exo)
-  if (!is.null(model$shocks)) {
-    for (sh in model$shocks) {
-      nm <- sh$name
-      if (!is.null(nm) && nm %in% names(sds)) {
-        val <- sh$stderr
-        if (is.character(val)) {
-          val <- if (val %in% names(params)) params[[val]] else 0.01
-        }
-        if (!is.null(val) && is.numeric(val) && is.finite(val) && val > 0)
-          sds[nm] <- val
-      }
-    }
+  se  <- tryCatch(.get_shock_stderr(model, exo, params),
+                  error = function(e) NULL)
+  if (!is.null(se)) {
+    ok <- is.finite(se) & se > 0
+    sds[ok] <- se[ok]
   }
   sds
 }
 
+## Unconditional (stationary) standard deviation of each state under the
+## ORDER-1 solution, as a named vector over `dr$state_vars`.
+##
+## Used to size the default collocation box: the Chebyshev nodes should sit
+## where the data live, and for an endogenous, capital-like state the only
+## model-derived scale available before the projection is solved is the
+## linear model's own stationary sd.
+##
+## `shock_sds` optionally overrides the model's shock standard deviations
+## (the SBC harness sizes its box at a prior-UPPER sd).  The override
+## rescales the shock covariance, so any declared correlations survive.
+## Returns NULL when the rule cannot be applied (no order-1 solution, or a
+## non-stationary Lyapunov solve).
+#' @noRd
+.dr_state_sd <- function(dr, model, params, shock_sds = NULL) {
+  if (is.null(dr) || is.null(dr$state_vars) || !length(dr$state_vars))
+    return(NULL)
+  TT <- dr$ghx[dr$state_idx, , drop = FALSE]
+  RR <- dr$ghu[dr$state_idx, , drop = FALSE]
+  Se <- tryCatch(.get_shock_cov(model, dr$exo_names, params),
+                 error = function(e) NULL)
+  if (is.null(Se)) return(NULL)
+  if (!is.null(shock_sds)) {
+    s0 <- sqrt(pmax(diag(as.matrix(Se)), 0))
+    sn <- shock_sds[dr$exo_names]
+    ok <- is.finite(s0) & s0 > 0 & is.finite(sn) & sn > 0
+    if (any(ok)) {
+      f      <- rep(1, length(s0))
+      f[ok]  <- sn[ok] / s0[ok]
+      D      <- diag(f, nrow = length(f))
+      Se     <- D %*% as.matrix(Se) %*% D
+    }
+  }
+  P0 <- tryCatch(kf_stationary_init(TT, RR, Se), error = function(e) NULL)
+  if (is.null(P0)) return(NULL)
+  stats::setNames(sqrt(pmax(diag(P0), 0)), dr$state_vars)
+}
+
+
+## =========================================================================
+## Domain-clipping diagnostic (F3-B)
+## =========================================================================
+
+## Half-width, in order-1 stationary state sds, of the box over which
+## `domain_clip_frac` is measured (and over which the warning fires).  Three
+## sds of every state jointly is already a rare corner of the ergodic set;
+## the point of the measure is that even THERE the quadrature's t+1 feed must
+## stay inside the collocation box.
+.gs_clip_n_sd <- 3
+
+## Package-private store for one-time warnings (the projection solve is
+## re-run at EVERY theta inside make_log_posterior_global_pf(), so a
+## per-solve warning would spam an entire MCMC run).  Same pattern as
+## `.hank_egm_warn_once()` / `.cumulant_warn_once()`.
+.gs_warn_env <- new.env(parent = emptyenv())
+
+#' Emit a warning at most once per session, keyed by \code{key}.
+#' @keywords internal
+#' @noRd
+.gs_warn_once <- function(key, ...) {
+  if (isTRUE(.gs_warn_env[[key]])) return(invisible(NULL))
+  .gs_warn_env[[key]] <- TRUE
+  warning(paste0(...), call. = FALSE)
+}
+
+## Largest Gauss-Hermite abscissa at `n_quad` nodes, in shock-sd units: how
+## far into the tail of eps_{t+1} the Euler quadrature actually reaches.  The
+## default AR(1) cover is sized so that even THAT node stays inside the box.
+#' @noRd
+.gs_quad_reach <- function(n_quad) {
+  q <- tryCatch(gauss_hermite(n_quad)$nodes, error = function(e) NULL)
+  if (is.null(q) || !length(q) || !all(is.finite(q))) return(3)
+  max(abs(q))
+}
+
+## Tensor grid of steady state +- `n_sd` order-1 stationary sds per state.
+## NULL when the stationary sds are unavailable (no order-1 solution, or a
+## non-stationary Lyapunov solve), in which case the diagnostic is NA rather
+## than silently computed on some other box.
+#' @noRd
+.gs_ergodic_grid <- function(state_names, ss_vals, state_sd, n_sd = 3,
+                             n_grid = 5L) {
+  if (is.null(state_sd) || !all(state_names %in% names(state_sd)))
+    return(NULL)
+  sdv <- state_sd[state_names]
+  if (!all(is.finite(sdv)) || any(sdv <= 0)) return(NULL)
+  g1 <- lapply(state_names, function(nm)
+    ss_vals[[nm]] + seq(-n_sd, n_sd, length.out = n_grid) * state_sd[[nm]])
+  names(g1) <- state_names
+  args <- rev(g1); names(args) <- rev(state_names)
+  out <- as.matrix(expand.grid(args))
+  out[, state_names, drop = FALSE]
+}
+
+## Build the clip-fraction measurement for a solved policy.  Returns a
+## function of a matrix of state LAGS; for each row it evaluates the policy,
+## forms the Gauss-Hermite t+1 feed points the Euler equation integrates over
+## (the solver's OWN `compute_next_lag()`, so the two cannot disagree about
+## the timing) and returns the fraction of feed COORDINATES outside the box.
+##
+#' @noRd
+.gs_clip_frac <- function(state_names, state_domain, eval_policy,
+                          norm_state_lag, compute_next_lag, endo, exo,
+                          shock_sds, n_quad) {
+  n_state <- length(state_names)
+  n_exo   <- length(exo)
+  lo <- vapply(state_names, function(nm) state_domain[[nm]][1L], numeric(1))
+  hi <- vapply(state_names, function(nm) state_domain[[nm]][2L], numeric(1))
+
+  ## The SAME tensor-product Gauss-Hermite node set expected_residual() uses.
+  gh <- gauss_hermite(n_quad)
+  shock_mat <- if (n_exo == 1L) matrix(gh$nodes * shock_sds[1L], ncol = 1L) else
+    as.matrix(expand.grid(lapply(seq_len(n_exo),
+                                 function(k) gh$nodes * shock_sds[k])))
+  n_combo <- nrow(shock_mat)
+
+  function(grid_nat) {
+    if (is.null(grid_nat) || !nrow(grid_nat)) return(NA_real_)
+    n_out <- 0L
+    n_tot <- 0L
+    for (j in seq_len(nrow(grid_nat))) {
+      s_lag <- grid_nat[j, state_names]
+      y <- as.vector(eval_policy(matrix(norm_state_lag(s_lag), nrow = 1L)))
+      names(y) <- endo
+      if (!all(is.finite(y))) next
+      for (ki in seq_len(n_combo)) {
+        nl <- compute_next_lag(y, shock_mat[ki, ])[state_names]
+        n_out <- n_out + sum(nl < lo | nl > hi, na.rm = TRUE)
+        n_tot <- n_tot + n_state
+      }
+    }
+    if (n_tot == 0L) NA_real_ else n_out / n_tot
+  }
+}
+
+
 ## Compute default state domain from SS ± coverage based on shock variances.
-.auto_state_domain <- function(state_names, ss_vals, shock_sds, model) {
+##
+## `pairing` is .global_shock_pairing()'s structural rho/psi/shock_idx map, so
+## the persistence and the effective innovation std |psi|*sigma come from the
+## MODEL rather than from a `rho_<state>` name lookup with a 0.9 default.
+##
+## TWO shock-awareness fixes (F2-C):
+##
+##  * AR(1) states are covered at the FEED point s_{t-1} + psi*eps_t/rho --
+##    the argument the filter and simulator actually evaluate the policy at
+##    -- whose stationary sd is `sigma_stat / rho`, STRICTLY wider than the
+##    state's own.  The old rule covered `domain_cover` sds of the STATE, so
+##    predict()'s silent clip bit in the tails.
+##
+##  * Endogenous, capital-like states (no paired shock) used a fixed
+##    ±40% of the steady-state LEVEL, regardless of shock size.  Measured on
+##    the F1-C two-shock RBC, the resulting box is 59 stationary sds wide at
+##    `sd_scale = 0.1` and only 5.9 at `sd_scale = 1` -- i.e. the SAME rule
+##    lands on opposite sides of the accuracy optimum depending on the
+##    calibration, which is exactly what a shock-blind rule does.  Both ends
+##    hurt, for different reasons:
+##      - too WIDE and a degree-3 Chebyshev fit is spread over curvature that
+##        the ergodic set never visits, so the fit near the data is loose;
+##      - too NARROW and the Euler quadrature's own t+1 states leave the box,
+##        where `predict()` CLIPS silently, so the residual being driven to
+##        zero is not the model's.
+##    `state_sd` (the order-1 stationary sd, `.dr_state_sd()`) puts the box
+##    at a FIXED number of stationary sds -- `endo_cover` -- so it tracks the
+##    shocks instead of the level.  The old ±40% rule survives as a CAP
+##    (`level_cap_frac`) and as the fallback when no order-1 solution is
+##    available.  `floor_frac` keeps a degenerate (zero-sd) state from
+##    collapsing the grid to a point.
+##
+## WHAT F3-B CHANGED, and why the F2-C numbers above no longer read the same.
+## F2-C set `endo_cover = 12` from ONE fixture at ONE shock scale, and the
+## U-shape it fitted had a NARROW arm that was not a property of the fit at
+## all: with `domain_cover = 3.5` the AR(1) box did not reach the largest
+## Gauss-Hermite node, so 2.7-4.0% of the Euler quadrature's own t+1 state
+## coordinates over the ergodic ±3 sd box were being CLIPPED -- on all four
+## F3-B fixtures, at every `endo_cover`, and invisibly.  Once the AR(1)
+## branch is floored at the quadrature's reach (see the `quad_reach` term
+## below) the narrow arm collapses and the optimum moves to ~6 stationary
+## sds and stays there.  Measured max |k_proj - k_order3| over a ±3
+## stationary-sd box in units of the stationary sd of k, on the F1-C
+## two-shock RBC (n_quad 5, n_nodes 5), cover in stationary sds of k:
+##
+##             4 sd     6 sd     8 sd    10 sd    12 sd    20 sd    30 sd
+##   deg 3, sd_scale 1
+##            2.8e-2   9.4e-3   2.0e-2   4.0e-2   8.1e-2   1.4e-1   2.8e-1
+##   deg 3, sd_scale 0.1
+##            5.9e-3   6.7e-5   7.3e-5   8.1e-5   9.1e-5   1.6e-4   3.2e-4
+##   deg 4, sd_scale 1
+##            1.8e-2   3.3e-3   4.4e-3   1.0e-2   3.0e-2      --       --
+##
+## So `endo_cover = 6` is at or within 1.1x of the per-fixture optimum at
+## both shock scales and both degrees, whereas 12 is 8.7x (degree 3) and
+## 9.3x (degree 4) off it at `sd_scale = 1`.  It is a CONSTANT, not a rule:
+## the capital-like optimum did not move with the calibration once the AR(1)
+## clipping was gone, which is exactly what a "fixed number of stationary
+## sds" is supposed to deliver and what the shock-blind ±40% rule could not.
+.auto_state_domain <- function(state_names, ss_vals, shock_sds, model,
+                               pairing, exo, domain_cover = 3.5,
+                               endo_cover = 6, state_sd = NULL,
+                               floor_frac = 1e-3, level_cap_frac = 0.4,
+                               level_cap_min = 0.1, pos_floor_frac = 0.05,
+                               boundary_frac = 0.4,
+                               n_quad = 5L, erg_cover = .gs_clip_n_sd,
+                               reach_margin = 1.05) {
   domain <- vector("list", length(state_names))
   names(domain) <- state_names
-  params <- model$param_values
 
   for (nm in state_names) {
     ss_val <- ss_vals[nm]
-    shock_nm <- paste0("eps_", nm)
-    if (shock_nm %in% names(shock_sds)) {
-      ## AR(1) shock state: stationary variance = sigma^2 / (1 - rho^2)
-      rho_nm  <- paste0("rho_", nm)
-      rho_val <- if (!is.null(params) && rho_nm %in% names(params))
-        params[[rho_nm]] else 0.9
-      sigma_stat <- shock_sds[shock_nm] / sqrt(max(1 - rho_val^2, 0.01))
-      lo <- ss_val - 3.5 * sigma_stat
-      hi <- ss_val + 3.5 * sigma_stat
+    si     <- pairing$shock_idx[[nm]]
+    ## Hoisted: the boundary bound below needs it as well as the cover rule.
+    sd_s   <- if (!is.null(state_sd) && nm %in% names(state_sd))
+                state_sd[[nm]] else NA_real_
+    if (!is.na(si)) {
+      ## AR(1) shock state: stationary variance = (psi*sigma)^2 / (1 - rho^2);
+      ## the FEED point adds (psi*sigma/rho)^2 on top.
+      rho_val    <- pairing$rho[[nm]]
+      sd_eff     <- abs(pairing$psi[[nm]]) * shock_sds[[exo[si]]]
+      sigma_stat <- sd_eff / sqrt(max(1 - rho_val^2, 0.01))
+      sigma_feed <- sqrt(sigma_stat^2 + (sd_eff / rho_val)^2)
+      ## F3-B: `domain_cover` FEED sds is a distributional cover -- it says
+      ## how much of the stationary feed distribution the box holds -- and it
+      ## is NOT the quantity the Euler quadrature needs.  At a state lag
+      ## s = erg_cover*sigma_stat the solver evaluates the policy at
+      ##   rho*s + psi*q*sigma/rho,   q = the LARGEST Gauss-Hermite abscissa,
+      ## a DETERMINISTIC point, and `predict()` clips it silently if the box
+      ## does not reach it.  Measured on all four F3-B fixtures, the shipped
+      ## `domain_cover = 3.5` did not: 2.7-4.0% of the t+1 coordinates over
+      ## the ergodic +-3 sd box were clipped on EVERY fixture and at EVERY
+      ## `endo_cover`, i.e. a defect of the AR(1) branch that no capital-like
+      ## cover constant could have repaired.  The half-width is therefore the
+      ## MAX of the distributional cover and the quadrature's own reach, so
+      ## the default box is clip-free BY CONSTRUCTION and the
+      ## `domain_clip_frac` warning below means what it says.  The floor is
+      ## `n_quad`-aware because the reach is (q grows like sqrt(2*n_quad)).
+      ## `reach_margin` is not decoration.  The t+1 feed is built from the
+      ## POLICY value at the ergodic edge, not from rho*s exactly, so the
+      ## interpolation error decides a bare equality: measured without a
+      ## margin, `kpr` and `persist` still clipped 10 of 125 coordinates by
+      ## ~1e-9 while `rbc2s` (the same rule, the error of the other sign)
+      ## clipped none.  A knife-edge that a numerical noise term resolves is
+      ## not a guarantee.
+      quad_reach <- reach_margin *
+        (abs(rho_val) * erg_cover * sigma_stat +
+           .gs_quad_reach(n_quad) * sd_eff / abs(rho_val))
+      half_width <- max(domain_cover * sigma_feed, quad_reach)
     } else {
-      ## Capital-like: ±40% of SS value
-      half_width <- max(0.4 * abs(ss_val), 0.1)
-      lo <- ss_val - half_width
-      hi <- ss_val + half_width
+      ## The old, shock-blind ±40%-of-level rule.  Since F3-B (follow-up) it
+      ## is ONLY the no-order-1-solution fallback; it is no longer a CAP on
+      ## the sd-based rule.
+      ##
+      ## WHY THE CAP HAD TO GO.  `max(level_cap_frac*|ss|, level_cap_min)` is
+      ## a LEVEL bound: it does not scale with the shocks, so for a large
+      ## enough sigma it truncates the box BELOW the ergodic set, which is
+      ## precisely the silent clipping this wave exists to remove.  Measured
+      ## on test-global-solve.R's `.rbc_mod_string(0.05)` fixture (the same
+      ## full-depreciation RBC as `smallk`, alpha = 0.33, sigma_z = 0.05, so
+      ## sd_k = 0.0311 against k_ss = 0.1883): `endo_cover * sd_k` asks for
+      ## 0.1865 but the cap allowed only 0.1, i.e. 3.22 stationary sds -- a
+      ## box barely wider than the +-3 sd ergodic set it has to hold.  The
+      ## policy at the (k, z) = (+3 sd, +3 sd) corner returns k_t = 0.3008
+      ## against a box top of 0.2883, and 2.0% of the Euler quadrature's t+1
+      ## coordinates were clipped.  At sigma_z = 0.01 the same rule asks for
+      ## 0.0373, the cap never binds, and nothing clips -- the defect is
+      ## exactly the cap's shock-blindness.
+      ##
+      ## Note the reach cannot be floored the way the AR(1) branch is: the
+      ## order-1 estimate of the policy's image of the ergodic box,
+      ## erg_cover * sum_j |ghx[k,j]| * sigma_j = 0.089 here, UNDERSTATES the
+      ## true image (0.1125) by 26%, because k = alpha*beta*exp(z)*k^alpha is
+      ## strongly convex in z at sigma_z = 0.05. There is no cheap linear
+      ## bound to floor against, so the cap is dropped rather than repaired.
+      ##
+      ## The cap's two stated jobs are both covered elsewhere now:
+      ##   * "the new rule can only ever NARROW the box" was an F2-C
+      ##     migration-safety argument, not a correctness one, and it is what
+      ##     reintroduced the clipping;
+      ##   * "keeps a positive-valued state off zero" is now the EXPLICIT
+      ##     `pos_floor_frac` bound below, which is what actually does that
+      ##     job here (k_ss - endo_cover*sd_k = 0.0018 is floored to 0.0094).
+      ## On all four F3-B fixtures the cap sat at 7.8-21.8 stationary sds,
+      ## i.e. above `endo_cover = 6`, so dropping it is a NO-OP for them and
+      ## changes only the large-shock regime where it was doing harm.
+      cap  <- max(level_cap_frac * abs(ss_val), level_cap_min)
+      half_width <- if (is.finite(sd_s) && sd_s > 0) {
+        max(endo_cover * sd_s, floor_frac * max(abs(ss_val), 1))
+      } else cap
     }
+    lo <- ss_val - half_width
+    hi <- ss_val + half_width
+
+    ## F3-B: an EXPLICIT lower bound for a positive-valued capital-like state.
+    ## Before F3-B nothing stopped the box from crossing k = 0 -- the ±40%
+    ## cap kept it off zero only by accident, and only while
+    ## `level_cap_min` (0.1) happened to be smaller than the steady-state
+    ## level. On a calibration whose k_ss is BELOW that floor (the F3-B
+    ## `smallk` fixture, k_ss = 0.0888, alpha = 0.12) the capped half-width
+    ## 0.1 puts collocation nodes at k < 0, where k^(alpha-1) is not real and
+    ## the Newton solve returns NaN.  A capital-like state (no paired shock)
+    ## with a strictly positive steady state is therefore floored at
+    ## `pos_floor_frac` of its own level.  The box becomes ASYMMETRIC, which
+    ## is correct: the natural boundary is one-sided, and so is the ergodic
+    ## distribution near it.  AR(1) states are exempt -- a log-deviation
+    ## process is centred at zero and has no such boundary.
+    ##
+    ## F3-B FOLLOW-UP: `pos_floor_frac` alone was set at 5%, which turned out
+    ## to be far too PERMISSIVE, and that -- not the cover, and not the
+    ## quadrature -- is what a large shock exposes.  On
+    ## test-global-solve.R's `.rbc_mod_string(0.05)` fixture (sd_k/k_ss =
+    ## 0.165) `endo_cover = 6` puts the lower edge 5.76 sd below the steady
+    ## state, at 5% of k_ss: the box then spans a factor 40 in k, and a
+    ## degree-3 Chebyshev fit is spread over the k -> 0 curvature (k^(alpha-1)
+    ## diverges) that the ergodic set never visits.  Measured against this
+    ## model's CLOSED-FORM policy, max |k_proj - k_exact| over the +-3 sd box
+    ## in sd_k units, holding the +6 sd upper edge fixed and moving only the
+    ## lower edge:
+    ##     lower edge   5.76 sd   5.45 sd   4.85 sd   4.00 sd   3.03 sd
+    ##     |proj-exact|  0.2326    0.1594    0.0920    0.0432    0.0244
+    ## -- a 5.4x accuracy swing that is ENTIRELY the low edge (sweeping the
+    ## UPPER edge at a fixed -4 sd lower edge gives 0.0725 / 0.0415 / 0.0432 /
+    ## 0.0572 at +4 / +5 / +6 / +8 sd, i.e. flat, with the optimum at the
+    ## shipped `endo_cover = 6`).
+    ##
+    ## So the boundary bound is TWO-sided, and the second half is what was
+    ## missing: the floor may lift the lower edge, but it must never lift it
+    ## into the ergodic set, and equally the box must never run closer to the
+    ## boundary than the fit can afford.  `erg_cover + 1` (one stationary sd
+    ## of margin below the +-erg_cover box the clipping diagnostic measures
+    ## on) is that limit.
+    ##
+    ## WHEN IT BINDS.  At the shipped `endo_cover = 6`, `erg_cover = 3` and
+    ## `boundary_frac = 0.4` the bound is active exactly when
+    ## sd > ss/10 -- via the 0.4*ss term for 0.10 < sd/ss <= 0.15, and via
+    ## the (erg_cover + 1) sd term above that.  So it is a NO-OP on all four
+    ## original F3-B fixtures (sd/ss = 0.045-0.067) and on the same RBC at
+    ## sigma_z = 0.01, and moves only the sigma_z = 0.05 case (sd/ss =
+    ## 0.165), where it pulls the lower edge from 5.76 sd back to 4 sd and
+    ## the accuracy from 0.233 to 0.043 sd.  (The threshold scales with the
+    ## cover: at a hand-passed `endo_cover = 20` it would bind from
+    ## sd > 0.03*ss.  That is intended -- the wider the requested box, the
+    ## sooner it would otherwise reach the boundary.)
+    if (is.na(si) && is.finite(ss_val) && ss_val > 0) {
+      lo <- max(lo, pos_floor_frac * ss_val)
+      if (is.finite(sd_s) && sd_s > 0)
+        lo <- max(lo, min(boundary_frac * ss_val,
+                          ss_val - (erg_cover + 1) * sd_s))
+    }
+
     domain[[nm]] <- c(lo, hi)
   }
   domain
@@ -673,4 +1110,218 @@ solve_global <- function(compiled,
     coefs[i, ] <- fit$coefficients
   }
   coefs
+}
+
+
+## =========================================================================
+## Model-class validation (E1-B follow-up)
+## -------------------------------------------------------------------------
+## solve_global() can only represent a NARROW class of models, and until this
+## function existed it never said so.  Its time-iteration convention sets the
+## CURRENT shock to zero in the residual (see expected_residual()) and injects
+## a realised shock only through the AR(1) "feed" lag inside
+## compute_next_lag().  A shock that does not sit in an AR(1) state process
+## therefore never enters the solution AT ALL -- silently.
+##
+## Worse, the pairing used to be by NAME: a state `nm` was treated as an
+## AR(1) shock state only when a shock literally called `eps_<nm>` existed,
+## and its persistence was read from a parameter called `rho_<nm>`, `rho`, or
+## -- failing both -- DEFAULTED TO 0.9.  On
+##
+##     x = rho*x(-1) + e;   y = beta*x + 0.2*x(+1) + u;
+##
+## (shocks `e` and `u`; no `eps_x`) nothing paired, both shocks vanished from
+## the policy, and the solver returned a converged, deterministic, WRONG
+## solution.  Downstream, make_log_posterior_global_pf() then produced a
+## perfectly finite log-likelihood of -425 where the Kalman filter says 151.
+##
+## The pairing is now STRUCTURAL, read from the compiled Jacobian rather than
+## from names, and anything outside the representable class is a hard error
+## naming the offending shock and equation.  For each shock s the equation it
+## appears in must be exactly
+##
+##     a0 * nm(t) + a1 * nm(t-1) + b * s(t) = 0     (linear, no other terms)
+##
+## for a single state `nm`, giving rho = -a1/a0 and psi = -b/a0, i.e.
+## nm_t = rho*nm_{t-1} + psi*s_t.  The feed that reproduces a realised shock
+## through a policy solved at s_t = 0 is then
+##
+##     feed = nm_lag + psi * s / rho
+##
+## which generalises the old (psi = 1) form bit-identically.
+##
+## @return list(rho, psi, shock_idx) -- each a vector over `state_names`, with
+##   NA for a state that carries no shock (a capital-like state, which IS
+##   representable: its lag is simply carried forward).
+#' @noRd
+.global_shock_pairing <- function(compiled, params, ss_vals, state_names,
+                                  context = "solve_global") {
+  map  <- .acc_dy_map(compiled)
+  dyn  <- compiled$dynamic
+  exo  <- map$exo
+
+  if (length(exo) == 0L)
+    stop(context, ": the model declares no exogenous shocks, so there is ",
+         "nothing for the projection solver to integrate over.", call. = FALSE)
+
+  col0  <- map$col0_of
+  colm1 <- stats::setNames(map$m1$col, map$m1$name)
+  colex <- stats::setNames(map$ux$col, map$ux$name)
+
+  ## Human-readable name for a set of dy columns, for the error messages.
+  lbl <- function(cols) {
+    out <- map$keys[cols]
+    out <- sub("__p1$", "(t+1)", sub("__m1$", "(t-1)", sub("__0$", "(t)", out)))
+    paste(out, collapse = ", ")
+  }
+
+  ## Two probe points, so that a coefficient which merely LOOKS constant at
+  ## one point (a nonlinear AR process such as log(a) = rho*log(a(-1)) + eps,
+  ## for which the feed formula is simply wrong) is detected.
+  probe <- function(h) {
+    dy <- map$template
+    for (k in seq_along(map$keys)) {
+      nm    <- sub("__(0|p1|m1)$", "", map$keys[k])
+      v     <- if (nm %in% names(ss_vals)) ss_vals[[nm]] else 0
+      dy[k] <- v + h * (1 + abs(v))
+    }
+    dy
+  }
+  J1 <- tryCatch(dyn$jacobian_fn(probe(1e-3), params, ss_vals),
+                 error = function(e) NULL)
+  J2 <- tryCatch(dyn$jacobian_fn(probe(-7e-3), params, ss_vals),
+                 error = function(e) NULL)
+  if (is.null(J1) || is.null(J2) || !all(is.finite(J1)) || !all(is.finite(J2)))
+    stop(context, ": could not evaluate the model Jacobian near the steady ",
+         "state, so the shock/state structure cannot be validated.",
+         call. = FALSE)
+
+  A   <- pmax(abs(J1), abs(J2))
+  rsc <- pmax(apply(A, 1L, max), .Machine$double.eps)
+  nzr <- function(q) which(A[q, ] > 1e-10 * rsc[q])
+
+  rho       <- stats::setNames(rep(NA_real_, length(state_names)), state_names)
+  psi       <- stats::setNames(rep(NA_real_, length(state_names)), state_names)
+  shock_idx <- stats::setNames(rep(NA_integer_, length(state_names)),
+                               state_names)
+
+  for (si in seq_along(exo)) {
+    s  <- exo[si]
+    cs <- colex[[s]]
+    if (is.null(cs) || is.na(cs))
+      stop(context, ": shock '", s, "' has no column in the compiled dynamic ",
+           "system, so it cannot enter the projection solution.",
+           call. = FALSE)
+
+    rows <- which(A[, cs] > 1e-10 * rsc)
+    if (length(rows) != 1L)
+      stop(context, ": shock '", s, "' enters ", length(rows), " equations (",
+           if (length(rows)) paste0("equation(s) ",
+                                    paste(rows, collapse = ", ")) else "none",
+           "). The projection solver sets the CURRENT shock to zero in the ",
+           "residual and re-injects it through an AR(1) state's feed lag, so ",
+           "every shock must appear in exactly ONE equation, and that ",
+           "equation must be an AR(1) state process `state = rho*state(-1) + ",
+           "psi*", s, "`.", call. = FALSE)
+    q <- rows
+
+    nz  <- nzr(q)
+    ## The single endogenous variable dated t in this equation.
+    at0 <- names(col0)[match(intersect(nz, col0), col0)]
+    at0 <- at0[!is.na(at0)]
+    if (length(at0) != 1L)
+      stop(context, ": shock '", s, "' enters equation ", q,
+           ", which is not an AR(1) state process -- it involves ",
+           if (length(at0)) paste0("the current-dated variables ",
+                                   paste(at0, collapse = ", "))
+           else "no current-dated endogenous variable",
+           ". Full equation-", q, " terms: ", lbl(nz),
+           ". solve_global() can only represent a shock that enters a single ",
+           "equation of the form `state = rho*state(-1) + psi*", s, "`.",
+           call. = FALSE)
+    nm <- at0
+
+    if (!nm %in% state_names)
+      stop(context, ": shock '", s, "' drives '", nm, "' (equation ", q,
+           "), which is not a state variable (it never appears at t-1). ",
+           "The projection policy is a function of the state lags only, so ",
+           "such a shock cannot be represented.", call. = FALSE)
+    if (!is.na(shock_idx[[nm]]))
+      stop(context, ": state '", nm, "' is driven by more than one shock ('",
+           exo[shock_idx[[nm]]], "' and '", s, "'). solve_global() feeds one ",
+           "shock per AR(1) state.", call. = FALSE)
+
+    c0 <- col0[[nm]]
+    c1 <- colm1[[nm]]
+    if (is.null(c1) || is.na(c1))
+      stop(context, ": shock '", s, "' drives '", nm, "' (equation ", q,
+           ") but '", nm, "' has no t-1 term there, so it is not an AR(1) ",
+           "process. Equation-", q, " terms: ", lbl(nz), ".", call. = FALSE)
+
+    extra <- setdiff(nz, c(c0, c1, cs))
+    if (length(extra))
+      stop(context, ": equation ", q, " (the process for '", nm,
+           "' driven by shock '", s, "') also involves ", lbl(extra),
+           ". solve_global() requires the shock-carrying equation to be ",
+           "exactly `", nm, " = rho*", nm, "(-1) + psi*", s, "`.",
+           call. = FALSE)
+
+    ## Linearity: the three coefficients must not move between probe points.
+    co1 <- J1[q, c(c0, c1, cs)]
+    co2 <- J2[q, c(c0, c1, cs)]
+    if (max(abs(co1 - co2)) > 1e-8 * max(1, max(abs(co1))))
+      stop(context, ": the process for '", nm, "' driven by shock '", s,
+           "' (equation ", q, ") is NONLINEAR in its own terms (for example ",
+           "`log(", nm, ") = rho*log(", nm, "(-1)) + ", s,
+           "`). solve_global() injects the shock as ", nm,
+           "(-1) + psi*", s, "/rho, which is only correct for a LINEAR AR(1) ",
+           "process.", call. = FALSE)
+
+    a0 <- J1[q, c0]; a1 <- J1[q, c1]; b <- J1[q, cs]
+    r  <- -a1 / a0
+    ps <- -b  / a0
+    if (!is.finite(r) || abs(r) < 1e-8)
+      stop(context, ": the process for '", nm, "' driven by shock '", s,
+           "' has persistence rho = ", format(r), ". The shock is injected ",
+           "as ", nm, "(-1) + psi*", s, "/rho, so a zero (or non-finite) rho ",
+           "cannot be represented; an i.i.d. state needs a different solver.",
+           call. = FALSE)
+    if (!is.finite(ps) || abs(ps) < 1e-12)
+      stop(context, ": shock '", s, "' has a zero loading on '", nm,
+           "' (equation ", q, ").", call. = FALSE)
+    if (abs(r) >= 1)
+      stop(context, ": the process for '", nm, "' driven by shock '", s,
+           "' has |rho| = ", format(abs(r)), " >= 1. The projection grid is ",
+           "built from a STATIONARY distribution, so a unit-root state has no ",
+           "bounded state domain.", call. = FALSE)
+
+    rho[[nm]]       <- r
+    psi[[nm]]       <- ps
+    shock_idx[[nm]] <- si
+  }
+
+  list(rho = rho, psi = psi, shock_idx = shock_idx)
+}
+
+
+## State (predetermined) variables of a compiled model: the endogenous
+## variables that appear at t-1.  Factored out of solve_global() so that
+## make_log_posterior_global_pf() can run .global_shock_pairing() at FACTORY
+## time -- one derivation, not two that can drift apart.
+#' @noRd
+.global_state_names <- function(compiled, endo = NULL) {
+  endo <- endo %||% compiled$dynamic$endo_names
+  lli  <- compiled$lead_lag_incidence %||% compiled$model$lead_lag_incidence
+  if (is.null(lli))
+    stop("solve_global: the compiled model carries no lead_lag_incidence.",
+         call. = FALSE)
+  ## LLI rownames are like "t-1", "t", "t+1" -- parse to integers.
+  row_labels <- vapply(rownames(lli), function(rn) {
+    rn <- trimws(rn)
+    if (rn == "t") return(0L)
+    m <- regmatches(rn, regexec("^t([+-]?\\d+)$", rn))[[1]]
+    if (length(m) == 2L) return(as.integer(m[2L]))
+    0L
+  }, integer(1L), USE.NAMES = FALSE)
+  endo[.structural_lag_lead(lli, row_labels)$has_lag]
 }

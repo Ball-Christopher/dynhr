@@ -11,7 +11,7 @@ hank_mixture_panel_loglik(
   omega,
   Pi,
   aggregate_path,
-  me_var
+  me_variance
 )
 }
 \arguments{
@@ -44,7 +44,7 @@ per particle (one \code{aggregate_path} draw) and combine the per-
 particle household log-likelihoods with particle weights, without any
 change to this function's contract.}
 
-\item{me_var}{Measurement-error variance: scalar or named vector keyed by
+\item{me_variance}{Measurement-error variance: scalar or named vector keyed by
 \code{obs_spec} (see \code{\link{hank_hh_hmm_loglik}}).}
 }
 \value{

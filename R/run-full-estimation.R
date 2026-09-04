@@ -160,6 +160,37 @@ print.dynhr_estimation_result <- function(x, ...) {
 #' optionally runs the diagnostic battery.  Results are saved to
 #' \code{output_dir} and returned as a structured list.
 #'
+#' @section Arguments by stage:
+#' The argument list is long because one call spans the whole pipeline.  Every
+#' argument has a default; a minimal call needs only \code{mod_file},
+#' \code{data} and \code{obs_vars}.  Grouped by the stage they act on:
+#'
+#' \describe{
+#'   \item{\strong{Model and data}}{\code{mod_file}, \code{data},
+#'     \code{obs_vars}, \code{data_col_map}, \code{dates}, \code{model},
+#'     \code{compiled}}
+#'   \item{\strong{Likelihood}}{\code{likelihood}, \code{me_variance},
+#'     \code{lik_init}, \code{freq_band}, \code{system_priors},
+#'     \code{tpf_options}, \code{filter_tunes},
+#'     \code{heteroskedastic_shocks}, \code{stochastic_volatility},
+#'     \code{plan}}
+#'   \item{\strong{Mode-finding}}{\code{n_mode_iter}, \code{mode_method},
+#'     \code{mode_n_starts}}
+#'   \item{\strong{Sampler}}{\code{sampler}, \code{n_draws}, \code{n_warmup},
+#'     \code{n_chains}, \code{n_particles}, \code{n_walkers},
+#'     \code{analytic_grad}, \code{seed}, \code{...}}
+#'   \item{\strong{Parallelism}}{\code{parallel}, \code{parallel_backend},
+#'     \code{n_cores}}
+#'   \item{\strong{Occasionally-binding constraints}}{\code{obc},
+#'     \code{obc_max_inner}, \code{obc_ppf_reweight},
+#'     \code{compute_smoother}}
+#'   \item{\strong{Optimal policy}}{\code{run_ramsey}, \code{ramsey_order},
+#'     \code{ramsey_n_periods}, \code{ramsey_burn_in}}
+#'   \item{\strong{Diagnostics}}{\code{run_diag}}
+#'   \item{\strong{Output}}{\code{output_dir}, \code{output_prefix},
+#'     \code{verbose}}
+#' }
+#'
 #' @param mod_file   Path to a Dynare \code{.mod} file.  Alternatively, pass
 #'   an already-parsed model via \code{model}.
 #' @param data       Observation matrix (\eqn{T \times n_{\text{obs}}}), column
@@ -296,20 +327,28 @@ print.dynhr_estimation_result <- function(x, ...) {
 #'   \code{write_llm_report}
 #'
 #' @examples
-#' \dontrun{
-#' mod  <- system.file("extdata", "models", "rbc.mod", package = "dynhr")
-#' data <- matrix(rnorm(100), nrow = 100, ncol = 1,
-#'                dimnames = list(NULL, "y_obs"))
-#' result <- run_full_estimation(
-#'   mod_file  = mod,
-#'   data      = data,
-#'   obs_vars  = "y_obs",
-#'   sampler   = "rwmh",
-#'   n_draws   = 1000L,
-#'   n_warmup  = 500L,
-#'   seed      = 1L
+#' \donttest{
+#' ## Model and data both ship with the package: nk_demo.mod is a textbook
+#' ## three-equation New Keynesian model (nine estimated parameters) and
+#' ## nk_demo_data.csv is 200 periods simulated from it at known parameters,
+#' ## so the run has a right answer to be checked against.
+#' mod_file <- system.file("extdata/models/nk_demo.mod", package = "dynhr")
+#' est_data <- read.csv(system.file("extdata/models/nk_demo_data.csv",
+#'                                  package = "dynhr"))
+#'
+#' fit <- run_full_estimation(
+#'   mod_file    = mod_file,
+#'   data        = est_data,
+#'   obs_vars    = c("ygr", "infl", "intr"),
+#'   output_dir  = tempdir(),
+#'   sampler     = "smc",        # no mode required; returns log p(Y | M)
+#'   n_particles = 500L,         # raise for a production run
+#'   seed        = 1L,
+#'   verbose     = FALSE
 #' )
-#' print(result)
+#'
+#' summary(fit$chains)
+#' fit$chains$log_marginal_lik
 #' }
 #' @export
 run_full_estimation <- function(
@@ -688,12 +727,19 @@ run_full_estimation <- function(
 
       rwmh = {
         n_par      <- length(theta_mode)
-        opt_scale  <- 2.38^2 / n_par
-        Sigma_prop <- if (!is.null(mode_res$V_mode))
-                        mode_res$V_mode * opt_scale
-                      else
-                        diag(priors$std^2, nrow = n_par) * opt_scale
-        rownames(Sigma_prop) <- colnames(Sigma_prop) <- names(theta_mode)
+        ## Posterior curvature, not prior variances. `mode_res$V_mode` is set
+        ## only by the exported run_mode_finding(); .run_mode_finding() (the
+        ## optimiser core this path uses) never sets it, so the old
+        ## `if (!is.null(mode_res$V_mode))` test was a DEAD branch and every
+        ## proposal came from the prior. See .sampler_proposal_cov().
+        Sigma_prop <- if (!is.null(mode_res$V_mode)) {
+                        S <- mode_res$V_mode * (2.38^2 / n_par)
+                        dimnames(S) <- list(names(theta_mode), names(theta_mode))
+                        S
+                      } else {
+                        .sampler_proposal_cov(log_post_fn, theta_mode, priors,
+                                              verbose = verbose)
+                      }
 
         if (n_chains == 1L) {
           res <- rwmh(log_post_fn, theta_mode, Sigma_prop,
@@ -791,7 +837,7 @@ run_full_estimation <- function(
                         verbose = verbose, ...)
         else
           dynhr_smc(log_post_fn, prior_spec = priors,
-                    n_particles = n_particles, ...)
+                    n_particles = n_particles, verbose = verbose, ...)
         ## Resample the weighted particle cloud to an equally-weighted draw
         ## matrix so all downstream consumers (diagnostics, Bayesian IRF,
         ## smoother) receive a standard draw matrix.  The original particles

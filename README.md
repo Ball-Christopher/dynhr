@@ -19,8 +19,9 @@ pure R (with optional Rcpp/Armadillo acceleration):
   constraints. (The default filter adds **no** measurement-error variance
   (`me_variance = 0`) for exact Dynare parity, falling back automatically to the
   univariate filter on a singular innovation covariance; see `?kalman_filter`.)
-- **Estimation** — random-walk Metropolis-Hastings, sequential Monte Carlo, and
-  NUTS, with mode-finding (Nelder-Mead, CMA-ES, JADE), prior tooling, and an
+- **Estimation** — random-walk Metropolis-Hastings, sequential Monte Carlo,
+  NUTS, DIME, PMMH and SMC² (`dynhr_smc2()`), with mode-finding (csminwel,
+  Nelder-Mead, CMA-ES, JADE), prior tooling, and an
   exact-Hessian curvature stack (`posterior_hessian()` with finite-difference-
   free adjoint second-order terms, `laplace_log_marglik()`, `profile_ci()`).
 - **Stochastic volatility on shocks** — declare AR(1) log-variance processes on
@@ -60,7 +61,71 @@ source — on Windows that means **Rtools43 or newer** (i.e. R >= 4.3), on
 macOS the Xcode command-line tools. Julia, Dynare, and Octave are **optional**
 and only needed to regenerate parity goldens.
 
-### Build configuration that affects PERFORMANCE (and reproducibility)
+## Quick start
+
+### Estimate a model end to end (about 7 seconds)
+
+A model *and* a dataset ship with the package — Schorfheide's (2000)
+three-equation New Keynesian model (`nk_demo.mod`, nine estimated
+parameters) and 200 quarters of simulated output-growth, inflation and
+interest-rate observations — so the whole pipeline
+(parse → compile → steady state → mode-finding → sampling) runs from a clean
+install with no data of your own:
+
+```r
+library(dynhr)
+
+mod_file <- system.file("extdata/models/nk_demo.mod", package = "dynhr")
+data     <- read.csv(system.file("extdata/models/nk_demo_data.csv", package = "dynhr"))
+
+fit <- run_full_estimation(
+  mod_file = mod_file, data = data, obs_vars = c("ygr", "infl", "intr"),
+  sampler  = "smc", n_particles = 500L, seed = 1L,
+  output_dir = tempdir(), verbose = FALSE
+)
+
+summary(fit$chains)              # posterior mean / sd / 5-50-95% per parameter
+fit$chains$log_marginal_lik      # SMC estimate of log p(Y | M)
+```
+
+Raise `n_particles` (or switch to `sampler = "rwmh"` with `n_draws` /
+`n_warmup` / `n_chains`) for a production run; `?run_full_estimation` documents
+the full argument set.
+
+### Solve and simulate
+
+```r
+library(dynhr)
+
+mod      <- parse_mod(system.file("extdata/models/rbc.mod", package = "dynhr"))
+compiled <- compile_model(mod)
+steady   <- solve_steady(compiled, mod$param_values)
+dr       <- solve_perturbation(mod, compiled, steady$values, mod$param_values)
+
+print(dr)                                              # decision rules
+sim <- simulate_model(dr, n_periods = 200, model = mod)
+```
+
+Higher orders (set `max_order` when compiling, then pass `order` to the solver):
+
+```r
+compiled <- compile_model(mod, max_order = 3L)
+dr3      <- solve_perturbation(mod, compiled, steady$values,
+                               mod$param_values, order = 3L)
+```
+
+## Vignettes
+
+- `vignette("dynhr")` — getting started
+- `vignette("solving")` — steady state, perturbation, IRFs, moments, Kalman
+- `vignette("estimation")` — priors, mode-finding, MCMC/SMC/NUTS, exact-Hessian curvature
+- `vignette("hank")` — heterogeneous-agent (HANK) solving, mixture estimation, welfare
+- `vignette("diagnostics")` — the diagnostic battery and custom expectations
+- `vignette("mod-conversion")` — Dynare `.mod` compatibility notes
+- `vignette("mod-syntax")` — dynhr `.mod` syntax reference
+- `vignette("sbc-matrix")` — the SBC (Simulation-Based Calibration) coverage matrix
+
+## Build configuration that affects PERFORMANCE (and reproducibility)
 
 dynhr supplies no compiler flags of its own. `src/Makevars` is a single line —
 `PKG_LIBS = $(LAPACK_LIBS) $(BLAS_LIBS) $(FLIBS)` — so optimisation level, BLAS
@@ -130,42 +195,6 @@ from the installed files alone, with no git and no network.
 readLines(system.file("GIT_COMMIT", package = "dynhr"))
 ```
 
-## Quick start
-
-```r
-library(dynhr)
-
-mod      <- parse_mod(system.file("extdata/models/rbc.mod", package = "dynhr"))
-compiled <- compile_model(mod)
-steady   <- solve_steady(compiled, mod$param_values)
-dr       <- solve_perturbation(mod, compiled, steady$values, mod$param_values)
-
-print(dr)                                              # decision rules
-sim <- simulate_model(dr, n_periods = 200, model = mod)
-```
-
-Higher orders (set `max_order` when compiling, then pass `order` to the solver):
-
-```r
-compiled <- compile_model(mod, max_order = 3L)
-dr3      <- solve_perturbation(mod, compiled, steady$values,
-                               mod$param_values, order = 3L)
-```
-
-End-to-end Bayesian estimation (mode-finding + sampling + diagnostics) is driven
-by `run_full_estimation()`. See the vignettes for worked examples.
-
-## Vignettes
-
-- `vignette("dynhr")` — getting started
-- `vignette("solving")` — steady state, perturbation, IRFs, moments, Kalman
-- `vignette("estimation")` — priors, mode-finding, MCMC/SMC/NUTS, exact-Hessian curvature
-- `vignette("hank")` — heterogeneous-agent (HANK) solving, mixture estimation, welfare
-- `vignette("diagnostics")` — the diagnostic battery and custom expectations
-- `vignette("mod-conversion")` — Dynare `.mod` compatibility notes
-- `vignette("mod-syntax")` — dynhr `.mod` syntax reference
-- `vignette("sbc-matrix")` — the SBC (Simulation-Based Calibration) coverage matrix
-
 ## Where things are
 
 - `R/` — package source
@@ -192,6 +221,9 @@ used from this page alone.
   `initval` / `steady_state_model`, `shocks`, `estimated_params`, and OBC tags.
 - `compile_model(model, max_order = 1L)` — compile symbolic derivatives (to
   order 5) and fast evaluators; raise `max_order` for higher-order perturbation.
+- `write_mod(model, file)` — serialise a parsed model back to Dynare `.mod`
+  source. A `parse_mod()` -> `write_mod()` -> `parse_mod()` round trip is the
+  cheapest check that dynhr read your file the way you meant it.
 
 ### Solving
 - `solve_steady(compiled, params)` — steady state (analytic `steady_state_model`
@@ -208,6 +240,16 @@ used from this page alone.
   `pruned_ss_moments()` / `pruned_ss_loglik()` (order 2) and
   `pruned_state_space3()` / `pruned_ss_moments3()` / `pruned_ss_loglik3()`
   (order 3).
+- Global (projection) solutions: `solve_global(compiled, ss, params)` —
+  Chebyshev collocation with a measured, shock-aware default state domain;
+  `simulate()` works on the returned `GlobalSolution`.
+- Solution accuracy: `euler_errors()` (unit-free Euler residuals, in
+  consumption units) and `den_haan_marcet()` (are the residuals orthogonal
+  to the information set?). Both work on perturbation solutions too — use
+  them to decide whether you need a global solve.
+- Markov switching: `ms_kim_filter()` / `ms_kim_smoother()` /
+  `ms_kim_smoother_struct()` (Kim collapse, `collapse` ∈ `"gpb2"`, `"gpb3"`)
+  and `ms_irf()` for regime-dependent impulse responses.
 
 ### Occasionally-binding constraints (OBC / ZLB)
 - Solvers: `occbin_solve_path()`, `mcp_solve_path()` (mixed complementarity),
@@ -223,14 +265,27 @@ used from this page alone.
   `"univariate"`; stationary / exact-diffuse / auto initialisation (`lik_init`).
   Default `me_variance = 0` for exact Dynare parity, with an automatic
   univariate fallback on a singular innovation covariance.
-- `kalman_smoother()` — RTS smoother.
+- `kalman_smoother(data, dr, model, params, obs_vars, me_variance = 0)` —
+  Durbin–Koopman disturbance smoother, taking the same arguments and the same
+  level data as `kalman_filter()`. `smoother2histval()` turns a smoother run
+  into an initial history for a forecast or counterfactual.
+- Mixed frequency: `obs_aggregation` declares an observable as the *k*-period
+  temporal aggregate of a higher-frequency model variable (`flow_sum`,
+  `flow_mean`, `stock_end`, `triangle`), so a monthly model can be estimated
+  on quarterly data. Fixed-weight state augmentation, so `ZZ`/`TT` stay
+  constant; `mf_augment_state_space()` exposes it directly.
 - Skewed / particle likelihoods: `make_log_posterior_pskf_order2()` (pruned
   skewed Kalman filter), `make_log_posterior_tpf()` (tempered particle filter).
 
 ### Bayesian estimation
 - `prior_spec(model)` — extract priors from the `estimated_params` block.
 - `make_posterior(model, data, prior_spec, obs_vars, compiled, me_variance = 0)`
-  — build a log-posterior closure (Gaussian, cumulant, or Whittle likelihood).
+  — build a log-posterior closure (`likelihood` ∈ `"gaussian"`, `"cumulant"`,
+  `"pruned"`). For the rest — `"whittle"`, `"student_t"`, and the particle /
+  skewed filters `"tpf"`, `"pskf"`, `"ppf"`, `"copf"`, `"sv_rbpf"` — call
+  `make_log_posterior(likelihood = ...)` directly, which additionally offers
+  `"global_pf"` — a bootstrap particle filter over a projection solution, so
+  the model is never linearised (`global_pf_sbc()` certifies it).
 - `find_mode(log_post_fn, theta_init, prior_spec, method = "newrat")` — posterior
   mode; `method` ∈ `"newrat"` (csminwel, = Dynare `mode_compute 4`), `"cmaes"`,
   `"nelder"`, `"jade"`, `"combined"`.
@@ -241,13 +296,31 @@ used from this page alone.
   `sv_rbpf`).
 - `run_full_estimation(...)` — one-call pipeline (mode → sample → diagnostics),
   multi-chain with Gelman–Rubin convergence.
+- `dynhr_model()` + the `dm_*()` verbs (`dm_solve`, `dm_posterior`, `dm_mode`,
+  `dm_sample`, `dm_diagnostics`, `dm_forecast`, `dm_irf`, `dm_test`) — one
+  pipeline object carrying model/compiled/ss/dr/data/priors, instead of
+  threading six arguments through every call. Numerically identical to the
+  functional API.
+- Long runs: `mcmc(checkpoint_dir =, resume = TRUE, flush_every =)` writes a
+  checksummed, atomically-written state pack (position, log-posterior,
+  adaptation state, `.Random.seed`), so a resumed chain is statistically
+  identical to the uninterrupted run. `mcmc_chain_state()` / `_save()` /
+  `_restore()` / `_extend()` are the sampler-agnostic primitives.
+- Cheap-then-exact: `mcmc(..., screen_fn = )` — delayed acceptance, where a
+  cheap approximate likelihood screens proposals before the expensive one
+  runs; the two-stage ratio keeps the exact posterior invariant.
+- Non-likelihood estimation: `method_of_moments()` — GMM or SMM by moment
+  matching, with identity / optimal / Newey–West / diagonal weighting and
+  analytic moment Jacobians where available.
 
 ### Curvature, model evidence, and weak identification
-- `posterior_hessian(log_post, theta, t2_method = "adjoint_solution")` — exact
+- `posterior_hessian(model, compiled, dr, params, param_names, obs_vars, Y,
+  t2_method = "adjoint_solution")` — exact
   analytic Hessian. `t2_method` ∈ `"loop"`, `"contract_once"`, `"hvp_solution"`,
   `"adjoint_solution"`; the last two never form the state-space second
   derivative, and `"adjoint_solution"` is exact and finite-difference-free.
-- `laplace_log_marglik()` — Laplace model evidence from the mode plus Hessian.
+- `laplace_log_marglik(mode_result)` — Laplace model evidence, read off a
+  `run_mode_finding(use_exact_hessian = TRUE)` result.
 - `make_posterior_grad(grad_method = "adjoint_solution")` — analytic score for
   gradient samplers.
 - `check_hessian_conditioning()`, `fd_safe_hessian()`, `profile_ci()`,
@@ -302,10 +375,19 @@ used from this page alone.
   `welfare_decompose()`.
 
 ### Diagnostics
-- `run_diagnostics()` — the D1–D30 battery (identification → convergence → fit →
+- `run_diagnostics()` — the D0–D41 battery (identification → convergence → fit →
   narrative), rendered by `write_report()`.
 - Standalone helpers: `chain_diagnostics()`, `bk_distance()`,
-  `kf_innovation_diagnostics()`, `solution_pencil_spectrum()`.
+  `kf_innovation_diagnostics()`, `solution_pencil_spectrum()`,
+  `diag_sloppiness()` (D38), `diag_stability_map()` (D39),
+  `diag_near_unit_root()` (D40), `euler_errors()` / `den_haan_marcet()`
+  (solution accuracy).
+- Out-of-sample: `forecast_backtest()` — recursive expanding-window
+  backtesting with CRPS, log score, PIT and interval coverage; re-estimate
+  at each origin or roll a single fit forward.
+- Shock decompositions add up exactly (shock contributions plus an `initial`
+  column reproduce the data): `historical_decomposition()` with optional
+  `shock_groups`, and `realtime_decomposition()` across data vintages.
 
 ### Cookbook
 
@@ -324,12 +406,21 @@ irf <- compute_irfs(dr, model = m, n_periods = 40L)
 Estimate (mode → exact-Hessian curvature → NUTS → diagnostics):
 
 ```r
+m      <- parse_mod(system.file("extdata/models/nk_demo.mod", package = "dynhr"))
+cm     <- compile_model(m)
+obs    <- c("ygr", "infl", "intr")
+Y      <- as.matrix(read.csv(system.file("extdata/models/nk_demo_data.csv",
+                                         package = "dynhr"))[, obs])
 priors <- prior_spec(m)
 theta0 <- setNames(priors$mean, priors$name)
 lp     <- make_posterior(m, data = Y, prior_spec = priors,
                          obs_vars = obs, compiled = cm, me_variance = 0)
 mode   <- find_mode(log_post_fn = lp, theta_init = theta0, prior_spec = priors)
-H      <- posterior_hessian(lp, mode$theta_mode, t2_method = "adjoint_solution")
+pm     <- apply_theta_to_params(m, mode$theta_mode)
+drm    <- solve_perturbation(m, cm, solve_steady(cm, pm)$values, pm)
+H      <- posterior_hessian(m, cm, drm, pm, param_names = priors$name,
+                            obs_vars = obs, data = Y,
+                            t2_method = "adjoint_solution")
 chains <- nuts(log_post_fn = lp, theta0 = mode$theta_mode,
                n_draws = 4000L, n_warmup = 2000L)
 chain_diagnostics(chains$chain)
@@ -351,4 +442,5 @@ irf   <- hank_model_irf(model, 0.01 * 0.9^(0:299))
 
 ## Licence
 
-MIT — see [LICENSE](LICENSE).
+MIT — see [LICENSE.md](LICENSE.md) for the full text (`LICENSE` is the
+two-line CRAN stub).

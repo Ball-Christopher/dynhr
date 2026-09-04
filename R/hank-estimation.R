@@ -17,7 +17,7 @@
 ## Only a scalar shock (KS TFP) is wired here; the MA/autocovariance machinery
 ## is written for a general n_shock Sigma_eps.  With more observables than
 ## shocks the model is stochastically singular, so measurement error must be
-## supplied (me_var) to keep the covariance positive definite.
+## supplied (me_variance) to keep the covariance positive definite.
 ## --------------------------------------------------------------------------
 
 
@@ -30,22 +30,22 @@
 #' @param ks A \code{\link{hank_ks_steady}} steady state.
 #' @param rho_z Numeric in [0,1): AR(1) persistence of (log) TFP.
 #' @param T_h Integer horizon (number of MA terms).
-#' @param observables Character subset of \code{c("Y","C","K","r","w")}.
+#' @param obs_vars Character subset of \code{c("Y","C","K","r","w")}.
 #' @param ge Optional precomputed \code{\link{hank_ks_ge_jacobian}}.
 #'
 #' @return A \code{T_h x n_obs} matrix of MA coefficients (columns named by
-#'   \code{observables}).
+#'   \code{obs_vars}).
 #' @export
 hank_ma_coefficients <- function(ks, rho_z, T_h,
-                                 observables = c("Y", "C"), ge = NULL) {
+                                 obs_vars = c("Y", "C"), ge = NULL) {
   if (is.null(ge)) ge <- hank_ks_ge_jacobian(ks, T_h)
   ## Deterministic TFP response to a unit innovation at t=0: dlogZ_t = rho^t.
   dZ  <- ks$Z * rho_z^(seq_len(T_h) - 1L)
   irf <- hank_ks_linear_irf(ks, dZ, ge = ge)
   fld <- c(Y = "dY", C = "dC", K = "dK", r = "dr", w = "dw")
-  Theta <- sapply(observables, function(o) irf[[fld[[o]]]])
-  matrix(Theta, T_h, length(observables),
-         dimnames = list(NULL, observables))
+  Theta <- sapply(obs_vars, function(o) irf[[fld[[o]]]])
+  matrix(Theta, T_h, length(obs_vars),
+         dimnames = list(NULL, obs_vars))
 }
 
 
@@ -78,13 +78,13 @@ hank_autocov <- function(Theta, sigma_eps, n_lags) {
 #' @param G Autocovariance array from \code{\link{hank_autocov}} (max lag must
 #'   be >= \code{T_data - 1}).
 #' @param T_data Integer: number of time periods in the sample.
-#' @param me_var Numeric >= 0: measurement-error variance added on the diagonal
+#' @param me_variance Numeric >= 0: measurement-error variance added on the diagonal
 #'   (required when n_obs > n_shocks to avoid singularity).
 #'
 #' @return A \code{(T_data*n_obs) x (T_data*n_obs)} covariance matrix, stacked
 #'   time-major (row \code{(t-1)*n_obs + j}).
 #' @keywords internal
-.hank_stacked_cov <- function(G, T_data, me_var = 0) {
+.hank_stacked_cov <- function(G, T_data, me_variance = 0) {
   n_obs <- dim(G)[1]; n_lags <- dim(G)[3] - 1L
   if (n_lags < T_data - 1L)
     stop("autocovariance max lag < T_data - 1; increase T_h/n_lags")
@@ -96,7 +96,7 @@ hank_autocov <- function(Theta, sigma_eps, n_lags) {
     S[((t - 1L) * n_obs + 1L):(t * n_obs),
       ((s - 1L) * n_obs + 1L):(s * n_obs)] <- blk
   }
-  if (me_var > 0) diag(S) <- diag(S) + me_var
+  if (me_variance > 0) diag(S) <- diag(S) + me_variance
   (S + t(S)) / 2   # symmetrize against round-off
 }
 
@@ -107,20 +107,20 @@ hank_autocov <- function(Theta, sigma_eps, n_lags) {
 #' sample under the MA representation, via the block-Toeplitz covariance and a
 #' Cholesky solve.
 #'
-#' @param Y \code{T_data x n_obs} matrix of demeaned aggregate observations
+#' @param data \code{T_data x n_obs} matrix of demeaned aggregate observations
 #'   (deviations from steady state), columns in the same order as \code{Theta}.
 #' @param Theta MA coefficients (see \code{\link{hank_ma_coefficients}}).
 #' @param sigma_eps Shock innovation standard deviation.
-#' @param me_var Measurement-error variance (default 0).
+#' @param me_variance Measurement-error variance (default 0).
 #'
 #' @return The scalar Gaussian log-likelihood.
 #' @export
-hank_loglik_aggregate <- function(Y, Theta, sigma_eps, me_var = 0) {
-  Y <- as.matrix(Y)
-  T_data <- nrow(Y); n_obs <- ncol(Y)
+hank_loglik_aggregate <- function(data, Theta, sigma_eps, me_variance = 0) {
+  data <- as.matrix(data)
+  T_data <- nrow(data); n_obs <- ncol(data)
   G <- hank_autocov(Theta, sigma_eps, n_lags = T_data - 1L)
-  S <- .hank_stacked_cov(G, T_data, me_var = me_var)
-  yv <- as.numeric(t(Y))                       # time-major stacking
+  S <- .hank_stacked_cov(G, T_data, me_variance = me_variance)
+  yv <- as.numeric(t(data))                       # time-major stacking
   ch <- chol(S)                                # upper triangular
   z  <- backsolve(ch, yv, transpose = TRUE)    # solve t(ch) z = yv
   logdet <- 2 * sum(log(diag(ch)))
@@ -166,7 +166,7 @@ hank_ma_state_space <- function(Theta, sigma_eps, q = NULL) {
 
   new_dsge_ss(T_mat = TT, R_mat = RR, Z_mat = Z_lag, D_mat = D_lag,
               Sigma_e = matrix(sigma_eps^2, 1, 1),
-              obs_names = colnames(Theta), timing = "lagged")
+              obs_vars = colnames(Theta), timing = "lagged")
 }
 
 
@@ -179,26 +179,26 @@ hank_ma_state_space <- function(Theta, sigma_eps, q = NULL) {
 #' composes with dynhr's missing-data handling, smoother, priors, samplers and
 #' SBC tooling.
 #'
-#' @param Y \code{T_data x n_obs} matrix of demeaned aggregate observations.
+#' @param data \code{T_data x n_obs} matrix of demeaned aggregate observations.
 #' @param Theta MA coefficients (see \code{\link{hank_ma_coefficients}}).
 #' @param sigma_eps Innovation standard deviation.
-#' @param me_var Measurement-error variance (needed when n_obs > n_shocks).
+#' @param me_variance Measurement-error variance (needed when n_obs > n_shocks).
 #' @param q Optional state length (default all MA terms).
 #'
 #' @return The scalar Kalman log-likelihood.
 #' @export
-hank_loglik_ss <- function(Y, Theta, sigma_eps, me_var = 0, q = NULL) {
-  Y  <- as.matrix(Y)
+hank_loglik_ss <- function(data, Theta, sigma_eps, me_variance = 0, q = NULL) {
+  data  <- as.matrix(data)
   ss <- hank_ma_state_space(Theta, sigma_eps, q = q)
   n_state <- ss$n_state
   out <- .kf_univariate_dispatch(
-    Y_minus_d   = t(Y),                       # core expects n_obs x T
+    Y_minus_d   = t(data),                       # core expects n_obs x T
     ZZ = ss$Z_mat, TT = ss$T_mat, RR = ss$R_mat, DD = ss$D_mat,
     Sigma_e = ss$Sigma_e,
     s0 = rep(0, n_state),
     P_state = sigma_eps^2 * diag(n_state),    # nilpotent T => stationary cov
     P_inf_state = NULL,
-    me_variance = me_var)
+    me_variance = me_variance)
   out$loglik
 }
 
@@ -208,14 +208,17 @@ hank_loglik_ss <- function(Y, Theta, sigma_eps, me_var = 0, q = NULL) {
 #' @param Theta MA coefficients.
 #' @param sigma_eps Innovation standard deviation.
 #' @param T_data Sample length.
-#' @param me_sd Measurement-error standard deviation (default 0).
+#' @param me_variance Measurement-error VARIANCE (default 0). Renamed from
+#'   the pre-0.9.2.0003 \code{me_sd}, which took a standard deviation: pass
+#'   \code{me_sd^2} for the same draws.
 #' @param eps Optional pre-drawn innovations (length \code{T_data}); if
 #'   \code{NULL}, drawn N(0, sigma_eps^2).  Provide for reproducibility.
 #'
 #' @return A \code{T_data x n_obs} matrix of simulated demeaned observations.
 #' @export
-hank_simulate_aggregate <- function(Theta, sigma_eps, T_data, me_sd = 0,
+hank_simulate_aggregate <- function(Theta, sigma_eps, T_data, me_variance = 0,
                                     eps = NULL) {
+  me_sd <- .hank_me_sd(me_variance, "hank_simulate_aggregate")
   T_h <- nrow(Theta); n_obs <- ncol(Theta)
   if (is.null(eps)) eps <- stats::rnorm(T_data, 0, sigma_eps)
   Y <- matrix(0, T_data, n_obs)

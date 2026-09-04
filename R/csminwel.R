@@ -10,7 +10,47 @@
 ## update (bfgsi), and the characteristic "bad gradient" / Hessian-reset
 ## logic that lets it climb out of stalls.  Self-contained: base R only.
 ##
-## Reference: Christopher A. Sims, csminwel (http://sims.princeton.edu/yftp/optimize/).
+## PROVENANCE AND LICENCE (checked 2026-09-05).
+##
+## Ported from Sims's OWN files, as distributed from his Princeton page:
+##   http://sims.princeton.edu/yftp/optimize/mfiles/{csminwel,csminit,bfgsi,numgrad}.m
+## That host stopped answering some time after 2026-05-18 (DNS still resolves
+## to eco-csimsserv.princeton.edu, nothing listens on http or https), so the
+## live citation is Sims's index page and the files are readable in the
+## Internet Archive:
+##   https://www.princeton.edu/~sims/#optimize                    (live index)
+##   https://web.archive.org/web/20180409211528/http://sims.princeton.edu/yftp/optimize/mfiles/csminwel.m
+##
+## LICENCE. Sims's `bfgsi.m` carries an explicit grant --
+##   "Copyright by Christopher Sims 1996.  This material may be freely
+##    reproduced and modified."
+## -- which is permissive and compatible with this package's MIT licence.
+## `csminwel.m`, `csminit.m` and `numgrad.m` as distributed by Sims carry NO
+## copyright or licence notice of any kind.
+##
+## NOT DERIVED FROM THE GPL FORKS, and this matters: the copies most people
+## reach first are copyleft. Dynare's `matlab/optimization/csminwel1.m` is
+## "Copyright (C) 1993-2007 Christopher Sims / 2006-2025 Dynare Team", GPL-3,
+## and the Sims-Zha `contrib/ms-sbvar/TZcode/.../csminwel.m` is
+## "Copyright (C) 1997-2012 Christopher A. Sims and Tao Zha", GPL-3-or-later.
+## A port of either would make this file GPL and collide with dynhr's MIT.
+## This port carries NONE of their fork-only machinery -- no `penalty`,
+## `Save_files`, `message` or `epsilon` (Dynare's, 6-23 occurrences each), no
+## `dispIndx` or `stps` (Sims-Zha's) -- and follows the original's structure,
+## including `numgrad.m`'s delta = 1e-6 and its abs(g) < 1e15 reliability
+## guard. If this file is ever re-synced against a MATLAB source, re-sync it
+## against the ARCHIVED ORIGINALS, never against Dynare.
+##
+## A private reference copy of the four originals (with the full licence
+## findings) is kept OUTSIDE this repository, at
+## ../dynhr_refs/csminwel-sims-originals/. Three of the four carry no licence
+## notice, so they are cited and checksummed here, never redistributed --
+## the same rule that kept Dynare's fs2000.mod out of the 0.9.3 release.
+## sha256 of the 2018-04-09 archive snapshot:
+##   6b3b13247aa1c6cfcfbe5bac4be2fb9c8dfd4f8695afd78d168849fbe381ad52  csminwel.m
+##   aa839dec3a44ed1c58eb6441c2ce61b253ce60b407d7226ef11b176fc82e2a24  csminit.m
+##   33beb5acdbb96dba51c1cab0ac7a59e99f2cf35f7ba4e0573ce9f1a1dd0b56c1  bfgsi.m
+##   55e28e6170e0347dec9141f8796e031c57c9d1f8094599c9696af7374c7563fd  numgrad.m
 ## --------------------------------------------------------------------------
 
 
@@ -252,8 +292,14 @@
 #' fit$xh      # ~ c(1, 1)
 #' fit$fh      # ~ 0
 #'
-#' @references Sims, C. A. \emph{csminwel}.
-#'   \url{http://sims.princeton.edu/yftp/optimize/}.
+#' @references Sims, C. A. \emph{csminwel} (optimization software).
+#'   \url{https://www.princeton.edu/~sims/#optimize}. The canonical file
+#'   location, \code{http://sims.princeton.edu/yftp/optimize/}, has been
+#'   unreachable since 2026 and is preserved in the Internet Archive:
+#'   \url{https://web.archive.org/web/20180409211528/http://sims.princeton.edu/yftp/optimize/mfiles/csminwel.m}.
+#'   This is a base-R port of Sims's own MATLAB files, not of the GPL forks
+#'   shipped with Dynare -- see the provenance note at the top of
+#'   \code{R/csminwel.R}.
 #' @seealso \code{\link{match_irfs}}, \code{\link[stats]{optim}}
 #' @export
 csminwel <- function(fcn, x0, ..., H0 = NULL, grad = NULL,

@@ -398,11 +398,14 @@ ramsey_obc_pwlinear <- function(model,
   # ---- 7. Run regime search ----
   if (verbose) cat("[ramsey_obc_pwlinear] Running regime search (method = '", method, "')...\n", sep = "")
 
-  # Build shock sequence: one std dev impulse in the first period
+  # Build shock sequence: one std dev impulse to the first shock in period 1.
+  # boehl_simulate()/boehl_solve_regime_path() take an n_exo x T matrix
+  # (shocks in ROWS, periods in COLUMNS); the previous T x n_exo layout was
+  # non-conformable and made this function fail on every call.
   n_T <- 40L  # Default horizon
-  shock_seq <- matrix(0, nrow = n_T, ncol = length(aug_model$varexo_names))
-  colnames(shock_seq) <- aug_model$varexo_names
-  if (ncol(shock_seq) >= 1) {
+  shock_seq <- matrix(0, nrow = length(aug_model$varexo_names), ncol = n_T)
+  rownames(shock_seq) <- aug_model$varexo_names
+  if (nrow(shock_seq) >= 1) {
     shock_seq[1, 1] <- shock_std
   }
 

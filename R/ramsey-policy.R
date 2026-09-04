@@ -548,21 +548,6 @@ ramsey_model <- function(model,
 }
 
 
-#' Evaluate planner objective at steady state
-#' @param obj_ast  Parsed objective AST.
-#' @param model    dynhr_mod.
-#' @param ss       Steady state vector.
-#' @param params   Parameter vector.
-#' @return Numeric: objective value at SS.
-#' @noRd
-.evaluate_welfare_at_ss <- function(obj_ast, model, ss, params) {
-  .eval_planner_ast(obj_ast,
-    vars = ss,
-    params = params,
-    ss = ss)
-}
-
-
 #' @export
 print.dynhr_ramsey_result2 <- function(x, ...) {
   cat(sprintf("\n<dynhr_ramsey_result2>  [Ramsey optimal policy]\n"))

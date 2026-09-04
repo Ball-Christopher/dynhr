@@ -51,3 +51,4 @@ path.
 \code{\link{hank_het2_jacobian}},
   \code{\link{hank_het_jacobian_nd}} (one-asset)
 }
+\keyword{internal}

@@ -313,7 +313,10 @@ d29_data_driven_constraints <- function(data,
   # ---- 7. Compute identification strengths ----
   # Adaptive ridge: scale regularisation to the matrix's own diagonal so that
   # near-singular moment matrices (rcond ~ 1e-25) don't crash solve().
-  .safe_inv <- function(M) {
+  ## Renamed from `.safe_inv`: that name is the PACKAGE-level helper in
+  ## R/solve-helpers.R, and a local definition here silently shadowed it for
+  ## the rest of this function.
+  .d29_ridge_inv <- function(M) {
     ridge <- max(1e-6 * max(abs(diag(M))), 1e-10)
     M_reg <- M + diag(ridge, nrow(M))
     tryCatch(solve(M_reg), error = function(e) {
@@ -325,14 +328,14 @@ d29_data_driven_constraints <- function(data,
 
   # Model-implied strength (like D20)
   I_model <- crossprod(J_moment)
-  I_model_inv <- .safe_inv(I_model)
+  I_model_inv <- .d29_ridge_inv(I_model)
   se_model <- sqrt(pmax(diag(I_model_inv), 0))
   model_strength <- abs(theta[param_names]) / pmax(se_model, 1e-16)
   names(model_strength) <- param_names
 
   # Data-driven strength
   I_data <- crossprod(J_data)
-  I_data_inv <- .safe_inv(I_data)
+  I_data_inv <- .d29_ridge_inv(I_data)
   se_data <- sqrt(pmax(diag(I_data_inv), 0))
   data_strength <- abs(theta[param_names]) / pmax(se_data, 1e-16)
   names(data_strength) <- param_names

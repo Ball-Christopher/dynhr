@@ -5,8 +5,8 @@
 \title{Exact-AR estimation target for a HANK model (structural + shock parameters)}
 \usage{
 hank_ar_target(
-  Y,
-  observables,
+  data,
+  obs_vars,
   model = NULL,
   model_fn = NULL,
   structural = NULL,
@@ -16,8 +16,7 @@ hank_ar_target(
   dtheta_fn = "auto",
   verify = TRUE,
   q = NULL,
-  me_var = 0,
-  me_sd = NULL,
+  me_variance = 0,
   prior_rho_mean = 0.5,
   prior_rho_sd = 0.3,
   prior_sigma_sd = 0.05,
@@ -27,10 +26,10 @@ hank_ar_target(
 )
 }
 \arguments{
-\item{Y}{\code{T_data x n_obs} matrix of demeaned observations.}
+\item{data}{\code{T_data x n_obs} matrix of demeaned observations.}
 
-\item{observables}{Character vector of observable names, in the column order
-of \code{Y}.}
+\item{obs_vars}{Character vector of observable names, in the column order
+of \code{data}.}
 
 \item{model}{A \code{\link{hank_model}}. Required when \code{model_fn} is
 \code{NULL}; otherwise optional, and used to seed the memo (so the first
@@ -62,7 +61,7 @@ difference per parameter, which is worth paying once and never again
 inside a loop (a wrong \code{dtheta_fn} is wrong at every theta, so
 re-checking buys nothing).}
 
-\item{q, me_var, me_sd}{As in \code{\link{make_log_posterior_hank}}.}
+\item{q, me_variance}{As in \code{\link{make_log_posterior_hank}}.}
 
 \item{prior_rho_mean, prior_rho_sd, prior_sigma_sd}{As in
 \code{\link{make_log_posterior_hank}}.}

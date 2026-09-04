@@ -98,3 +98,4 @@ SINGLE realized \code{(n_e*n_a)}-vector (calibrated \code{Dhat1 - Dhat0}),
 compared by \code{\link{hank_reweighting_loss}} against each candidate
 mixture's model-implied net reweighting, likewise summed over \code{T_h}.
 }
+\keyword{internal}

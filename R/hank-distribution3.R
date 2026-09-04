@@ -227,6 +227,7 @@ hank_het3_dist_jacobian <- function(block, T_h,
 #' JD_nd <- hank_het3_dist_jacobian_nd(blk, T_h = 3, inputs = c("rd", "w"),
 #'                                    delta = 3e-6)
 #' dim(JD_nd$rd)
+#' @keywords internal
 #' @export
 hank_het3_dist_jacobian_nd <- function(block, T_h, inputs = NULL,
                                        delta = 1e-5, threads = NULL) {

@@ -44,6 +44,22 @@ The returned mode is the natural starting point for \code{\link{mcmc}} or
 \code{\link{nuts}}, and the inverse Hessian at the mode provides the
 initial proposal covariance for RWMH.
 }
+\examples{
+model    <- parse_mod(system.file("extdata/models/nk_demo.mod",
+                                  package = "dynhr"), verbose = FALSE)
+compiled <- compile_model(model, verbose = FALSE)
+priors   <- prior_spec(model)
+obs_vars <- c("ygr", "infl", "intr")
+Y <- as.matrix(read.csv(system.file("extdata/models/nk_demo_data.csv",
+                                    package = "dynhr"))[, obs_vars])
+log_post <- make_posterior(model, data = Y, prior_spec = priors,
+                           obs_vars = obs_vars, compiled = compiled)
+
+theta0 <- setNames(priors$mean, priors$name)
+mode <- find_mode(log_post, theta0, priors, n_iter = 200L, verbose = FALSE)
+mode$logpost
+round(mode$theta_mode, 4)
+}
 \references{
 Hansen, N. (2016). The CMA evolution strategy: A tutorial.
     \emph{arXiv:1604.00772}.
@@ -51,5 +67,6 @@ Hansen, N. (2016). The CMA evolution strategy: A tutorial.
     minimization. \emph{The Computer Journal}, 7(4), 308-313.
 }
 \seealso{
-\code{\link{mcmc}}, \code{\link{nuts}}, \code{\link{make_posterior}}
+\code{\link{mcmc}}, \code{\link{nuts}}, \code{\link{make_posterior}},
+  \code{\link{dm_mode}} (the pipeline-object equivalent)
 }

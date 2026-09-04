@@ -4,7 +4,7 @@
 \alias{.hank_sbc_sim_Y}
 \title{Simulate a macro series from a `dsge_ss` state space (single-shock MA form)}
 \usage{
-.hank_sbc_sim_Y(ss_obj, T_data, me_var, sigma_Z, observables)
+.hank_sbc_sim_Y(ss_obj, T_data, me_variance, sigma_Z, obs_vars)
 }
 \description{
 Mirrors the research scratch's `sim_Y` (`wave3_lib.R`): draws iid `N(0,

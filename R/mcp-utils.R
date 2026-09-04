@@ -71,62 +71,6 @@ mcp_fb_deriv <- function(a, b) {
 # Complementarity residual for MCP
 # =============================================================================
 
-#' Compute the MCP complementarity residual for a solved path
-#'
-#' For each constrained variable j and period t, evaluates the FB function
-#'   φ(a_{j,t}, F_j(y_{t-1}, y_t, y_{t+1}, ε_t))
-#' where a_{j,t} = x_{j,t} − bound_j for lower bounds, or
-#'       a_{j,t} = bound_j − x_{j,t} for upper bounds.
-#'
-#' Returns a matrix of FB residuals: zero at complementarity, positive on
-#' violation.  This is the primary convergence metric for the MCP solver.
-#'
-#' @param Y         T × n_endo matrix: current path
-#' @param y0_num    Length-n_endo initial state
-#' @param y_ss_num  Length-n_endo steady state (terminal condition)
-#' @param eps_mat   T × n_exo shock matrix
-#' @param meta      Column metadata from .pf_col_meta()
-#' @param mcp_specs List of MCP specs (from mcp_parse_tags)
-#' @param compiled  dynhr_compiled (for residuals_fn)
-#' @param params    Named numeric parameter vector
-#' @param cmap_meta Column metadata from .occbin_col_meta()
-#' @param T, n_endo Integer: horizon and number of endogenous variables
-#' @return n_spec × T matrix of FB residuals (zero at complementarity)
-#' @noRd
-mcp_fb_residual_matrix <- function(Y, y0_num, y_ss_num, eps_mat,
-                                    meta, mcp_specs, compiled,
-                                    params, cmap_meta, T, n_endo) {
-  n_spec <- length(mcp_specs)
-  if (n_spec == 0L) return(matrix(0, 0, T))
-
-  dyn <- compiled$dynamic
-  fb_mat <- matrix(NA_real_, n_spec, T)
-
-  for (t in seq_len(T)) {
-    dy <- .pf_make_dy(meta, Y, y0_num, y_ss_num, eps_mat[t, ], t, T)
-    Rt <- dyn$residuals_fn(dy, params, NULL)
-
-    for (j in seq_len(n_spec)) {
-      sp <- mcp_specs[[j]]
-      x_cur <- Y[t, sp$var_idx]
-
-      if (sp$op == ">") {
-        # Lower bound: a = x - bound, b = F(x)
-        a <- x_cur - sp$bound
-        b <- Rt[sp$eq_idx]
-      } else {
-        # Upper bound: a = bound - x, b = -F(x)
-        a <- sp$bound - x_cur
-        b <- -Rt[sp$eq_idx]
-      }
-
-      fb_mat[j, t] <- mcp_fb(a, b)
-    }
-  }
-
-  fb_mat
-}
-
 
 # =============================================================================
 # Merit function
@@ -140,7 +84,7 @@ mcp_fb_residual_matrix <- function(Y, y0_num, y_ss_num, eps_mat,
 #' for backtracking line search.  Zero iff all complementarity conditions
 #' are satisfied.
 #'
-#' @param fb_mat  n_spec × T matrix of FB residuals (from mcp_fb_residual_matrix)
+#' @param fb_mat  n_spec × T matrix of FB residuals
 #' @return Scalar: θ = ½ Σ φ²
 #' @noRd
 mcp_compute_merit <- function(fb_mat) {

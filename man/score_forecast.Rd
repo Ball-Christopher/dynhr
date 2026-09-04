@@ -5,25 +5,32 @@
 \title{Proper scoring rules for posterior-predictive forecast evaluation}
 \usage{
 score_forecast(
-  predictive_draws,
+  predictive_draws = NULL,
   observed,
   rules = c("crps", "energy", "variogram"),
   vs_p = 0.5,
   vs_weights = NULL,
-  obs_names = NULL
+  obs_vars = NULL,
+  predictive_moments = NULL,
+  logs_method = c("gaussian", "kde"),
+  coverage_levels = c(0.5, 0.9),
+  kde_bw = NULL,
+  pit_randomize = TRUE
 )
 }
 \arguments{
 \item{predictive_draws}{Numeric matrix (S \eqn{\times} n_obs) of S draws
 from the posterior predictive distribution, where each column corresponds
 to one observable.  For a single observable, a numeric vector of length S
-is also accepted.}
+is also accepted.  May be \code{NULL} when \code{predictive_moments} is
+supplied and only closed-form rules are requested.}
 
 \item{observed}{Numeric vector of length n_obs giving the realised
 observations.}
 
 \item{rules}{Character vector naming the rules to compute.  Any subset of
-\code{c("crps", "energy", "variogram")}.  Default: all three.}
+\code{c("crps", "energy", "variogram", "logs", "pit", "coverage")}.
+Default: the first three (unchanged from earlier releases).}
 
 \item{vs_p}{Variogram score order (default 0.5; recommended by
 Scheuerer & Hamill 2015).}
@@ -31,8 +38,28 @@ Scheuerer & Hamill 2015).}
 \item{vs_weights}{Optional weight matrix (n_obs \eqn{\times} n_obs) for the
 variogram score.  Default \code{NULL} uses uniform weights.}
 
-\item{obs_names}{Optional character vector of length n_obs for labelling
+\item{obs_vars}{Optional character vector of length n_obs for labelling
 per-observable CRPS values.}
+
+\item{predictive_moments}{Optional \code{list(mean = , cov = )} giving the
+Gaussian predictive mean (length n_obs) and covariance
+(n_obs \eqn{\times} n_obs; a length-n_obs vector of variances is also
+accepted).  When supplied, the closed-form Gaussian scores are used --
+see the section above.}
+
+\item{logs_method}{Either \code{"gaussian"} (default) or \code{"kde"}; see
+the \code{logs} entry above.  Ignored unless \code{"logs"} is requested.}
+
+\item{coverage_levels}{Numeric vector of nominal central-interval levels in
+(0, 1).  Default \code{c(0.5, 0.9)}.  Ignored unless \code{"coverage"} is
+requested.}
+
+\item{kde_bw}{Bandwidth for \code{logs_method = "kde"} (scalar, or one per
+observable).  Default \code{NULL} uses \code{stats::bw.nrd0()}.}
+
+\item{pit_randomize}{Logical; use the randomised ensemble rank for the PIT
+(default \code{TRUE}).  Set \code{FALSE} for the plain empirical CDF.
+Has no effect on the \code{predictive_moments} path.}
 }
 \value{
 A list with elements:
@@ -41,8 +68,17 @@ A list with elements:
     \item{\code{crps_mean}}{Mean CRPS across observables.}
     \item{\code{energy}}{Scalar energy score (if requested).}
     \item{\code{variogram}}{Scalar variogram score (if requested).}
+    \item{\code{logs}}{Per-observable log score (if requested).}
+    \item{\code{logs_mean}}{Mean per-observable log score.}
+    \item{\code{logs_joint}}{Joint multivariate Gaussian log score
+      (\code{logs_method = "gaussian"} only; \code{NA} if the ensemble
+      covariance is not factorisable).}
+    \item{\code{pit}}{Per-observable PIT value in [0, 1].}
+    \item{\code{coverage}}{List with \code{lower}, \code{upper},
+      \code{covered} (n_levels \eqn{\times} n_obs) and \code{levels}.}
     \item{\code{rules}}{Character vector of rules computed.}
-    \item{\code{n_draws}}{Number of ensemble members used.}
+    \item{\code{n_draws}}{Number of ensemble members used (0 on the
+      \code{predictive_moments}-only path).}
     \item{\code{n_obs}}{Number of observables.}
   }
 }
@@ -64,7 +100,34 @@ scores indicate better-calibrated and sharper forecasts.
   \item{variogram}{Variogram Score of order \code{vs_p} (Scheuerer & Hamill
     2015).  Rewards correct dependence structure across observables.
     Requires \code{n_obs >= 2}.}
+  \item{logs}{Logarithmic score, reported as \eqn{-\log f(y)} so that,
+    like every other rule here, LOWER IS BETTER.  \code{logs_method =
+    "gaussian"} uses the Gaussian plug-in built from the ensemble mean and
+    covariance (per-observable marginals plus a joint multivariate value);
+    \code{"kde"} replaces the per-observable marginals with a Gaussian
+    kernel-density estimate, which does not assume normality.  With
+    \code{predictive_moments} the Gaussian score is exact rather than a
+    plug-in.}
+  \item{pit}{Probability integral transform \eqn{u = F(y)} per observable.
+    Calibrated forecasts have \eqn{u \sim U(0,1)}.  From an ensemble the
+    randomised rank is used (exactly uniform under exchangeability); from
+    \code{predictive_moments} it is \code{pnorm()} and needs no
+    randomisation.}
+  \item{coverage}{Equal-tailed central prediction intervals at each level
+    in \code{coverage_levels}, with 0/1 coverage indicators.  Averaging the
+    indicators over many forecast origins gives the empirical coverage
+    rate; see \code{\link{forecast_backtest}}.}
 }
+}
+
+\section{Gaussian predictive (\code{predictive_moments})}{
+
+For a linear Gaussian state space the predictive distribution is known in
+closed form, and passing it through \code{predictive_moments =
+list(mean = , cov = )} makes CRPS, the log score, the PIT and the coverage
+intervals EXACT instead of Monte-Carlo estimates -- CRPS via
+Gneiting & Raftery (2007) eq. 22.  The energy and variogram scores have no
+closed form here and still require draws.
 }
 
 \examples{
@@ -76,6 +139,11 @@ X <- cbind(rnorm(S, mu[1], sigma[1]),
            rnorm(S, mu[2], sigma[2]))
 y_obs <- c(0.6, -0.5)
 score_forecast(X, y_obs)
+
+## Calibration diagnostics and the exact Gaussian predictive
+score_forecast(X, y_obs, rules = c("logs", "pit", "coverage"))
+score_forecast(NULL, y_obs, rules = c("crps", "logs", "pit"),
+               predictive_moments = list(mean = mu, cov = sigma^2))
 }
 \references{
 Gneiting, T., & Raftery, A. E. (2007). Strictly proper scoring rules,
@@ -85,4 +153,12 @@ Association}, 102(477), 359--378.
 Scheuerer, M., & Hamill, T. M. (2015). Variogram-based proper scoring
 rules for probabilistic forecasts of multivariate quantities.
 \emph{Monthly Weather Review}, 143(4), 1321--1334.
+
+Diebold, F. X., Gunther, T. A., & Tay, A. S. (1998). Evaluating density
+forecasts with applications to financial risk management.
+\emph{International Economic Review}, 39(4), 863--883.
+}
+\seealso{
+\code{\link{dm_test}} to compare two score series,
+  \code{\link{forecast_backtest}} for the recursive expanding-window driver.
 }

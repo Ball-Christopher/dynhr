@@ -427,12 +427,13 @@ solve_perturbation_order2 <- function(model, compiled, ss, params,
 
   if (n_s == 0L) {
     if (verbose) message("No state variables; second-order terms are all zero.")
-    return(.trivial_dr2(dr1))
+    return(.trivial_dr2(dr1, model = model, params = params, Sigma_e = Sigma_e))
   }
 
   if (isTRUE(model$model_options$linear)) {
     if (verbose) message("Linear model: all second-order terms are exactly zero; skipping Kronecker solve.")
-    return(.linear_dr2(dr1, n_s, n_u, endo_names, state_idx, exo_names, model, params))
+    return(.linear_dr2(dr1, n_s, n_u, endo_names, state_idx, exo_names, model,
+                       params, Sigma_e = Sigma_e))
   }
 
   # ----------------------------------------------------------------
@@ -646,20 +647,16 @@ solve_perturbation_order2 <- function(model, compiled, ss, params,
   # ----------------------------------------------------------------
   # Assemble DecisionRules2 object (inherits from DecisionRules)
   # ----------------------------------------------------------------
-  dr2 <- c(
-    unclass(dr1),          # all first-order fields
-    list(
-      ghxx              = ghxx,
-      ghxu              = ghxu,
-      ghuu              = ghuu,
-      ghss              = ghss,
-      Sigma_e           = Sigma_e,
-      order             = 2L,
-      hessian_method    = hessian_method,
-      hessian_step      = h,
-      second_order_ok   = TRUE
-    )
-  )
+  ## NOTE on the merge idiom: dr1 ALREADY carries a `Sigma_e` field (attached by
+  ## solve_perturbation()'s .attach_Se()). A plain c(unclass(dr1), list(...))
+  ## would leave TWO entries named "Sigma_e" in the list, and `dr2$Sigma_e`
+  ## returns the FIRST -- i.e. dr1's -- silently discarding the value computed
+  ## here (and any explicit `Sigma_e` argument to this function). Assigning by
+  ## name replaces in place instead. Same idiom in .linear_dr2/.trivial_dr2.
+  dr2 <- unclass(dr1)          # all first-order fields
+  dr2[c("ghxx", "ghxu", "ghuu", "ghss", "Sigma_e", "order",
+        "hessian_method", "hessian_step", "second_order_ok")] <-
+    list(ghxx, ghxu, ghuu, ghss, Sigma_e, 2L, hessian_method, h, TRUE)
   class(dr2) <- c("DecisionRules2", "DecisionRules")
 
   if (verbose) {
@@ -677,7 +674,7 @@ solve_perturbation_order2 <- function(model, compiled, ss, params,
 #' Second-order solution for linear models (all higher-order terms exactly zero)
 #' @noRd
 .linear_dr2 <- function(dr1, n_s, n_u, endo_names, state_idx, exo_names,
-                        model, params) {
+                        model, params, Sigma_e = NULL) {
   n   <- length(endo_names)
   state_vars <- endo_names[state_idx]
 
@@ -690,21 +687,23 @@ solve_perturbation_order2 <- function(model, compiled, ss, params,
   colnames(ghuu) <- as.vector(outer(exo_names,  exo_names,  paste, sep = "__x__"))
   rownames(ghxx) <- rownames(ghxu) <- rownames(ghuu) <- endo_names
 
-  stderr  <- .get_shock_stderr(model, exo_names, params)
-  Sigma_e <- diag(stderr^2, n_u, n_u)
-  if (!is.null(exo_names)) colnames(Sigma_e) <- rownames(Sigma_e) <- exo_names
+  ## Shock covariance: exactly the convention of the non-shortcircuit path
+  ## above -- an explicitly supplied `Sigma_e` wins verbatim, otherwise derive
+  ## the FULL covariance from the model's shocks block.
+  ##
+  ## This used to be `diag(.get_shock_stderr(...)^2)`, which (a) ignored the
+  ## caller's `Sigma_e` argument outright and (b) discarded every off-diagonal
+  ## coming from `corr a, b = ...` / `var a, b = ...` shocks-block entries. A
+  ## `model(linear)` model therefore got a DIFFERENT Sigma_e -- and hence
+  ## different order-2 moments/IRFs/likelihoods -- from the byte-identical
+  ## model without the `linear` flag.
+  if (is.null(Sigma_e)) Sigma_e <- .get_shock_cov(model, exo_names, params)
 
-  dr2 <- c(unclass(dr1), list(
-    ghxx           = ghxx,
-    ghxu           = ghxu,
-    ghuu           = ghuu,
-    ghss           = setNames(numeric(n), endo_names),
-    Sigma_e        = Sigma_e,
-    order          = 2L,
-    hessian_method = "linear_shortcircuit",
-    hessian_step   = NA_real_,
-    second_order_ok = TRUE
-  ))
+  dr2 <- unclass(dr1)
+  dr2[c("ghxx", "ghxu", "ghuu", "ghss", "Sigma_e", "order",
+        "hessian_method", "hessian_step", "second_order_ok")] <-
+    list(ghxx, ghxu, ghuu, setNames(numeric(n), endo_names), Sigma_e, 2L,
+         "linear_shortcircuit", NA_real_, TRUE)
   class(dr2) <- c("DecisionRules2", "DecisionRules")
   dr2
 }
@@ -712,15 +711,30 @@ solve_perturbation_order2 <- function(model, compiled, ss, params,
 
 #' Trivial second-order solution (no state variables)
 #' @noRd
-.trivial_dr2 <- function(dr1) {
+.trivial_dr2 <- function(dr1, model = NULL, params = NULL, Sigma_e = NULL) {
   n   <- length(dr1$endo_names)
   n_u <- length(dr1$exo_names)
-  dr2 <- c(unclass(dr1), list(
-    ghxx = matrix(0, n, 0), ghxu = matrix(0, n, 0),
-    ghuu = matrix(0, n, n_u^2), ghss = numeric(n),
-    Sigma_e = diag(n_u), order = 2L, hessian_step = NA_real_,
-    second_order_ok = TRUE
-  ))
+  ## Same convention as .linear_dr2 / the main path: explicit `Sigma_e` wins,
+  ## otherwise derive it from the shocks block. The literal `diag(n_u)` that
+  ## used to sit here discarded BOTH the declared shock stderrs and every
+  ## cross-shock correlation (the "ghu Q = I default" failure mode in
+  ## CLAUDE.md), so a stateless model reported unit-variance shock moments.
+  if (is.null(Sigma_e)) {
+    Sigma_e <- if (!is.null(model))
+      .get_shock_cov(model, dr1$exo_names, params)
+    else
+      dr1$Sigma_e
+    if (is.null(Sigma_e)) {
+      Sigma_e <- diag(1, n_u, n_u)
+      if (n_u > 0L)
+        rownames(Sigma_e) <- colnames(Sigma_e) <- dr1$exo_names
+    }
+  }
+  dr2 <- unclass(dr1)
+  dr2[c("ghxx", "ghxu", "ghuu", "ghss", "Sigma_e", "order",
+        "hessian_step", "second_order_ok")] <-
+    list(matrix(0, n, 0), matrix(0, n, 0), matrix(0, n, n_u^2), numeric(n),
+         Sigma_e, 2L, NA_real_, TRUE)
   class(dr2) <- c("DecisionRules2", "DecisionRules")
   dr2
 }

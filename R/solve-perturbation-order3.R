@@ -239,29 +239,6 @@
 }
 
 
-#' Permute the "abc"-column index of an (n_eq x n_a*n_b*n_c) matrix.
-#'
-#' Each row of M is a flattened 3-tensor T[a,b,c] in column-major order
-#' (a fastest, c slowest).  Returns a new matrix M' whose rows are
-#' aperm(T, perm) -- i.e., for perm = c(1,3,2) the new row at (a,b,c)
-#' equals the original row at (a, c, b).
-#'
-#' All three modes must have the same length n (works for n_s^3 case).
-#'
-#' @noRd
-.permute_cube_cols <- function(M, n, perm) {
-  if (n == 0L) return(M)
-  n_eq <- nrow(M)
-  out  <- matrix(0, n_eq, n^3)
-  for (e in seq_len(n_eq)) {
-    A <- array(M[e, ], dim = c(n, n, n))
-    B <- aperm(A, perm)
-    out[e, ] <- as.numeric(B)
-  }
-  out
-}
-
-
 #' Symmetrize an n_eq x n^3 tensor over all three modes.
 #' @noRd
 .symmetrize_cube_cols <- function(M, n) {
@@ -315,7 +292,6 @@
 # =====================================================================
 # Main third-order solver
 # =====================================================================
-
 
 
 #' Solve the deterministic third-order perturbation of a DSGE model

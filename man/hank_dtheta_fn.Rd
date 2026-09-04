@@ -4,12 +4,12 @@
 \alias{hank_dtheta_fn}
 \title{Build an exact \code{dtheta_fn} for the structural score}
 \usage{
-hank_dtheta_fn(model_fn, shock_specs, observables, model = NULL, theta = NULL)
+hank_dtheta_fn(model_fn, shock_specs, obs_vars, model = NULL, theta = NULL)
 }
 \arguments{
 \item{model_fn}{\code{function(theta)} returning a \code{\link{hank_model}}.}
 
-\item{shock_specs, observables}{As for \code{\link{hank_dtheta_theta_list}}.}
+\item{shock_specs, obs_vars}{As for \code{\link{hank_dtheta_theta_list}}.}
 
 \item{model}{Optional prebuilt \code{\link{hank_model}} to seed the memo
 with; requires \code{theta}, and is used only while the requested

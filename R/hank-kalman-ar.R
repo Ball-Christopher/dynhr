@@ -9,8 +9,7 @@
 ## each shock's impulse response and drop the rest.  For a shock with AR(1)
 ## persistence rho the dropped tail carries variance of order
 ## rho^(2q)/(1 - rho^2): negligible at tame persistences, catastrophic near
-## the unit root.  Documented failure case (downstream application,
-## 2026-07-12): at a posterior mode with
+## the unit root.  Documented failure case (2026-07-12): at a posterior mode with
 ## rho = 0.9992 the plain truncated-MA likelihood (q = 200) was -337
 ## log-points off the exact Kalman filter of the equivalent .mod state space,
 ## at parameter values where a tame-rho oracle had previously matched to
@@ -40,8 +39,7 @@
 ## process).  At rho_z = 0 the formula reduces bit-exact to the plain
 ## truncated-MA autocovariance (0^0 = 1 keeps the d = k term).
 ##
-## VALIDATION HISTORY (against an independent reference implementation
-## of the same likelihood):
+## VALIDATION HISTORY (against an independent reference implementation):
 ##   - reduces bit-exact to the plain truncated-MA formula at rho = 0;
 ##   - matches a brute-force MA(5000) analytic oracle to 6e-4 log-points at a
 ##     near-unit-root mode where the plain formula is off by +9.0;
@@ -123,9 +121,9 @@
 ## invalidates every autocovariance slab but not this). Split out of
 ## .hank_stacked_loglik so hank_loglik_ar_grad() can share the one index --
 ## and the one factorization built from it -- instead of building a second.
-.hank_stacked_index <- function(Y, cache = NULL) {
-  Td <- nrow(Y); n_obs <- ncol(Y)
-  yv <- as.numeric(t(Y))                       # time-major stacking
+.hank_stacked_index <- function(data, cache = NULL) {
+  Td <- nrow(data); n_obs <- ncol(data)
+  yv <- as.numeric(t(data))                       # time-major stacking
   keep <- is.finite(yv)
   if (!is.null(cache) && !is.null(cache$Sidx) &&
       identical(cache$keep, keep) && identical(cache$dims, c(Td, n_obs)))
@@ -158,13 +156,13 @@
   -0.5 * (length(yk) * log(2 * pi) + 2 * sum(log(diag(ch))) + sum(z^2))
 }
 
-.hank_stacked_loglik <- function(Y, G, cache = NULL) {
-  Td <- nrow(Y); n_obs <- ncol(Y)
+.hank_stacked_loglik <- function(data, G, cache = NULL) {
+  Td <- nrow(data); n_obs <- ncol(data)
   if (dim(G)[1L] != n_obs)
-    stop("stacked loglik: dim(G)[1] != ncol(Y)")
+    stop("stacked loglik: dim(G)[1] != ncol(data)")
   if (dim(G)[3L] < Td)
     stop("autocovariance max lag < T_data - 1; increase T_h/n_lags")
-  ix <- .hank_stacked_index(Y, cache)
+  ix <- .hank_stacked_index(data, cache)
   yk <- ix$yv[ix$keep]
   S  <- matrix(as.numeric(G)[ix$idx], length(yk), length(yk))
   S  <- (S + t(S)) / 2                         # symmetrize against round-off
@@ -301,7 +299,7 @@ hank_autocov_ar <- function(Theta, rho, sigma_eps, n_lags, q = NULL) {
 #' agree bit-exactly.
 #'
 #' Unlike \code{\link{hank_loglik_aggregate}}, missing observations
-#' (\code{NA}/\code{NaN} entries of \code{Y}) are handled exactly, by row
+#' (\code{NA}/\code{NaN} entries of \code{data}) are handled exactly, by row
 #' deletion of the stacked system.
 #'
 #' @section Representability bound: the exact-AR treatment repairs the
@@ -314,13 +312,13 @@ hank_autocov_ar <- function(Theta, rho, sigma_eps, n_lags, q = NULL) {
 #' cap \eqn{\rho} at 0.98 for \code{T_h = 400}); by default the function warns
 #' when the bound is violated.  See \code{\link{hank_theta_boundary_check}}.
 #'
-#' @param Y \code{T_data x n_obs} matrix of demeaned aggregate observations
+#' @param data \code{T_data x n_obs} matrix of demeaned aggregate observations
 #'   (deviations from steady state), columns in the same order as
 #'   \code{Theta}; \code{NA}/\code{NaN} entries allowed.
 #' @param Theta MA coefficients (see \code{\link{hank_ma_coefficients}}).
 #' @param rho AR(1) persistence of the shock, \code{abs(rho) < 1}.
 #' @param sigma_eps Shock innovation standard deviation.
-#' @param me_var Measurement-error variance added to every observable
+#' @param me_variance Measurement-error variance added to every observable
 #'   (default 0).
 #' @param q Number of quasi-differenced MA terms retained (default all rows of
 #'   \code{Theta}).
@@ -330,7 +328,7 @@ hank_autocov_ar <- function(Theta, rho, sigma_eps, n_lags, q = NULL) {
 #' @param boundary_tol Threshold for the boundary warning (default
 #'   \code{1e-3}).
 #' @param cache Optional environment (\code{new.env()}) reused across calls
-#'   with the same \code{Y} shape and missing-data pattern.  Two
+#'   with the same \code{data} shape and missing-data pattern.  Two
 #'   exactness-preserving layers (a cache hit returns identical floats to
 #'   the uncached path): per-shock unscaled autocovariance slabs keyed on
 #'   \code{(rho, q, Theta)} -- so a one-coordinate optimizer/gradient
@@ -346,14 +344,14 @@ hank_autocov_ar <- function(Theta, rho, sigma_eps, n_lags, q = NULL) {
 #' @seealso \code{\link{hank_loglik_aggregate}}, \code{\link{hank_loglik_ar}},
 #'   \code{\link{hank_theta_boundary_check}}
 #' @export
-hank_loglik_aggregate_ar <- function(Y, Theta, rho, sigma_eps, me_var = 0,
+hank_loglik_aggregate_ar <- function(data, Theta, rho, sigma_eps, me_variance = 0,
                                      q = NULL, check_boundary = TRUE,
                                      boundary_tol = 1e-3, cache = NULL) {
-  Y <- as.matrix(Y)
+  data <- as.matrix(data)
   Theta <- as.matrix(Theta)
-  n_obs <- ncol(Y)
+  n_obs <- ncol(data)
   if (ncol(Theta) != n_obs)
-    stop("hank_loglik_aggregate_ar: ncol(Theta) must equal ncol(Y).")
+    stop("hank_loglik_aggregate_ar: ncol(Theta) must equal ncol(data).")
   if (abs(rho) >= 1)
     stop("hank_loglik_aggregate_ar: `rho` must satisfy abs(rho) < 1.")
   if (!is.null(cache) && !is.environment(cache))
@@ -367,9 +365,9 @@ hank_loglik_aggregate_ar <- function(Y, Theta, rho, sigma_eps, me_var = 0,
                               "hank_loglik_aggregate_ar")
 
   G <- sigma_eps^2 *
-    .hank_ar_autocov_slab("shock", Theta, rho, nrow(Y) - 1L, q, cache)
-  G[, , 1L] <- G[, , 1L] + diag(me_var, n_obs)
-  .hank_stacked_loglik(Y, G, cache = cache)
+    .hank_ar_autocov_slab("shock", Theta, rho, nrow(data) - 1L, q, cache)
+  G[, , 1L] <- G[, , 1L] + diag(me_variance, n_obs)
+  .hank_stacked_loglik(data, G, cache = cache)
 }
 
 
@@ -400,7 +398,7 @@ hank_loglik_aggregate_ar <- function(Y, Theta, rho, sigma_eps, me_var = 0,
 #'
 #' @inheritSection hank_loglik_aggregate_ar Representability bound
 #'
-#' @param Y \code{T_data x n_obs} matrix (or data frame) of demeaned
+#' @param data \code{T_data x n_obs} matrix (or data frame) of demeaned
 #'   observations, columns in the order of \code{ss$obs_names} (for a
 #'   \code{\link{hank_state_space}} object) or of the \code{Theta} columns;
 #'   \code{NA}/\code{NaN} entries allowed.
@@ -416,9 +414,11 @@ hank_loglik_aggregate_ar <- function(Y, Theta, rho, sigma_eps, me_var = 0,
 #'   (\code{abs(rho) < 1}).  Defaults to the values stored in \code{ss}.
 #' @param sigma Named numeric vector of per-shock innovation standard
 #'   deviations.  Defaults to the values stored in \code{ss}.
-#' @param me_sd Measurement-error standard deviation: scalar (recycled) or
+#' @param me_variance Measurement-error VARIANCE: scalar (recycled) or
 #'   length-\code{n_obs} vector.  Default 0 (allowed only if the observation
-#'   set is non-singular).
+#'   set is non-singular).  Renamed from the pre-0.9.2.0003 \code{me_sd},
+#'   which took a standard deviation: pass \code{me_sd^2} for the same
+#'   likelihood.
 #' @param q Number of quasi-differenced MA terms retained per shock (default:
 #'   \code{ss$q} for a state-space object, else all rows of \code{Theta}).
 #' @inheritParams hank_loglik_aggregate_ar
@@ -430,14 +430,31 @@ hank_loglik_aggregate_ar <- function(Y, Theta, rho, sigma_eps, me_var = 0,
 #'   \code{\link{make_log_posterior_hank}} (option
 #'   \code{likelihood = "exact_ar"})
 #' @export
-hank_loglik_ar <- function(Y, ss, rho = NULL, sigma = NULL, me_sd = 0,
+hank_loglik_ar <- function(data, ss, rho = NULL, sigma = NULL, me_variance = 0,
                            q = NULL, check_boundary = TRUE,
                            boundary_tol = 1e-3, cache = NULL) {
-  Y <- as.matrix(Y)
-  p <- .hank_ar_prepare(Y, ss, rho = rho, sigma = sigma, me_sd = me_sd, q = q,
+  data <- as.matrix(data)
+  me_sd <- .hank_me_sd(me_variance, "hank_loglik_ar")
+  p <- .hank_ar_prepare(data, ss, rho = rho, sigma = sigma, me_sd = me_sd, q = q,
                         check_boundary = check_boundary,
                         boundary_tol = boundary_tol, cache = cache)
-  .hank_stacked_loglik(Y, p$G, cache = cache)
+  .hank_stacked_loglik(data, p$G, cache = cache)
+}
+
+
+## Boundary conversion for the public `me_variance` argument. The exact-AR
+## internals below carry a measurement-error STANDARD DEVIATION (G[,,1] gets
+## diag(me_sd^2), and .hank_ar_dscore_me() is literally d/d(me_sd)), so the
+## public variance is square-rooted ONCE, here, at the API boundary -- the
+## numbers downstream are bit-identical to the pre-rename `me_sd = sqrt(v)`
+## call.
+.hank_me_sd <- function(me_variance, where) {
+  if (!is.numeric(me_variance) || length(me_variance) == 0L ||
+      anyNA(me_variance) || any(!is.finite(me_variance)) ||
+      any(me_variance < 0))
+    stop(where, ": `me_variance` must be a non-negative finite numeric ",
+         "scalar or vector (a VARIANCE, not a standard deviation).")
+  sqrt(me_variance)
 }
 
 
@@ -449,10 +466,10 @@ hank_loglik_ar <- function(Y, ss, rho = NULL, sigma = NULL, me_sd = 0,
 ## Cholesky per call. Every message keeps the "hank_loglik_ar:" prefix
 ## deliberately: these describe THAT function's documented contract, and the
 ## grad path reached them through it until this refactor.
-.hank_ar_prepare <- function(Y, ss, rho = NULL, sigma = NULL, me_sd = 0,
+.hank_ar_prepare <- function(data, ss, rho = NULL, sigma = NULL, me_sd = 0,
                              q = NULL, check_boundary = TRUE,
                              boundary_tol = 1e-3, cache = NULL) {
-  Td <- nrow(Y); n_obs <- ncol(Y)
+  Td <- nrow(data); n_obs <- ncol(data)
   if (!is.null(cache) && !is.environment(cache))
     stop("hank_loglik_ar: `cache` must be an environment ",
          "(e.g. new.env()) or NULL.")

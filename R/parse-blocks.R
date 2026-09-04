@@ -291,11 +291,29 @@ remove_blocks <- function(txt) {
               "osr", "ramsey_model", "ramsey_policy",
               "discretionary_policy", "planner_objective",
               "dynare_sensitivity", "bvar_density",
-              "bvar_forecast", "dsample", "Sigma_e")
+              "bvar_forecast", "dsample")
   for (kw in cmd_kw) {
     pat <- paste0("(?i)\\b", kw, "\\b\\s*(?:\\([^)]*\\))?\\s*[^;]*;")
     txt <- gsub(pat, " ", txt, perl = TRUE)
   }
+
+  ## `Sigma_e` is CASE-SENSITIVE, unlike every keyword above.
+  ##
+  ## Dynare's shock-covariance command is spelled `Sigma_e` (capital S) and
+  ## Dynare identifiers are case-sensitive, so `sigma_e` is NOT that command --
+  ## it is an ordinary, and extremely natural, parameter name. Matching it
+  ## case-insensitively with the rest of `cmd_kw` deleted the user's
+  ## `sigma_e = 1;` calibration line before parse_calibration() ever saw it,
+  ## leaving the parameter declared but NA. Reported against 0.9.1: the model
+  ## parsed cleanly after renaming the parameter to `sigma_obs_e`, which is
+  ## the signature of a name collision rather than a syntax error.
+  ##
+  ## The other keywords stay case-insensitive because they are genuine Dynare
+  ## reserved words -- a user cannot name a parameter `stoch_simul` in Dynare
+  ## either, so being permissive there costs nothing. `Sigma_e` is the only
+  ## entry whose lower-case form is a legal user identifier.
+  txt <- gsub("\\bSigma_e\\b\\s*(?:\\([^)]*\\))?\\s*[^;]*;", " ", txt,
+              perl = TRUE)
   txt
 }
 
@@ -465,6 +483,177 @@ parse_initval_block <- function(body, env = parent.frame()) {
     }
   }
   values
+}
+
+
+#' Parse a histval block into a per-variable history over lags
+#'
+#' Dynare's \code{histval} block sets the pre-sample history of endogenous
+#' (and exogenous) variables.  The index in \code{name(index)} is the period
+#' RELATIVE TO THE FIRST SIMULATION PERIOD, and it is \code{<= 0}:
+#' \code{y(0)} is the last pre-sample period (i.e. lag 1 as seen from period
+#' 1), \code{y(-1)} is the one before that (lag 2), and so on -- exactly the
+#' convention of the Dynare manual's histval example.  A bare
+#' \code{y = value;} is accepted as shorthand for \code{y(0) = value;}.
+#'
+#' The parsed result flips that into a LAG index, which is what every
+#' downstream consumer wants: element \code{k} of \code{histval[[v]]} is the
+#' value of \code{v} \code{k} periods before the first simulation period, so
+#' \code{histval[[v]][1]} is the initial condition \code{y0} of a one-lag
+#' model.  Missing intermediate lags are \code{NA}.
+#'
+#' @param body Body text of the histval block.
+#' @param env  Environment used to evaluate the right-hand sides (usually
+#'   seeded with the calibrated parameter values).
+#' @return Named list: variable name -> numeric vector indexed by lag.
+#' @noRd
+parse_histval_block <- function(body, env = parent.frame()) {
+  out <- list()
+  pat <- paste0("([A-Za-z_][A-Za-z0-9_]*)\\s*",       # name
+                "(?:\\(\\s*([+-]?[0-9]+)\\s*\\))?",   # optional (index)
+                "\\s*=\\s*([^;\\n]+)\\s*;")
+  all_matches <- regmatches(body, gregexpr(pat, body, perl = TRUE))[[1]]
+
+  for (m in all_matches) {
+    parts <- regmatches(m, regexec(pat, m, perl = TRUE))[[1]]
+    name  <- parts[2]
+    idx_s <- parts[3]
+    idx   <- if (is.na(idx_s) || !nzchar(idx_s)) 0L else as.integer(idx_s)
+    if (idx > 0L)
+      stop(sprintf(paste0("histval: '%s(%+d)' uses a positive period index. ",
+                          "histval indexes periods at or before the first ",
+                          "simulation period, so the index must be <= 0 ",
+                          "(y(0) is lag 1, y(-1) is lag 2)."),
+                   name, idx), call. = FALSE)
+    lag <- 1L - idx
+    expr_text <- gsub("\\s+", " ", trimws(parts[4]))
+    val <- tryCatch(eval(parse(text = expr_text), envir = env),
+                    error = function(e) NULL)
+    if (!is.numeric(val) || length(val) != 1L)
+      stop(sprintf(paste0("histval: could not evaluate the value for '%s' ",
+                          "('%s') to a single number."), name, expr_text),
+           call. = FALSE)
+    v <- out[[name]]
+    if (is.null(v)) v <- numeric(0)
+    if (length(v) < lag) v <- c(v, rep(NA_real_, lag - length(v)))
+    v[lag] <- val
+    out[[name]] <- v
+  }
+  out
+}
+
+
+#' Parse a shock_groups block body into a named list of shock memberships
+#'
+#' Dynare syntax (each entry ends with a semicolon):
+#' \preformatted{
+#'   shock_groups(name = groupname);
+#'   'supply' = e_a, e_z;
+#'   'demand' = e_g;
+#'   end;
+#' }
+#' The group label is normally single-quoted; double quotes and a bare
+#' identifier are accepted too.  Members may be separated by commas or
+#' whitespace.  The result is the named list of character vectors that
+#' \code{\link{historical_decomposition}} takes as \code{shock_groups}.
+#'
+#' Unknown shock names are a hard error naming the offender: a mistyped shock
+#' would otherwise silently drop out of the decomposition and every remaining
+#' contribution would still add up, so nothing downstream could catch it.
+#'
+#' @param body        Body text of the shock_groups block.
+#' @param shock_names Declared exogenous names used to validate membership.
+#'   \code{NULL} skips validation.
+#' @param block_name  Name of the enclosing block (for error messages).
+#' @return Named list: group label -> character vector of shock names.
+#' @noRd
+parse_shock_groups_block <- function(body, shock_names = NULL,
+                                     block_name = NULL) {
+  where <- if (is.null(block_name)) "shock_groups"
+           else sprintf("shock_groups(name = %s)", block_name)
+
+  out <- list()
+  ## Group label: 'quoted', "quoted" or a bare identifier; then = members ;
+  pat <- paste0("(?:'([^']*)'|\"([^\"]*)\"|([A-Za-z_][A-Za-z0-9_]*))",
+                "\\s*=\\s*([^;]*);")
+  all_matches <- regmatches(body, gregexpr(pat, body, perl = TRUE))[[1]]
+
+  for (m in all_matches) {
+    parts <- regmatches(m, regexec(pat, m, perl = TRUE))[[1]]
+    label <- parts[2]
+    if (!nzchar(label)) label <- parts[3]
+    if (!nzchar(label)) label <- parts[4]
+    label <- trimws(label)
+    if (!nzchar(label))
+      stop(where, ": a group entry has an empty name.", call. = FALSE)
+
+    members <- strsplit(trimws(gsub(",", " ", parts[5])), "\\s+")[[1]]
+    members <- members[nzchar(members)]
+    if (length(members) == 0L)
+      stop(sprintf("%s: group '%s' lists no shocks.", where, label),
+           call. = FALSE)
+
+    bad <- members[!grepl("^[A-Za-z_][A-Za-z0-9_]*$", members)]
+    if (length(bad))
+      stop(sprintf("%s: group '%s' has non-identifier member(s): %s.",
+                   where, label, paste(bad, collapse = ", ")), call. = FALSE)
+
+    if (!is.null(shock_names)) {
+      unknown <- setdiff(members, shock_names)
+      if (length(unknown))
+        stop(sprintf(paste0("%s: group '%s' references unknown shock(s): %s. ",
+                            "Declared shocks: %s."),
+                     where, label, paste(unknown, collapse = ", "),
+                     paste(shock_names, collapse = ", ")), call. = FALSE)
+    }
+
+    if (!is.null(out[[label]]))
+      stop(sprintf("%s: group '%s' is defined twice.", where, label),
+           call. = FALSE)
+    out[[label]] <- members
+  }
+
+  dup <- unique(unlist(out, use.names = FALSE)[
+    duplicated(unlist(out, use.names = FALSE))])
+  if (length(dup))
+    stop(sprintf(paste0("%s: shock(s) %s appear in more than one group; ",
+                        "groups must partition the shocks."),
+                 where, paste(dup, collapse = ", ")), call. = FALSE)
+
+  out
+}
+
+
+#' Extract and parse every shock_groups block in a .mod file
+#'
+#' Dynare allows several \code{shock_groups} blocks, each labelled by its
+#' \code{name=} option, so a file can carry alternative groupings and pick one
+#' per \code{shock_decomposition} call.  A block with no \code{name=} option is
+#' keyed \code{"default"}, matching Dynare's own default group name.
+#'
+#' @param txt         Cleaned .mod text.
+#' @param shock_names Declared exogenous names (validation; \code{NULL} skips).
+#' @return Named list: block name -> named list of group -> shock names.
+#'   Empty list when the file has no \code{shock_groups} block.
+#' @noRd
+parse_shock_groups <- function(txt, shock_names = NULL) {
+  blocks <- extract_all_paired_blocks(txt, "shock_groups")
+  if (length(blocks) == 0L) return(list())
+
+  out <- list()
+  for (blk in blocks) {
+    nm <- regmatches(
+      blk$options_str,
+      regexec("(?i)\\bname\\s*=\\s*['\"]?([A-Za-z_][A-Za-z0-9_]*)['\"]?",
+              blk$options_str, perl = TRUE))[[1]]
+    key <- if (length(nm) >= 2L) nm[2] else "default"
+    if (!is.null(out[[key]]))
+      stop(sprintf(paste0("parse_mod: two shock_groups blocks share the name ",
+                          "'%s'; give each block a distinct name= option."),
+                   key), call. = FALSE)
+    out[[key]] <- parse_shock_groups_block(blk$body, shock_names, key)
+  }
+  out
 }
 
 

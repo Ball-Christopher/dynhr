@@ -15,8 +15,9 @@ A \code{dsge_ss} object with \code{timing = "lagged"}.
 }
 \description{
 Converts a \code{dsge_ss} object tagged \code{timing = "current"} to
-the lagged-state convention required by \code{kalman_smoother},
-\code{kalman_filter}, and all frequency-domain likelihoods.  If
+the lagged-state convention every filter, smoother and frequency-domain
+likelihood in the package requires.  The observation intercept \code{d} is
+timing-invariant and carries over unchanged.  If
 \code{ss$timing} is already \code{"lagged"} the object is returned
 unchanged.
 }

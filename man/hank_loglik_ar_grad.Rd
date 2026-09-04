@@ -5,11 +5,11 @@
 \title{Analytic / semi-analytic score of the exact-AR sequence-space likelihood}
 \usage{
 hank_loglik_ar_grad(
-  Y,
+  data,
   ss,
   rho = NULL,
   sigma = NULL,
-  me_sd = 0,
+  me_variance = 0,
   q = NULL,
   check_boundary = TRUE,
   boundary_tol = 0.001,
@@ -24,7 +24,7 @@ hank_loglik_ar_grad(
 )
 }
 \arguments{
-\item{Y}{\code{T_data x n_obs} matrix (or data frame) of demeaned
+\item{data}{\code{T_data x n_obs} matrix (or data frame) of demeaned
 observations, columns in the order of \code{ss$obs_names} (for a
 \code{\link{hank_state_space}} object) or of the \code{Theta} columns;
 \code{NA}/\code{NaN} entries allowed.}
@@ -44,9 +44,11 @@ shock (the response to the anticipated-from-0 AR(1) driving path
 \item{sigma}{Named numeric vector of per-shock innovation standard
 deviations.  Defaults to the values stored in \code{ss}.}
 
-\item{me_sd}{Measurement-error standard deviation: scalar (recycled) or
+\item{me_variance}{Measurement-error VARIANCE: scalar (recycled) or
 length-\code{n_obs} vector.  Default 0 (allowed only if the observation
-set is non-singular).}
+set is non-singular).  Renamed from the pre-0.9.2.0003 \code{me_sd},
+which took a standard deviation: pass \code{me_sd^2} for the same
+likelihood.}
 
 \item{q}{Number of quasi-differenced MA terms retained per shock (default:
 \code{ss$q} for a state-space object, else all rows of \code{Theta}).}
@@ -59,7 +61,7 @@ set is non-singular).}
 \code{1e-3}).}
 
 \item{cache}{Optional environment (\code{new.env()}) reused across calls
-with the same \code{Y} shape and missing-data pattern.  Two
+with the same \code{data} shape and missing-data pattern.  Two
 exactness-preserving layers (a cache hit returns identical floats to
 the uncached path): per-shock unscaled autocovariance slabs keyed on
 \code{(rho, q, Theta)} -- so a one-coordinate optimizer/gradient
@@ -88,7 +90,7 @@ unit-innovation MA-coefficient matrix for \code{shock} at persistence
 \code{rho_z} (i.e. what \code{Theta_list[[shock]]} would be if the
 model were resolved at that persistence). \code{Theta_z} is DEFINED as
 the response to the driving path \code{rho_z^t}, so unlike the sigma/me
-blocks this cannot be derived from \code{Y}/\code{Theta_list} alone --
+blocks this cannot be derived from \code{data}/\code{Theta_list} alone --
 see \code{\link{make_posterior_grad_hank_ar}} for the
 \code{hank_model_irf()}-based callback used when \code{ss} carries a
 \code{\link{hank_model}}.}
@@ -132,13 +134,17 @@ A list: \code{loglik} (identical to what
   \code{me}, each a named numeric vector (by shock, by shock, by
   observable respectively) or \code{NULL} if not requested via \code{wrt},
   plus \code{theta} (a named list of \code{q x n_obs} matrices) when
-  \code{"theta" \%in\% wrt}.
+  \code{"theta" \%in\% wrt}.  \strong{\code{me} is the score with respect
+  to the measurement-error STANDARD DEVIATION}, unchanged by the
+  0.9.2.0003 \code{me_sd -> me_variance} argument rename (which only moved
+  the parameterisation of the INPUT); chain-rule it yourself
+  (\eqn{dl/dv = dl/ds \cdot 1/(2s)}) if you want the variance score.
 }
 \description{
 Gradient counterpart of \code{\link{hank_loglik_ar}}: the sigma block is
 exact-analytic (reuses the same cached autocovariance slabs the
 likelihood itself builds -- a sigma-only move recomputes zero new slabs),
-the me_sd block is a trivial closed form, and the rho block is
+the measurement-error block is a trivial closed form, and the rho block is
 semi-analytic (central-differences the per-shock slab only, keeping the
 expensive stacked-covariance algebra -- one Cholesky, shared across every
 parameter -- fully analytic). See the file header for the derivation and

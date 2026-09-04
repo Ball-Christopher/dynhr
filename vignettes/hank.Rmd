@@ -116,6 +116,15 @@ version: `hank_employment_income3()` adds a third, not-in-labour-force state
 accepts a full `n_e x n_a` matrix so a transfer's incidence can vary by
 wealth as well as income state, not just be a flat per-state amount.
 
+One caveat on the E/U/N block: with `p_un = p_nu = 0` the N state never
+communicates with E or U, so the employment chain is **reducible** and has no
+unique invariant distribution — the stationary distribution the block converges
+to would depend silently on the power iteration's starting point. `hank_het_block()`
+detects this and errors rather than returning an init-dependent mixture. Pass
+the intended invariant distribution explicitly to proceed, e.g.
+`hank_het_block(..., dist_init = inc$pi)` using the income object's own
+`pi`; with `dist_init` supplied the distribution is always seeded from it.
+
 ## 2. General equilibrium (Krusell-Smith)
 
 `hank_ks_steady()` closes the model with a Cobb-Douglas firm and asset-market
@@ -165,7 +174,7 @@ likelihood follows from the implied autocovariance function (ABRS eq. 37) — no
 state-space or Kalman filter is required.
 
 ```{r estimate, purl = FALSE}
-Theta <- hank_ma_coefficients(ks, rho_z = 0.9, T_h = 300, observables = "Y")
+Theta <- hank_ma_coefficients(ks, rho_z = 0.9, T_h = 300, obs_vars = "Y")
 
 ## Simulate a sample and evaluate / profile the likelihood:
 set.seed(1)
@@ -179,12 +188,12 @@ grid[which.max(ll_prof)]
 ```
 
 With more observables than structural shocks the aggregate covariance is
-stochastically singular; supply a measurement-error variance (`me_var`) to keep
+stochastically singular; supply a measurement-error variance (`me_variance`) to keep
 the likelihood well-defined.
 
 ## 5. A discount-heterogeneity mixture economy
 
-The flagship application in dynhr 0.9.0 is a **mixture of household types that
+The flagship application is a **mixture of household types that
 differ in their discount factor** — the cstwMPC device for matching the
 empirical wealth distribution. Each type faces the same aggregate prices and
 interacts only through them, so the economy is a single Krusell-Smith GE with a
@@ -234,7 +243,7 @@ config <- list(a_grid = a_grid, Pi = inc$Pi, e = inc$e, T_h = T_h,
 
 ## theta here is the estimated coordinate(s) — e.g. the discount-factor spread.
 lp <- function(theta)
-  hank_mixture_joint_logpost(theta, Y = Y, m_lev_hat = m_lev_hat,
+  hank_mixture_joint_logpost(theta, data = Y, m_lev_hat = m_lev_hat,
                              level_metric = level_metric, config = config)
 ```
 
@@ -253,7 +262,7 @@ sbc$uniformity                                # per-channel SBC rank uniformity
 
 ## (b) Laplace approximation: mode + Laplace-covariance proposal (NOT diagonal RWM):
 fit <- hank_mixture_laplace(theta0 = 0.02, config = config,
-                            Y = Y, m_lev_hat = m_lev_hat,
+                            data = Y, m_lev_hat = m_lev_hat,
                             level_metric = level_metric)
 fit$mode; fit$cov
 ```
@@ -273,6 +282,40 @@ wp <- hank_welfare_posterior(draws,
 wp$quantiles
 ```
 
+## 8. Aggregate risk (Krusell-Smith)
+
+Everything above is **certainty-equivalent**: the sequence-space Jacobians are
+linear perfect-foresight objects and `hank_ks_nonlinear_irf()` solves a
+deterministic transition. `hank_ks_aggregate_risk()` is the exception --
+aggregate TFP is a genuine Markov chain, households integrate over it, and the
+aggregate law of motion is a Krusell-Smith fixed point:
+
+```{r agg-risk, purl = FALSE}
+chain <- hank_tfp_chain(rho = 0.9, sigma = 0.03, n = 5)   # AR(1) -> Markov
+fit   <- hank_ks_aggregate_risk(ks, chain, T_sim = 1500, burn_in = 300,
+                                seed = 1)
+fit$rule$R2          # forecast-rule fit, one per aggregate state
+fit$den_haan$max_pct # den Haan (2010) DYNAMIC forecast error, in percent
+c(mean = fit$K_mean, sd = fit$K_sd, deterministic = fit$K_ss)
+```
+
+Impulse responses are generalized (Koop-Pesaran-Potter): averaged over the
+ergodic distribution and over future shock paths, so they are state dependent
+rather than a single linear object.
+
+```{r agg-risk-irf, purl = FALSE}
+girf <- hank_ks_risk_irf(fit, horizon = 20, n_draws = 400, seed = 2)
+girf$dlogK_scaled    # response of log K per unit log-TFP innovation
+girf$mcse            # its Monte-Carlo standard error -- always read this
+
+## Aggregate paths from the solution, given a drawn or supplied Z path:
+head(simulate(fit, T_sim = 100, seed = 3))
+```
+
+As `sigma` goes to zero the scaled generalized IRF converges to
+`hank_ks_linear_irf(ks, dZ)` at the same steady state; that limit is the gate
+in `tests/testthat/test-hank-aggregate-risk-oracle.R`.
+
 ## References
 
 - Auclert, Bardóczy, Rognlie & Straub (2021), "Using the Sequence-Space
@@ -280,3 +323,9 @@ wp$quantiles
   89(5), 2375–2408.
 - Carroll (2006), the endogenous gridpoints method.
 - Young (2010), non-stochastic simulation of the distribution.
+- Krusell & Smith (1998), "Income and Wealth Heterogeneity in the
+  Macroeconomy," *JPE* 106(5), 867-896.
+- den Haan (2010), "Assessing the accuracy of the aggregate law of motion
+  in models with heterogeneous agents," *JEDC* 34(1), 79-99.
+- Koop, Pesaran & Potter (1996), "Impulse response analysis in nonlinear
+  multivariate models," *J. Econometrics* 74(1), 119-147.

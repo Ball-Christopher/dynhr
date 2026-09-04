@@ -1118,57 +1118,44 @@ pruned_ss_loglik3 <- function(pss3, Y, obs_vars, me_variance = 0,
 #' @noRd
 make_log_posterior_pruned3 <- function(model, data, prior_spec, obs_vars,
                                         compiled, me_variance = 0,
-                                        system_priors = NULL) {
-  ss_warm <- NULL
-  .me_floor_checked <- FALSE
+                                        system_priors = NULL,
+                                        power = NULL) {
+  ## Resolve zeta ONCE here, not per draw (see .resolve_power_posterior).
+  power <- .resolve_power_posterior(power, "make_log_posterior_pruned3")
   n_obs <- length(obs_vars)
   Y <- if (is.matrix(data) && nrow(data) == n_obs) data else t(data)
 
-  function(theta) {
-    lp <- log_prior(theta, prior_spec)
-    if (!is.finite(lp))
-      return(list(logpost = -Inf, loglik = -Inf, logprior = lp))
-
-    params <- .apply_theta_to_params(model, theta)
-    ss_result <- solve_steady_state(model, compiled, params,
-                                    y0 = ss_warm, verbose = FALSE)
-    if (is.null(ss_result) || !isTRUE(ss_result$converged)) {
-      ss_warm <<- NULL
-      return(list(logpost = -Inf, loglik = -Inf, logprior = lp))
-    }
-    ss_warm <<- ss_result$ss
-    params  <- ss_result$params %||% params
-
-    dr3 <- tryCatch(
-      solve_perturbation(model, compiled, ss_result$ss, params,
-                         order = 3L, verbose = FALSE),
-      error = function(e) NULL
-    )
-    if (is.null(dr3) || !isTRUE(dr3$bk_satisfied))
-      return(list(logpost = -Inf, loglik = -Inf, logprior = lp))
-
-    pss3 <- tryCatch(pruned_state_space3(dr3, model, params),
-                     error = function(e) NULL)
-    if (is.null(pss3))
-      return(list(logpost = -Inf, loglik = -Inf, logprior = lp))
-
-    loglik <- tryCatch(
-      pruned_ss_loglik3(pss3, Y, obs_vars, me_variance = me_variance,
-                        me_floor_check = !.me_floor_checked &&
-                          isTRUE(getOption("dynhr.me_floor_check", TRUE))),
-      error = function(e) -Inf
-    )
-    .me_floor_checked <<- TRUE   # guard once per closure, not per MCMC draw
-    if (!is.finite(loglik))
-      return(list(logpost = -Inf, loglik = -Inf, logprior = lp))
-
-    sp_lp <- if (!is.null(system_priors)) {
-      .eval_system_priors(
-        system_priors,
-        list(theta = theta, model = model, dr = dr3,
-             Sigma_e = pss3$Sigma_e, params = params))
-    } else 0
-
-    list(logpost = lp + loglik + sp_lp, loglik = loglik, logprior = lp)
-  }
+  ## Adapter over the shared closure builder (R/posterior-closure.R); the
+  ## order-3 twin of make_log_posterior_pruned's. `sys_cache = FALSE` because
+  ## this branch goes straight to solve_perturbation(order = 3L) and never
+  ## touches extract_system_matrices_fast(), so building the cache would be
+  ## factory-time work for nothing.
+  .make_posterior_closure(
+    model, data, prior_spec, obs_vars, compiled,
+    sys_cache = FALSE,
+    solve_fn = function(model, compiled, sys_cache, ss, params, theta) {
+      dr3 <- tryCatch(
+        solve_perturbation(model, compiled, ss, params,
+                           order = 3L, verbose = FALSE),
+        error = function(e) NULL
+      )
+      if (is.null(dr3) || !isTRUE(dr3$bk_satisfied)) return(NULL)
+      pss3 <- tryCatch(pruned_state_space3(dr3, model, params),
+                       error = function(e) NULL)
+      if (is.null(pss3)) return(NULL)
+      list(dr = dr3, pss = pss3)
+    },
+    loglik_fn = function(sol, params, ss, theta, me_floor_check, ...) {
+      loglik <- tryCatch(
+        pruned_ss_loglik3(sol$pss, Y, obs_vars, me_variance = me_variance,
+                          me_floor_check = me_floor_check),
+        error = function(e) -Inf
+      )
+      if (!is.finite(loglik)) return(NULL)
+      list(loglik = loglik, Sigma_e = sol$pss$Sigma_e)
+    },
+    power             = power,
+    warm_retry        = FALSE,
+    system_prior      = system_priors,
+    system_prior_mode = "extra")
 }

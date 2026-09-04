@@ -520,8 +520,8 @@ BEGIN_RCPP
 END_RCPP
 }
 // kalman_standard_loop_cpp
-List kalman_standard_loop_cpp(const arma::mat& Y_minus_d, const arma::mat& ZZ, const arma::mat& TT, const arma::mat& RR, const arma::mat& DD, const arma::mat& HH_full, const arma::mat& Sigma_e, const arma::mat& SS, arma::mat P, double ll_const, double ss_tol, double ll_min, bool return_filtered);
-RcppExport SEXP _dynhr_kalman_standard_loop_cpp(SEXP Y_minus_dSEXP, SEXP ZZSEXP, SEXP TTSEXP, SEXP RRSEXP, SEXP DDSEXP, SEXP HH_fullSEXP, SEXP Sigma_eSEXP, SEXP SSSEXP, SEXP PSEXP, SEXP ll_constSEXP, SEXP ss_tolSEXP, SEXP ll_minSEXP, SEXP return_filteredSEXP) {
+List kalman_standard_loop_cpp(const arma::mat& Y_minus_d, const arma::mat& ZZ, const arma::mat& TT, const arma::mat& RR, const arma::mat& DD, const arma::mat& HH_full, const arma::mat& Sigma_e, const arma::mat& SS, arma::mat P, double ll_const, double ss_tol, double ll_min, bool return_filtered, const arma::vec& me_diag_vec);
+RcppExport SEXP _dynhr_kalman_standard_loop_cpp(SEXP Y_minus_dSEXP, SEXP ZZSEXP, SEXP TTSEXP, SEXP RRSEXP, SEXP DDSEXP, SEXP HH_fullSEXP, SEXP Sigma_eSEXP, SEXP SSSEXP, SEXP PSEXP, SEXP ll_constSEXP, SEXP ss_tolSEXP, SEXP ll_minSEXP, SEXP return_filteredSEXP, SEXP me_diag_vecSEXP) {
 BEGIN_RCPP
     Rcpp::RObject rcpp_result_gen;
     Rcpp::RNGScope rcpp_rngScope_gen;
@@ -538,7 +538,8 @@ BEGIN_RCPP
     Rcpp::traits::input_parameter< double >::type ss_tol(ss_tolSEXP);
     Rcpp::traits::input_parameter< double >::type ll_min(ll_minSEXP);
     Rcpp::traits::input_parameter< bool >::type return_filtered(return_filteredSEXP);
-    rcpp_result_gen = Rcpp::wrap(kalman_standard_loop_cpp(Y_minus_d, ZZ, TT, RR, DD, HH_full, Sigma_e, SS, P, ll_const, ss_tol, ll_min, return_filtered));
+    Rcpp::traits::input_parameter< const arma::vec& >::type me_diag_vec(me_diag_vecSEXP);
+    rcpp_result_gen = Rcpp::wrap(kalman_standard_loop_cpp(Y_minus_d, ZZ, TT, RR, DD, HH_full, Sigma_e, SS, P, ll_const, ss_tol, ll_min, return_filtered, me_diag_vec));
     return rcpp_result_gen;
 END_RCPP
 }
@@ -718,7 +719,7 @@ BEGIN_RCPP
 END_RCPP
 }
 // sv_rbpf_loglik_cpp
-double sv_rbpf_loglik_cpp(const arma::mat& Y, const arma::mat& TT, const arma::mat& ZZ, const arma::mat& RR, const arma::mat& DD, const arma::mat& Sigma_e, const arma::vec& d, const arma::mat& P0, const arma::uvec& sv_idx1, const arma::vec& mu, const arma::vec& rho, const arma::vec& seta, const int n_particles, const arma::vec& me_diag);
+Rcpp::List sv_rbpf_loglik_cpp(const arma::mat& Y, const arma::mat& TT, const arma::mat& ZZ, const arma::mat& RR, const arma::mat& DD, const arma::mat& Sigma_e, const arma::vec& d, const arma::mat& P0, const arma::uvec& sv_idx1, const arma::vec& mu, const arma::vec& rho, const arma::vec& seta, const int n_particles, const arma::vec& me_diag);
 RcppExport SEXP _dynhr_sv_rbpf_loglik_cpp(SEXP YSEXP, SEXP TTSEXP, SEXP ZZSEXP, SEXP RRSEXP, SEXP DDSEXP, SEXP Sigma_eSEXP, SEXP dSEXP, SEXP P0SEXP, SEXP sv_idx1SEXP, SEXP muSEXP, SEXP rhoSEXP, SEXP setaSEXP, SEXP n_particlesSEXP, SEXP me_diagSEXP) {
 BEGIN_RCPP
     Rcpp::RObject rcpp_result_gen;
@@ -760,8 +761,8 @@ BEGIN_RCPP
 END_RCPP
 }
 // tpf_run_period_cpp
-List tpf_run_period_cpp(arma::mat particles, const arma::vec y_t, const arma::mat L_e, const arma::mat hx, const arma::mat hu, const arma::mat hxx, const arma::mat hxu, const arma::mat huu, const arma::vec hss, const arma::mat ZZ, const arma::mat DD, const arma::vec d_obs, const arma::vec ghss_obs, const arma::mat hxx_obs, const arma::mat hxu_obs, const arma::mat huu_obs, double me_variance, double ess_target, int n_mh, double mh_scale, int max_stages, Rcpp::Nullable<arma::mat> U_normals, Rcpp::Nullable<double> U_resample, Rcpp::Nullable<arma::vec> U_mid, Rcpp::Nullable<arma::mat> U_mutation);
-RcppExport SEXP _dynhr_tpf_run_period_cpp(SEXP particlesSEXP, SEXP y_tSEXP, SEXP L_eSEXP, SEXP hxSEXP, SEXP huSEXP, SEXP hxxSEXP, SEXP hxuSEXP, SEXP huuSEXP, SEXP hssSEXP, SEXP ZZSEXP, SEXP DDSEXP, SEXP d_obsSEXP, SEXP ghss_obsSEXP, SEXP hxx_obsSEXP, SEXP hxu_obsSEXP, SEXP huu_obsSEXP, SEXP me_varianceSEXP, SEXP ess_targetSEXP, SEXP n_mhSEXP, SEXP mh_scaleSEXP, SEXP max_stagesSEXP, SEXP U_normalsSEXP, SEXP U_resampleSEXP, SEXP U_midSEXP, SEXP U_mutationSEXP) {
+List tpf_run_period_cpp(arma::mat particles, const arma::vec y_t, const arma::mat L_e, const arma::mat hx, const arma::mat hu, const arma::mat hxx, const arma::mat hxu, const arma::mat huu, const arma::vec hss, const arma::mat ZZ, const arma::mat DD, const arma::vec d_obs, const arma::vec ghss_obs, const arma::mat hxx_obs, const arma::mat hxu_obs, const arma::mat huu_obs, double me_variance, double ess_target, int n_mh, int max_stages, Rcpp::Nullable<arma::mat> U_normals, Rcpp::Nullable<double> U_resample, Rcpp::Nullable<arma::vec> U_mid, Rcpp::Nullable<arma::mat> U_mutation);
+RcppExport SEXP _dynhr_tpf_run_period_cpp(SEXP particlesSEXP, SEXP y_tSEXP, SEXP L_eSEXP, SEXP hxSEXP, SEXP huSEXP, SEXP hxxSEXP, SEXP hxuSEXP, SEXP huuSEXP, SEXP hssSEXP, SEXP ZZSEXP, SEXP DDSEXP, SEXP d_obsSEXP, SEXP ghss_obsSEXP, SEXP hxx_obsSEXP, SEXP hxu_obsSEXP, SEXP huu_obsSEXP, SEXP me_varianceSEXP, SEXP ess_targetSEXP, SEXP n_mhSEXP, SEXP max_stagesSEXP, SEXP U_normalsSEXP, SEXP U_resampleSEXP, SEXP U_midSEXP, SEXP U_mutationSEXP) {
 BEGIN_RCPP
     Rcpp::RObject rcpp_result_gen;
     Rcpp::RNGScope rcpp_rngScope_gen;
@@ -784,13 +785,12 @@ BEGIN_RCPP
     Rcpp::traits::input_parameter< double >::type me_variance(me_varianceSEXP);
     Rcpp::traits::input_parameter< double >::type ess_target(ess_targetSEXP);
     Rcpp::traits::input_parameter< int >::type n_mh(n_mhSEXP);
-    Rcpp::traits::input_parameter< double >::type mh_scale(mh_scaleSEXP);
     Rcpp::traits::input_parameter< int >::type max_stages(max_stagesSEXP);
     Rcpp::traits::input_parameter< Rcpp::Nullable<arma::mat> >::type U_normals(U_normalsSEXP);
     Rcpp::traits::input_parameter< Rcpp::Nullable<double> >::type U_resample(U_resampleSEXP);
     Rcpp::traits::input_parameter< Rcpp::Nullable<arma::vec> >::type U_mid(U_midSEXP);
     Rcpp::traits::input_parameter< Rcpp::Nullable<arma::mat> >::type U_mutation(U_mutationSEXP);
-    rcpp_result_gen = Rcpp::wrap(tpf_run_period_cpp(particles, y_t, L_e, hx, hu, hxx, hxu, huu, hss, ZZ, DD, d_obs, ghss_obs, hxx_obs, hxu_obs, huu_obs, me_variance, ess_target, n_mh, mh_scale, max_stages, U_normals, U_resample, U_mid, U_mutation));
+    rcpp_result_gen = Rcpp::wrap(tpf_run_period_cpp(particles, y_t, L_e, hx, hu, hxx, hxu, huu, hss, ZZ, DD, d_obs, ghss_obs, hxx_obs, hxu_obs, huu_obs, me_variance, ess_target, n_mh, max_stages, U_normals, U_resample, U_mid, U_mutation));
     return rcpp_result_gen;
 END_RCPP
 }
@@ -838,7 +838,7 @@ static const R_CallMethodDef CallEntries[] = {
     {"_dynhr_kf_adjoint_cpp", (DL_FUNC) &_dynhr_kf_adjoint_cpp, 18},
     {"_dynhr_kf_adjoint_uni_cpp", (DL_FUNC) &_dynhr_kf_adjoint_uni_cpp, 17},
     {"_dynhr_kalman_ss_loop_cpp", (DL_FUNC) &_dynhr_kalman_ss_loop_cpp, 10},
-    {"_dynhr_kalman_standard_loop_cpp", (DL_FUNC) &_dynhr_kalman_standard_loop_cpp, 13},
+    {"_dynhr_kalman_standard_loop_cpp", (DL_FUNC) &_dynhr_kalman_standard_loop_cpp, 14},
     {"_dynhr_kalman_univariate_loop_cpp", (DL_FUNC) &_dynhr_kalman_univariate_loop_cpp, 16},
     {"_dynhr_kf_adjoint_diffuse_cpp", (DL_FUNC) &_dynhr_kf_adjoint_diffuse_cpp, 9},
     {"_dynhr_kf_loglik_dG_cpp", (DL_FUNC) &_dynhr_kf_loglik_dG_cpp, 15},
@@ -850,7 +850,7 @@ static const R_CallMethodDef CallEntries[] = {
     {"_dynhr_qr_static_transform_cpp", (DL_FUNC) &_dynhr_qr_static_transform_cpp, 5},
     {"_dynhr_sv_rbpf_loglik_cpp", (DL_FUNC) &_dynhr_sv_rbpf_loglik_cpp, 14},
     {"_dynhr_tpf_propagate_particles", (DL_FUNC) &_dynhr_tpf_propagate_particles, 8},
-    {"_dynhr_tpf_run_period_cpp", (DL_FUNC) &_dynhr_tpf_run_period_cpp, 25},
+    {"_dynhr_tpf_run_period_cpp", (DL_FUNC) &_dynhr_tpf_run_period_cpp, 24},
     {"_dynhr_tpf_log_weights", (DL_FUNC) &_dynhr_tpf_log_weights, 9},
     {NULL, NULL, 0}
 };

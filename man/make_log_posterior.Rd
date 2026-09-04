@@ -12,7 +12,7 @@ make_log_posterior(
   compiled,
   me_variance = 0,
   likelihood = c("gaussian", "cumulant", "whittle", "tpf", "pskf", "student_t", "pruned",
-    "ppf", "copf", "sv_rbpf"),
+    "ppf", "copf", "sv_rbpf", "global_pf"),
   lik_init = "auto",
   me_extra = NULL,
   shock_scale = NULL,
@@ -105,7 +105,11 @@ the returned list always carries the \emph{raw} (untempered) log-likelihood
 so that SMC tempering, marginal-likelihood estimates, and other callers that
 need the true likelihood are unaffected. Only \code{$logpost} is tempered.
 Can also be set globally via
-\code{dynhr_set_options(power_posterior = 0.5)}.}
+\code{dynhr_set_options(power_posterior = 0.5)}; the explicit argument
+wins over the option. Applies to EVERY \code{likelihood} -- it is
+forwarded to each likelihood's factory, which resolves it once at build
+time, so the exponent is a fixed property of the returned closure and
+cannot drift mid-run if some other code changes the option.}
 
 \item{student_df}{Positive finite scalar: degrees of freedom for
 \code{likelihood = "student_t"}. Ignored by the other likelihoods.}

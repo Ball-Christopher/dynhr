@@ -211,7 +211,10 @@
 
     ## Advance primal state
     s_new <- as.numeric(TT %*% s) + as.numeric(K %*% v)
-    P_new <- .sym(tcrossprod(A %*% P, A) + tcrossprod(B %*% Sigma_e, B))
+    P_raw <- tcrossprod(A %*% P, A) + tcrossprod(B %*% Sigma_e, B)
+    ## TRUE measurement-noise law (F3-D): P' += K me_diag K'.
+    if (me_variance != 0) P_raw <- P_raw + me_variance * tcrossprod(K)
+    P_new <- .sym(P_raw)
 
     ## Advance tangent state:
     ## ds' = dTT s + TT ds + dK v + K dv
@@ -226,7 +229,12 @@
                    AP %*% t(dA_t) +
                    tcrossprod(dB_t %*% Sigma_e, B) +
                    B %*% tcrossprod(dSig, B) +
-                   BSig %*% t(dB_t))
+                   BSig %*% t(dB_t) +
+                   ## Tangent of the ME Joseph term (me_diag is data):
+                   ## dP' += me * (dK K' + K dK')
+                   if (me_variance != 0)
+                     me_variance * (tcrossprod(dK_t, K) + tcrossprod(K, dK_t))
+                   else 0)
 
     s  <- s_new;  P  <- P_new
     ds <- ds_new; dP <- dP_new
@@ -335,6 +343,13 @@
     bar_K  <- outer(bar_s,  v)
     ## Tangent: dbar_K = outer(dbar_s, v) + outer(bar_s, dv)
     dbar_K <- outer(dbar_s, v) + outer(bar_s, dv)
+
+    ## Adjoint (and its tangent) of the ME Joseph term P_t += K me K':
+    ## bar_K += 2 me bar_P K; dbar_K += 2 me (dbar_P K + bar_P dK).
+    if (me_variance != 0) {
+      bar_K  <- bar_K  + 2 * me_variance * (bar_P %*% K)
+      dbar_K <- dbar_K + 2 * me_variance * (dbar_P %*% K + bar_P %*% dK)
+    }
 
     ## Primal: bar_v = K' bar_s
     bar_v  <- as.numeric(t(K)  %*% bar_s)

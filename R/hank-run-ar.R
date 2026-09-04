@@ -69,9 +69,9 @@
 #'   take \code{log_post_fn}/\code{grad_fn} and add your own log-prior --
 #'   \code{$loglik} is returned separately for exactly that.
 #'
-#' @param Y \code{T_data x n_obs} matrix of demeaned observations.
-#' @param observables Character vector of observable names, in the column order
-#'   of \code{Y}.
+#' @param data \code{T_data x n_obs} matrix of demeaned observations.
+#' @param obs_vars Character vector of observable names, in the column order
+#'   of \code{data}.
 #' @param model A \code{\link{hank_model}}. Required when \code{model_fn} is
 #'   \code{NULL}; otherwise optional, and used to seed the memo (so the first
 #'   evaluation at \code{structural} costs no rebuild).
@@ -95,7 +95,7 @@
 #'   difference per parameter, which is worth paying once and never again
 #'   inside a loop (a wrong \code{dtheta_fn} is wrong at every theta, so
 #'   re-checking buys nothing).
-#' @param q,me_var,me_sd As in \code{\link{make_log_posterior_hank}}.
+#' @param q,me_variance As in \code{\link{make_log_posterior_hank}}.
 #' @param prior_rho_mean,prior_rho_sd,prior_sigma_sd As in
 #'   \code{\link{make_log_posterior_hank}}.
 #' @param rho_method Passed to \code{\link{hank_loglik_ar_grad}}.
@@ -117,11 +117,11 @@
 #' @seealso \code{\link{hank_run_mode_finding}}, \code{\link{hank_run_estimation}},
 #'   \code{\link{hank_loglik_ar_structural_grad}}, \code{\link{hank_dtheta_fn}}
 #' @export
-hank_ar_target <- function(Y, observables, model = NULL, model_fn = NULL,
+hank_ar_target <- function(data, obs_vars, model = NULL, model_fn = NULL,
                            structural = NULL, structural_sd = NULL,
                            structural_lower = NULL, structural_upper = NULL,
                            dtheta_fn = "auto", verify = TRUE,
-                           q = NULL, me_var = 0, me_sd = NULL,
+                           q = NULL, me_variance = 0,
                            prior_rho_mean = 0.5, prior_rho_sd = 0.3,
                            prior_sigma_sd = 0.05,
                            rho_method = c("fd_slab", "adjoint"),
@@ -150,18 +150,17 @@ hank_ar_target <- function(Y, observables, model = NULL, model_fn = NULL,
            "is supplied (there is no defensible default prior width for a ",
            "structural parameter).")
   }
-  Y <- as.matrix(Y)
+  data <- as.matrix(data)
   ## One model is needed up front for the shock names, T_h and the observable
   ## check. If the caller did not hand one over, build it ONCE at `structural`
   ## and seed the memo with it -- never build a throwaway.
   if (is.null(model)) model <- model_fn(structural)
   if (!inherits(model, "hank_model"))
     stop("hank_ar_target: `model_fn` must return a hank_model() object.")
-  missing_obs <- setdiff(observables, names(model$G))
+  missing_obs <- setdiff(obs_vars, names(model$G))
   if (length(missing_obs))
     stop("hank_ar_target: observable(s) not produced by model: ",
          paste(missing_obs, collapse = ", "))
-  if (is.null(me_sd)) me_sd <- sqrt(me_var)
 
   rep_named <- function(x, nm, what) {
     if (is.null(x)) return(NULL)
@@ -222,7 +221,7 @@ hank_ar_target <- function(Y, observables, model = NULL, model_fn = NULL,
   make_dt <- function(theta_s, mod, shock_specs) {
     if (is.null(model_fn) || is.null(dtheta_fn)) return(NULL)
     if (identical(dtheta_fn, "auto"))
-      hank_dtheta_fn(model_fn, shock_specs, observables,
+      hank_dtheta_fn(model_fn, shock_specs, obs_vars,
                      model = mod, theta = theta_s)
     else dtheta_fn
   }
@@ -282,10 +281,10 @@ hank_ar_target <- function(Y, observables, model = NULL, model_fn = NULL,
     if (.hank_ar_boundary_gate(p$rho, mod$T_h, boundary, boundary_tol,
                                "hank_ar_target", boundary_state))
       return(list(logpost = -Inf, loglik = NA_real_, logprior = logprior))
-    Theta_list <- .hank_theta_list(mod, specs, observables)
+    Theta_list <- .hank_theta_list(mod, specs, obs_vars)
     loglik <- tryCatch(
-      hank_loglik_ar(Y, Theta_list, rho = p$rho, sigma = p$sigma,
-                     me_sd = me_sd, q = q, check_boundary = FALSE,
+      hank_loglik_ar(data, Theta_list, rho = p$rho, sigma = p$sigma,
+                     me_variance = me_variance, q = q, check_boundary = FALSE,
                      cache = ar_cache),
       error = function(e) -Inf)
     if (!is.finite(loglik))
@@ -305,14 +304,14 @@ hank_ar_target <- function(Y, observables, model = NULL, model_fn = NULL,
                                "hank_ar_target", boundary_state))
       return(list(logpost = -Inf, loglik = NA_real_, logprior = logprior,
                   grad = NULL))
-    Theta_list <- .hank_theta_list(mod, specs, observables)
+    Theta_list <- .hank_theta_list(mod, specs, obs_vars)
 
     ## The rho score needs Theta at a perturbed persistence; both routes reuse
     ## the SAME model, so neither costs a rebuild.
     irf_of <- function(z, path) {
       irf <- hank_model_irf(mod, stats::setNames(list(path), z))
-      matrix(sapply(observables, function(o) irf[[o]]),
-             mod$T_h, length(observables), dimnames = list(NULL, observables))
+      matrix(sapply(obs_vars, function(o) irf[[o]]),
+             mod$T_h, length(obs_vars), dimnames = list(NULL, obs_vars))
     }
     theta_fn  <- function(z, r) irf_of(z, r^(seq_len(mod$T_h) - 1L))
     dtheta_rho <- function(z, r) {
@@ -324,8 +323,9 @@ hank_ar_target <- function(Y, observables, model = NULL, model_fn = NULL,
     ## structural contraction below reuses it instead of computing a second.
     wrt <- if (length(s_nm)) c("sigma", "rho", "theta") else c("sigma", "rho")
     sc <- tryCatch(
-      hank_loglik_ar_grad(Y, Theta_list, rho = p$rho, sigma = p$sigma,
-                          me_sd = me_sd, q = q, check_boundary = FALSE,
+      hank_loglik_ar_grad(data, Theta_list, rho = p$rho, sigma = p$sigma,
+                          me_variance = me_variance, q = q,
+                          check_boundary = FALSE,
                           cache = ar_cache, wrt = wrt, theta_fn = theta_fn,
                           rho_method = rho_method, dtheta_fn = dtheta_rho),
       error = function(e) NULL)
@@ -346,8 +346,8 @@ hank_ar_target <- function(Y, observables, model = NULL, model_fn = NULL,
       dfun <- if (is.null(st$dt)) NULL else
         function(th, k) st$dt(th, k, specs)
       call_ssg <- function() hank_loglik_ar_structural_grad(
-        Y, model_fn = model_fn, theta = p$s, observables = observables,
-        rho = p$rho, sigma = p$sigma, me_sd = me_sd, q = q,
+        data, model_fn = model_fn, theta = p$s, obs_vars = obs_vars,
+        rho = p$rho, sigma = p$sigma, me_variance = me_variance, q = q,
         dtheta_fn = dfun, verify = !st$verified, cache = ar_cache,
         check_boundary = FALSE, boundary_tol = boundary_tol,
         Theta_list = Theta_list, score = sc)
@@ -375,7 +375,7 @@ hank_ar_target <- function(Y, observables, model = NULL, model_fn = NULL,
                  structural_names = s_nm, shock_names = exo,
                  prior_spec = prior_spec, cache = ar_cache, stats = stats_env,
                  boundary = boundary, boundary_tol = boundary_tol),
-            class = "hank_ar_target")
+            class = c("hank_ar_target", "hank_block"))
 }
 
 
@@ -461,7 +461,7 @@ hank_run_mode_finding <- function(target, theta_init, method = "newrat",
                  prior_spec = target$prior_spec,
                  convergence = res$convergence, iterations = res$iterations,
                  method = method, rebuilds = target$stats$rebuilds),
-            class = "hank_ar_mode")
+            class = c("hank_ar_mode", "hank_block"))
 }
 
 

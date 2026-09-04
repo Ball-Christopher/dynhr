@@ -3,7 +3,7 @@
 ## Analytic (symbolic) forcing-term assembler for the order-4 / order-5
 ## perturbation solvers.
 ##
-## Replaces the finite-difference "FD-forcing" builder (.build_phi_fd) with an
+## Replaces the finite-difference "FD-forcing" builder (removed 2026-09) with an
 ## exact Faa-di-Bruno assembly of the K-th total derivative of the composed
 ## map  F( dy(z) ),  where
 ##
@@ -20,9 +20,9 @@
 ## This is the same quantity the FD builder computes by finite differences,
 ## but assembled analytically (no residual re-evaluation), ~100-1000x faster.
 ##
-## The central routine .fdb_compose() is fully generic in the order K: it is
-## used both to compose the lead-block policy (P o Q) and to assemble the
-## outer Phi (F o dy).
+## The central routine .fdb_compose_folded() is fully generic in the order K:
+## it is used both to compose the lead-block policy (P o Q) and to assemble
+## the outer Phi (F o dy).
 ## --------------------------------------------------------------------------
 
 
@@ -94,95 +94,12 @@
 # Generic Faa-di-Bruno composition derivative
 # =====================================================================
 
-#' K-th total derivative of a composition  g(h(z)).
-#'
-#' Computes D^K (g o h) at the base point (assumed h(0)=0), returning an
-#' n_out x r^K matrix whose columns enumerate the K inner-input modes in
-#' COLUMN-MAJOR order (mode 1 fastest), i.e. row a reshaped via
-#' array(M[a, ], rep(r, K)) gives the symmetric K-tensor D^K(g o h)_a.
-#'
-#' @param K      total derivative order
-#' @param Glist  list; Glist[[m]] holds the m-th derivative of the OUTER map g
-#'               as canonical sparse triplets:
-#'                 list(eq = integer vec,            # output row a (1..n_out)
-#'                      cols = integer matrix N x m, # b-indices, each row sorted
-#'                      val  = numeric vec)          # symmetric tensor value
-#'               for m = 1..K.  b-indices range over 1..p (inner-map output dim).
-#' @param Hlist  list; Hlist[[k]] is a p x r^k matrix: row b reshaped col-major
-#'               to rep(r, k) is the symmetric k-th derivative of inner map
-#'               component b.  Required for k = 1..K.
-#' @param n_out  number of output rows of g
-#' @param r      inner-input dimension (nz)
-#' @return n_out x r^K matrix
-#' @noRd
-.fdb_compose <- function(K, Glist, Hlist, n_out, r) {
-  parts <- .set_partitions(K)
-  rK    <- r^K
-  D     <- matrix(0, n_out, rK)
-
-  # Partitions that share a block-size MULTISET produce identical block-order
-  # contractions (the per-triplet kronecker products depend only on the block
-  # sizes, not on which positions form each block).  They differ ONLY by the
-  # final slot->input-mode column permutation.  So we compute the block-order
-  # accumulation ONCE per size-shape and add each instance's permuted copy --
-  # this collapses the 52 partitions of K=5 into 7 integer-partition shapes.
-  sigs   <- vapply(parts, function(p)
-    paste(sort(vapply(p, length, 1L), decreasing = TRUE), collapse = "-"), "")
-  groups <- split(seq_along(parts), sigs)
-
-  for (gi in groups) {
-    grp <- parts[gi]
-    m   <- length(grp[[1L]])
-    G   <- Glist[[m]]
-    if (is.null(G) || length(G$val) == 0L) next
-    csizes <- sort(vapply(grp[[1L]], length, 1L), decreasing = TRUE)  # canonical
-
-    cols <- G$cols
-    if (is.null(dim(cols))) cols <- matrix(cols, ncol = m)
-
-    # Block-order accumulation (blocks in canonical size-desc order).
-    Dpart <- matrix(0, n_out, rK)
-    for (t in seq_along(G$val)) {
-      val <- G$val[t]
-      if (val == 0) next
-      a    <- G$eq[t]
-      bvec <- cols[t, ]
-      acc  <- numeric(rK)
-      for (bp in .multiset_perms(bvec)) {
-        # Flat outer product of inner-map factors in block order.  For
-        # col-major flattening, as.numeric(outer(A, B)) == kronecker(B, A)
-        # (A fastest), so fold with reversed-argument kronecker (C-level).
-        P <- Hlist[[csizes[1L]]][bp[1L], ]
-        if (m > 1L) {
-          for (tt in 2:m) P <- kronecker(Hlist[[csizes[tt]]][bp[tt], ], P)
-        }
-        acc <- acc + P
-      }
-      Dpart[a, ] <- Dpart[a, ] + val * acc
-    }
-
-    # Distribute over every partition instance of this shape.
-    for (part in grp) {
-      ord <- order(vapply(part, length, 1L), decreasing = TRUE)
-      pos <- unlist(part[ord])                 # i-positions in canonical order
-      inv <- order(pos)                         # block-order -> natural i-order
-      if (identical(as.integer(inv), seq_len(K))) {
-        D <- D + Dpart
-      } else {
-        perm_idx <- as.integer(aperm(array(seq_len(rK), dim = rep(r, K)), inv))
-        D <- D + Dpart[, perm_idx, drop = FALSE]
-      }
-    }
-  }
-  D
-}
-
 
 # =====================================================================
 # Folded (canonical-column) Faa-di-Bruno composition
 # =====================================================================
 #
-# The dense .fdb_compose() above materializes the full symmetric n_out x r^K
+# A dense Faa-di-Bruno composition materializes the full symmetric n_out x r^K
 # tensor.  Because that tensor is symmetric, only its C(r+K-1, K) canonical
 # (sorted-multi-index) columns are distinct -- at K=5, r=12 that is 4368 vs
 # 248832 (~57x fewer).  .fdb_compose_folded() computes exactly those canonical
@@ -253,10 +170,10 @@
          inherits = FALSE, mode = "function")
 }
 
-#' Folded counterpart of .fdb_compose(): returns n_out x C(r+K-1, K), columns
-#' enumerated by .sorted_multiindices(r, K).  Hlist is the SAME dense format as
-#' .fdb_compose (row b reshaped col-major to rep(r, k)); the folded output is
-#' value-identical to .fdb_compose's canonical columns (modulo float order).
+#' Faa-di-Bruno composition in folded form: returns n_out x C(r+K-1, K),
+#' columns enumerated by .sorted_multiindices(r, K).  Hlist is in the dense
+#' format (row b reshaped col-major to rep(r, k)); the folded output holds
+#' exactly the canonical columns of the dense symmetric tensor.
 #'
 #' Dispatches to the compiled backend fdb_compose_folded_cpp (src/fdb_compose.cpp)
 #' when available; the pure-R .fdb_compose_folded_R is the fallback (value-identical
@@ -735,7 +652,7 @@
 
 #' Slice a symmetric K-tensor forcing matrix (n x nz^K, col-major, mode 1
 #' fastest) into the FD-compatible blocks.  Block layout matches
-#' .build_phi_fd / phi_type: within each block the LAST slot varies fastest
+#' phi_type layout: within each block the LAST slot varies fastest
 #' (i.e. as.numeric(aperm(sub, K:1))).
 #'
 #' @param Phi   n x nz^K matrix (rows already in declaration order)
@@ -778,11 +695,11 @@
 # Top-level analytic forcing assembler
 # =====================================================================
 
-#' Analytic replacement for .build_phi_fd at order 4 / 5.
+#' Analytic replacement for the finite-difference Phi builder at order 4 / 5.
 #'
 #' Computes the order-K forcing blocks (the part of the perturbation forcing
 #' that excludes the unknown order-K policy term) by exact Faa-di-Bruno
-#' assembly of D^K( F o dy ).  Output blocks match .build_phi_fd's layout and
+#' assembly of D^K( F o dy ).  Output blocks match the FD builder's layout and
 #' sign convention (positive forcing; caller negates for the Sylvester solve).
 #'
 #' @param dyn        compiled$dynamic
@@ -791,7 +708,7 @@
 #' @param state_idx,endo_names,exo_names,n_s,n_u,n  bookkeeping
 #' @param order      K (4 or 5)
 #' @param res_perm   permutation mapping compiled-eq rows -> declaration order
-#' @return named list of forcing blocks (same names/layout as .build_phi_fd)
+#' @return named list of forcing blocks (same names/layout as the FD builder)
 #' @noRd
 .build_phi_analytic <- function(dyn, dr, ss, params,
                                 state_idx, endo_names, exo_names,

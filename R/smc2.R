@@ -46,9 +46,39 @@
 ## would silently conflate the two counts. Routing PF-level tuning through a
 ## named list mirrors the codebase's existing ctx$tpf_options convention
 ## (see the "tpf" branch of make_log_posterior() in R/posterior.R).
-.smc2_tpf_allow <- c("n_particles", "ess_target", "n_mh", "mh_scale",
+## `mh_scale` was REMOVED from this list (and from the whole TPF stack) on
+## 2026-09-02: it had been inert since the mutation step was corrected to hold
+## the ancestor state fixed, so it tuned nothing while looking like a knob.
+## Passing it now trips the allow-list check below, which is the point --
+## a silently ignored tuning parameter is worse than an error.
+.smc2_tpf_allow <- c("n_particles", "ess_target", "n_mh",
                       "max_stages_u", "order", "burn_in_init")
 .smc2_sv_allow  <- c("n_particles", "stochastic_volatility", "power")
+
+#' Reject `likelihood_args` keys the chosen factory does not accept.
+#'
+#' The allow-list used to be applied with \code{intersect()} alone, which
+#' SILENTLY DROPPED anything unrecognised -- so a typo, or a knob that had
+#' been retired (\code{mh_scale}), looked like it was tuning the filter while
+#' doing nothing at all. That is the exact failure mode this list exists to
+#' prevent, so an unknown key is now an error naming the accepted set.
+#' \code{seed} is checked separately and earlier (it has its own message).
+#' @noRd
+.smc2_check_allowed <- function(args, allow, which) {
+  if (!length(args)) return(invisible(NULL))
+  nm  <- names(args)
+  bad <- setdiff(nm[nzchar(nm)], c(allow, "seed"))
+  if (length(bad))
+    stop("dynhr_smc2: likelihood_args ",
+         paste(sQuote(bad), collapse = ", "),
+         if (length(bad) > 1L) " are not accepted" else " is not accepted",
+         " for likelihood = ", sQuote(which), ". Accepted: ",
+         paste(sQuote(allow), collapse = ", "), ".", call. = FALSE)
+  if (any(!nzchar(nm)) || is.null(nm))
+    stop("dynhr_smc2: every element of likelihood_args must be named.",
+         call. = FALSE)
+  invisible(NULL)
+}
 
 
 #' Compose the noisy, unbiased particle-filter log-posterior used by
@@ -86,6 +116,7 @@
            if (is.null(me_variance)) "NULL" else me_variance, ".",
            call. = FALSE)
     }
+    .smc2_check_allowed(likelihood_args, .smc2_tpf_allow, "tpf")
     extra <- likelihood_args[intersect(names(likelihood_args), .smc2_tpf_allow)]
     do.call(make_log_posterior_tpf,
             c(list(model = model, data = data, prior_spec = prior_spec,
@@ -94,6 +125,7 @@
                    seed = NULL),
               extra))
   } else if (identical(likelihood, "sv_rbpf")) {
+    .smc2_check_allowed(likelihood_args, .smc2_sv_allow, "sv_rbpf")
     extra <- likelihood_args[intersect(names(likelihood_args), .smc2_sv_allow)]
     do.call(make_log_posterior_sv_rbpf,
             c(list(model = model, data = data, prior_spec = prior_spec,
@@ -169,7 +201,7 @@
 #'   chosen factory. For \code{"tpf"}: any of \code{n_particles} (PF particle
 #'   count), \code{ess_target} (the FILTER's internal resampling threshold --
 #'   distinct from this function's own \code{ess_target}, which governs the
-#'   OUTER theta-tempering schedule), \code{n_mh}, \code{mh_scale},
+#'   OUTER theta-tempering schedule), \code{n_mh},
 #'   \code{max_stages_u}, \code{order}, \code{burn_in_init} (e.g. the
 #'   SBC-certified order-3 config \code{list(n_particles = 150, n_mh = 1,
 #'   burn_in_init = 50)}). For \code{"sv_rbpf"}: \code{n_particles},
@@ -217,11 +249,14 @@
 #' @param progressor Optional progressr callback, forwarded to
 #'   \code{dynhr_smc}.
 #'
-#' @return List with the same shape as \code{dynhr_smc()}'s return
-#'   value (particles/chain, smc_weights, log_liks, log_marginal_lik,
-#'   lambda_schedule, ess_schedule, accept_schedule, n_eval, ...), plus
-#'   \code{$sampler = "smc2"} and \code{$likelihood} recording which particle
-#'   filter was used.
+#' @return A \code{\link{dynhr_chains}} object (so \code{print()},
+#'   \code{summary()} and \code{plot()} work exactly as for
+#'   \code{\link{mcmc}} / \code{\link{smc}} / \code{\link{nuts}} /
+#'   \code{\link{dime}}).  Every field of \code{dynhr_smc()}'s return value is
+#'   retained unchanged (particles/chain, smc_weights, log_liks,
+#'   log_marginal_lik, lambda_schedule, ess_schedule, accept_schedule,
+#'   n_eval, ...), plus \code{$sampler = "smc2"} and \code{$likelihood}
+#'   recording which particle filter was used.
 #'
 #' @references
 #' Chopin, N., Jacob, P.E. & Papaspiliopoulos, O. (2013). SMC^2: an efficient
@@ -237,6 +272,26 @@
 #' @seealso \code{dynhr_smc}, \code{\link{pmmh}},
 #'   \code{\link{make_log_posterior_tpf}}, \code{\link{make_log_posterior_sv_rbpf}}
 #'
+#' @examples
+#' \donttest{
+#' ## Deliberately tiny: 20 theta-particles around a 100-particle inner TPF.
+#' ## A real run needs hundreds of each, and the TPF needs me_variance > 0.
+#' model    <- parse_mod(system.file("extdata/models/nk_demo.mod",
+#'                                   package = "dynhr"), verbose = FALSE)
+#' compiled <- compile_model(model, max_order = 2L, verbose = FALSE)
+#' priors   <- prior_spec(model)
+#' obs_vars <- c("ygr", "infl", "intr")
+#' Y <- as.matrix(read.csv(system.file("extdata/models/nk_demo_data.csv",
+#'                                     package = "dynhr"))[, obs_vars])
+#'
+#' fit <- dynhr_smc2(model, Y, priors, obs_vars, compiled,
+#'                   likelihood      = "tpf",
+#'                   me_variance     = 1e-4,
+#'                   n_particles     = 20L,
+#'                   likelihood_args = list(n_particles = 100L),
+#'                   verbose = FALSE)
+#' fit
+#' }
 #' @export
 dynhr_smc2 <- function(
     model, data, prior_spec, obs_vars, compiled,
@@ -297,5 +352,9 @@ dynhr_smc2 <- function(
 
   out$sampler    <- "smc2"
   out$likelihood <- likelihood
-  out
+  ## C6 (API consistency): every sampler entry point returns a dynhr_chains
+  ## object. new_dynhr_chains() only stamps the class and normalises
+  ## $n_draws to nrow($chain) -- no field of dynhr_smc()'s return value is
+  ## dropped or renamed, so the fields test-smc2.R pins are all still there.
+  new_dynhr_chains(out, "smc2")
 }

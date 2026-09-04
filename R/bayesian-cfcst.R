@@ -20,7 +20,7 @@
 #'   column names must match estimated parameter names from the model.
 #' @param model         dynhr_mod from \code{parse_mod()}.
 #' @param compiled      dynhr_compiled from \code{compile_model()}.
-#' @param Y             Observed data matrix (\eqn{T \times n\_obs}) or a
+#' @param data             Observed data matrix (\eqn{T \times n\_obs}) or a
 #'   named list of observable variable matrices.  Passed as-is to
 #'   \code{\link{conditional_forecast}}.
 #' @param plan          A \code{\link{dynhr_plan}} carrying out-of-sample
@@ -29,8 +29,8 @@
 #'   entries in the plan are ignored on the forecast side (consistent with
 #'   \code{conditional_forecast}'s existing behaviour).
 #' @param horizon       Forecast horizon (integer, default \code{8L}).
-#' @param obs_names     Character vector of observable variable names
-#'   (column order in \code{Y}).  Inferred from \code{colnames(Y)} when
+#' @param obs_vars     Character vector of observable variable names
+#'   (column order in \code{data}).  Inferred from \code{colnames(data)} when
 #'   \code{NULL}.
 #' @param n_subsample   Maximum number of draws to use (default \code{400L}).
 #'   If \code{nrow(draws) > n_subsample} a random subsample is taken.
@@ -61,10 +61,10 @@ bayesian_conditional_forecast <- function(
     draws,
     model,
     compiled,
-    Y,
+    data,
     plan,
     horizon      = 8L,
-    obs_names    = NULL,
+    obs_vars    = NULL,
     n_subsample  = 400L,
     ci_bands     = c(0.10, 0.90),
     inner_bands  = c(0.16, 0.84),
@@ -80,10 +80,10 @@ bayesian_conditional_forecast <- function(
   if (!is.null(seed)) set.seed(seed)
   draw_idx <- if (n_use < n_total) sample(n_total, n_use) else seq_len(n_total)
 
-  Y <- as.matrix(Y)
-  if (is.null(obs_names)) {
-    if (!is.null(colnames(Y))) {
-      obs_names <- colnames(Y)
+  data <- as.matrix(data)
+  if (is.null(obs_vars)) {
+    if (!is.null(colnames(data))) {
+      obs_vars <- colnames(data)
     } else {
       stop("bayesian_conditional_forecast: obs_names must be supplied when Y has no colnames.",
            call. = FALSE)
@@ -94,13 +94,13 @@ bayesian_conditional_forecast <- function(
   par_names <- colnames(draws)
   model_pars <- names(model$param_values)
 
-  n_obs <- length(obs_names)
+  n_obs <- length(obs_vars)
 
   ## Storage: [draw, horizon, variable]
   paths_array <- array(
     NA_real_,
     dim      = c(n_use, H, n_obs),
-    dimnames = list(NULL, paste0("h", seq_len(H)), obs_names)
+    dimnames = list(NULL, paste0("h", seq_len(H)), obs_vars)
   )
 
   n_ok   <- 0L
@@ -146,10 +146,10 @@ bayesian_conditional_forecast <- function(
     ## Conditional forecast at this draw
     cfcst_k <- tryCatch(
       suppressWarnings(
-        conditional_forecast(m_work, dr_k, Y,
+        conditional_forecast(m_work, dr_k, data,
                              plan      = plan,
                              horizon   = H,
-                             obs_names = obs_names,
+                             obs_vars = obs_vars,
                              ...)
       ),
       error   = function(e) NULL,
@@ -157,10 +157,10 @@ bayesian_conditional_forecast <- function(
         ## Re-try silently: some shock-scale warnings are non-fatal
         tryCatch(
           suppressWarnings(
-            conditional_forecast(m_work, dr_k, Y,
+            conditional_forecast(m_work, dr_k, data,
                                  plan      = plan,
                                  horizon   = H,
-                                 obs_names = obs_names,
+                                 obs_vars = obs_vars,
                                  ...)
           ),
           error = function(e2) NULL
@@ -196,7 +196,7 @@ bayesian_conditional_forecast <- function(
     apply(mat_vi[finite_rows, , drop = FALSE], 2L,
           quantile, probs = probs_all, na.rm = TRUE)
   })
-  names(quantiles) <- obs_names
+  names(quantiles) <- obs_vars
 
   structure(
     list(
@@ -205,7 +205,7 @@ bayesian_conditional_forecast <- function(
       n_ok        = n_ok,
       n_fail      = n_fail,
       n_use       = n_use,
-      obs_names   = obs_names,
+      obs_names   = obs_vars,
       probs       = probs_all,
       plan        = plan
     ),

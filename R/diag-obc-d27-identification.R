@@ -392,12 +392,12 @@ d27_obc_identification <- function(model,
         dr_regime <- entry$dr
       } else {
         # Slack regime: re-solve perturbation at new params
-        dr_regime <- .stoch_simul_internal_d27(model, params_new, dr_order = 1L)
+        dr_regime <- .stoch_simul_internal_diag(model, params_new, dr_order = 1L)
         if (is.null(dr_regime) || is.null(dr_regime$ghx)) return(NULL)
       }
 
       # Compute moments from regime-specific DR
-      moments <- .moments_from_dr_d27(dr_regime, model = model, params = params_new)
+      moments <- .moments_from_dr(dr_regime, model = model, params = params_new)
       if (is.null(moments)) return(NULL)
       if (is.null(moments$sigma_y) || is.null(moments$acf_y)) return(NULL)
 
@@ -528,35 +528,5 @@ d27_obc_identification <- function(model,
         sprintf("; regime-dependent: %s", paste(regime_dependent, collapse = ", "))
       else ""
     )
-  )
-}
-
-
-#' Internal stoch_simul wrapper for D27 helper
-#' @noRd
-.stoch_simul_internal_d27 <- function(model, params, dr_order = 1L) {
-  compiled <- compile_model(model, verbose = FALSE)
-  if (is.null(compiled)) return(NULL)
-  ss <- solve_steady(compiled, params = params, verbose = FALSE)
-  if (is.null(ss) || !isTRUE(ss$converged)) return(NULL)
-  dr <- solve_perturbation(model, compiled, ss$values, params, order = dr_order, verbose = FALSE)
-  dr
-}
-
-
-#' Compute model-implied moments from decision rules (D27-specific)
-#' @param dr   DecisionRules object
-#' @return List with $sigma_y, $acf_y, or NULL
-#' @noRd
-.moments_from_dr_d27 <- function(dr, model = NULL, params = NULL) {
-  if (!is.null(model)) {
-    moments <- compute_moments(dr, model, params = params)
-  } else {
-    moments <- compute_moments(dr)
-  }
-  if (!is.list(moments) || is.null(moments$var_cov)) return(NULL)
-  list(
-    sigma_y = moments$var_cov,
-    acf_y = if (!is.null(moments$autocorr)) moments$autocorr else NULL
   )
 }

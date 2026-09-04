@@ -69,7 +69,6 @@ List kf_tangent_cpp(const arma::mat& Y,
   const arma::mat QQ  = sym(RR * Sigma_e * RR.t());
   const arma::mat HH  = sym(DD * Sigma_e * DD.t());
   const arma::mat SS  = RR * Sigma_e * DD.t();
-  const arma::mat me_diag = me_variance * arma::eye(n_obs, n_obs);
   const double ll_const = -0.5 * static_cast<double>(n_obs) * std::log(2.0 * M_PI);
 
   // Pre-compute flags for tv inputs.
@@ -79,6 +78,9 @@ List kf_tangent_cpp(const arma::mat& Y,
       arma::abs(shock_scale_mat - 1.0) < 1e-15));
   const bool has_me_extra = !arma::all(arma::vectorise(
       arma::abs(me_extra_mat) < 1e-15));
+  // Any TRUE observation noise (base me_variance or per-period me_extra):
+  // both feed F AND the Joseph covariance term (F3-D).
+  const bool has_me_true  = has_me_extra || me_variance != 0.0;
 
   arma::vec grad = arma::vec(n_par, arma::fill::value(NA_REAL));
 
@@ -205,11 +207,9 @@ List kf_tangent_cpp(const arma::mat& Y,
       HH_t = HH;
       SS_t = SS;
     }
-    if (has_me_extra) {
-      me_diag_t = me_diag + arma::diagmat(me_extra_mat.col(t));
-    } else {
-      me_diag_t = me_diag;
-    }
+    arma::vec me_x_t(n_obs); me_x_t.fill(me_variance);
+    if (has_me_extra) me_x_t += me_extra_mat.col(t);
+    me_diag_t = arma::diagmat(me_x_t);
 
     // -- Base step (mirrors .kf_step exactly) --------------------------------
     arma::mat PZ = P * tZZ;
@@ -236,15 +236,12 @@ List kf_tangent_cpp(const arma::mat& Y,
 
     arma::vec s_n = TT * s + K * v;
     arma::mat P_n_raw = A * P * A.t() + B * Se_t * B.t();
-    // Joseph true-noise term for me_extra (mirrors kalman_filter's standard
-    // path): P' += K diag(me_extra[, t]) K'. me_variance stays F-only
-    // (regularizer convention; no Joseph term). Kme = K diag(me_x_t) is
-    // hoisted for the per-parameter tangent recursion below.
-    arma::vec me_x_t;
+    // Joseph true-noise term for the FULL ME diagonal (mirrors
+    // kalman_filter's standard path): P' += K diag(me_x_t) K'.
+    // Kme = K diag(me_x_t) is hoisted for the tangent recursion below.
     arma::mat Kme;
-    if (has_me_extra) {
-      me_x_t = me_extra_mat.col(t);
-      Kme    = K * arma::diagmat(me_x_t);
+    if (has_me_true) {
+      Kme    = K * me_diag_t;
       P_n_raw += Kme * K.t();
     }
     arma::mat P_n = sym(P_n_raw);
@@ -319,10 +316,10 @@ List kf_tangent_cpp(const arma::mat& Y,
       arma::mat dP_n_raw = dA * P * A.t() + A * dP * A.t() + AP * dA.t() +
                            dB * Se_t * B.t() + B * dSig_eff * B.t() +
                            BSig * dB.t();
-      // Tangent of the me_extra Joseph term P' += K me_x K' (me_extra is
+      // Tangent of the ME Joseph term P' += K me_x K' (the ME diagonal is
       // data, not differentiated): dP' += dK me_x K' + K me_x dK'.
-      if (has_me_extra)
-        dP_n_raw += dK * arma::diagmat(me_x_t) * K.t() + Kme * dK.t();
+      if (has_me_true)
+        dP_n_raw += dK * me_diag_t * K.t() + Kme * dK.t();
       arma::mat dP_n = sym(dP_n_raw);
 
       ds = ds_n;

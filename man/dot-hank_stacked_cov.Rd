@@ -4,7 +4,7 @@
 \alias{.hank_stacked_cov}
 \title{Block-Toeplitz covariance of a stacked aggregate sample}
 \usage{
-.hank_stacked_cov(G, T_data, me_var = 0)
+.hank_stacked_cov(G, T_data, me_variance = 0)
 }
 \arguments{
 \item{G}{Autocovariance array from \code{\link{hank_autocov}} (max lag must
@@ -12,7 +12,7 @@ be >= \code{T_data - 1}).}
 
 \item{T_data}{Integer: number of time periods in the sample.}
 
-\item{me_var}{Numeric >= 0: measurement-error variance added on the diagonal
+\item{me_variance}{Numeric >= 0: measurement-error variance added on the diagonal
 (required when n_obs > n_shocks to avoid singularity).}
 }
 \value{

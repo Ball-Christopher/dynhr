@@ -241,7 +241,7 @@
 #' Gradient counterpart of \code{\link{hank_loglik_ar}}: the sigma block is
 #' exact-analytic (reuses the same cached autocovariance slabs the
 #' likelihood itself builds -- a sigma-only move recomputes zero new slabs),
-#' the me_sd block is a trivial closed form, and the rho block is
+#' the measurement-error block is a trivial closed form, and the rho block is
 #' semi-analytic (central-differences the per-shock slab only, keeping the
 #' expensive stacked-covariance algebra -- one Cholesky, shared across every
 #' parameter -- fully analytic). See the file header for the derivation and
@@ -264,7 +264,7 @@
 #'   \code{rho_z} (i.e. what \code{Theta_list[[shock]]} would be if the
 #'   model were resolved at that persistence). \code{Theta_z} is DEFINED as
 #'   the response to the driving path \code{rho_z^t}, so unlike the sigma/me
-#'   blocks this cannot be derived from \code{Y}/\code{Theta_list} alone --
+#'   blocks this cannot be derived from \code{data}/\code{Theta_list} alone --
 #'   see \code{\link{make_posterior_grad_hank_ar}} for the
 #'   \code{hank_model_irf()}-based callback used when \code{ss} carries a
 #'   \code{\link{hank_model}}.
@@ -302,10 +302,15 @@
 #'   \code{me}, each a named numeric vector (by shock, by shock, by
 #'   observable respectively) or \code{NULL} if not requested via \code{wrt},
 #'   plus \code{theta} (a named list of \code{q x n_obs} matrices) when
-#'   \code{"theta" \%in\% wrt}.
+#'   \code{"theta" \%in\% wrt}.  \strong{\code{me} is the score with respect
+#'   to the measurement-error STANDARD DEVIATION}, unchanged by the
+#'   0.9.2.0003 \code{me_sd -> me_variance} argument rename (which only moved
+#'   the parameterisation of the INPUT); chain-rule it yourself
+#'   (\eqn{dl/dv = dl/ds \cdot 1/(2s)}) if you want the variance score.
 #' @seealso \code{\link{hank_loglik_ar}}, \code{\link{make_posterior_grad_hank_ar}}
 #' @export
-hank_loglik_ar_grad <- function(Y, ss, rho = NULL, sigma = NULL, me_sd = 0,
+hank_loglik_ar_grad <- function(data, ss, rho = NULL, sigma = NULL,
+                                me_variance = 0,
                                 q = NULL, check_boundary = TRUE,
                                 boundary_tol = 1e-3, cache = NULL,
                                 wrt = c("sigma", "rho", "me"),
@@ -341,21 +346,22 @@ hank_loglik_ar_grad <- function(Y, ss, rho = NULL, sigma = NULL, me_sd = 0,
   ## factorization inside a separate hank_loglik_ar() call -- bit-identical by
   ## construction, since .hank_stacked_loglik() evaluates the same expression
   ## on the same (ch, yk).
-  Y <- as.matrix(Y)
-  prep <- .hank_ar_prepare(Y, ss, rho = rho, sigma = sigma, me_sd = me_sd,
+  data <- as.matrix(data)
+  me_sd <- .hank_me_sd(me_variance, "hank_loglik_ar_grad")
+  prep <- .hank_ar_prepare(data, ss, rho = rho, sigma = sigma, me_sd = me_sd,
                            q = q, check_boundary = check_boundary,
                            boundary_tol = boundary_tol, cache = cache)
   Theta_list <- prep$Theta_list
   rho <- prep$rho; sigma <- prep$sigma; me_sd <- prep$me_sd
   shocks <- prep$shocks
-  Td <- nrow(Y); n_obs <- ncol(Y)
+  Td <- nrow(data); n_obs <- ncol(data)
   q <- min(prep$q, nrow(as.matrix(Theta_list[[1L]])))
   G <- prep$G
 
   ## The gather index depends only on (T_data, n_obs, NA pattern), so a
   ## `cache` carried across calls keeps it through a STRUCTURAL move (which
   ## invalidates every slab but not this) -- see the cache documentation.
-  ix <- .hank_stacked_index(Y, cache)
+  ix <- .hank_stacked_index(data, cache)
   keep <- ix$keep
   yk <- ix$yv[keep]; N <- length(yk)
   gath <- function(X) matrix(as.numeric(X)[ix$idx], N, N)
@@ -409,7 +415,7 @@ hank_loglik_ar_grad <- function(Y, ss, rho = NULL, sigma = NULL, me_sd = 0,
   if ("me" %in% wrt) {
     bI <- rep(seq_len(n_obs), Td)[keep]
     d_me <- stats::setNames(.hank_ar_dscore_me(Sinv, v, me_sd, bI),
-                            colnames(Y) %||% paste0("obs", seq_len(n_obs)))
+                            colnames(data) %||% paste0("obs", seq_len(n_obs)))
   }
 
   if ("rho" %in% wrt) {
@@ -494,7 +500,7 @@ hank_loglik_ar_grad <- function(Y, ss, rho = NULL, sigma = NULL, me_sd = 0,
 #'   on the same "pay for it once, then turn it off" logic as the
 #'   \code{dtheta_fn} verification.
 #'
-#' @param Y \code{T_data x n_obs} matrix of demeaned observations.
+#' @param data \code{T_data x n_obs} matrix of demeaned observations.
 #' @param model_fn \code{function(theta)} returning a \code{\link{hank_model}}
 #'   at the structural parameter vector \code{theta}. May be \code{NULL} only
 #'   when a prebuilt base (\code{model} or \code{Theta_list}) and an exact
@@ -513,10 +519,10 @@ hank_loglik_ar_grad <- function(Y, ss, rho = NULL, sigma = NULL, me_sd = 0,
 #'   corresponds to the current arguments -- that is the caller's obligation.
 #' @param Theta_list Optional prebuilt named list of \code{T_h x n_obs} MA
 #'   coefficient matrices at \code{theta} (what
-#'   \code{model_fn(theta)} would produce for \code{observables} under
+#'   \code{model_fn(theta)} would produce for \code{obs_vars} under
 #'   \code{rho}), used instead of \code{model} / \code{model_fn}.
-#' @param observables Character vector of observable names, in the column order
-#'   of \code{Y}.
+#' @param obs_vars Character vector of observable names, in the column order
+#'   of \code{data}.
 #' @param rho,sigma Named numeric vectors of per-shock persistence and
 #'   innovation sd, held FIXED here (their own scores come from
 #'   \code{\link{hank_loglik_ar_grad}}).
@@ -540,8 +546,9 @@ hank_loglik_ar_grad <- function(Y, ss, rho = NULL, sigma = NULL, me_sd = 0,
 #'   \eqn{dl/d\Theta_z} matrices the score was contracted from).
 #' @seealso \code{\link{hank_loglik_ar_grad}}, \code{\link{hank_loglik_ar}}
 #' @export
-hank_loglik_ar_structural_grad <- function(Y, model_fn, theta, observables,
-                                           rho, sigma, me_sd = 0, q = NULL,
+hank_loglik_ar_structural_grad <- function(data, model_fn, theta, obs_vars,
+                                           rho, sigma, me_variance = 0,
+                                           q = NULL,
                                            dtheta_fn = NULL, verify = TRUE,
                                            tol = 1e-4, h = 1e-5, cache = NULL,
                                            check_boundary = FALSE,
@@ -568,7 +575,7 @@ hank_loglik_ar_structural_grad <- function(Y, model_fn, theta, observables,
   if (!is.null(model) && !inherits(model, "hank_model"))
     stop("hank_loglik_ar_structural_grad: `model` must be a hank_model() ",
          "object built at `theta`, or NULL.")
-  Y <- as.matrix(Y)
+  data <- as.matrix(data)
 
   shock_specs <- stats::setNames(
     lapply(names(rho), function(z) list(rho = rho[[z]], sigma = sigma[[z]])),
@@ -577,7 +584,7 @@ hank_loglik_ar_structural_grad <- function(Y, model_fn, theta, observables,
     if (!inherits(mod, "hank_model"))
       stop("hank_loglik_ar_structural_grad: `model_fn` must return a ",
            "hank_model() object.")
-    .hank_theta_list(mod, shock_specs, observables)
+    .hank_theta_list(mod, shock_specs, obs_vars)
   }
   theta_list_at <- function(th) theta_list_of(model_fn(th))
 
@@ -622,8 +629,8 @@ hank_loglik_ar_structural_grad <- function(Y, model_fn, theta, observables,
   ## rho, sigma) -- nothing here can check that, so it is documented as the
   ## caller's obligation and defaults to computing it.
   sc <- if (is.null(score)) {
-    hank_loglik_ar_grad(Y, Theta_list, rho = rho, sigma = sigma,
-                        me_sd = me_sd, q = q, cache = cache,
+    hank_loglik_ar_grad(data, Theta_list, rho = rho, sigma = sigma,
+                        me_variance = me_variance, q = q, cache = cache,
                         check_boundary = check_boundary,
                         boundary_tol = boundary_tol, wrt = "theta")
   } else {
@@ -721,8 +728,8 @@ hank_loglik_ar_structural_grad <- function(Y, model_fn, theta, observables,
 #'   \code{\link{make_log_posterior_hank}}'s \code{-Inf} early return).
 #' @seealso \code{\link{make_log_posterior_hank}}, \code{\link{hank_loglik_ar_grad}}
 #' @export
-make_posterior_grad_hank_ar <- function(model, Y, observables, q = NULL,
-                                        me_var = 0, me_sd = NULL,
+make_posterior_grad_hank_ar <- function(model, data, obs_vars, q = NULL,
+                                        me_variance = 0,
                                         prior_rho_mean = 0.5, prior_rho_sd = 0.3,
                                         prior_sigma_sd = 0.05,
                                         rho_method = c("fd_slab", "adjoint"),
@@ -737,11 +744,10 @@ make_posterior_grad_hank_ar <- function(model, Y, observables, q = NULL,
          "positive scalar.")
   boundary_state <- new.env(parent = emptyenv())
   exo <- model$exogenous
-  missing_obs <- setdiff(observables, names(model$G))
+  missing_obs <- setdiff(obs_vars, names(model$G))
   if (length(missing_obs))
     stop("make_posterior_grad_hank_ar: observable(s) not produced by model: ",
          paste(missing_obs, collapse = ", "))
-  if (is.null(me_sd)) me_sd <- sqrt(me_var)
   rep_named <- function(x, nm) {
     if (is.null(names(x))) stats::setNames(rep(x, length.out = length(nm)), nm)
     else x[nm]
@@ -753,8 +759,8 @@ make_posterior_grad_hank_ar <- function(model, Y, observables, q = NULL,
 
   irf_of <- function(z, path) {
     irf <- hank_model_irf(model, stats::setNames(list(path), z))
-    matrix(sapply(observables, function(o) irf[[o]]),
-          model$T_h, length(observables), dimnames = list(NULL, observables))
+    matrix(sapply(obs_vars, function(o) irf[[o]]),
+          model$T_h, length(obs_vars), dimnames = list(NULL, obs_vars))
   }
   theta_fn <- function(z, r) irf_of(z, r^(seq_len(model$T_h) - 1L))
   ## dTheta_z/drho_z for rho_method = "adjoint": Theta_z is LINEAR in its
@@ -787,10 +793,11 @@ make_posterior_grad_hank_ar <- function(model, Y, observables, q = NULL,
 
     shock_specs <- stats::setNames(
       lapply(exo, function(z) list(rho = rho[[z]], sigma = sigma[[z]])), exo)
-    Theta_list <- .hank_theta_list(model, shock_specs, observables)
+    Theta_list <- .hank_theta_list(model, shock_specs, obs_vars)
 
     sc <- tryCatch(
-      hank_loglik_ar_grad(Y, Theta_list, rho = rho, sigma = sigma, me_sd = me_sd,
+      hank_loglik_ar_grad(data, Theta_list, rho = rho, sigma = sigma,
+                          me_variance = me_variance,
                           q = q, check_boundary = FALSE, cache = ar_cache,
                           wrt = c("sigma", "rho"), theta_fn = theta_fn,
                           rho_method = rho_method, dtheta_fn = dtheta_fn),

@@ -149,13 +149,6 @@ extract_mod_metadata <- function(mod_file_or_lines) {
   )
 }
 
-# Helper: get display label for a variable
-var_label <- function(metadata, varname, with_code = TRUE) {
-  lab <- metadata$var_labels[[varname]]
-  if (is.null(lab)) return(varname)
-  if (with_code) sprintf("%s (%s)", lab, varname) else lab
-}
-
 
 # ---------------------------------------------------------------------------
 #' Extract @dynhr:narratives block from .mod file

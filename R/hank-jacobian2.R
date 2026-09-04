@@ -105,6 +105,7 @@
 #'   matrix with \code{[t, s] = dO_t/dI_s}.
 #' @seealso \code{\link{hank_het2_jacobian}},
 #'   \code{\link{hank_het_jacobian_nd}} (one-asset)
+#' @keywords internal
 #' @export
 hank_het2_jacobian_nd <- function(block, T_h,
                                   inputs = c("rb", "ra", "w"),

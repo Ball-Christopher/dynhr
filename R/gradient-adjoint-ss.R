@@ -134,7 +134,10 @@
       B_store[[t]]  <- B
 
       s_new <- as.numeric(TT %*% s) + as.numeric(K %*% v)
-      P_new <- .sym(tcrossprod(A %*% P, A) + tcrossprod(B %*% Sigma_e, B))
+      P_raw <- tcrossprod(A %*% P, A) + tcrossprod(B %*% Sigma_e, B)
+      ## TRUE measurement-noise law (F3-D): P' += K me_diag K'.
+      if (me_variance != 0) P_raw <- P_raw + me_variance * tcrossprod(K)
+      P_new <- .sym(P_raw)
 
       ## Convergence check (require t > 1, mirror kalman_standard_loop_cpp)
       if (t > 1 && max(abs(P_new - P)) < ss_tol) {
@@ -218,6 +221,12 @@
     ## ---- Step 2: adjoint of s_t = TT s_prev + K v --------------------------
     G_TT    <- G_TT + outer(bar_s, s_prev)                 # [n x n]
     bar_K   <- outer(bar_s, v)                             # [n x q]
+
+    ## Adjoint of the ME Joseph term in P_t (P_t += K me_diag K'; me_diag is
+    ## DATA, not differentiated): with bar_P symmetrized in Step 1,
+    ## d tr(bar_P K me K') / dK = 2 bar_P K me.
+    if (me_variance != 0)
+      bar_K <- bar_K + 2 * me_variance * (bar_P %*% K)     # [n x q]
     bar_v   <- as.numeric(t(K) %*% bar_s)                 # [q]
     bar_s_prev <- as.numeric(t(TT) %*% bar_s)             # [n]
 

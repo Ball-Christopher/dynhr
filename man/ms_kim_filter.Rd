@@ -5,7 +5,7 @@
 \title{Kim-Nelson filter for Markov-switching DSGE (shock-variance switching)}
 \usage{
 ms_kim_filter(
-  Y,
+  data,
   dr,
   model,
   params,
@@ -13,11 +13,14 @@ ms_kim_filter(
   ms_spec,
   me_variance = 0,
   return_regime_probs = FALSE,
-  lik_init = c("auto", "stationary", "kappa")
+  return_state_path = FALSE,
+  return_collapse_diag = FALSE,
+  lik_init = c("auto", "stationary", "kappa"),
+  collapse = c("gpb2", "gpb3")
 )
 }
 \arguments{
-\item{Y}{Observation matrix (\code{n_obs x T}).  May contain \code{NA}s;
+\item{data}{Observation matrix (\code{n_obs x T}).  May contain \code{NA}s;
 missing observations at period \code{t} are handled by skipping the
 measurement update (propagating the state through transition only).}
 
@@ -31,17 +34,57 @@ measurement update (propagating the state through transition only).}
 
 \item{ms_spec}{An \code{\link{ms_dsge_spec}} object.}
 
-\item{me_variance}{Scalar measurement-error variance added to the
-innovation covariance \code{F_{ij}} at every period (default \code{0}).}
+\item{me_variance}{Scalar variance of TRUE i.i.d. measurement error
+(default \code{0}).  See the \emph{Measurement error} section.}
 
 \item{return_regime_probs}{Logical; if \code{TRUE} return a
 \code{n_regimes x T} matrix of filtered regime probabilities
 \code{Pr[s_t = j | y_{1:t}]}.  Default \code{FALSE}.}
 
+\item{return_state_path}{Logical; if \code{TRUE} additionally return the
+per-regime collapsed filtered state moments, the per-path Durbin-Koopman
+backward blocks, and the state-space pieces the Kim smoother needs
+(\code{beta_filt}, \code{P_filt}, \code{dk_path}, \code{joint_filt},
+\code{cell_filt}, \code{TT}, \code{RR},
+\code{QQ_list}, \code{Sigma_e_list}, \code{P0_list}).  \code{joint_filt}
+is the \code{h x h x T} array of Hamilton-filter posterior JOINT regime
+probabilities \eqn{\Pr[s_{t-1} = i, s_t = j \mid y_{1:t}]};
+\code{cell_filt} (\code{"gpb3"} only) is the length-\code{T} list of
+UNCOLLAPSED per-cell posteriors, i.e. the per-TRIPLE filtered joint
+\eqn{\Pr[s_{t-2}, s_{t-1}, s_t \mid y_{1:t}]} the GPB(3) backward pass
+needs, and is \code{NULL} under \code{"gpb2"}.  Implies
+\code{return_regime_probs = TRUE}.  This is the interface
+\code{\link{ms_kim_smoother}} consumes; it exists so the smoother's
+forward pass IS the filter, never a second copy of the recursion.
+Default \code{FALSE}.}
+
+\item{return_collapse_diag}{Logical; if \code{TRUE} additionally return
+\code{collapse_diag} (\code{n_regimes x T}) and \code{collapse_max}, the
+GPB(2) COLLAPSE-QUALITY statistic.  See the "Collapse quality" section.
+Default \code{FALSE}.}
+
 \item{lik_init}{Character; state covariance initialisation: \code{"auto"},
 \code{"stationary"}, or \code{"kappa"}.  The exact-diffuse path is not
 yet supported for the MS filter; models with true unit roots should use
-\code{"kappa"}.}
+\code{"kappa"}.  Each regime is initialised at its OWN unconditional
+state covariance (Kim & Nelson 1999); see \code{.ms_init_P0}.}
+
+\item{collapse}{Character; the GPB collapse depth.  \code{"gpb2"}
+(default, and bit-identical to every release before this argument
+existed) is Kim's filter: it keeps \eqn{h} Gaussians, collapsing
+\eqn{h^2 \to h} each period on the LAST regime.  \code{"gpb3"} keeps
+\eqn{h^2} Gaussians indexed by the last TWO regimes
+\eqn{(s_{t-1}, s_t)}, collapsing \eqn{h^3 \to h^2}; it costs about
+\eqn{h} times as much per period and is exact whenever GPB(2)'s error
+is entirely due to the one-period collapse.  Use it when
+\code{collapse_max} from a \code{"gpb2"} run is O(1) nats or more (see
+the \emph{Collapse quality} section).  \code{return_state_path} is
+supported under \code{"gpb3"}, but the state path then carries the
+\eqn{h^2} pair-indexed components, which the Kim SMOOTHERS route to
+their own PAIR-INDEXED backward pass (F4-D): an adjoint per pair
+collapsed with the \eqn{h^3} smoothed joint
+\eqn{\Pr[s_{t-2}, s_{t-1}, s_t \mid y_{1:T}]}, whose weights come from
+\code{cell_filt}.}
 }
 \value{
 A list with:
@@ -51,6 +94,14 @@ A list with:
       \code{return_regime_probs = TRUE}, otherwise \code{NULL}.}
     \item{\code{n_obs}}{Number of observed variables.}
     \item{\code{n_T}}{Number of time periods.}
+    \item{\code{beta_filt}, \code{P_filt}, \code{dk_path},
+      \code{joint_filt}, \code{cell_filt}, \code{collapse}, \code{TT},
+      \code{RR}, \code{QQ_list}, \code{Sigma_e_list}, \code{P0_list},
+      \code{state_names}, \code{shock_names}, \code{lik_init}}{Present only
+      when \code{return_state_path = TRUE} (\code{cell_filt} is
+      \code{NULL} unless \code{collapse = "gpb3"}).}
+    \item{\code{collapse_diag}, \code{collapse_max}}{Present only when
+      \code{return_collapse_diag = TRUE}.}
   }
 }
 \description{
@@ -58,4 +109,89 @@ Evaluates the log-likelihood of an MS-DSGE model where only shock variances
 switch across regimes, using the Kim (1994) / GPB(2) filter.  The
 structural parameters and decision rules (\code{ghx}, \code{ghu}) are
 identical across regimes; only the per-regime shock covariance differs.
+}
+\section{Measurement error (TRUE noise, not a regulariser)}{
+
+\code{me_variance} is the variance of a genuine i.i.d. observation noise
+\eqn{u_t \sim N(0, \code{me\_variance} \cdot I)} appended to the
+measurement equation,
+\deqn{y_t = d_i + Z_i s_{t-1} + D_j \varepsilon_t + u_t ,}
+so it enters BOTH the innovation covariance
+\eqn{F_{ij} = Z P_i Z' + HH_j + \code{me\_variance} I} AND the Joseph
+covariance update, which carries the extra \eqn{K_{ij} (\code{me\_variance}
+I) K_{ij}'} term.  The resulting log-likelihood is the exact
+joint-Gaussian likelihood of that model (verified against an
+all-regime-path enumeration, and against
+\code{kalman_filter(method = "univariate")} whenever the regime paths are
+self-contained, e.g. \eqn{P = I}).  Every MS entry point
+(\code{\link{ms_kim_filter}}, \code{\link{ms_kim_filter_struct}},
+\code{\link{ms_kim_smoother}}, \code{\link{ms_kim_smoother_struct}}) uses
+this same semantics, and it is the law the MS SBC data-generating
+processes simulate from.
+
+This DIFFERS from the multivariate \code{\link{kalman_filter}} methods
+(\code{"standard"}, \code{"dare"}, \code{"chandrasekhar"}), where
+\code{me_variance} is documented as an \eqn{F}-only REGULARISER: it is
+added to \eqn{F} but not carried through the covariance update, so it is
+not an i.i.d. noise.  \code{kalman_filter(method = "univariate")} is the
+true-ME law and is the single-regime oracle for the MS filters here.
+The two conventions agree at \code{me_variance = 0} and differ by
+\eqn{O(\code{me\_variance})} otherwise.
+}
+
+\section{Collapse quality (GPB(2) is an approximation, and it can fail)}{
+
+Kim's filter keeps \eqn{h} Gaussians where the exact posterior is a mixture
+over all \eqn{h^{T}} regime paths, collapsing \eqn{h^2 \to h} by
+moment-matching each period.  \code{collapse_diag[t]} reports, in
+LOG-LIKELIHOOD NATS, what the collapse at \eqn{t-1} cost at period
+\eqn{t}: the period-\eqn{t} contribution recomputed against the \eqn{h^2}
+UNCOLLAPSED components, minus the contribution the filter actually used,
+\deqn{\log f_t^{*} - \log f_t .}
+This is the one-step GPB(3)-vs-GPB(2) gap.  It is identically \code{0}
+whenever the collapse is lossless --- in particular at every period under
+\eqn{P = I}, and at \eqn{t = 1}, where nothing has been collapsed yet ---
+and unlike a KL or a variance-share statistic it does not saturate when
+the per-path covariances go singular, which is exactly the regime in which
+the collapse fails.  \code{collapse_max} is \eqn{\max_t |collapse\_diag[t]|}.
+
+The collapse error is normally negligible, but it is NOT bounded.  On the
+\code{rbc} two-structural-regime fixture with \code{n_obs = n_exo = 1} and
+\code{me_variance = 0} the model is EXACTLY identified, so the per-path
+covariances collapse toward singular.  Over 96 switching draws the filter
+matches the exact all-path-enumeration log-likelihood to a median of
+3e-4 nats, but on one draw (seed 11) it misses by 48 nats --- while a full
+GPB(3) reproduces the exact value on that same draw to \code{1e-15}.  That
+contrast is the proof that the \eqn{h^2 \to h} collapse, and not the
+recursion, is the entire source of the error.  Raising \code{me_variance}
+off zero relieves the degeneracy: on that draw the GPB(2)-vs-GPB(3) gap
+falls from 48 nats to 5.6 at \code{me_variance = 1e-2} and to 0.01 at
+\code{1e-1}.  (Those three GPB(2)-vs-GPB(3) figures were measured before
+F3-A made \code{me_variance} true measurement error; the qualitative
+point --- adding observation noise relieves the degeneracy --- is
+unchanged.  See the \emph{Measurement error} section.)
+
+Practical rule: \code{collapse_max} below ~0.1 nats means the collapse is
+harmless on that sample.  If it runs to O(1) nats or more, treat the
+log-likelihood as unreliable --- re-run with \code{collapse = "gpb3"}, add
+measurement error, or observe fewer series than the model has shocks ---
+rather than trusting the number.
+
+\code{collapse = "gpb3"} is that fix, at \eqn{h}x the cost: it keeps the
+\eqn{h^2} components indexed by \eqn{(s_{t-1}, s_t)} and collapses
+\eqn{h^3 \to h^2}.  On the seed-11 breakdown above it reproduces the exact
+enumeration likelihood to \code{4e-16} where GPB(2) is 48 nats off, and
+over the whole 96-case seed scan its worst error is \code{3e-14} against
+GPB(2)'s 48 (its filtered regime probabilities likewise land within
+\code{7e-16} of the exact posterior, where GPB(2) is 0.91 away on that
+draw).  Under \code{"gpb3"} \code{collapse_diag} keeps its meaning ---
+defer THIS filter's collapse by one period and rescore --- so it becomes
+the GPB(4)-vs-GPB(3) gap, and it is \code{2e-14} on that same draw, which
+is what says GPB(3) has CONVERGED here rather than merely improved.
+Measured cost at \eqn{T = 300}, \eqn{h = 2}: 1.9x (structural filter),
+1.2x (reduced-form).  See \code{tests/testthat/test-ms-gpb3.R}.
+}
+
+\seealso{
+\code{\link{ms_kim_smoother}}, \code{\link{ms_irf}}
 }

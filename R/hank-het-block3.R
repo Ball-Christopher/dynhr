@@ -233,7 +233,7 @@ hank_het3_block <- function(d_grid,f_grid,a_grid,Pi,e,beta,eis,rd,rf,ra,w,
     CHI=sum(sd$d*flat(hh$chi)),PHI=sum(sd$d*flat(hh$phi)),
     n_e=length(e),n_d=length(d_grid),n_f=length(f_grid),n_a=length(a_grid),
     Pi_fn=Pi_fn,Pi_inputs=Pi_inputs,
-    elapsed_solve=hh$elapsed,elapsed_dist=elapsed_dist)),class="hank_het3_block")
+    elapsed_solve=hh$elapsed,elapsed_dist=elapsed_dist)),class=c("hank_het3_block", "hank_block"))
 }
 
 ## A non-convergence message a calibration driver can act on: iterations,

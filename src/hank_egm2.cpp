@@ -41,7 +41,10 @@
 #include <algorithm>
 #include <atomic>
 #include <barrier>
+#include <exception>
 #include <memory>
+#include <mutex>
+#include <string>
 #include <thread>
 #include <vector>
 using namespace Rcpp;
@@ -395,45 +398,109 @@ static void egm2_phase2(Egm2Ctx &X, int w, int nthr) {
 //   phase 2 -> arrive -> [serial convergence check] -> loop
 //
 // so three barrier arrivals per step and zero thread creations after the first.
-// Workers never touch the R API, and never signal errors: this kernel has no
-// error condition inside the step at all (the only failure mode, consumption
-// pinned at the numerical floor, is diagnosed by the R wrapper AFTER the solve
-// returns), so there is nothing to marshal back to the main thread.
+// Workers never touch the R API. The step has no ERROR condition of its own
+// (the only failure mode, consumption pinned at the numerical floor, is
+// diagnosed by the R wrapper AFTER the solve returns), but a phase body can
+// still throw -- std::bad_alloc from its per-worker scratch vectors, or an
+// Armadillo logic_error -- and an exception that escapes a std::thread body
+// calls std::terminate, i.e. kills the R session with no error and no chance
+// to save work. So every phase call, on the workers AND on the main thread,
+// runs inside a guard that records the first failure; the MAIN thread re-raises
+// it as an R error after the last barrier, once every worker is parked again.
+// (Rcpp::stop() from a worker would be worse than the crash: R's error
+// mechanism longjmps, which is undefined behaviour off the main thread.)
 class Egm2Pool {
  public:
   Egm2Pool(Egm2Ctx *ctx, int nthr)
-    : ctx_(ctx), nthr_(nthr), bar_((std::ptrdiff_t)nthr), done_(false) {
+    : ctx_(ctx), nthr_(nthr), bar_((std::ptrdiff_t)nthr), done_(false),
+      failed_(false), joined_(false) {
     pool_.reserve(nthr - 1);
-    for (int w = 1; w < nthr; ++w)
-      pool_.emplace_back([this, w] { this->worker(w); });
+    try {
+      for (int w = 1; w < nthr; ++w)
+        pool_.emplace_back([this, w] { this->worker(w); });
+    } catch (...) {
+      // If the N-th spawn throws (thread-resource exhaustion is the realistic
+      // case), the workers already created are parked at the top barrier and
+      // ~std::vector<std::thread> would call std::terminate on them. Release
+      // and join them first, THEN rethrow -- the destructor never runs for an
+      // object whose constructor threw.
+      shutdown();
+      throw;
+    }
   }
   // Run one backward step's parallel phases. Step 2 must already be done.
   void run_step() {
     bar_.arrive_and_wait();          // release the workers into phase 1
-    egm2_phase1(*ctx_, 0, nthr_);
+    guard(0, true);
     bar_.arrive_and_wait();
-    egm2_phase2(*ctx_, 0, nthr_);
+    guard(0, false);
     bar_.arrive_and_wait();          // workers park at the top barrier again
+    raise_if_failed();
+  }
+  // Re-raise a worker failure as an R error. MAIN THREAD ONLY, and only when
+  // the workers are parked at the top barrier (so the destructor that runs
+  // during the unwind can still release them).
+  void raise_if_failed() const {
+    if (failed_.load(std::memory_order_acquire))
+      stop("hank_egm2 (compiled kernel): a worker thread failed: %s",
+           err_msg_.c_str());
   }
   // Releases and joins the workers. Runs on the normal path AND during stack
   // unwinding if the main thread throws between steps, so a worker can never
   // outlive the buffers it points at.
-  ~Egm2Pool() {
-    done_.store(true, std::memory_order_release);
-    bar_.arrive_and_wait();
-    for (auto &t : pool_) t.join();
-  }
+  ~Egm2Pool() { shutdown(); }
   Egm2Pool(const Egm2Pool &) = delete;
   Egm2Pool &operator=(const Egm2Pool &) = delete;
 
  private:
+  // Never let an exception cross the std::thread boundary. Also skips the
+  // phase entirely once a failure is recorded: the buffers a failed phase 1
+  // left behind are not worth a phase 2, and the step is going to error out.
+  void guard(int w, bool phase1) {
+    if (failed_.load(std::memory_order_acquire)) return;
+    try {
+      if (phase1) egm2_phase1(*ctx_, w, nthr_);
+      else        egm2_phase2(*ctx_, w, nthr_);
+    } catch (const std::exception &e) {
+      record(e.what());
+    } catch (...) {
+      record("unknown C++ exception");
+    }
+  }
+  void record(const char *what) {
+    try {
+      std::lock_guard<std::mutex> lk(err_mu_);
+      if (!failed_.load(std::memory_order_relaxed)) {
+        err_msg_ = what;                       // first failure wins
+        failed_.store(true, std::memory_order_release);
+      }
+    } catch (...) {
+      // Even copying the message can fail under bad_alloc; the flag alone
+      // still turns the crash into an R error.
+      failed_.store(true, std::memory_order_release);
+    }
+  }
+  // Release every live worker and join it. Idempotent: the constructor's
+  // failure path and the destructor both call it.
+  void shutdown() {
+    if (joined_) return;
+    joined_ = true;
+    done_.store(true, std::memory_order_release);
+    // A barrier phase needs nthr arrivals. If the constructor died partway
+    // through, the participants that were never created must be DROPPED or
+    // the wait below blocks forever on arrivals that can never come.
+    for (std::size_t k = pool_.size() + 1; k < (std::size_t)nthr_; ++k)
+      bar_.arrive_and_drop();
+    bar_.arrive_and_wait();
+    for (auto &t : pool_) t.join();
+  }
   void worker(int w) {
     for (;;) {
       bar_.arrive_and_wait();
       if (done_.load(std::memory_order_acquire)) return;
-      egm2_phase1(*ctx_, w, nthr_);
+      guard(w, true);
       bar_.arrive_and_wait();
-      egm2_phase2(*ctx_, w, nthr_);
+      guard(w, false);
       bar_.arrive_and_wait();
     }
   }
@@ -441,16 +508,75 @@ class Egm2Pool {
   int nthr_;
   std::barrier<> bar_;
   std::atomic<bool> done_;
+  std::atomic<bool> failed_;
+  bool joined_;
+  mutable std::mutex err_mu_;
+  std::string err_msg_;
   std::vector<std::thread> pool_;
 };
 
 // Number of workers actually usable: never more than the smallest task axis
-// that has to be split, and never less than 1.
+// that has to be split, never more than the machine can actually run, and
+// never less than 1. Clamping to hardware_concurrency() cannot change a single
+// bit of the answer -- output is thread-count-invariant by construction (see
+// the header) -- it only stops an absurd `threads` from spawning thousands of
+// OS threads for compute-bound phases.
 static inline int egm2_nthreads(const Egm2Ctx &X, int threads) {
   const int max_useful = std::max(X.n_lead_b, std::max(X.n_e * X.n_k, X.n_a));
   int n = threads < 1 ? 1 : threads;
   if (n > max_useful) n = max_useful;
+  const unsigned hc = std::thread::hardware_concurrency();
+  if (hc > 0u && n > (int)hc) n = (int)hc;
   return n < 1 ? 1 : n;
+}
+
+// Input-shape validation for the exported kernels (B4). The R wrappers
+// validate too, but these entry points are reachable directly as
+// dynhr:::hank_egm2_step_cpp() and every buffer below is indexed with raw
+// pointer arithmetic: Psi1_grid in particular was read as n_a x n_a with no
+// check at all, so a wrong-shaped matrix was an out-of-bounds read, not an
+// error. Names the argument and the expected shape.
+static void egm2_check_shapes(const char *fn,
+                              const NumericVector &Vb, const NumericVector &Va,
+                              const char *vb_nm, const char *va_nm,
+                              const NumericVector &b_grid,
+                              const NumericVector &a_grid,
+                              const NumericVector &k_grid,
+                              const NumericVector &y,
+                              const NumericMatrix &Pi,
+                              const NumericMatrix &Psi1) {
+  const R_xlen_t n_b = b_grid.size(), n_a = a_grid.size(), n_k = k_grid.size();
+  const R_xlen_t n_e = Pi.nrow();
+  if (Pi.ncol() != Pi.nrow())
+    stop("%s: `Pi` must be a square n_e x n_e matrix; got %d x %d.",
+         fn, (int)Pi.nrow(), (int)Pi.ncol());
+  if (n_e < 1)
+    stop("%s: `Pi` must have at least one row (n_e >= 1).", fn);
+  if (n_b < 2)
+    stop("%s: `b_grid` must have at least 2 points (the liquid interpolation "
+         "brackets b_grid[i], b_grid[i+1]); got %d.", fn, (int)n_b);
+  if (n_a < 2)
+    stop("%s: `a_grid` must have at least 2 points (the illiquid crossing "
+         "search brackets a_grid[i], a_grid[i+1]); got %d.", fn, (int)n_a);
+  if (n_k < 2)
+    stop("%s: `k_grid` must have at least 2 points (the kappa -> b remap "
+         "interpolates between k_grid entries); got %d.", fn, (int)n_k);
+  if (y.size() != n_e)
+    stop("%s: `y` must have length n_e = %d (= nrow(Pi)); got %d.",
+         fn, (int)n_e, (int)y.size());
+  if (Psi1.nrow() != n_a || Psi1.ncol() != n_a)
+    stop("%s: `Psi1_grid` must be n_a x n_a = %d x %d "
+         "(n_a = length(a_grid)); got %d x %d.",
+         fn, (int)n_a, (int)n_a, (int)Psi1.nrow(), (int)Psi1.ncol());
+  const R_xlen_t need = n_e * n_b * n_a;
+  if (Vb.size() != need)
+    stop("%s: `%s` must have length n_e*n_b*n_a = %d "
+         "(n_e = %d, n_b = %d, n_a = %d); got %d.",
+         fn, vb_nm, (int)need, (int)n_e, (int)n_b, (int)n_a, (int)Vb.size());
+  if (Va.size() != need)
+    stop("%s: `%s` must have length n_e*n_b*n_a = %d "
+         "(n_e = %d, n_b = %d, n_a = %d); got %d.",
+         fn, va_nm, (int)need, (int)n_e, (int)n_b, (int)n_a, (int)Va.size());
 }
 
 // Copy one context buffer out to a dim'd NumericVector (main thread only).
@@ -477,6 +603,8 @@ List hank_egm2_step_cpp(NumericVector Vb_p_, NumericVector Va_p_,
                         double chi0, double chi1, double chi2,
                         NumericMatrix Pi_, NumericMatrix Psi1_grid_,
                         int threads = 1) {
+  egm2_check_shapes("hank_egm2_step_cpp", Vb_p_, Va_p_, "Vb_p", "Va_p",
+                    b_grid_, a_grid_, k_grid_, y_, Pi_, Psi1_grid_);
   Egm2Ctx X(Pi_.nrow(), b_grid_.size(), a_grid_.size(), k_grid_.size(),
             b_grid_.begin(), a_grid_.begin(), k_grid_.begin(), y_.begin(),
             Psi1_grid_.begin(), rb, ra, beta, eis, chi0, chi1, chi2);
@@ -514,6 +642,9 @@ List hank_egm2_solve_cpp(NumericVector Vb_init, NumericVector Va_init,
                          double chi0, double chi1, double chi2,
                          NumericMatrix Pi_, NumericMatrix Psi1_grid_,
                          double tol, int maxit, int threads = 1) {
+  egm2_check_shapes("hank_egm2_solve_cpp", Vb_init, Va_init,
+                    "Vb_init", "Va_init",
+                    b_grid_, a_grid_, k_grid_, y_, Pi_, Psi1_grid_);
   Egm2Ctx X(Pi_.nrow(), b_grid_.size(), a_grid_.size(), k_grid_.size(),
             b_grid_.begin(), a_grid_.begin(), k_grid_.begin(), y_.begin(),
             Psi1_grid_.begin(), rb, ra, beta, eis, chi0, chi1, chi2);
@@ -528,6 +659,12 @@ List hank_egm2_solve_cpp(NumericVector Vb_init, NumericVector Va_init,
   double *vb_src = Vb_init.begin(), *va_src = Va_init.begin();
   int it = 0;
   for (it = 1; it <= maxit; ++it) {
+    // SERIAL section: the workers (if any) are parked at the top barrier, so
+    // the R-API call and the longjmp-free C++ throw it raises are both safe
+    // here and nowhere inside a phase. The throw unwinds through `pool`'s
+    // unique_ptr, whose ~Egm2Pool releases and JOINS the workers before the
+    // context buffers they point at go away.
+    Rcpp::checkUserInterrupt();
     egm2_step2_run(X, vb_src, va_src, Pi_.begin());
     if (pool) pool->run_step(); else { egm2_phase1(X, 0, 1); egm2_phase2(X, 0, 1); }
     // The step's Vb/Va output IS the next step's input; no copy needed.
@@ -657,6 +794,10 @@ List hank_curly_sweep2_cpp(NumericVector Vb_ss_, NumericVector Va_ss_,
                            double chi0, double chi1, double chi2,
                            NumericMatrix Pi_, NumericMatrix Psi1_grid_,
                            double delta_va, int T_h, int threads = 1) {
+  egm2_check_shapes("hank_curly_sweep2_cpp", Vb_ss_, Va_ss_, "Vb_ss", "Va_ss",
+                    b_grid_, a_grid_, k_grid_, y_, Pi_, Psi1_grid_);
+  egm2_check_shapes("hank_curly_sweep2_cpp", dVb0_, dVa0_, "dVb0", "dVa0",
+                    b_grid_, a_grid_, k_grid_, y_, Pi_, Psi1_grid_);
   Egm2Ctx X(Pi_.nrow(), b_grid_.size(), a_grid_.size(), k_grid_.size(),
             b_grid_.begin(), a_grid_.begin(), k_grid_.begin(), y_.begin(),
             Psi1_grid_.begin(), rb, ra, beta, eis, chi0, chi1, chi2);
@@ -676,6 +817,8 @@ List hank_curly_sweep2_cpp(NumericVector Vb_ss_, NumericVector Va_ss_,
 
   const double *Vb_ss = Vb_ss_.begin(), *Va_ss = Va_ss_.begin();
   for (int s = 0; s < S; ++s) {
+    // SERIAL section of the date loop: workers parked at the top barrier.
+    Rcpp::checkUserInterrupt();
     const double h = delta_va / egm2_sweep_scale(dVb_prev.data(),
                                                  dVa_prev.data(), n);
     // --- +h evaluation -----------------------------------------------------

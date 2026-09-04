@@ -84,26 +84,6 @@
 }
 
 
-#' Stationary mean of the second-order correction layer
-#'
-#' μ_x2 = ½·(I - h_x)^{-1}·h_xx·vec(Σ_x)
-#'
-#' This is the unconditional mean of x_t^(2) under Gaussian shocks.
-#'
-#' @param hx  n_s × n_s state transition
-#' @param hxx n_s × n_s^2 second-order state terms (full, expanded)
-#' @param Sigma_x n_s × n_s state covariance
-#' @return n_s vector: E[x_t^(2)]
-#' @noRd
-.second_order_mean <- function(hx, hxx, Sigma_x) {
-  n_s <- nrow(hx)
-  vec_Sigma <- as.numeric(Sigma_x)  # n_s^2, col-major
-  rhs <- hxx %*% vec_Sigma          # n_s
-  mu  <- 0.5 * solve(diag(n_s) - hx, rhs)
-  as.numeric(mu)
-}
-
-
 # ============================================================================
 # Third cumulant of pruned state-space  (M2015 eqs. 12-16)
 # ============================================================================
@@ -1033,7 +1013,10 @@ compute_third_cumulant <- function(dr, model, params = NULL) {
 #'   validated near the unit root; prefer \code{"window"} there.
 #' @return List:
 #'   \item{kurtosis_obs}{Named numeric vector of marginal excess kurtosis gamma_2}
-#'   \item{c4_obs}{n_obs × n_obs^3 matrix: fourth cumulant of observables}
+#'   \item{c4_obs}{n_endo × n_endo^3 matrix: fourth cumulant in the FULL
+#'     endogenous layout (column \eqn{(j-1)n^2 + (k-1)n + l}).  Consumers that
+#'     match it against \code{sample_cumulants()$c4} must project it onto the
+#'     observables with \code{.project_c4_obs()} first.}
 #' @export
 compute_fourth_cumulant <- function(dr, model, params = NULL,
                                     method = c("window", "closed_form")) {
@@ -1134,6 +1117,91 @@ compute_fourth_cumulant <- function(dr, model, params = NULL,
 }
 
 
+#' Column index map projecting an endo-space c3 tensor onto the observables
+#'
+#' \code{compute_third_cumulant()} returns \code{c3_obs} in the FULL endo
+#' layout, \code{n_endo x n_endo^2} with column \eqn{(j-1) n_{endo} + k}, and
+#' it fills EVERY \eqn{(i,j,k)} entry.  The sample k-statistic
+#' \code{sample_cumulants()$c3} is \code{n_obs x n_obs^2} with column
+#' \eqn{(j-1) n_{obs} + k}.
+#'
+#' The assembly this replaces (E4-B) was a two-level \code{for (a) for (b)}
+#' loop writing \code{c3_obs_only[a, (a-1) * n_obs + b]}, i.e. it kept ONLY the
+#' \eqn{(i, i, k)} sub-slice and left the remaining \eqn{n_{obs}^2 - n_{obs}}
+#' columns of every row at zero.  The lengths matched, so nothing recycled and
+#' no test failed -- but for \code{n_obs >= 2} the model side was structurally
+#' zero exactly where \code{sample_cumulants()$c3} is not, biasing every
+#' order-3 cumulant likelihood / GMM fit.
+#'
+#' This returns the length-\eqn{n_{obs}^2} vector of SOURCE column indices, in
+#' destination order (\eqn{k} fastest, then \eqn{j}), so that
+#' \code{c3_full[obs_idx, .c3_obs_col_index(obs_idx, n_endo)]} is the
+#' \code{n_obs x n_obs^2} sub-tensor in exactly the sample layout.
+#'
+#' @param obs_idx Integer positions of the observables in \code{dr$endo_names}.
+#' @param n_endo  Number of endogenous variables (the source tensor dimension).
+#' @return Integer vector of length \code{length(obs_idx)^2}.
+#' @noRd
+.c3_obs_col_index <- function(obs_idx, n_endo) {
+  n_obs <- length(obs_idx)
+  j <- rep(obs_idx, each  = n_obs)   # slowest
+  k <- rep(obs_idx, times = n_obs)   # fastest
+  as.integer((j - 1L) * n_endo + k)
+}
+
+#' Project a full endo-layout third cumulant onto the observables.
+#'
+#' @param c3_full n_endo x n_endo^2 matrix (\code{compute_third_cumulant()$c3_obs}).
+#' @param obs_idx Integer positions of the observables in the endo ordering.
+#' @param n_endo  Number of endogenous variables.
+#' @return n_obs x n_obs^2 matrix in the \code{sample_cumulants()$c3} layout.
+#' @noRd
+.project_c3_obs <- function(c3_full, obs_idx, n_endo) {
+  c3_full[obs_idx, .c3_obs_col_index(obs_idx, n_endo), drop = FALSE]
+}
+
+
+#' Column index map projecting an endo-space c4 tensor onto the observables
+#'
+#' \code{compute_fourth_cumulant()} returns \code{c4_obs} in the FULL endo
+#' layout, \code{n_endo x n_endo^3} with column
+#' \eqn{(j-1) n_{endo}^2 + (k-1) n_{endo} + l}.  The sample k-statistic
+#' \code{sample_cumulants()$c4} is \code{n_obs x n_obs^3} with column
+#' \eqn{(j-1) n_{obs}^2 + (k-1) n_{obs} + l}.  Taking only the observable ROWS
+#' of the model side (what the code used to do) leaves an
+#' \code{n_obs x n_endo^3} block, so \code{m_emp - m_model} silently RECYCLED
+#' the shorter sample vector whenever \code{n_obs < n_endo} — the two sides
+#' only lined up when every endogenous variable was observed.
+#'
+#' This returns the length-\eqn{n_{obs}^3} vector of SOURCE column indices, in
+#' destination order (\eqn{l} fastest, then \eqn{k}, then \eqn{j}), so that
+#' \code{c4_full[obs_idx, .c4_obs_col_index(obs_idx, n_endo)]} is the
+#' \code{n_obs x n_obs^3} sub-tensor in exactly the sample layout.
+#'
+#' @param obs_idx Integer positions of the observables in \code{dr$endo_names}.
+#' @param n_endo  Number of endogenous variables (the source tensor dimension).
+#' @return Integer vector of length \code{length(obs_idx)^3}.
+#' @noRd
+.c4_obs_col_index <- function(obs_idx, n_endo) {
+  n_obs <- length(obs_idx)
+  j <- rep(obs_idx, each  = n_obs * n_obs)          # slowest
+  k <- rep(rep(obs_idx, each = n_obs), times = n_obs)
+  l <- rep(obs_idx, times = n_obs * n_obs)          # fastest
+  as.integer((j - 1L) * n_endo * n_endo + (k - 1L) * n_endo + l)
+}
+
+#' Project a full endo-layout fourth cumulant onto the observables.
+#'
+#' @param c4_full n_endo x n_endo^3 matrix (\code{compute_fourth_cumulant()$c4_obs}).
+#' @param obs_idx Integer positions of the observables in the endo ordering.
+#' @param n_endo  Number of endogenous variables.
+#' @return n_obs x n_obs^3 matrix in the \code{sample_cumulants()$c4} layout.
+#' @noRd
+.project_c4_obs <- function(c4_full, obs_idx, n_endo) {
+  c4_full[obs_idx, .c4_obs_col_index(obs_idx, n_endo), drop = FALSE]
+}
+
+
 # ============================================================================
 # Sample cumulant computation
 # ============================================================================
@@ -1149,7 +1217,9 @@ compute_fourth_cumulant <- function(dr, model, params = NULL,
 #'   \item{mean}{n-vector of sample mean}
 #'   \item{var_cov}{n × n sample variance-covariance}
 #'   \item{c3}{n × n^2 sample third cumulant (K_3)}
-#'   \item{c4}{n × n^3 sample fourth cumulant (K_4)}
+#'   \item{c4}{n × n^3 sample fourth cumulant (Fisher's k_4).  Corrected in
+#'     E3-D: the previous normalisation was short by a factor \eqn{(T+1)}
+#'     (invisible on Gaussian data, where \eqn{\kappa_4 = 0}).}
 #'   \item{n_obs}{number of observations}
 #' @export
 sample_cumulants <- function(Y, max_order = 4L) {
@@ -1208,12 +1278,34 @@ sample_cumulants <- function(Y, max_order = 4L) {
   }
 
   if (max_order >= 4L) {
-    # 4. Fourth cumulant (k-statistic k_4)
-    # k_4[i,j,k,l] = T^2/((T-1)(T-2)(T-3)) * ...
-    #   [ Σ(y_i y_j y_k y_l) - (T-1)/(T(T+1))·Σ(y_i y_j)·Σ(y_k y_l)·(all pairings) ]
-    # Simplified: compute the fourth central moment and subtract the
-    # variance-pairing contribution.
-    factor4 <- T_obs^2 / ((T_obs - 1) * (T_obs - 2) * (T_obs - 3))
+    # 4. Fourth cumulant (k-statistic k_4).  Fisher's k-statistic is
+    #
+    #   k_4 = T^2 [ (T+1) m_4 - 3 (T-1) m_2^2 ] / ((T-1)(T-2)(T-3))
+    #
+    # with the RAW central moments m_r = T^{-1} sum_t yc_t^r.  Written in the
+    # quantities this function already has -- M4 = T^{-1} sum yc_i yc_j yc_k
+    # yc_l and the UNBIASED covariance var_hat = (T-1)^{-1} sum yc yc' (so
+    # m_2 = ((T-1)/T) var_hat) -- that is
+    #
+    #   k_4 = a4 * M4 - b4 * P,
+    #   a4 = T^2 (T+1) / D,  b4 = (T-1)^3 / D,  D = (T-1)(T-2)(T-3),
+    #   P   = S_ij S_kl + S_ik S_jl + S_il S_jk   (the three pairings).
+    #
+    # Both a4 and b4 tend to 1, so k_4 -> M4 - P, the population definition.
+    #
+    # FIX (E3-D): the previous normalisation was
+    #   (M4 - P (T-1)/(T+1)) * T^2/((T-1)(T-2)(T-3)),
+    # which is the above DIVIDED BY (T+1) -- i.e. the sample fourth cumulant
+    # came out roughly T times too small.  It was invisible on Gaussian data
+    # (kappa_4 = 0 scales to 0) and the only consumer, the order-4 cumulant
+    # moment block, was independently broken by the n_endo^3 layout bug, so
+    # nothing ever compared it against a nonzero target.  Verified against
+    # known cumulants: Exp(1) (kappa_4 = 6), mean over 4000 replications at
+    # T = 40 -- old 0.151, new 6.404; chi^2_1 (kappa_4 = 48) at T = 2e5 --
+    # old 0.000232, new 46.38.
+    D_k4 <- (T_obs - 1) * (T_obs - 2) * (T_obs - 3)
+    a4   <- T_obs^2 * (T_obs + 1) / D_k4
+    b4   <- (T_obs - 1)^3 / D_k4
 
     # Compute the fourth product moment
     m4 <- array(0, dim = c(n, n, n, n))
@@ -1232,23 +1324,20 @@ sample_cumulants <- function(Y, max_order = 4L) {
     }
     m4 <- m4 / T_obs  # fourth moment (raw)
 
-    # Subtract variance-pairing for the cumulant
-    # For Gaussian: κ_4 = m_4 - 3·vec(Σ)'s pairing
+    # Subtract the variance pairings: kappa_4 = m_4 - 3 sigma^4 for a Gaussian
     c4 <- array(0, dim = c(n, n, n, n))
     for (i in seq_len(n)) {
       for (j in seq_len(n)) {
         for (k in seq_len(n)) {
           for (l in seq_len(n)) {
-            c4[i, j, k, l] <- m4[i, j, k, l] -
-              (var_hat[i, j] * var_hat[k, l] +
-               var_hat[i, k] * var_hat[j, l] +
-               var_hat[i, l] * var_hat[j, k]) *
-              (T_obs - 1) / (T_obs + 1)
+            c4[i, j, k, l] <- a4 * m4[i, j, k, l] -
+              b4 * (var_hat[i, j] * var_hat[k, l] +
+                    var_hat[i, k] * var_hat[j, l] +
+                    var_hat[i, l] * var_hat[j, k])
           }
         }
       }
     }
-    c4 <- c4 * factor4
 
     # Flatten to n × n^3 (row = first index, col = (j,k,l) col-major)
     c4_flat <- matrix(0, n, n * n * n)
@@ -1274,6 +1363,20 @@ sample_cumulants <- function(Y, max_order = 4L) {
 # ============================================================================
 # Cumulant-based log-likelihood
 # ============================================================================
+
+#' Subset a data matrix to the observables, in obs_vars order
+#' @noRd
+.cumulant_subset_obs <- function(data, obs_vars) {
+  if (is.data.frame(data)) data <- as.matrix(data)
+  cn <- colnames(data)
+  if (!is.null(cn) && all(obs_vars %in% cn)) return(data[, obs_vars, drop = FALSE])
+  if (ncol(data) != length(obs_vars))
+    stop(".cumulant_subset_obs: data has ", ncol(data), " columns but obs_vars has ",
+         length(obs_vars), " entries and the columns are not named by obs_vars.",
+         call. = FALSE)
+  data
+}
+
 
 #' Cumulant-based log-likelihood
 #'
@@ -1313,6 +1416,11 @@ sample_cumulants <- function(Y, max_order = 4L) {
 
   # ---- 1. Compute sample cumulants ----
   max_order <- max(orders)
+  ## Orders 3-4 are consumed in raw column order, so the data must be
+  ## subset to obs_vars IN obs_vars ORDER (a permuted or wider data matrix
+  ## previously compared mismatched c3/c4 blocks while orders 1-2, indexed
+  ## by name, were unaffected).
+  data <- .cumulant_subset_obs(data, obs_vars)
   sc <- sample_cumulants(data, max_order = max_order)
 
   # ---- 2. Compute model-implied cumulants ----
@@ -1348,26 +1456,26 @@ sample_cumulants <- function(Y, max_order = 4L) {
   }
   if (any(orders >= 3L) && dr_order >= 2L) {
     c3_result <- compute_third_cumulant(dr, model, params)
-    # Select only observables
     obs_idx <- match(obs_vars, dr$endo_names)
-    c3_model <- c3_result$c3_obs[obs_idx, , drop = FALSE]
-    # Keep only columns corresponding to (obs, obs) pairs
-    cols_keep <- rep(obs_idx, each = n_obs) * 0  # need to subset n_obs^2 cols
-    c3_obs_only <- matrix(0, n_obs, n_obs * n_obs)
-    for (a in seq_len(n_obs)) {
-      for (b in seq_len(n_obs)) {
-        src_col <- (obs_idx[a] - 1L) * length(dr$endo_names) + obs_idx[b]
-        dst_col <- (a - 1L) * n_obs + b
-        c3_obs_only[a, dst_col] <- c3_model[a, src_col]
-      }
-    }
-    c3_model <- c3_obs_only
+    ## Project onto the observables in BOTH the row and the (j,k) column index,
+    ## giving n_obs x n_obs^2 -- the layout sample_cumulants()$c3 uses.  The
+    ## previous two-level `for (a) for (b)` loop wrote only column
+    ## (a-1)*n_obs + b of row a, i.e. it kept the (i,i,k) slice and left the
+    ## other n_obs^2 - n_obs columns per row at zero while the sample side
+    ## fills them (see .project_c3_obs).
+    c3_model <- .project_c3_obs(c3_result$c3_obs, obs_idx,
+                                length(dr$endo_names))
   }
 
   if (any(orders >= 4L) && dr_order >= 2L) {
     c4_result <- compute_fourth_cumulant(dr, model, params)
     obs_idx <- match(obs_vars, dr$endo_names)
-    c4_model <- c4_result$c4_obs[obs_idx, , drop = FALSE]
+    ## Project onto the observables in BOTH the row and the (j,k,l) column
+    ## index, giving n_obs x n_obs^3 -- the layout sample_cumulants()$c4 uses.
+    ## A row-only subset left n_obs x n_endo^3 and made `m_emp - m_model`
+    ## recycle whenever n_obs < n_endo (see .project_c4_obs).
+    c4_model <- .project_c4_obs(c4_result$c4_obs, obs_idx,
+                                length(dr$endo_names))
   }
 
   # ---- 3. Build the moment vector ----
@@ -1469,6 +1577,12 @@ sample_cumulants <- function(Y, max_order = 4L) {
 #'   omitted it defaults to 2 if \code{cumulant_orders} requests an
 #'   order-3/4 cumulant (so the skewness/kurtosis terms actually activate)
 #'   and 1 otherwise.  \code{h} sets the order-2 finite-difference step.
+#' @param power Power-posterior (generalised-Bayes) tempering exponent
+#'   \eqn{\zeta}: the returned \code{$logpost} is
+#'   \eqn{\log p(\theta) + \zeta \cdot \log L(\theta)} and \code{$loglik}
+#'   always carries the RAW (untempered) likelihood. \code{NULL} (default)
+#'   resolves the \code{power_posterior} package option ONCE, at factory time,
+#'   so the exponent is a fixed property of the returned closure.
 #' @return A function \code{function(theta)} returning a named list
 #'   \code{list(logpost, loglik, logprior)}
 #' @export
@@ -1479,7 +1593,13 @@ make_log_posterior_cumulant <- function(model, data, prior_spec, obs_vars,
                                          cumulant_weight = "identity",
                                          weight_matrix = NULL,
                                          system_priors = NULL,
+                                         power = NULL,
                                          ...) {
+  ## Resolve zeta ONCE here. It used to be re-read from the option store on
+  ## EVERY evaluation, so a mid-run dynhr_set_options() silently changed the
+  ## target distribution and a mirai daemon (own `.dynhr_opts`) used a
+  ## different exponent than the host (see .resolve_power_posterior).
+  power <- .resolve_power_posterior(power, "make_log_posterior_cumulant")
   ## data/prior_spec/obs_vars/me_variance/cumulant_* are only referenced inside
   ## the returned closure, so without forcing they remain unevaluated promises
   ## pointing at the caller's frame. A mirai daemon that ships this closure
@@ -1491,8 +1611,6 @@ make_log_posterior_cumulant <- function(model, data, prior_spec, obs_vars,
   if (is.null(compiled$lead_lag_incidence) &&
       !is.null(compiled$model$lead_lag_incidence))
     compiled$lead_lag_incidence <- compiled$model$lead_lag_incidence
-
-  sys_cache <- cache_system_structure(compiled)
 
   # Capture extra args for solve_perturbation (order, h, etc.)
   solver_args <- list(...)
@@ -1513,70 +1631,49 @@ make_log_posterior_cumulant <- function(model, data, prior_spec, obs_vars,
          solve_order, "); cumulants above the fourth are not implemented.")
   solver_h <- solver_args$h %||% 1e-4
 
-  function(theta) {
-    lp <- log_prior(theta, prior_spec)
-    if (!is.finite(lp))
-      return(list(logpost = -Inf, loglik = -Inf, logprior = lp))
-
-    params <- .apply_theta_to_params(model, theta)
-
-    ss_result <- solve_steady_state(model, compiled, params, verbose = FALSE)
-    if (is.null(ss_result) || !isTRUE(ss_result$converged))
-      return(list(logpost = -Inf, loglik = -Inf, logprior = lp))
-
-    ## Re-derive SSM-computed params for a consistent linearization point
-    ## (no-op for non-SSM-parameter models; Tier 13 #1).
-    params <- ss_result$params %||% params
-    sys <- extract_system_matrices_fast(sys_cache, ss_result$ss, params)
-    dr  <- .solve_from_system(sys, model, compiled, ss_result$ss, params, FALSE)
-    if (is.null(dr) || !isTRUE(dr$bk_satisfied))
-      return(list(logpost = -Inf, loglik = -Inf, logprior = lp))
-
-    ghx_state <- dr$ghx[dr$state_idx, , drop = FALSE]
-    if (max(Mod(eigen(ghx_state, only.values = TRUE)$values)) >= 1)
-      return(list(logpost = -Inf, loglik = -Inf, logprior = lp))
-
-    ## Higher-order solve: lift the first-order rule to order 2 so that
-    ## ghxx/ghss are available for the cumulant orders 3-4. Stationarity is
-    ## already checked on the first-order block above; the order-2 solve only
-    ## adds the quadratic terms. A failed quadratic solve falls back to the
-    ## first-order rule, which trips the order-detection warning downstream.
-    if (solve_order >= 2L) {
-      Sigma_e <- .get_shock_cov(model, model$varexo_names, params)
-      dr2 <- tryCatch(
-        solve_perturbation_order2(model, compiled, ss_result$ss, params,
-                                  dr1 = dr, Sigma_e = Sigma_e,
-                                  h = solver_h, verbose = FALSE),
-        error = function(e) NULL)
-      if (!is.null(dr2)) dr <- dr2
-    }
-
-    # Compute cumulant-based log-likelihood
-    loglik <- .cumulant_loglik(data, dr, model, params, obs_vars,
-                               orders = cumulant_orders,
-                               weight_method = cumulant_weight,
-                               weight_matrix = weight_matrix,
-                               me_variance = me_variance)
-    if (!is.finite(loglik))
-      return(list(logpost = -Inf, loglik = -Inf, logprior = lp))
-
-    ## System priors: penalty on model features evaluated from the solved dr.
-    if (!is.null(system_priors)) {
-      sp_lp <- .eval_system_priors(
-        system_priors,
-        list(theta   = theta,
-             model   = model,
-             dr      = dr,
-             Sigma_e = .get_shock_cov(model, model$varexo_names, params),
-             params  = params))
-      if (!is.finite(sp_lp))
-        return(list(logpost = -Inf, loglik = loglik, logprior = lp))
-      lp <- lp + sp_lp
-    }
-
-    list(logpost = .dynhr_opt("power_posterior", default = 1) * loglik + lp,
-         loglik = loglik, logprior = lp)
-  }
+  ## Adapter over the shared closure builder (R/posterior-closure.R). Specific
+  ## to this branch: the steady state is solved COLD on every draw (no
+  ## ss_warm), the stationarity guard always re-runs eigen() on the
+  ## first-order state block, and the optional order-2 lift happens in the
+  ## solve hook so the cumulant terms and the system prior both see the LIFTED
+  ## decision rule.
+  .make_posterior_closure(
+    model, data, prior_spec, obs_vars, compiled,
+    solve_fn = function(model, compiled, sys_cache, ss, params, theta) {
+      s1 <- .posterior_solve1(model, compiled, sys_cache, ss, params, "eigen")
+      if (is.null(s1)) return(NULL)
+      dr <- s1$dr
+      ## Higher-order solve: lift the first-order rule to order 2 so that
+      ## ghxx/ghss are available for the cumulant orders 3-4. Stationarity is
+      ## already checked on the first-order block; the order-2 solve only adds
+      ## the quadratic terms. A failed quadratic solve falls back to the
+      ## first-order rule, which trips the order-detection warning downstream.
+      if (solve_order >= 2L) {
+        Sigma_e <- .get_shock_cov(model, model$varexo_names, params)
+        dr2 <- tryCatch(
+          solve_perturbation_order2(model, compiled, ss, params,
+                                    dr1 = dr, Sigma_e = Sigma_e,
+                                    h = solver_h, verbose = FALSE),
+          error = function(e) NULL)
+        if (!is.null(dr2)) dr <- dr2
+      }
+      list(sys = s1$sys, dr = dr)
+    },
+    loglik_fn = function(sol, params, ss, theta, me_floor_check, ...) {
+      # Compute cumulant-based log-likelihood
+      loglik <- .cumulant_loglik(data, sol$dr, model, params, obs_vars,
+                                 orders = cumulant_orders,
+                                 weight_method = cumulant_weight,
+                                 weight_matrix = weight_matrix,
+                                 me_variance = me_variance)
+      if (!is.finite(loglik)) return(NULL)
+      list(loglik = loglik)
+    },
+    power             = power,
+    warm_start        = FALSE,
+    needs_me_floor    = FALSE,
+    system_prior      = system_priors,
+    system_prior_mode = "lp")
 }
 
 
@@ -1611,7 +1708,7 @@ make_log_posterior_cumulant <- function(model, data, prior_spec, obs_vars,
 #' Analytic long-run covariance Omega for GMM orders 1-2
 #'
 #' For a stationary Gaussian linear state-space with observable covariance
-#' \eqn{\Sigma_y} and lag-\eqn{h} autocovariance \eqn{\Gamma(h) = Z hx^h \Sigma_s Z'}:
+#' \eqn{\Sigma_y} and lag-\eqn{h} autocovariance \eqn{\Gamma(h)}:
 #'
 #' \describe{
 #'   \item{Omega_11}{T * Sigma_y  — asymptotic variance of the sample mean}
@@ -1638,6 +1735,23 @@ make_log_posterior_cumulant <- function(model, data, prior_spec, obs_vars,
 #'        = (I + K)(Sigma_y kron Sigma_y)
 #'
 #' The lag sum is truncated when the Frobenius norm of A(h) falls below tol.
+#'
+#' @section Autocovariance recursion (corrected):
+#' \eqn{\Gamma(h)} is built with the ENDO-space recursion
+#' \eqn{\Gamma(h) = G\,\Gamma(h-1)}, \eqn{\Gamma(0) = \Sigma_y^{full}}, where
+#' \eqn{G = ghx\,S} is \code{.mom_endo_transition(dr)} — the same operator
+#' \code{compute_moments()$autocorr} and \code{.mom_model_autocov()} use, so
+#' the weight matrix and \code{method_of_moments()} agree by construction.
+#' The observable block is taken AFTER the recursion.
+#'
+#' This replaces the earlier closed form \eqn{\Gamma(h) = Z\,hx^h\,\Sigma_s Z'},
+#' which is only valid when the observables carry NO contemporaneous shock
+#' loading (\code{ghu[obs, ] == 0}): with \eqn{y_t = ghx\,s_{t-1} + ghu\,e_t},
+#' \eqn{\mathrm{Cov}(y_t, y_{t-h})} also picks up
+#' \eqn{ghx\,\mathrm{Cov}(s_{t-1}, e_{t-h})\,ghu'}, a channel the \eqn{Z hx^h}
+#' form drops.  Only the state rows of \eqn{y} satisfy the dropped-channel
+#' condition, so on any model with a contemporaneously-loaded observable the
+#' old Omega was wrong at every lag \eqn{h \ge 1}.
 #'
 #' @param dr        Decision rule (order >= 1)
 #' @param model     dynhr_mod
@@ -1666,14 +1780,13 @@ make_log_posterior_cumulant <- function(model, data, prior_spec, obs_vars,
     stop(".analytic_gmm_weight_matrix: Sigma_y contains non-finite values ",
          "(unit root or non-stationary model?)")
 
-  # ---- Extract state-space matrices for lag autocovariance recursion ----
-  ghx       <- dr$ghx
-  state_idx <- dr$state_idx
-  n_state   <- length(state_idx)
-
-  ghx_state   <- ghx[state_idx, , drop = FALSE]         # n_state x n_state
-  Z           <- ghx[obs_idx, seq_len(n_state), drop = FALSE]  # n_obs x n_state
-  Sigma_state <- moments$Sigma_state   # n_state x n_state (from compute_moments)
+  # ---- Endo-space autocovariance recursion (shared with method_of_moments) --
+  # Gamma(h) = G Gamma(h-1), Gamma(0) = Sigma_y_full, G = ghx S.
+  # G is .mom_endo_transition(dr) -- ONE definition of the transition operator
+  # for compute_moments()$autocorr, .mom_model_autocov() and this weight
+  # matrix.  See @section above for why `Z hx^h Sigma_state Z'` is wrong.
+  G           <- .mom_endo_transition(dr)              # n_endo x n_endo
+  Sigma_full  <- moments$var_cov                       # n_endo x n_endo
 
   # ---- Determine total moment dimension p ----
   p_11 <- if (1L %in% orders) n_obs      else 0L
@@ -1695,22 +1808,17 @@ make_log_posterior_cumulant <- function(model, data, prior_spec, obs_vars,
   #
   # Actually: Omega_11 = sum_{h=-inf}^{inf} Gamma(h) where Gamma(h) = Cov(y_t, y_{t-h}).
   # For h=0: Gamma(0) = Sigma_y.
-  # For h>=1: Gamma(h) = Z hx^h Sigma_state Z'.
+  # For h>=1: Gamma(h) = (G^h Sigma_y_full)[obs, obs].
   # For h<=-1: Gamma(h) = Gamma(-h)'.
   # Sum: Omega_11 = Sigma_y + sum_{h=1}^{inf} [Gamma(h) + Gamma(h)'].
 
   if (p_11 > 0L) {
     Omega_11 <- Sigma_y   # h=0 contribution
 
-    # Add lag contributions via recursion: Gamma_h = Z * (hx^h * Sigma_state) * Z'
-    Gamma_state_h <- Sigma_state   # will be updated as hx^h * Sigma_state * (hx^h)'
-    # Actually Gamma(h) = Z hx_state^h Sigma_state Z', so the recursion is:
-    # Let S_h = hx_state^h Sigma_state (the propagated covariance);
-    # then Gamma(h) = Z S_h Z', and S_{h+1} = hx_state S_h.
-    S_h <- Sigma_state
+    Gam <- Sigma_full     # Gamma(0) in endo space
     for (h in seq_len(max_lags)) {
-      S_h     <- ghx_state %*% S_h
-      Gamma_h <- Z %*% S_h %*% t(Z)
+      Gam     <- G %*% Gam
+      Gamma_h <- Gam[obs_idx, obs_idx, drop = FALSE]
       contrib <- Gamma_h + t(Gamma_h)
       if (max(abs(contrib)) < tol) break
       Omega_11 <- Omega_11 + contrib
@@ -1742,11 +1850,11 @@ make_log_posterior_cumulant <- function(model, data, prior_spec, obs_vars,
     Syky <- kronecker(Sigma_y, Sigma_y)   # n_obs^2 x n_obs^2
     Omega_22 <- Syky + K_nn %*% Syky     # (I + K)(Sigma_y kron Sigma_y)
 
-    # Lag contributions
-    S_h <- Sigma_state
+    # Lag contributions (same endo-space recursion as Omega_11)
+    Gam <- Sigma_full
     for (h in seq_len(max_lags)) {
-      S_h     <- ghx_state %*% S_h
-      Gamma_h <- Z %*% S_h %*% t(Z)
+      Gam     <- G %*% Gam
+      Gamma_h <- Gam[obs_idx, obs_idx, drop = FALSE]
       Gamma_ht <- t(Gamma_h)   # Gamma(-h)
 
       # A(h): Gamma_h kron Gamma_h + K (Gamma_h kron Gamma_h')
@@ -1969,7 +2077,21 @@ estimate_gmm_weight_matrix <- function(data, dr, model, params, obs_vars,
       }
       G_list[[oi]] <- G3
     } else if (ord == 4L) {
-      # Raw order-4: n_obs × n_obs^3 product using yc_t, vec'd — matches sc$c4
+      # Order-4: n_obs × n_obs^3 product using yc_t, vec'd — matches sc$c4.
+      # The order-4 MOMENT is the fourth CUMULANT, so the contribution must
+      # carry the Gaussian-pairing subtraction too: without it the column
+      # means are the raw fourth moment while m_model is kappa_4, and the
+      # centring is off by the 3-sigma^4 pairing.  The pairing is
+      # deterministic given the sample, so it is built once here.
+      Vh   <- crossprod(Yc) / max(1L, T_obs - 1L)
+      pair <- numeric(n_obs^4)
+      for (a in seq_len(n_obs)) for (b in seq_len(n_obs))
+        for (cc in seq_len(n_obs)) for (d in seq_len(n_obs)) {
+          pos <- ((b - 1L) * n_obs * n_obs + (cc - 1L) * n_obs + d - 1L) *
+                 n_obs + a
+          pair[pos] <- Vh[a, b] * Vh[cc, d] + Vh[a, cc] * Vh[b, d] +
+                       Vh[a, d] * Vh[b, cc]
+        }
       G4 <- matrix(0, T_obs, n_obs * n_obs^3)
       for (t in seq_len(T_obs)) {
         yct <- Yc[t, ]
@@ -1985,7 +2107,7 @@ estimate_gmm_weight_matrix <- function(data, dr, model, params, obs_vars,
             }
           }
         }
-        G4[t, ] <- as.numeric(m4t)
+        G4[t, ] <- as.numeric(m4t) - pair
       }
       G_list[[oi]] <- G4
     }

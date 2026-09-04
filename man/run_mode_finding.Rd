@@ -218,11 +218,21 @@ prior extraction -> log-posterior construction -> multi-stage optimisation
 -> Hessian-based proposal covariance.
 }
 \examples{
-\dontrun{
-mod  <- solve_model("my_model.mod")
-data <- read.csv("data.csv")
-mode <- run_mode_finding(mod, data, obs_vars = c("y", "pi", "r"))
-}
+## Model and data both ship with the package
+solved   <- solve_model(system.file("extdata/models/nk_demo.mod",
+                                    package = "dynhr"), verbose = FALSE)
+obs_vars <- c("ygr", "infl", "intr")
+Y <- as.matrix(read.csv(system.file("extdata/models/nk_demo_data.csv",
+                                    package = "dynhr"))[, obs_vars])
+
+## n_iter is capped here to keep the example quick
+mode <- run_mode_finding(solved, Y, obs_vars = obs_vars,
+                         n_iter = 200L, verbose = FALSE)
+mode
+round(mode$theta_mode, 4)
+
+## The proposal covariance feeds straight into mcmc()
+dim(mode$Sigma_prop)
 
 }
 \seealso{

@@ -111,3 +111,4 @@ scale-invariant way to inject "the econometrician observes this macro
 series with some noise" without hand-picking absolute noise units per
 output.
 }
+\keyword{internal}

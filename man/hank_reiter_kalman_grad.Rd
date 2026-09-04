@@ -5,17 +5,17 @@
 \title{Adjoint-KF x central-FD hybrid gradient of the Reiter HANK loglik (P3 #3)}
 \usage{
 hank_reiter_kalman_grad(
-  Y,
+  data,
   rss_fn,
   theta,
-  observables = "A",
-  me_var = 0,
+  obs_vars = "A",
+  me_variance = 0,
   fd_step = NULL
 )
 }
 \arguments{
-\item{Y}{\code{T x n_obs} matrix (or vector when \code{n_obs = 1}) of
-DEMEANED observations, columns in the order of \code{observables}. Must
+\item{data}{\code{T x n_obs} matrix (or vector when \code{n_obs = 1}) of
+DEMEANED observations, columns in the order of \code{obs_vars}. Must
 not contain \code{NA}.}
 
 \item{rss_fn}{\code{function(theta)} returning a \code{hank_reiter_ss}
@@ -29,10 +29,10 @@ or another household parameter).}
 \item{theta}{NAMED numeric vector of parameter values at which to
 differentiate.}
 
-\item{observables}{Which observation rows of the state space to use
+\item{obs_vars}{Which observation rows of the state space to use
 (subset of \code{rss_fn(theta)$obs_names}).}
 
-\item{me_var}{Measurement-error variance added to each observable -- see
+\item{me_variance}{Measurement-error variance added to each observable -- see
 the convention warning above when combined with multiple observables.}
 
 \item{fd_step}{Relative central-FD step: \code{h_j = fd_step *
@@ -47,9 +47,9 @@ re-solve) may want a larger step.}
 \value{
 \code{list(loglik, grad)}: \code{loglik} is the adjoint path's
   log-likelihood at \code{theta} (matches
-  \code{\link{hank_reiter_kalman_loglik}} to ~1e-8 when \code{me_var = 0}
-  or \code{length(observables) == 1} -- both exact Gaussian-KF evaluations
-  of the SAME state space; see the \code{me_var} convention section
+  \code{\link{hank_reiter_kalman_loglik}} to ~1e-8 when \code{me_variance = 0}
+  or \code{length(obs_vars) == 1} -- both exact Gaussian-KF evaluations
+  of the SAME state space; see the \code{me_variance} convention section
   otherwise); \code{grad} is a numeric vector named as \code{theta}.
 }
 \description{
@@ -69,31 +69,25 @@ recipe of \code{\link{hank_ks_coarse_anchored}}, ~10s-100s of ms per
 evaluation).
 }
 \details{
-The adjoint leg (\code{.kf_loglik_adjoint}) requires a NA-free \code{Y}
+The adjoint leg (\code{.kf_loglik_adjoint}) requires a NA-free \code{data}
 (it has no univariate/missing-data dispatch); use
 \code{\link{hank_reiter_kalman_loglik}} directly (its
-\code{.kf_univariate_dispatch} path) when \code{Y} has gaps.
+\code{.kf_univariate_dispatch} path) when \code{data} has gaps.
 }
-\section{IMPORTANT -- \code{me_var} convention with \code{length(observables) > 1}}{
+\section{\code{me_variance} (RESOLVED in 0.9.2.x -- F3-D)}{
 
-\code{\link{hank_reiter_kalman_loglik}} always routes through
-\code{.kf_univariate_dispatch}, which (per the documented convention in
-\code{R/kalman-filter.R}) treats \code{me_var > 0} as TRUE iid diagonal
-measurement noise (a real noise model). \code{.kf_loglik_adjoint} runs the
-plain multivariate recursion, which instead adds \code{me_var} to \code{F}
-ONLY as a positive-definiteness regularizer (never as a noise term in the
-state/covariance update). The two conventions are IDENTICAL at
-\code{me_var = 0} (verified here to ~1e-8, both exact evaluations of the
-same state space) but DIFFER by \code{O(me_var)} otherwise -- confirmed
-empirically: with 2 observables and \code{me_var = 1e-8} the two logliks
-differ by ~2 nats, NOT shrinking as \code{me_var -> 0} faster than that
-\code{O(me_var)} term implies. This function's \code{loglik}/\code{grad}
-are therefore an EXACT gradient of the adjoint's OWN (regularizer-
-convention) likelihood, not of \code{hank_reiter_kalman_loglik}'s, whenever
-\code{me_var > 0} and \code{length(observables) > 1}. Do not mix the two
-functions' outputs in the same estimation when that condition holds; the
-single-observable case (\code{length(observables) == 1}, where \code{F} is
-scalar and stochastic singularity does not arise) is unaffected.
+\code{\link{hank_reiter_kalman_loglik}} routes through
+\code{.kf_univariate_dispatch} and \code{.kf_loglik_adjoint} runs the
+multivariate recursion. Up to 0.9.2.0004 these implemented DIFFERENT
+\code{me_variance} conventions -- true iid measurement noise vs. an
+\code{F}-only regulariser -- and with 2 observables at
+\code{me_variance = 1e-8} their logliks differed by ~2 nats, so their
+outputs could not be mixed. F3-D made \code{me_variance} TRUE iid diagonal
+measurement noise on the multivariate paths too (it now enters the Joseph
+covariance update as well as \code{F}), so the two agree at ANY
+\code{me_variance} (verified to ~1e-9 here) and this function's
+\code{loglik}/\code{grad} are an exact gradient of
+\code{hank_reiter_kalman_loglik}'s likelihood.
 }
 
 \section{Cost model}{

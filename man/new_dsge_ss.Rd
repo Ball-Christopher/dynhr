@@ -12,7 +12,7 @@ new_dsge_ss(
   Sigma_e,
   d = NULL,
   state_names = NULL,
-  obs_names = NULL,
+  obs_vars = NULL,
   shock_names = NULL,
   timing = c("lagged", "current"),
   ...
@@ -34,11 +34,16 @@ equation.}
 \item{Sigma_e}{n_shock x n_shock shock covariance matrix.}
 
 \item{d}{n_obs-length constant term in the observation equation
-(default zero vector).}
+(default zero vector) -- the observation intercept, subtracted from the
+data by everything that consumes the object, which is what makes the
+data convention LEVELS. \code{\link{build_dsge_state_space}()} fills it
+with \code{dr$ys[obs_vars]}; a hand-built state space has no steady
+state behind it, so its default zero means its data is in deviations by
+construction.}
 
 \item{state_names}{Character vector of state-variable names (length n_state).}
 
-\item{obs_names}{Character vector of observable names (length n_obs).}
+\item{obs_vars}{Character vector of observable names (length n_obs).}
 
 \item{shock_names}{Character vector of shock names (length n_shock).}
 
@@ -54,8 +59,8 @@ A list with class \code{"dsge_ss"} containing all input matrices
 \description{
 Creates a \code{dsge_ss} object encoding either the lagged-state or
 current-state timing convention.  The lagged-state form is dynhr's
-canonical convention and is the form expected by \code{kalman_smoother},
-\code{kalman_filter}, and all frequency-domain likelihoods.
+canonical convention and is the form every filter, smoother and
+frequency-domain likelihood in the package works in.
 }
 \details{
 \strong{Lagged-state (timing = "lagged"):}

@@ -310,14 +310,17 @@ pruned_ss_moments <- function(pss, n_ar = 5L) {
   if (!length(main)) main <- obs_vars[which.max(chk$loadings)]
   warning(sprintf(paste0(
     "me_variance = %g is large relative to the smallest eigenvalue of the ",
-    "model-implied one-step innovation covariance (inflates it by factor ",
-    "%.2f): a linear combination of the observables (loading mainly on %s) ",
-    "is nearly perfectly predictable, and the floor reshapes the likelihood ",
-    "exactly in that direction. If your DATA genuinely carry measurement ",
-    "error of this size, ignore this warning. If the data are simulated ",
-    "withOUT measurement error, this floor biases the likelihood ",
-    "(theta-dependently) -- set me_variance = 0. Disable this check with ",
-    "options(dynhr.me_floor_check = FALSE)."),
+    "model-implied (noise-free) one-step innovation covariance (inflates it ",
+    "by factor %.2f): a linear combination of the observables (loading ",
+    "mainly on %s) is nearly perfectly predictable by the model, so the ",
+    "measurement noise you ASSUMED -- not the model -- dominates the ",
+    "likelihood in that direction. me_variance is a genuine iid observation-",
+    "noise variance (it enters both the innovation covariance and the state ",
+    "update), so if your DATA really carry measurement error of this size, ",
+    "ignore this warning. If the data were simulated withOUT measurement ",
+    "error, this is a mis-specified noise model and it distorts the ",
+    "likelihood (theta-dependently) -- set me_variance = 0. Disable this ",
+    "check with options(dynhr.me_floor_check = FALSE)."),
     me_variance, chk$ratio, paste(main, collapse = ", ")),
     call. = FALSE)
   invisible(TRUE)
@@ -363,6 +366,15 @@ pruned_ss_moments <- function(pss, n_ar = 5L) {
 #'   falls back to a predict-only step (no update). Fully-observed and
 #'   fully-missing periods are unaffected by this and match the previous
 #'   behavior exactly.
+#'   \code{Y} must be in LEVELS: the observation intercept is
+#'   \code{ys + ghss/2 + c_v} (the order-2 mean), not zero.  Passing
+#'   deviations from the steady state -- e.g. raw \code{simulate_model()} /
+#'   \code{simulate_model_order2()} output, which are deviations -- makes
+#'   every innovation carry the whole steady state and silently inflates
+#'   \eqn{v_t^2/F_t} by orders of magnitude (F4-C: it turned an
+#'   \eqn{O(\sigma^2)} model difference into a \eqn{\sigma}-invariant 2.8-nat
+#'   offset against the linear Kalman filter).  Add \code{dr$ys[obs_vars]}
+#'   to simulated deviations before filtering.
 #' @param obs_vars Character vector of observed variable names (must be a
 #'   subset of \code{pss$endo_names}).
 #' @param me_variance  Scalar measurement-error jitter added to the diagonal
@@ -727,80 +739,61 @@ pruned_ss_loglik <- function(pss, Y, obs_vars, me_variance = 0,
 #' @param compiled  dynhr_compiled (from \code{compile_model}).
 #' @param me_variance Measurement-error jitter (default 0).
 #' @param system_priors Named list of system-prior functions (default NULL).
+#' @param power Power-posterior (generalised-Bayes) tempering exponent
+#'   \eqn{\zeta}. \code{NULL} (default) resolves the \code{power_posterior}
+#'   option once, at factory time (see \code{.resolve_power_posterior}); the
+#'   default of 1 is bit-identical to the untempered posterior.
 #' @return A closure \code{function(theta)} returning
 #'   \code{list(logpost, loglik, logprior)}.
 #' @noRd
 make_log_posterior_pruned <- function(model, data, prior_spec, obs_vars,
                                        compiled, me_variance = 0,
-                                       system_priors = NULL) {
-  sys_cache <- cache_system_structure(compiled)
-  ss_warm   <- NULL
-  .me_floor_checked <- FALSE
+                                       system_priors = NULL,
+                                       power = NULL) {
+  ## Resolve zeta ONCE here, not per draw -- the exponent is a property of the
+  ## closure (see .resolve_power_posterior).
+  power <- .resolve_power_posterior(power, "make_log_posterior_pruned")
 
   ## Data: ensure n_obs x T
   n_obs <- length(obs_vars)
   Y <- if (is.matrix(data) && nrow(data) == n_obs) data else t(data)
 
-  function(theta) {
-    lp <- log_prior(theta, prior_spec)
-    if (!is.finite(lp))
-      return(list(logpost = -Inf, loglik = -Inf, logprior = lp))
-
-    params <- .apply_theta_to_params(model, theta)
-    ss_result <- solve_steady_state(model, compiled, params,
-                                    y0 = ss_warm, verbose = FALSE)
-    if (is.null(ss_result) || !isTRUE(ss_result$converged)) {
-      ss_warm <<- NULL
-      return(list(logpost = -Inf, loglik = -Inf, logprior = lp))
-    }
-    ss_warm <<- ss_result$ss
-    params   <- ss_result$params %||% params
-
-    sys <- extract_system_matrices_fast(sys_cache, ss_result$ss, params)
-    dr1 <- .solve_from_system(sys, model, compiled, ss_result$ss, params, FALSE)
-    if (is.null(dr1) || !isTRUE(dr1$bk_satisfied))
-      return(list(logpost = -Inf, loglik = -Inf, logprior = lp))
-
-    ## Solve to order 2
-    dr2 <- tryCatch(
-      solve_perturbation_order2(model, compiled, ss_result$ss, params, dr1,
-                                verbose = FALSE),
-      error = function(e) NULL
-    )
-    if (is.null(dr2))
-      return(list(logpost = -Inf, loglik = -Inf, logprior = lp))
-
-    pss <- tryCatch(
-      pruned_state_space(dr2, model, params),
-      error = function(e) NULL
-    )
-    if (is.null(pss))
-      return(list(logpost = -Inf, loglik = -Inf, logprior = lp))
-
-    loglik <- tryCatch(
-      pruned_ss_loglik(pss, Y, obs_vars, me_variance = me_variance,
-                       me_floor_check = !.me_floor_checked &&
-                         isTRUE(getOption("dynhr.me_floor_check", TRUE))),
-      error = function(e) -Inf
-    )
-    .me_floor_checked <<- TRUE   # guard once per closure, not per MCMC draw
-    if (!is.finite(loglik))
-      return(list(logpost = -Inf, loglik = -Inf, logprior = lp))
-
-    sp_lp <- if (!is.null(system_priors)) {
-      .eval_system_priors(
-        system_priors,
-        list(theta   = theta,
-             model   = model,
-             dr      = dr2,
-             Sigma_e = pss$Sigma_e,
-             params  = params))
-    } else 0
-
-    list(logpost  = lp + loglik + sp_lp,
-         loglik   = loglik,
-         logprior = lp)
-  }
+  ## Adapter over the shared closure builder (R/posterior-closure.R). What is
+  ## specific to this branch: the order-2 lift + pruned-SS assembly (solve
+  ## hook), the augmented-state Gaussian KF (loglik hook), NO cold retry after
+  ## a failed warm-started steady-state solve, NO stationarity guard beyond
+  ## the BK check, and a system prior that is added to $logpost WITHOUT
+  ## folding into $logprior (mode "extra") against dr2 and the pruned
+  ## Sigma_e -- all pinned by test-posterior-closure-parity.R.
+  .make_posterior_closure(
+    model, data, prior_spec, obs_vars, compiled,
+    solve_fn = function(model, compiled, sys_cache, ss, params, theta) {
+      s1 <- .posterior_solve1(model, compiled, sys_cache, ss, params, "none")
+      if (is.null(s1)) return(NULL)
+      dr2 <- tryCatch(
+        solve_perturbation_order2(model, compiled, ss, params, s1$dr,
+                                  verbose = FALSE),
+        error = function(e) NULL
+      )
+      if (is.null(dr2)) return(NULL)
+      pss <- tryCatch(pruned_state_space(dr2, model, params),
+                      error = function(e) NULL)
+      if (is.null(pss)) return(NULL)
+      list(dr = dr2, pss = pss)
+    },
+    loglik_fn = function(sol, params, ss, theta, me_floor_check, ...) {
+      loglik <- tryCatch(
+        pruned_ss_loglik(sol$pss, Y, obs_vars, me_variance = me_variance,
+                         me_floor_check = me_floor_check),
+        error = function(e) -Inf
+      )
+      if (!is.finite(loglik)) return(NULL)
+      list(loglik = loglik, Sigma_e = sol$pss$Sigma_e)
+    },
+    power             = power,
+    warm_retry        = FALSE,
+    system_prior      = system_priors,
+    system_prior_mode = "extra")
 }
 
 

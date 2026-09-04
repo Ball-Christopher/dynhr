@@ -71,3 +71,4 @@ dim(J$D$rd)
   validates), \code{\link{hank_het_jacobian_nd}} (one-asset),
   \code{\link{hank_td3_nonlinear}}
 }
+\keyword{internal}

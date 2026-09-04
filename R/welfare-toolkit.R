@@ -202,41 +202,6 @@
 }
 
 
-#' Extract shock covariance from a model or result object
-#'
-#' @param model dynhr_mod.
-#' @param params Named parameter vector.
-#' @return Sigma_e matrix.
-#' @noRd
-.extract_sigma_e <- function(model, params) {
-  exo <- model$varexo_names
-  n_exo <- length(exo)
-  Sigma_e <- matrix(0, n_exo, n_exo)
-  stderr <- vapply(seq_len(n_exo), function(k) {
-    sname <- exo[k]
-    # Check model$shocks for stderr specification
-    if (!is.null(model$shocks)) {
-      sd_val <- model$shocks$std[sname]
-      if (!is.null(sd_val) && is.finite(sd_val)) return(as.numeric(sd_val))
-    }
-    # Fallback: check if a parameter named stderr_<name> exists
-    pname <- paste0("stderr_", sname)
-    if (pname %in% names(params) && is.finite(params[pname])) {
-      return(as.numeric(params[pname]))
-    }
-    # Fallback: check if a parameter with the shock name exists
-    if (sname %in% names(params) && is.finite(params[sname])) {
-      return(as.numeric(params[sname]))
-    }
-    1.0  # Default fallback
-  }, numeric(1))
-  diag(Sigma_e) <- stderr^2
-  rownames(Sigma_e) <- exo
-  colnames(Sigma_e) <- exo
-  Sigma_e
-}
-
-
 #' Estimate marginal utility of consumption at steady state
 #'
 #' Uses a numerical derivative of the planner objective with respect to

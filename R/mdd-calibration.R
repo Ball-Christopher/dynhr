@@ -24,16 +24,6 @@
 ## --------------------------------------------------------------------------
 
 
-## ---- shared numeric helper -------------------------------------------
-
-## log( sum(exp(x)) ), stable.
-.mdd_logsumexp <- function(x) {
-  mx <- max(x)
-  if (!is.finite(mx)) return(mx)
-  mx + log(sum(exp(x - mx)))
-}
-
-
 ## ==========================================================================
 ## Case builder: conjugate_regression (rung a)
 ## ==========================================================================
@@ -208,7 +198,7 @@
                       prior_lower, prior_upper),
     numeric(1))
   dxg  <- diff(grid)[1]
-  logZ_quad <- .mdd_logsumexp(loglik_grid + logprior_grid) + log(dxg)
+  logZ_quad <- .logsumexp(loglik_grid + logprior_grid) + log(dxg)
 
   ## ---- real pipeline: mode + (numerical, since the model is diffuse-init
   ## and posterior_hessian's analytic exact-Hessian path explicitly excludes

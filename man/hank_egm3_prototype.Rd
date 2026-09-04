@@ -102,3 +102,4 @@ x$converged
   distribution), \code{\link{hank_egm3_solve}} (the production EGM solver
   this establishes the budget for)
 }
+\keyword{internal}

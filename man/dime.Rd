@@ -44,5 +44,6 @@ Boehl, G. (2022). DIME MCMC: A Swiss Army Knife for Bayesian Inference.
     SSRN Working Paper No. 4250395.
 }
 \seealso{
-\code{\link{mcmc}}, \code{\link{smc}}, \code{\link{nuts}}
+\code{\link{mcmc}}, \code{\link{smc}}, \code{\link{nuts}},
+  \code{\link{dm_sample}}
 }

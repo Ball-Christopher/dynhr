@@ -208,7 +208,7 @@
   new_dsge_ss(T_mat = TT, R_mat = RR, Z_mat = Z_lag, D_mat = D_lag,
                       Sigma_e = matrix(sigma^2, 1L, 1L),
                       state_names = paste0("Z_lag", seq_len(q) - 1L),
-                      obs_names = cfg$observables, shock_names = "Z",
+                      obs_vars = cfg$observables, shock_names = "Z",
                       timing = "lagged",
                       Theta_list = list(Z = Theta_mat), q = q)
 }
@@ -417,7 +417,7 @@ hank_mixture_emulator <- function(box, config, design = c("grid", "scatter"),
                               M2D0 = c(K, K), M2dD = c(K, K))
   }
 
-  structure(emu, class = "hank_mixture_emulator")
+  structure(emu, class = c("hank_mixture_emulator", "hank_block"))
 }
 
 
@@ -623,7 +623,7 @@ hank_emulator_level_metric <- function(emu, theta, N) {
 #' sigma_Z^2)` innovations, forms the truncated-MA observation path, adds iid
 #' measurement error, and demeans.
 #' @keywords internal
-.hank_sbc_sim_Y <- function(ss_obj, T_data, me_var, sigma_Z, observables) {
+.hank_sbc_sim_Y <- function(ss_obj, T_data, me_variance, sigma_Z, obs_vars) {
   Theta <- ss_obj$Theta_list[["Z"]]; q <- nrow(Theta); n_obs <- ncol(Theta)
   eps <- stats::rnorm(T_data, 0, sigma_Z)
   Y <- matrix(0, T_data, n_obs)
@@ -631,9 +631,9 @@ hank_emulator_level_metric <- function(emu, theta, N) {
     s <- 0:min(t - 1L, q - 1L)
     Y[t, ] <- colSums(Theta[s + 1L, , drop = FALSE] * eps[t - s])
   }
-  if (me_var > 0) Y <- Y + matrix(stats::rnorm(T_data * n_obs, 0, sqrt(me_var)), T_data, n_obs)
+  if (me_variance > 0) Y <- Y + matrix(stats::rnorm(T_data * n_obs, 0, sqrt(me_variance)), T_data, n_obs)
   Y <- scale(Y, center = TRUE, scale = FALSE); attr(Y, "scaled:center") <- NULL
-  matrix(Y, T_data, n_obs, dimnames = list(NULL, observables))
+  matrix(Y, T_data, n_obs, dimnames = list(NULL, obs_vars))
 }
 
 
@@ -826,8 +826,8 @@ hank_mixture_sbc <- function(emu, n_rep, prior = NULL, sampler = "grid",
     set.seed(T_data_seed)
     centre_target <- vapply(nm, function(n) mean(box[[n]]), numeric(1))
     ss_ref <- hank_emulator_state_space(emu, setNames(as.list(centre_target), nm))
-    Y_ref <- .hank_sbc_sim_Y(ss_ref, T_data, me_var = 0, sigma_Z = cfg$shock_specs$Z$sigma,
-                            observables = cfg$observables)
+    Y_ref <- .hank_sbc_sim_Y(ss_ref, T_data, me_variance = 0, sigma_Z = cfg$shock_specs$Z$sigma,
+                            obs_vars = cfg$observables)
     ME_VAR <- (me_frac * min(apply(Y_ref, 2, stats::sd)))^2
   }
 
@@ -877,8 +877,8 @@ hank_mixture_sbc <- function(emu, n_rep, prior = NULL, sampler = "grid",
     ## normalization below). "emulated_varying" is the alternative, theta-
     ## VARYING interpolated covariance INCLUDING its log-det term.
     if (use_macro)
-      Y <- .hank_sbc_sim_Y(tr$ss_dir, T_data, me_var = ME_VAR, sigma_Z = cfg$shock_specs$Z$sigma,
-                          observables = cfg$observables)
+      Y <- .hank_sbc_sim_Y(tr$ss_dir, T_data, me_variance = ME_VAR, sigma_Z = cfg$shock_specs$Z$sigma,
+                          obs_vars = cfg$observables)
     if (use_resp) {
       Dhat0 <- as.numeric(stats::rmultinom(1, N, tr$D0)) / N
       Dhat1 <- as.numeric(stats::rmultinom(1, N, tr$D1)) / N
@@ -896,7 +896,7 @@ hank_mixture_sbc <- function(emu, n_rep, prior = NULL, sampler = "grid",
     loglik <- numeric(n_eval_nodes)
     for (k in seq_len(n_eval_nodes)) {
       ll <- 0
-      if (use_macro) ll <- ll + hank_kalman_loglik(Y, ss_list[[k]], me_var = ME_VAR)
+      if (use_macro) ll <- ll + hank_kalman_loglik(Y, ss_list[[k]], me_variance = ME_VAR)
       if (use_resp) {
         d_k <- m_hat - g_mat[k, ]
         if (rw_metric == "fixed_truth") {

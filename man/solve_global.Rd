@@ -49,7 +49,19 @@ order-1 perturbation solution (default TRUE).}
 \value{
 A \code{GlobalSolution} S3 object with fields \code{coefs},
   \code{state_names}, \code{all_endo_names}, \code{shock_names},
-  \code{state_domain}, \code{poly_degree}, \code{converged}, etc.
+  \code{state_domain}, \code{poly_degree}, \code{converged}, the order-1
+  stationary state sds \code{state_sd}, and two domain-clipping
+  diagnostics.  \code{predict.GlobalSolution()} CLIPS a state outside
+  \code{state_domain} to the boundary, silently, so the Euler quadrature's
+  own \eqn{t+1} points leaving the box would corrupt the solution
+  invisibly; both diagnostics report the FRACTION of those \eqn{t+1} state
+  coordinates that do so, at the converged policy.
+  \code{domain_clip_solve} measures it over the collocation grid (whose
+  corners are the extremes of the box, so a small positive value is
+  normal); \code{domain_clip_frac} measures it over the ergodic box
+  (steady state \eqn{\pm 3} order-1 stationary sds of each state), where
+  it is expected to be ZERO and a positive value raises a warning.  Both
+  are \code{NA} when no order-1 solution is available.
 }
 \description{
 Solves a DSGE model via Chebyshev polynomial collocation with

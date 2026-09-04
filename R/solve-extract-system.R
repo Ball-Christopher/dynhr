@@ -674,12 +674,3 @@ extract_system_matrices_fast <- function(cache, ss, params, center = NULL) {
   }
   J
 }
-
-.colmax_abs <- function(M) {
-  if (nrow(M) == 0L) return(rep(0, ncol(M)))
-  ## Column-wise max(|.|) without apply(): max.col() on the transpose returns,
-  ## for each column, the row index achieving the max; index back to read it.
-  absM <- abs(M)
-  ri <- max.col(t(absM), ties.method = "first")
-  absM[cbind(ri, seq_len(ncol(absM)))]
-}

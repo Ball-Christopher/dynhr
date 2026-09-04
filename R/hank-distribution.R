@@ -337,6 +337,111 @@ hank_aggregate <- function(d, x) {
 }
 
 
+#' Is a Markov transition matrix reducible (more than one communicating class)?
+#'
+#' At \code{hank_employment_income3}'s degenerate nesting point
+#' (\code{p_un = p_nu = 0}, default \code{f_ne = s_en = 0}) the E/U/N
+#' employment chain has \code{N} as a CLOSED, unreachable class: the chain is
+#' reducible, has more than one invariant distribution, and a uniform-seeded
+#' power iteration (\code{\link{hank_stationary_dist}}'s default) strands
+#' whatever mass the init put in \code{N} there forever -- see
+#' \code{\link{hank_het_block}}'s \code{dist_init} argument and its
+#' reducibility guard.
+#'
+#' Detected via the transitive closure of the "positive one-step transition
+#' probability" digraph: \code{Pi} is irreducible iff every state can reach
+#' every other state (the digraph, with self-loops added, is strongly
+#' connected). \code{n} is always tiny here (the number of income states), so
+#' a dense boolean transitive closure by repeated squaring
+#' (\code{O(n^3 log n)}, exact -- no eigenvalue tolerance games) is cheap.
+#' Entries are compared to exact \code{0}, not a tolerance, so a chain with a
+#' tiny-but-nonzero rate (e.g. \code{p_un = p_nu = 1e-9}) is correctly
+#' IRREDUCIBLE (no false positive) -- the discontinuity at exactly zero is
+#' the point (see the paper bug report this guards against).
+#'
+#' @param Pi Numeric \code{n x n} transition matrix (rows sum to 1;
+#'   non-negative entries assumed -- callers validate that separately via
+#'   \code{\link{.hank_check_markov}}).
+#' @return \code{TRUE} if \code{Pi} is reducible (more than one communicating
+#'   class), \code{FALSE} if it is irreducible (a single communicating class
+#'   covering every state).
+#' @keywords internal
+.hank_pi_reducible <- function(Pi) {
+  n <- nrow(Pi)
+  if (n <= 1L) return(FALSE)
+  A <- Pi > 0
+  diag(A) <- TRUE
+  ## Reachability-in-<=k-steps via repeated boolean squaring: after k
+  ## squarings, R encodes reachability within 2^k steps of the self-looped
+  ## graph, so k = ceiling(log2(n)) steps (2^k >= n) certainly covers the
+  ## longest possible shortest path (<= n - 1 edges).
+  R <- A
+  k <- max(1L, ceiling(log2(n)))
+  for (i in seq_len(k)) R <- (R %*% R) > 0
+  ## Irreducible iff EVERY state reaches every other state, i.e. R is the
+  ## all-TRUE matrix (a single communicating class spanning all n states).
+  !all(R)
+}
+
+
+#' Resolve a \code{dist_init} argument to a full initial distribution vector
+#'
+#' Shared by \code{\link{hank_het_block}} (and any future het-block
+#' constructor needing the same knob): \code{dist_init} may be
+#' \describe{
+#'   \item{\code{NULL}}{No seed requested; returns \code{NULL} (callers keep
+#'     their own default, e.g. \code{hank_stationary_dist}'s uniform init).}
+#'   \item{a length-\code{n_e} vector}{A MARGINAL over income states, spread
+#'     UNIFORMLY across the asset grid -- \code{d0[e, a] = dist_init[e] /
+#'     n_a} for every \code{a}. This is the shape
+#'     \code{hank_employment_income3()$pi_m}-like objects (or, for the
+#'     reducibility fix, the FULL combined-state stationary vector
+#'     \code{inc$pi}, which is length \code{n_e} in the block's sense once
+#'     \code{e} is the combined employment x productivity index) naturally
+#'     have.}
+#'   \item{an \code{n_e x n_a} matrix, or a length-\code{n_e*n_a} vector}{A
+#'     full initial distribution in the block's own \code{(e, a)} shape
+#'     (distribution order for the vector form -- see the file header).}
+#' }
+#' Validated finite, non-negative, and strictly positive total mass (the same
+#' contract \code{\link{hank_stationary_dist}} enforces on its own \code{d0},
+#' checked here too so a bad \code{dist_init} fails at the block boundary
+#' with a block-shaped message rather than deep inside the solver).
+#'
+#' @param dist_init The raw \code{dist_init} argument (\code{NULL} or
+#'   numeric vector/matrix).
+#' @param n_e,n_a Grid dimensions.
+#' @param caller Function name for error messages.
+#' @return \code{NULL}, or a length-\code{n_e*n_a} numeric vector in
+#'   distribution order (unnormalized; \code{hank_stationary_dist} normalizes
+#'   its \code{d0}).
+#' @keywords internal
+.hank_dist_init_d0 <- function(dist_init, n_e, n_a, caller) {
+  if (is.null(dist_init)) return(NULL)
+  if (!is.numeric(dist_init) || !all(is.finite(dist_init)))
+    stop(caller, ": 'dist_init' must be a finite numeric vector or matrix.")
+  if (any(dist_init < 0))
+    stop(caller, ": 'dist_init' must be non-negative (min = ",
+         format(min(dist_init)), ").")
+  if (sum(dist_init) <= 0)
+    stop(caller, ": 'dist_init' must have strictly positive total mass ",
+         "(sum = ", format(sum(dist_init)), ").")
+  if (is.matrix(dist_init)) {
+    if (nrow(dist_init) != n_e || ncol(dist_init) != n_a)
+      stop(caller, ": 'dist_init' matrix must be ", n_e, " x ", n_a,
+           " (n_e x n_a), got ", nrow(dist_init), " x ", ncol(dist_init), ".")
+    return(.hank_mat_to_vec(dist_init))
+  }
+  if (length(dist_init) == n_e * n_a) return(as.numeric(dist_init))
+  if (length(dist_init) == n_e)
+    return(.hank_mat_to_vec(matrix(dist_init / n_a, n_e, n_a)))
+  stop(caller, ": 'dist_init' must be a length-", n_e,
+       " marginal over income states, a length-", n_e * n_a,
+       " full distribution vector, or an ", n_e, " x ", n_a,
+       " matrix; got length ", length(dist_init), ".")
+}
+
+
 #' Validate a Markov transition matrix at a public HANK boundary
 #'
 #' Shared input contract (adversarial review 2026-07-13, P2): \code{Pi} must

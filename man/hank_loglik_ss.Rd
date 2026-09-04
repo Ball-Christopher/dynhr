@@ -4,16 +4,16 @@
 \alias{hank_loglik_ss}
 \title{Kalman log-likelihood of aggregate HANK data (state-space bridge)}
 \usage{
-hank_loglik_ss(Y, Theta, sigma_eps, me_var = 0, q = NULL)
+hank_loglik_ss(data, Theta, sigma_eps, me_variance = 0, q = NULL)
 }
 \arguments{
-\item{Y}{\code{T_data x n_obs} matrix of demeaned aggregate observations.}
+\item{data}{\code{T_data x n_obs} matrix of demeaned aggregate observations.}
 
 \item{Theta}{MA coefficients (see \code{\link{hank_ma_coefficients}}).}
 
 \item{sigma_eps}{Innovation standard deviation.}
 
-\item{me_var}{Measurement-error variance (needed when n_obs > n_shocks).}
+\item{me_variance}{Measurement-error variance (needed when n_obs > n_shocks).}
 
 \item{q}{Optional state length (default all MA terms).}
 }

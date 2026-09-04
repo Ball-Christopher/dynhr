@@ -176,15 +176,6 @@
 
 
 ## ---------------------------------------------------------------------------
-## Helper: compute Phi_xx/Phi_xu/Phi_uu given H, T_x, T_u, n_eq
-## (thin wrapper around the existing .compute_phi_matrices)
-## ---------------------------------------------------------------------------
-.o2sd_phi <- function(H, T_x, T_u, n_eq) {
-  .compute_phi_matrices(H, T_x, T_u, n_eq)
-}
-
-
-## ---------------------------------------------------------------------------
 ## Helper: d(Sigma_x)/dθ_j via a Lyapunov solve.
 ##   hx dX hx' - dX = -(dhx*Sx*hx' + hx*Sx*dhx' + dhu*Se*hu' + hu*Se*dhu' + hu*dSe*hu')
 ## The dSigma_e term is the shock-covariance channel (C1/C5): for a param

@@ -192,7 +192,10 @@
     A_store[[t]] <- A;   B_store[[t]] <- B
 
     s <- as.numeric(TT %*% s) + as.numeric(K %*% v)
-    P <- .sym(tcrossprod(A %*% P, A) + tcrossprod(B %*% Se_t, B))
+    P_raw <- tcrossprod(A %*% P, A) + tcrossprod(B %*% Se_t, B)
+    ## TRUE measurement-noise law (F3-D): P' += K me_o K'.
+    if (me_variance != 0) P_raw <- P_raw + me_variance * tcrossprod(K)
+    P <- .sym(P_raw)
   }
 
   ## -- Backward sweep -------------------------------------------------------
@@ -236,6 +239,10 @@
     ## Step 2: s_t = TT s_prev + K v
     G_TT  <- G_TT + outer(bar_s, s_prev)
     bar_K <- outer(bar_s, v)
+    ## Adjoint of the ME Joseph term P_t += K me_o K' (me_o is DATA):
+    ## d tr(bar_P K me K') / dK = 2 me bar_P K.
+    if (me_variance != 0)
+      bar_K <- bar_K + 2 * me_variance * (bar_P %*% K)
     bar_v <- as.numeric(t(K) %*% bar_s)
     bar_s_prev <- as.numeric(t(TT) %*% bar_s)
 

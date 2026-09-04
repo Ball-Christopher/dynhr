@@ -63,3 +63,17 @@ An object of class "dynhr_compiled".
 \description{
 Compile a dynhr_mod into evaluable functions
 }
+\examples{
+model    <- parse_mod(system.file("extdata/models/rbc.mod",
+                                  package = "dynhr"), verbose = FALSE)
+compiled <- compile_model(model, verbose = FALSE)
+compiled
+
+## Raise max_order to unlock higher-order perturbation later
+compiled2 <- compile_model(model, max_order = 2L, verbose = FALSE)
+compiled2$max_order
+}
+\seealso{
+\code{\link{parse_mod}}, \code{\link{solve_steady}},
+  \code{\link{solve_perturbation}}
+}

@@ -231,37 +231,6 @@ solve_ss_optim <- function(compiled, params, y0 = NULL,
 # 5. HOMOTOPY SOLVER
 # ============================================================================
 
-solve_ss_homotopy <- function(compiled, params_start, params_end,
-                              y0 = NULL, n_steps = 20L,
-                              tol = 1e-10, verbose = FALSE) {
-  endo_names <- compiled$model$var_names
-  exo_names  <- compiled$model$varexo_names
-  y_current <- y0; last_result <- NULL
-  for (s in seq(0, 1, length.out = n_steps + 1)) {
-    p_interp <- params_start + s * (params_end - params_start)
-    if (verbose) cat(sprintf("  Homotopy step s=%.3f\n", s))
-    result <- solve_steady(compiled, p_interp, y0 = y_current,
-                              endo_names = endo_names, exo_names = exo_names,
-                              tol = tol, verbose = FALSE)
-    if (result$converged) {
-      y_current <- result$values; last_result <- result
-    } else {
-      result2 <- solve_steady(compiled, p_interp, y0 = y_current,
-                                 endo_names = endo_names, exo_names = exo_names,
-                                 max_iter = 5000L, tol = tol)
-      if (result2$converged) {
-        y_current <- result2$values; last_result <- result2
-      } else {
-        if (verbose) cat("  Homotopy failed at s=", s, "\n")
-        last_result <- result2
-        last_result$method <- "homotopy (incomplete)"
-        return(last_result)
-      }
-    }
-  }
-  if (!is.null(last_result)) last_result$method <- "homotopy"
-  last_result
-}
 
 # ============================================================================
 # 6. MAIN STEADY STATE INTERFACE
@@ -647,17 +616,3 @@ verify_steady_state <- function(ss, compiled, params, tol = 1e-8) {
 # ============================================================================
 # 8. DISPLAY UTILITIES
 # ============================================================================
-
-display_steady_state <- function(ss) {
-  cat("=== Steady State Values ===\n")
-  max_nchar <- max(nchar(names(ss)), 8)
-  fmt <- paste0("  %-", max_nchar, "s = %12.6f\n")
-  for (nm in names(ss)) cat(sprintf(fmt, nm, ss[[nm]]))
-  cat("===========================\n")
-  invisible(ss)
-}
-
-steady_state_to_dynare <- function(ss, model) {
-  data.frame(variable = names(ss), value = as.numeric(ss),
-             stringsAsFactors = FALSE)
-}

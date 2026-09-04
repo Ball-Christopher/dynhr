@@ -30,8 +30,8 @@
 #'
 #' Creates a \code{dsge_ss} object encoding either the lagged-state or
 #' current-state timing convention.  The lagged-state form is dynhr's
-#' canonical convention and is the form expected by \code{kalman_smoother},
-#' \code{kalman_filter}, and all frequency-domain likelihoods.
+#' canonical convention and is the form every filter, smoother and
+#' frequency-domain likelihood in the package works in.
 #'
 #' @param T_mat  n_state x n_state state-transition matrix.
 #' @param R_mat  n_state x n_shock shock-impact matrix (unit-shock responses;
@@ -43,9 +43,14 @@
 #'   equation.
 #' @param Sigma_e n_shock x n_shock shock covariance matrix.
 #' @param d      n_obs-length constant term in the observation equation
-#'   (default zero vector).
+#'   (default zero vector) -- the observation intercept, subtracted from the
+#'   data by everything that consumes the object, which is what makes the
+#'   data convention LEVELS. \code{\link{build_dsge_state_space}()} fills it
+#'   with \code{dr$ys[obs_vars]}; a hand-built state space has no steady
+#'   state behind it, so its default zero means its data is in deviations by
+#'   construction.
 #' @param state_names Character vector of state-variable names (length n_state).
-#' @param obs_names   Character vector of observable names (length n_obs).
+#' @param obs_vars   Character vector of observable names (length n_obs).
 #' @param shock_names Character vector of shock names (length n_shock).
 #' @param timing  \code{"lagged"} (default, dynhr canonical) or
 #'   \code{"current"}.  See \emph{Details}.
@@ -75,7 +80,7 @@
 new_dsge_ss <- function(T_mat, R_mat, Z_mat, D_mat, Sigma_e,
                         d = NULL,
                         state_names = NULL,
-                        obs_names   = NULL,
+                        obs_vars   = NULL,
                         shock_names = NULL,
                         timing      = c("lagged", "current"),
                         ...) {
@@ -97,7 +102,7 @@ new_dsge_ss <- function(T_mat, R_mat, Z_mat, D_mat, Sigma_e,
         Sigma_e     = Sigma_e,
         d           = d,
         state_names = state_names,
-        obs_names   = obs_names,
+        obs_names   = obs_vars,
         shock_names = shock_names,
         n_state     = n_state,
         n_obs       = n_obs,
@@ -114,8 +119,9 @@ new_dsge_ss <- function(T_mat, R_mat, Z_mat, D_mat, Sigma_e,
 #' Convert a state-space object from current-state to lagged-state timing
 #'
 #' Converts a \code{dsge_ss} object tagged \code{timing = "current"} to
-#' the lagged-state convention required by \code{kalman_smoother},
-#' \code{kalman_filter}, and all frequency-domain likelihoods.  If
+#' the lagged-state convention every filter, smoother and frequency-domain
+#' likelihood in the package requires.  The observation intercept \code{d} is
+#' timing-invariant and carries over unchanged.  If
 #' \code{ss$timing} is already \code{"lagged"} the object is returned
 #' unchanged.
 #'
@@ -159,7 +165,7 @@ ss_convert_timing <- function(ss) {
     Sigma_e     = ss$Sigma_e,
     d           = ss$d,
     state_names = ss$state_names,
-    obs_names   = ss$obs_names,
+    obs_vars   = ss$obs_names,
     shock_names = ss$shock_names,
     timing      = "lagged"
   )

@@ -401,24 +401,6 @@ solve_third_cumulant <- function(dr3, compiled, ss, params, sigma3 = NULL) {
 }
 
 
-#' Convert dynhr ghxuu columns to Mutschler/Dynare kron(x, kron(u, u)) layout.
-#'
-#' dynhr stores ghxuu as array dims (state, u1, u2), state fastest.  The
-#' Mutschler sigma-cross formulas multiply ghxuu by kron(hx, Iu2), whose
-#' columns are laid out as (u2 fastest, u1 middle, state slowest).
-#'
-#' @noRd
-.to_mutschler_xuu <- function(ghxuu, n_s, n_u) {
-  if (n_s == 0L || n_u == 0L || ncol(ghxuu) == 0L) return(ghxuu)
-  out <- matrix(0, nrow(ghxuu), n_s * n_u * n_u)
-  for (e in seq_len(nrow(ghxuu))) {
-    A <- array(ghxuu[e, ], dim = c(n_s, n_u, n_u))
-    out[e, ] <- as.numeric(aperm(A, c(3L, 2L, 1L)))
-  }
-  out
-}
-
-
 #' Pass-through for .contract_h3(T_X, T_up, T_up) Fxupup output.
 #'
 #' The actual output layout of .contract_h3 (due to the outer product order
@@ -565,7 +547,7 @@ solve_sigma_cross <- function(dr3, compiled, ss, params, Sigma_e = NULL) {
   # dr3$ghxuu is stored in standard Kron layout (state SLOW, u1 MID, u2 FAST),
   # which is exactly the Mutschler/Dynare kron(hx, I_{u^2}) column order — no
   # conversion needed. (Earlier versions of solve_perturbation_order3 emitted
-  # an internal (state FAST) layout, which is what .to_mutschler_xuu was
+  # an internal (state FAST) layout, which is what the Mutschler converter was
   # designed to flip. After commit "Order-3 perturbation: fix internal/standard
   # col convention", the public field is already in standard layout.)
   ghxuu_m <- dr3$ghxuu

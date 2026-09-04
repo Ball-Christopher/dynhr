@@ -7,29 +7,60 @@ vignette: >
   %\VignetteEncoding{UTF-8}
 ---
 
-```{r setup, include = FALSE}
+```{r setup, include = FALSE, purl = FALSE}
 knitr::opts_chunk$set(
   collapse = TRUE,
   comment  = "#>",
   eval     = FALSE   # most diagnostics require estimation; show code only
 )
+## These chunks assume a completed estimation (`model`, `compiled`,
+## `theta_mode`, ...), so they cannot run standalone. `eval = FALSE` alone is
+## not enough: R CMD check also RUNS the tangled code, which knitr::purl()
+## emits whatever `eval` says. Hence `purl = FALSE` in every chunk HEADER --
+## it cannot be set here, because during tangling knitr never evaluates this
+## chunk.
 ```
 
 ## Overview
 
-dynhr ships an extended diagnostic battery (D1–D30) that evaluates a DSGE model
-across six stages of the workflow:
+dynhr ships an extended diagnostic battery (D0–D41) that evaluates a DSGE model
+across the stages of the workflow:
 
 | Stage | Diagnostics | When to run |
 |-------|-------------|-------------|
-| Pre-estimation | D1–D4, D19–D26, Expectations | Before drawing from the posterior |
+| Pre-flight | D0 (static equation-system rank) | Before solving |
+| Pre-estimation | D1–D4, D19–D26, D37, Expectations | Before drawing from the posterior |
 | MCMC quality | D5–D7 | After sampling |
-| Post-estimation fit | D8–D18 | After sampling |
-| OBC identification | D27 | After OBC model setup |
+| Post-estimation fit | D8–D18, D41 | After sampling |
+| OBC identification | D27, D31–D32 | After OBC model setup |
 | Regime-switching | D28 | After Markov-switching specification |
 | Data-driven constraints | D29 | When external data moments are available |
 | Arbitrary-precision | D30 | For high-precision rank validation |
+| Deep-parameter checks | D33–D36 | When deep primitives carry reduced-form images |
+| Standalone (not orchestrated) | D38–D40 | Ad-hoc curvature / stability investigation |
 | Model comparison | Bayes factor, parent comparison | When comparing two models |
+
+The stages added after the original D1–D30 core:
+
+| # | Reached via | What it checks |
+|---|-------------|----------------|
+| D0 | `run_diagnostics(model = )` | Static equation-system rank — a redundant-equation pre-flight, before the model is ever solved |
+| D31 | `run_diagnostics(obc_specs = )` | OBC scenario comparison: perfect-foresight paths with and without the constraint imposed |
+| D32 | `run_diagnostics(obc_specs = )` | OBC binding summary: when, and for how long, each constraint bound |
+| D33 | `run_diagnostics(model = )` | Structural-vs-reduced-form gap ("borrowed identification") for each deep primitive that declares a `@dynhr:deep` reduced-form image |
+| D34 | `run_diagnostics(draws = , results_sub = )` | Policy-partitioned invariance — an operational Lucas-critique test, reusing D16's subsample draws |
+| D35 | `run_diagnostics(loglik_contrib_fn = , theta_mode = )` | Misspecification softness via the sandwich / information-matrix equality |
+| D36 | `run_diagnostics(loglik_full_fn = , params = )` | Calibration deepness: is each *fixed* deep parameter data-consistent? |
+| D37 | `run_diagnostics(abcd_solve_fn = )` | Dynamic identification rank condition (Komunjer & Ng 2011), with a minimal-realisation pre-check |
+| D38 | `diag_sloppiness()` | Posterior-curvature sloppiness spectrum (Gutenkunst et al. 2007) — eigenvalues of the negative log-posterior Hessian |
+| D39 | `diag_stability_map()` | Blanchard–Kahn feasibility mapping over prior draws (Ratto 2008 Monte-Carlo filtering) |
+| D40 | `diag_near_unit_root()` | Near-unit-root proximity and eigenvalue-sensitivity attribution |
+| D41 | `kf_innovation_diagnostics()`, or `run_diagnostics()` when `dr`, `data` and `obs_names` are all supplied | Kalman-innovation whiteness: per-observable variance and first-autocorrelation z-statistics, plus a joint portmanteau summary |
+
+`run_diagnostics()` wires D0–D37 and D41 and skips any stage whose inputs are
+absent.  D38, D39 and D40 are exported as standalone functions instead — they
+need only a model plus a parameter vector, so they are useful long before there
+is a posterior to orchestrate around.
 
 Every diagnostic returns a `dynhr_diagnostic` object with a standardised
 shape:
@@ -51,7 +82,7 @@ required inputs are absent — and returns a named list of class
 
 ## 1  Running all diagnostics
 
-```{r run-all}
+```{r run-all, purl = FALSE}
 library(dynhr)
 
 # Assume you have completed estimation (see vignette("estimation"))
@@ -73,14 +104,14 @@ diags <- run_diagnostics(
   data_moments     = list(sigma_y = empirical_sd, acf_y = empirical_acf),
   model_moments    = moms,
   dates            = dates,        # optional Date vector for plots
-  model_name       = "nk_hs2016",
+  model_name       = "nk_demo",
   verbose          = TRUE
 )
 ```
 
 ### Printing the suite
 
-```{r print-diags}
+```{r print-diags, purl = FALSE}
 print(diags)
 ```
 
@@ -93,7 +124,7 @@ The console output shows one line per diagnostic with a `[PASS]`,
 
 ### D1 — Local identification
 
-```{r d1}
+```{r d1, purl = FALSE}
 d1 <- diag_identification <- diags$d1
 cat(d1$summary)
 ```
@@ -114,7 +145,7 @@ below); running `diag_meta()` will not list a D2 entry.
 
 ### D3 — Sensitivity analysis (Morris screening)
 
-```{r d3}
+```{r d3, purl = FALSE}
 cat(diags$d3$summary)
 ```
 
@@ -127,7 +158,7 @@ identified from data.
 
 ### D4 — Prior predictive checks
 
-```{r d4}
+```{r d4, purl = FALSE}
 cat(diags$d4$summary)
 ```
 
@@ -140,7 +171,7 @@ outside the data should be tightened.
 
 ### Expectations check
 
-```{r expectations}
+```{r expectations, purl = FALSE}
 cat(diags$expectations$summary)
 ```
 
@@ -165,9 +196,9 @@ Add expectations to any `.mod` file:
 
 Run it directly:
 
-```{r expectations-direct, eval = TRUE}
+```{r expectations-direct, eval = TRUE, purl = FALSE}
 library(dynhr)
-mod_path <- system.file("extdata", "models", "nk_hs2016.mod", package = "dynhr")
+mod_path <- system.file("extdata", "models", "nk_demo.mod", package = "dynhr")
 model_nk <- parse_mod(mod_path, verbose = FALSE)
 
 # Check param_range expectations with calibrated values
@@ -182,7 +213,7 @@ cat(exp_result$summary, "\n")
 
 ### D5 — Convergence (R-hat, ESS, trace)
 
-```{r d5}
+```{r d5, purl = FALSE}
 cat(diags$d5$summary)
 ```
 
@@ -200,7 +231,7 @@ Plots (if `ggplot2` is installed):
 
 ### D6 — Posterior vs prior
 
-```{r d6}
+```{r d6, purl = FALSE}
 cat(diags$d6$summary)
 ```
 
@@ -214,7 +245,7 @@ comparison.
 
 ### D7 — Mode robustness
 
-```{r d7}
+```{r d7, purl = FALSE}
 cat(diags$d7$summary)
 ```
 
@@ -228,7 +259,7 @@ values greater than 2 natural-log units suggests a multimodal posterior.
 
 ### D8 — IRF plausibility
 
-```{r d8}
+```{r d8, purl = FALSE}
 cat(diags$d8$summary)
 ```
 
@@ -247,7 +278,7 @@ failing ones otherwise.
 
 ### D9 — Moment matching
 
-```{r d9}
+```{r d9, purl = FALSE}
 cat(diags$d9$summary)
 ```
 
@@ -259,7 +290,7 @@ problem.
 
 ### D10 — Variance decomposition
 
-```{r d10}
+```{r d10, purl = FALSE}
 cat(diags$d10$summary)
 ```
 
@@ -269,7 +300,7 @@ driven by implausibly few (or many) shocks.
 
 ### D11 — Historical decomposition
 
-```{r d11}
+```{r d11, purl = FALSE}
 cat(diags$d11$summary)
 ```
 
@@ -278,9 +309,34 @@ contributions.  Uses the smoother output from `kalman_smoother()`.
 The plot shows stacked bar charts of shock contributions for each
 observable through the sample period.
 
+The decomposition adds up EXACTLY: the shock contributions plus an
+`initial` column (the contribution of the initial state, which is not zero
+unless the sample happens to start at the steady state) reproduce the data
+to machine precision — in **deviation from steady state**, so add
+`dr$ys[v]` to read a series back in levels. The data you hand the smoother,
+like every filtering entry point in the package, is in levels.
+Related surfaces:
+
+```{r decomp-extras, eval = FALSE, purl = FALSE}
+# The decomposition consumes a smoother run and the state space it came
+# from. `shock_groups` can also be declared as a block in the .mod file
+# (see vignette("mod-syntax")).
+ss <- build_dsge_state_space(model, dr, obs, verbose = FALSE)
+sm <- kalman_smoother(Y, dr, model, params, obs_vars = obs)   # Y in LEVELS
+historical_decomposition(sm, ss,
+                         shock_groups = list(demand = c("e_g", "e_c"),
+                                             supply = c("e_a", "e_ms")))
+
+# Real-time (recursive-vintage) decomposition: re-run the decomposition on
+# each data vintage, so you can see how the story of a given quarter was
+# revised as later data arrived.
+realtime_decomposition(model, dr, data = Y, obs_vars = obs,
+                       vintages = seq(80, nrow(Y), by = 4))
+```
+
 ### D12 — Smoothed shocks
 
-```{r d12}
+```{r d12, purl = FALSE}
 cat(diags$d12$summary)
 ```
 
@@ -302,7 +358,7 @@ cross-equation restrictions are rejected by the data.
 
 ### D14 — Bayes factor model comparison
 
-```{r d14}
+```{r d14, purl = FALSE}
 # Compare two models
 models_list <- list(
   baseline  = list(log_ml = chains_baseline$log_marginal_lik),
@@ -335,7 +391,7 @@ DSGE-VAR coefficients vs the unrestricted OLS VAR.
 
 ### D16 — Subsample stability
 
-```{r d16}
+```{r d16, purl = FALSE}
 # Split chains at the midpoint and compare
 n_mid <- nrow(chains$chain) %/% 2L
 results_sub <- list(
@@ -352,7 +408,7 @@ one posterior standard deviation across subsamples.
 
 ### D17 — Narrative identification
 
-```{r d17}
+```{r d17, purl = FALSE}
 d17 <- d17_narrative_identification(hd, shocks, episodes = model$metadata$narratives)
 cat(d17$summary)
 ```
@@ -383,7 +439,7 @@ nonlinear, and data-driven checks that go beyond the core battery.
 
 ### D19 — IRF comparison
 
-```{r d19}
+```{r d19, purl = FALSE}
 cat(diags$d19$summary)
 ```
 
@@ -396,7 +452,7 @@ the empirical confidence bands.
 
 ### D20 — Fisher information strength
 
-```{r d20}
+```{r d20, purl = FALSE}
 cat(diags$d20$summary)
 ```
 
@@ -408,7 +464,7 @@ data.
 
 ### D21 — KPS precision
 
-```{r d21}
+```{r d21, purl = FALSE}
 cat(diags$d21$summary)
 ```
 
@@ -419,7 +475,7 @@ requirements for reliable estimation.
 
 ### D22 — Observable information
 
-```{r d22}
+```{r d22, purl = FALSE}
 cat(diags$d22$summary)
 ```
 
@@ -430,7 +486,7 @@ is sufficient for the parameter set.
 
 ### D23 — Spectral identification
 
-```{r d23}
+```{r d23, purl = FALSE}
 cat(diags$d23$summary)
 ```
 
@@ -441,7 +497,7 @@ Complements the time-domain D1 check.
 
 ### D24 — Global KL identification
 
-```{r d24}
+```{r d24, purl = FALSE}
 cat(diags$d24$summary)
 ```
 
@@ -453,7 +509,7 @@ globally unidentified.  Accepts Ramsey-augmented decision rules when a
 
 ### D25 — Higher-order identification
 
-```{r d25}
+```{r d25, purl = FALSE}
 cat(diags$d25$summary)
 ```
 
@@ -464,7 +520,7 @@ higher-order information versus first-order moments alone.
 
 ### D26 — Calibration sensitivity
 
-```{r d26}
+```{r d26, purl = FALSE}
 cat(diags$d26$summary)
 ```
 
@@ -475,7 +531,7 @@ set; parameters with negligible sensitivity can be safely calibrated.
 
 ### D27 — OBC identification
 
-```{r d27}
+```{r d27, purl = FALSE}
 cat(diags$d27$summary)
 ```
 
@@ -488,7 +544,7 @@ require regime-specific priors or data splits.
 
 ### D28 — Regime-switching identification
 
-```{r d28}
+```{r d28, purl = FALSE}
 cat(diags$d28$summary)
 ```
 
@@ -499,7 +555,7 @@ assessment.
 
 ### D29 — Data-driven constraints
 
-```{r d29}
+```{r d29, purl = FALSE}
 cat(diags$d29$summary)
 ```
 
@@ -511,7 +567,7 @@ versa) are flagged.
 
 ### D30 — Arbitrary-precision rank checks
 
-```{r d30}
+```{r d30, purl = FALSE}
 cat(diags$d30$summary)
 ```
 
@@ -523,12 +579,39 @@ be masked by floating-point rounding at standard double precision.
 
 ---
 
+## 4b  Out-of-sample evaluation: `forecast_backtest()`
+
+Everything above scores the model in-sample. `forecast_backtest()` scores
+it the way a forecaster would — recursive expanding-window, re-estimating at
+each origin, and comparing the predictive distribution against what actually
+happened:
+
+```{r backtest, eval = FALSE, purl = FALSE}
+bt <- forecast_backtest(model, data = Y, obs_vars = obs,
+                        origins   = seq(80, nrow(Y) - 8, by = 4),
+                        horizons  = 1:8,
+                        estimator = "mode",   # or "posterior" / "fixed"
+                        refit     = "each",   # or "once"
+                        rules     = c("crps", "logs", "pit", "coverage"))
+```
+
+The scoring rules are the standard ones: CRPS and log score for sharpness
+and calibration jointly, PIT histograms for calibration alone, and interval
+coverage at `coverage_levels`. A model whose PIT is U-shaped is
+over-confident; a hump is under-confident. `estimator = "fixed"` holds
+`theta` at a supplied value and scores the forecast distribution only, which
+isolates forecast performance from estimation instability. `refit = "once"`
+estimates at the first origin and rolls forward — much cheaper, and the
+honest choice only if you are not claiming real-time performance.
+
+---
+
 ## 5  OBC diagnostics
 
 The OBC diagnostic section summarises binding episodes from a solved
 OBC path:
 
-```{r obc, eval = FALSE}
+```{r obc, eval = FALSE, purl = FALSE}
 obc_diag <- d_obc_binding_summary(
   regime_path      = occbin_result$regimes,
   constraint_names = c("zlb"),
@@ -544,9 +627,45 @@ a full binding-episodes analysis.
 
 ---
 
+## 5b  Standalone diagnostic helpers
+
+Several diagnostics are also exported as lightweight standalone functions,
+usable outside the `run_diagnostics()` battery:
+
+```{r standalone, eval = FALSE, purl = FALSE}
+# MCMC chain summary: split-R-hat, bulk/tail ESS, Monte-Carlo standard errors
+chain_diagnostics(draws)                       # n_draws x n_par, or a chain list
+
+# Kalman-filter innovation whiteness (mis-specification / over-fitting check)
+kf_innovation_diagnostics(Y, dr, model, params, obs_vars = obs)
+
+# Determinacy: Blanchard-Kahn distance to the indeterminacy / no-solution
+# boundary, and the generalised-eigenvalue spectrum of the solution pencil
+bk_distance(model, compiled, params)
+solution_pencil_spectrum(model, compiled, params)
+```
+
+Solution accuracy has its own pair, which work on perturbation and global
+solutions alike — use them to decide whether a local approximation is good
+enough before trusting anything above:
+
+```{r accuracy-helpers, eval = FALSE, purl = FALSE}
+euler_errors(sol)        # unit-free Euler residuals, in consumption units
+den_haan_marcet(sol)     # are residuals orthogonal to the information set?
+```
+
+See `vignette("solving")` for what to do when they say no.
+
+`bk_distance()` is useful when mapping a determinacy region over a parameter
+grid: it returns a signed distance (how far the current parameters sit from the
+nearest boundary where the number of explosive roots changes), which varies
+smoothly where a pass/fail Blanchard-Kahn flag does not.
+
+---
+
 ## 6  Writing a report
 
-```{r write-report}
+```{r write-report, purl = FALSE}
 write_report(diags, file = "output/report.md")
 ```
 
@@ -561,7 +680,7 @@ are also supported via `format_llm_report()`.
 
 Every diagnostic is also callable directly for targeted inspection:
 
-```{r individual}
+```{r individual, purl = FALSE}
 # Run only D5 (convergence) and D8 (IRF plausibility)
 d5 <- d5_mcmc_convergence(chains$chain, param_names, chains_list = list(chains$chain))
 d8 <- d8_irf_plausibility(irfs)
@@ -627,6 +746,6 @@ Sims, C. A. (1980). Macroeconomics and reality. *Econometrica*, 48(1), 1-48.
 
 ---
 
-```{r session, eval = TRUE}
+```{r session, eval = TRUE, purl = FALSE}
 sessionInfo()
 ```

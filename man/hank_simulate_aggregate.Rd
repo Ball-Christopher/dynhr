@@ -4,7 +4,7 @@
 \alias{hank_simulate_aggregate}
 \title{Simulate an aggregate sample from the MA representation}
 \usage{
-hank_simulate_aggregate(Theta, sigma_eps, T_data, me_sd = 0, eps = NULL)
+hank_simulate_aggregate(Theta, sigma_eps, T_data, me_variance = 0, eps = NULL)
 }
 \arguments{
 \item{Theta}{MA coefficients.}
@@ -13,7 +13,9 @@ hank_simulate_aggregate(Theta, sigma_eps, T_data, me_sd = 0, eps = NULL)
 
 \item{T_data}{Sample length.}
 
-\item{me_sd}{Measurement-error standard deviation (default 0).}
+\item{me_variance}{Measurement-error VARIANCE (default 0). Renamed from
+the pre-0.9.2.0003 \code{me_sd}, which took a standard deviation: pass
+\code{me_sd^2} for the same draws.}
 
 \item{eps}{Optional pre-drawn innovations (length \code{T_data}); if
 \code{NULL}, drawn N(0, sigma_eps^2).  Provide for reproducibility.}

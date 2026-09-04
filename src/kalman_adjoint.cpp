@@ -106,7 +106,6 @@ List kf_adjoint_cpp(const arma::mat& Y,
   const arma::mat QQ      = sym(RR * Sigma_e * RR.t());
   const arma::mat HH      = sym(DD * Sigma_e * DD.t());
   const arma::mat SS      = RR * Sigma_e * DD.t();
-  const arma::mat me_diag = me_variance * arma::eye(n_obs, n_obs);
   const double ll_const   = -0.5 * static_cast<double>(n_obs) * std::log(2.0 * M_PI);
 
   // Pre-compute flags for tv inputs.
@@ -114,6 +113,9 @@ List kf_adjoint_cpp(const arma::mat& Y,
       arma::abs(shock_scale_mat - 1.0) < 1e-15));
   const bool has_me_extra = !arma::all(arma::vectorise(
       arma::abs(me_extra_mat) < 1e-15));
+  // Any TRUE observation noise at all (base me_variance or per-period
+  // me_extra): both feed F AND the Joseph covariance term (F3-D).
+  const bool has_me_true  = has_me_extra || me_variance != 0.0;
 
   arma::vec grad_na = arma::vec(n_par, arma::fill::value(NA_REAL));
 
@@ -196,11 +198,9 @@ List kf_adjoint_cpp(const arma::mat& Y,
       HH_t   = HH;
       SS_t   = SS;
     }
-    if (has_me_extra) {
-      me_diag_t = me_diag + arma::diagmat(me_extra_mat.col(t));
-    } else {
-      me_diag_t = me_diag;
-    }
+    arma::vec me_vec_t(n_obs); me_vec_t.fill(me_variance);
+    if (has_me_extra) me_vec_t += me_extra_mat.col(t);
+    me_diag_t = arma::diagmat(me_vec_t);
 
     arma::mat PZ = P * tZZ;
     arma::mat Ft = sym(ZZ * PZ + HH_t + me_diag_t);
@@ -235,11 +235,10 @@ List kf_adjoint_cpp(const arma::mat& Y,
 
     s = TT * s + K * v;
     arma::mat P_raw = A * P * A.t() + B * Se_t_f * B.t();
-    // Joseph true-noise term for me_extra (mirrors kalman_filter's standard
-    // path): P' += K diag(me_extra[, t]) K'. me_variance stays F-only
-    // (regularizer convention; no Joseph term).
-    if (has_me_extra)
-      P_raw += (K * arma::diagmat(me_extra_mat.col(t))) * K.t();
+    // Joseph true-noise term for the FULL ME diagonal (mirrors
+    // kalman_filter's standard path): P' += K diag(me_vec_t) K'.
+    if (has_me_true)
+      P_raw += (K * me_diag_t) * K.t();
     P = sym(P_raw);
   }
 
@@ -320,12 +319,16 @@ List kf_adjoint_cpp(const arma::mat& Y,
     // bar_K_from_s: += outer(bar_s, v)
     arma::mat bar_K = bar_s * v.t();                           // [n x q]
 
-    // Adjoint of the me_extra Joseph term in P_t (P_t += K me_x K', with
-    // me_x = diag(me_extra_mat.col(t)) being DATA, not differentiated):
-    // with bar_P symmetrized in Step 1, d tr(bar_P K me_x K') / dK
-    // = 2 bar_P K me_x. Mirrors R/gradient-adjoint-kf.R.
-    if (has_me_extra)
-      bar_K += 2.0 * bar_P * K * arma::diagmat(me_extra_mat.col(t));
+    // Adjoint of the ME Joseph term in P_t (P_t += K me K', with
+    // me = diag(me_variance + me_extra_mat.col(t)) being DATA, not
+    // differentiated): with bar_P symmetrized in Step 1,
+    // d tr(bar_P K me K') / dK = 2 bar_P K me. Mirrors
+    // R/gradient-adjoint-kf.R.
+    if (has_me_true) {
+      arma::vec me_vec_b(n_obs); me_vec_b.fill(me_variance);
+      if (has_me_extra) me_vec_b += me_extra_mat.col(t);
+      bar_K += 2.0 * bar_P * K * arma::diagmat(me_vec_b);
+    }
 
     // bar_v_from_s: K' bar_s
     arma::vec bar_v = K.t() * bar_s;                           // [q]

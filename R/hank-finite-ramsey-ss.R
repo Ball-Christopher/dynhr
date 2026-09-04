@@ -183,7 +183,7 @@ hank_ks_taxed_steady <- function(a_grid, Pi, e, beta, eis, alpha, delta,
   structure(list(r = r, w = w, K = K, tau = tau, tr = blk$tr, Z = Z,
                  alpha = alpha, delta = delta, beta = beta, eis = eis,
                  block = blk, mkt_residual = blk$A - K),
-            class = "hank_ks_taxed")
+            class = c("hank_ks_taxed", "hank_block"))
 }
 
 
@@ -292,7 +292,7 @@ hank_ramsey_ss_solve <- function(a_grid, Pi, e, beta, eis, alpha, delta,
          W_competitive = W_comp, dW_dtau_ramsey = dW_dtau(tau_ramsey),
          a_grid = a_grid, Pi = Pi, e = e, beta = beta, eis = eis,
          alpha = alpha, delta = delta, Z = Z),
-    class = "hank_ramsey_ss")
+    class = c("hank_ramsey_ss", "hank_block"))
 }
 
 

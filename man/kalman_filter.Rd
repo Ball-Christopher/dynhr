@@ -5,7 +5,7 @@
 \title{Kalman filter for DSGE models}
 \usage{
 kalman_filter(
-  Y,
+  data,
   dr,
   model,
   params,
@@ -19,11 +19,12 @@ kalman_filter(
   lik_init = c("auto", "stationary", "diffuse", "kappa"),
   me_extra = NULL,
   shock_scale = NULL,
+  obs_aggregation = NULL,
   me_floor_check = getOption("dynhr.me_floor_check", TRUE)
 )
 }
 \arguments{
-\item{Y}{observation matrix (\code{n_obs} x \code{T}).}
+\item{data}{observation matrix (\code{n_obs} x \code{T}).}
 
 \item{dr}{decision rule (output of \code{\link{solve_perturbation}}).}
 
@@ -38,9 +39,10 @@ kalman_filter(
 
 \item{ss_tol}{tolerance for steady-state lock detection (default \code{.LYAP_TOL}).}
 
-\item{me_variance}{scalar measurement-error variance added to the innovation
-covariance \code{F} in every likelihood evaluation (default \code{0}).
-See Details for implications.}
+\item{me_variance}{scalar variance of iid Gaussian measurement error on
+every observable (default \code{0}). It enters the innovation covariance
+\code{F} AND the state-covariance (Joseph) update on every method --
+the exact likelihood of the noise-augmented model. See Details.}
 
 \item{return_ll_contrib}{logical; if \code{TRUE}, return per-step
 log-likelihood contributions (prediction-error decomposition).}
@@ -48,7 +50,12 @@ log-likelihood contributions (prediction-error decomposition).}
 \item{method}{character; filtering algorithm: \code{"auto"} (default; picks
 \code{"standard"} or \code{"chandrasekhar"}), \code{"dare"} (textbook
 Kalman filter, no steady-state shortcut), \code{"chandrasekhar"}
-(low-rank recursion), \code{"standard"} (per-step Riccati with steady-state
+(Morf--Sidhu--Kailath low-rank increment recursion; requires
+\code{lik_init = "stationary"}, a fully observed panel and no
+\code{me_extra} / \code{shock_scale}, and errors otherwise --
+\code{"auto"} selects it only when \code{n_state > 100}, the measured
+crossover against the C++ \code{"standard"} loop),
+\code{"standard"} (per-step Riccati with steady-state
 lock), \code{"reference"} (alias for \code{"dare"}), or
 \code{"univariate"} (Koopman--Durbin 2000 sequential filter on the
 augmented state \code{[s; eps]}; handles singular innovation
@@ -61,13 +68,13 @@ See Details.}
 
 \item{me_extra}{\code{n_obs x T} matrix of additional per-observable,
 per-period measurement-error variances (default \code{NULL}, no extra
-variance).  Unlike the scalar \code{me_variance} regularizer,
-\code{me_extra} is treated as TRUE per-period measurement noise on all
-paths: it enters the innovation covariance \code{F_t} AND the
-Joseph-form state-covariance update
-(\code{P += K_t diag(me_extra[, t]) t(K_t)}), so the \code{"standard"},
-\code{"dare"}/\code{"reference"}, and \code{"univariate"} methods agree
-exactly under \code{me_extra} (at \code{me_variance = 0}).
+variance).  Like the scalar \code{me_variance}, \code{me_extra} is TRUE
+per-period measurement noise on all paths: it enters the innovation
+covariance \code{F_t} AND the Joseph-form state-covariance update
+(\code{P += K_t \%*\% (diag(me_variance + me_extra[, t]) \%*\% t(K_t))}), so the
+\code{"standard"}, \code{"dare"}/\code{"reference"}, and
+\code{"univariate"} methods agree exactly under any combination of
+\code{me_variance} and \code{me_extra}.
 Intended for \code{filter_tunes} soft tunes: the expanded
 observable's column carries \code{stderr^2} at the tune periods and 0
 elsewhere.  When \code{me_extra} is non-\code{NULL} and has any nonzero
@@ -97,10 +104,37 @@ Incompatible with \code{method = "chandrasekhar"}, \code{"univariate"},
 and \code{lik_init = "diffuse"}. \code{P0} always uses the baseline
 (unscaled) \eqn{\\Sigma_e}.}
 
+\item{obs_aggregation}{Optional named list declaring one or more
+observables as TEMPORAL AGGREGATES of a higher-frequency model variable,
+e.g. \code{list(gdp_q = list(of = "gdp_m", type = "flow_sum", k = 3L))}
+("the observable \code{gdp_q} is the 3-period sum of the model variable
+\code{gdp_m}").  \code{NULL} (default) falls back to
+\code{model$obs_aggregation}, and when that is also \code{NULL} the
+filter is byte-identical to the non-aggregated one.  Names must appear in
+\code{obs_vars}; \code{of} must be a model variable; \code{type} is one of
+\code{"flow_sum"}, \code{"flow_mean"}, \code{"stock_end"} or
+\code{"triangle"} (see \code{\link{mf_aggregation_weights}}).
+Implemented by fixed-weight state augmentation (Harvey 1989;
+Mariano--Murasawa 2003): the aggregator's \code{m-1} lags become extra
+states, so \code{ZZ} and \code{TT} stay constant.  Supply the data at the
+HIGH frequency with the aggregate observed at the last period of each
+window and \code{NA} in between (\code{\link{mf_expand_observations}}
+builds such a column); the existing missing-data path handles the gaps.
+The steady-state offset of an aggregated row is scaled by the sum of its
+weights, so the data must be on the aggregate's own scale.
+Consumed by the Gaussian Kalman likelihood only: the other likelihoods in
+\code{\link{make_log_posterior}} (particle filters, pruned/PSKF,
+\code{whittle}, \code{cumulant}, \code{student_t}) and the
+Markov-switching Kim filter reject it, and the ANALYTIC score
+(\code{make_posterior_grad}) has no aggregation awareness -- sample a
+mixed-frequency posterior with a gradient-free sampler.}
+
 \item{me_floor_check}{Logical: when \code{me_variance > 0}, compare it
 against the smallest eigenvalue of the model-implied (ME-free) steady-
-state innovation covariance \code{F} and warn if the floor is large
-relative to that eigenvalue (near-collinear observables; see
+state innovation covariance \code{F} and warn when the assumed
+measurement-noise variance is large relative to that eigenvalue -- i.e.
+when the observation noise, not the model, dominates some near-collinear
+combination of observables (see
 \code{.pruned_me_floor_ratio}). Default
 \code{getOption("dynhr.me_floor_check", TRUE)}. Only evaluated on the
 stationary (non-\code{shock_scale}) baseline system; scoped to the
@@ -120,23 +154,64 @@ innovation covariance \code{F}, giving exact numeric parity with Dynare
 (which adds no regularisation). Through dynhr 0.7 the default was
 \code{1e-8} as a positive-definiteness safeguard; this is no longer
 needed because a singular or ill-conditioned \code{F} on any
-multivariate path now triggers an automatic fallback to the univariate
-(sequential) filter, which processes observables one at a time and skips
-zero-variance components instead of inverting \code{F} (the analog of
-Dynare's \code{univariate_kalman_filter_if_singularity_is_detected}).
+multivariate path triggers a \emph{conditional} automatic fallback to the
+univariate (sequential) filter, which processes observables one at a time
+and skips zero-variance components instead of inverting \code{F} (the
+analog of Dynare's
+\code{univariate_kalman_filter_if_singularity_is_detected}); see
+\strong{Singularity-fallback contract} below.
 Set \code{me_variance > 0} to deliberately add measurement noise, e.g.
 for stochastically singular models where the singularity is a modelling
 choice rather than a numerical artifact. When comparing marginal
 likelihoods (model comparison) across models, ensure all use the same
 \code{me_variance} setting; the ranking is otherwise invalidated.
-Convention note for \code{me_variance > 0}: the multivariate methods add
-the jitter to \code{F} only (likelihood and gain), never to the
-state-covariance update -- a regularisation, not a noise model. The
-\code{"univariate"} method instead treats \code{me_variance} as TRUE
-iid diagonal measurement noise (the statistically exact filter for the
-noise-augmented model), so the two conventions agree exactly at
-\code{me_variance = 0} but differ by \code{O(me_variance)} otherwise.
-Do not mix methods across draws when \code{me_variance > 0}.
+\code{me_variance > 0} is a genuine noise model on EVERY method: the
+observation equation becomes \code{y_t = ZZ x_t + DD e_t + u_t} with
+\code{u_t ~ N(0, me_variance I)}, so the variance enters both \code{F}
+and the state-covariance update
+(\code{P += K \%*\% (me_variance * t(K))}). All methods --
+\code{"standard"}, \code{"dare"}, \code{"chandrasekhar"},
+\code{"univariate"} -- and \code{\link{kalman_smoother}} therefore
+evaluate the SAME likelihood at any \code{me_variance}, and it equals the
+brute-force joint-Gaussian projection of the whole sample. (Before dynhr 0.9.2.x the multivariate
+methods added \code{me_variance} to \code{F} only -- a regulariser --
+which understated the state uncertainty and biased the log-likelihood
+UPWARD by \code{O(me_variance)} per period against the package's own
+data-generating process; \code{me_variance = 0} results are unchanged.)
+
+\strong{Singularity-fallback contract:}
+When a multivariate method (\code{"standard"}, \code{"dare"},
+\code{"chandrasekhar"}) hits a singular / non-positive-definite innovation
+covariance \code{F}, a failed DARE/Chandrasekhar step, or a non-finite
+per-period contribution, the filter retries on the \code{"univariate"}
+filter \strong{only when the two paths evaluate the SAME likelihood},
+namely when all of
+\itemize{
+  \item \code{me_variance == 0} (a conservative gate retained from the
+    pre-F3-D regulariser convention: the two paths now evaluate the same
+    likelihood at any \code{me_variance}, but the gate still refuses to
+    switch estimator mid-chain),
+  \item \code{me_extra} is \code{NULL} or all zero,
+  \item the resolved \code{lik_init} is not \code{"diffuse"} (the
+    univariate diffuse filter keeps the divergent \code{0.5*log(F_inf)}
+    term that the multivariate exact-diffuse recursion renormalises away;
+    the two conventions can differ by more than 15 nats on unit-root
+    models)
+}
+hold.  In that case a \code{warning()} is emitted \strong{once per
+\code{kalman_filter()} call} naming the method that failed, and the
+returned \code{$method} is \code{"univariate"}.
+\strong{Otherwise the draw is rejected: the function returns
+\code{loglik = -Inf} and \code{$method} names the failed multivariate
+method}, which is what Dynare does without
+\code{univariate_kalman_filter_if_singularity_is_detected}.  The point is
+that an MCMC chain in which only \emph{some} draws trip the fallback must
+not silently sample a mixture of two different likelihood definitions.
+(One routing decision is deliberately \emph{not} a fallback and is not
+covered by this contract: with \code{lik_init = "diffuse"} and an
+\code{F_inf} that is singular but nonzero -- "Case C" -- the multivariate
+exact-diffuse recursion is undefined and the univariate diffuse filter is
+the algorithm for that model, not a substitute for it.)
 
 \strong{Likelihood initialization (\code{lik_init}):}
 \code{"stationary"} initialises \code{P0} via the discrete Lyapunov
@@ -178,6 +253,26 @@ the (correct) stationary likelihood there. To force the exact-diffuse
 treatment for every near-unit root, pass \code{lik_init = "diffuse"}
 explicitly.
 }
+\examples{
+model    <- parse_mod(system.file("extdata/models/rbc.mod",
+                                  package = "dynhr"), verbose = FALSE)
+compiled <- compile_model(model, verbose = FALSE)
+steady   <- solve_steady(compiled, model$param_values,
+                         endo_names = model$var_names,
+                         exo_names  = model$varexo_names, verbose = FALSE)
+dr <- solve_perturbation(model, compiled, steady$values,
+                         model$param_values, verbose = FALSE)
+
+## Simulated data standing in for observations. rbc.mod has ONE shock, so
+## one observable keeps the innovation covariance non-singular.
+set.seed(1)
+paths <- simulate_model(dr, n_periods = 100L, model = model, burn_in = 20L)
+Y <- as.matrix(paths[, "y", drop = FALSE])
+
+kf <- kalman_filter(Y, dr, model, model$param_values, obs_vars = "y",
+                    me_variance = 1e-6)
+kf$loglik
+}
 \references{
 Kalman, R. E. (1960). A new approach to linear filtering and prediction
     problems. \emph{Journal of Basic Engineering}, 82(1), 35-45.
@@ -188,4 +283,8 @@ Kalman, R. E. (1960). A new approach to linear filtering and prediction
     Analysis}, 21(3), 281-296.
   Strid, I., & Walentin, K. (2011). Block Kalman filtering for large-scale
     DSGE models. \emph{Computational Economics}, 39(2), 145-160.
+}
+\seealso{
+\code{\link{kalman_smoother}}, \code{\link{make_posterior}},
+  \code{\link{kf_innovation_diagnostics}}
 }

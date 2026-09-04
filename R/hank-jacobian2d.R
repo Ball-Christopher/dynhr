@@ -188,6 +188,7 @@
 #' @return Nested list \code{J[[output]][[input]]} of \code{T_h x T_h}
 #'   matrices.
 #' @seealso \code{\link{hank_het2d_jacobian}}
+#' @keywords internal
 #' @export
 hank_het2d_jacobian_nd <- function(block, T_h,
                                    inputs = c("rb", "ra", "w"),

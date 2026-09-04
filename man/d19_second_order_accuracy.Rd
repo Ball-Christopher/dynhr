@@ -34,3 +34,4 @@ not the unconditional (Lyapunov) variance.  These are equal only when
 uncertainty-correction ratio \code{unc_rel} is therefore relative to the
 impact-period standard deviation, not the unconditional standard deviation.
 }
+\keyword{internal}

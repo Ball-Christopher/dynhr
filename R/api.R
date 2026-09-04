@@ -57,6 +57,12 @@ print.dynhr_chains <- function(x, ...) {
   if (!is.null(x$acceptance_rate))
     cat(sprintf("  Acceptance rate : %.1f%%\n", x$acceptance_rate * 100))
 
+  ## Delayed-acceptance chains (mcmc(screen_fn = )) carry the stage-1 kill
+  ## rate and the count of expensive evaluations actually paid for.
+  if (!is.null(x$screen_rate))
+    cat(sprintf("  Screen rate     : %.1f%% (stage-1 rejects; %d expensive evals)\n",
+                x$screen_rate * 100, x$n_expensive %||% NA_integer_))
+
   if (!is.null(x$n_divergent) && x$n_divergent > 0)
     cat(sprintf("  Divergences     : %d\n", x$n_divergent))
 
@@ -96,7 +102,11 @@ summary.dynhr_chains <- function(object, probs = c(0.05, 0.50, 0.95), ...) {
   )
 
   sampler <- toupper(object$sampler %||% "?")
-  cat(sprintf("\n<dynhr_chains [%s]: %d draws>\n\n", sampler, nrow(ch)))
+  cat(sprintf("\n<dynhr_chains [%s]: %d draws>\n", sampler, nrow(ch)))
+  if (!is.null(object$screen_rate))
+    cat(sprintf("Screen rate: %.1f%% of proposals rejected at stage 1; %d expensive evaluations\n",
+                object$screen_rate * 100, object$n_expensive %||% NA_integer_))
+  cat("\n")
   print(out)
   invisible(out)
 }
@@ -115,7 +125,17 @@ summary.dynhr_chains <- function(object, probs = c(0.05, 0.50, 0.95), ...) {
 #' @param model dynhr_mod object from \code{\link{parse_mod}}
 #' @return data.frame with columns: name, distribution, p1, p2, lower, upper,
 #'   mean, std
-#' @seealso \code{\link{make_posterior}}, \code{\link{find_mode}}
+#' @seealso \code{\link{make_posterior}}, \code{\link{find_mode}},
+#'   \code{\link{dynhr_model}} (the pipeline-object equivalent)
+#' @examples
+#' ## nk_demo.mod carries a nine-parameter estimated_params block
+#' model  <- parse_mod(system.file("extdata/models/nk_demo.mod",
+#'                                 package = "dynhr"), verbose = FALSE)
+#' priors <- prior_spec(model)
+#' priors[, c("name", "distribution", "p1", "p2")]
+#'
+#' ## prior means are the conventional starting point for find_mode()
+#' theta0 <- setNames(priors$mean, priors$name)
 #' @export
 prior_spec <- function(model) extract_prior_spec(model)
 
@@ -147,7 +167,23 @@ prior_spec <- function(model) extract_prior_spec(model)
 #'   ("identity" or "precision").
 #' @return A function \code{function(theta)} returning a named list
 #'   \code{list(logpost, loglik, logprior)}
-#' @seealso \code{\link{prior_spec}}, \code{\link{find_mode}}, \code{\link{mcmc}}
+#' @seealso \code{\link{prior_spec}}, \code{\link{find_mode}}, \code{\link{mcmc}},
+#'   \code{\link{dm_posterior}} (the pipeline-object equivalent)
+#' @examples
+#' ## Model and data both ship with the package
+#' model    <- parse_mod(system.file("extdata/models/nk_demo.mod",
+#'                                   package = "dynhr"), verbose = FALSE)
+#' compiled <- compile_model(model, verbose = FALSE)
+#' priors   <- prior_spec(model)
+#' obs_vars <- c("ygr", "infl", "intr")
+#' Y <- as.matrix(read.csv(system.file("extdata/models/nk_demo_data.csv",
+#'                                     package = "dynhr"))[, obs_vars])
+#'
+#' log_post <- make_posterior(model, data = Y, prior_spec = priors,
+#'                            obs_vars = obs_vars, compiled = compiled)
+#'
+#' theta0 <- setNames(priors$mean, priors$name)
+#' str(log_post(theta0))
 #' @export
 make_posterior <- function(model, data, prior_spec, obs_vars, compiled,
                            me_variance = 0,
@@ -182,13 +218,29 @@ make_posterior <- function(model, data, prior_spec, obs_vars, compiled,
 #' @param verbose     Print progress (default \code{TRUE})
 #' @return Named list: \code{theta_mode}, \code{logpost}, \code{convergence},
 #'   \code{iterations}, \code{method}
-#' @seealso \code{\link{mcmc}}, \code{\link{nuts}}, \code{\link{make_posterior}}
+#' @seealso \code{\link{mcmc}}, \code{\link{nuts}}, \code{\link{make_posterior}},
+#'   \code{\link{dm_mode}} (the pipeline-object equivalent)
 #'
 #' @references
 #'   Hansen, N. (2016). The CMA evolution strategy: A tutorial.
 #'     \emph{arXiv:1604.00772}.
 #'   Nelder, J. A., & Mead, R. (1965). A simplex method for function
 #'     minimization. \emph{The Computer Journal}, 7(4), 308-313.
+#' @examples
+#' model    <- parse_mod(system.file("extdata/models/nk_demo.mod",
+#'                                   package = "dynhr"), verbose = FALSE)
+#' compiled <- compile_model(model, verbose = FALSE)
+#' priors   <- prior_spec(model)
+#' obs_vars <- c("ygr", "infl", "intr")
+#' Y <- as.matrix(read.csv(system.file("extdata/models/nk_demo_data.csv",
+#'                                     package = "dynhr"))[, obs_vars])
+#' log_post <- make_posterior(model, data = Y, prior_spec = priors,
+#'                            obs_vars = obs_vars, compiled = compiled)
+#'
+#' theta0 <- setNames(priors$mean, priors$name)
+#' mode <- find_mode(log_post, theta0, priors, n_iter = 200L, verbose = FALSE)
+#' mode$logpost
+#' round(mode$theta_mode, 4)
 #' @export
 find_mode <- function(log_post_fn, theta_init, prior_spec,
                       n_iter = 10000L, method = "newrat", verbose = TRUE) {
@@ -211,11 +263,50 @@ find_mode <- function(log_post_fn, theta_init, prior_spec,
 #' @param n_draws     Post-warmup draws to retain (default 2000)
 #' @param n_warmup    Warmup draws for adaptive tuning, then discarded
 #'   (default 1000)
+#' @param checkpoint_dir Optional directory for streaming checkpoints. When
+#'   set, draws are streamed to per-chain files in \code{flush_every}-row
+#'   chunks and a restart state (position, proposal scale and covariance,
+#'   acceptance count, and -- crucially -- \code{.Random.seed}) is saved
+#'   after every flush, so an interrupted run loses at most one flush
+#'   window.
+#' @param resume      Logical (default \code{FALSE}). With
+#'   \code{checkpoint_dir} set, continue the saved run in that directory
+#'   instead of starting fresh: pass a larger \code{n_draws} to extend a
+#'   finished chain. The continuation is \emph{bit-identical} to having run
+#'   the larger \code{n_draws} in one process (exact RNG and adaptation
+#'   restore). Keep \code{n_warmup} at its original value: the saved warmup
+#'   length governs the retained-draw split, while \code{n_warmup} still
+#'   enters the total draw target \code{n_draws + n_warmup}. A checkpoint
+#'   written under a different parameter configuration is refused. For bespoke samplers outside
+#'   \code{mcmc()}, the same contract is available via
+#'   \code{\link{mcmc_chain_state}} / \code{\link{mcmc_chain_restore}}.
+#' @param flush_every Rows per checkpoint flush (default 1000; only used
+#'   with \code{checkpoint_dir}).
+#' @param screen_fn   Optional CHEAP log-posterior closure over the same
+#'   parameters (e.g. an order-1 Kalman posterior when \code{log_post_fn} is
+#'   an order-2 pruned or particle-filter posterior). When supplied, the
+#'   sampler switches to \strong{delayed acceptance} (Christen & Fox 2005):
+#'   each proposal is first accept/rejected against \code{screen_fn}, and only
+#'   a survivor pays for an evaluation of \code{log_post_fn}, which is then
+#'   accepted with the screen-corrected ratio
+#'   \eqn{[\pi(\theta')/\pi(\theta)] \cdot [c(\theta)/c(\theta')]}. The chain
+#'   targets \code{log_post_fn} \emph{exactly} however biased the screen is;
+#'   a bad screen costs efficiency only. \code{screen_fn} must be
+#'   deterministic in \eqn{\theta} (verified at \code{theta0}). The returned
+#'   object gains \code{$screen_rate} (share of proposals killed by the
+#'   screen) and \code{$n_expensive} (evaluations of \code{log_post_fn}).
+#'   Pass \code{pseudo_marginal = TRUE} through \code{...} when
+#'   \code{log_post_fn} is a particle filter: the sampler then refuses a
+#'   fixed-seed closure and runs the PMCMC variance preflight.
 #' @param ...         Additional arguments forwarded to the internal sampler:
 #'   \code{scale}, \code{target_rate}, \code{adapt_every}, \code{verbose}
+#'   (and, with \code{screen_fn}, \code{pseudo_marginal},
+#'   \code{preflight_K}, \code{adapt_cov})
 #' @return A \code{\link{dynhr_chains}} object whose \code{$chain} slot is the
 #'   \eqn{n_{\text{draws}} \times n_p} post-warmup sample matrix
-#' @seealso \code{\link{smc}}, \code{\link{nuts}}, \code{\link{find_mode}}
+#' @seealso \code{\link{smc}}, \code{\link{nuts}}, \code{\link{find_mode}},
+#'   \code{\link{mcmc_chain_state}}, \code{\link{dm_sample}} (the
+#'   pipeline-object equivalent)
 #'
 #' @references
 #'   Metropolis, N., Rosenbluth, A. W., Rosenbluth, M. N., Teller, A. H., &
@@ -225,11 +316,57 @@ find_mode <- function(log_post_fn, theta_init, prior_spec,
 #'     and their applications. \emph{Biometrika}, 57(1), 97-109.
 #'   Gelman, A., Carlin, J. B., Stern, H. S., & Rubin, D. B. (2013).
 #'     \emph{Bayesian Data Analysis} (3rd ed.). Chapman & Hall/CRC.
+#' @examples
+#' ## Any function(theta) -> list(logpost, loglik, logprior) is a valid target;
+#' ## in practice it comes from make_posterior().
+#' log_post <- function(theta) {
+#'   ll <- -0.5 * sum(((theta - c(0.5, -0.2)) / c(1, 0.5))^2)
+#'   list(logpost = ll, loglik = ll, logprior = 0)
+#' }
+#'
+#' set.seed(1)
+#' chains <- mcmc(log_post, theta0 = c(a = 0, b = 0),
+#'                Sigma_prop = diag(c(1, 0.25)),
+#'                n_draws = 500L, n_warmup = 200L, verbose = FALSE)
+#' chains
+#' summary(chains)
 #' @export
 mcmc <- function(log_post_fn, theta0, Sigma_prop,
-                 n_draws = 2000L, n_warmup = 1000L, ...) {
-  res <- rwmh(log_post_fn, theta0, Sigma_prop,
-              n_draws = n_draws + n_warmup, n_burn = n_warmup, ...)
+                 n_draws = 2000L, n_warmup = 1000L,
+                 checkpoint_dir = NULL, resume = FALSE,
+                 flush_every = 1000L, screen_fn = NULL, ...) {
+  if (isTRUE(resume) && is.null(checkpoint_dir))
+    stop("mcmc: resume = TRUE requires 'checkpoint_dir' (the directory of ",
+         "the run to continue).", call. = FALSE)
+  if (!is.null(screen_fn)) {
+    ## Delayed acceptance: `screen_fn` is a CHEAP stand-in for `log_post_fn`
+    ## used only to kill hopeless proposals before the expensive target is
+    ## touched. The chain still targets `log_post_fn` exactly (see
+    ## R/sampler-da.R); a biased screen costs efficiency, never correctness.
+    ckpt <- NULL
+    if (!is.null(checkpoint_dir)) {
+      if (!dir.exists(checkpoint_dir)) dir.create(checkpoint_dir, recursive = TRUE)
+      ckpt <- list(dir = checkpoint_dir, flush_every = flush_every,
+                   resume = isTRUE(resume))
+    }
+    res <- rwmh_da(log_post_fn, screen_fn, theta0, Sigma_prop,
+                   n_draws = n_draws + n_warmup, n_burn = n_warmup,
+                   checkpoint = ckpt, ...)
+    return(new_dynhr_chains(res, "rwmh_da"))
+  }
+  if (is.null(checkpoint_dir)) {
+    res <- rwmh(log_post_fn, theta0, Sigma_prop,
+                n_draws = n_draws + n_warmup, n_burn = n_warmup, ...)
+  } else {
+    if (!dir.exists(checkpoint_dir))
+      dir.create(checkpoint_dir, recursive = TRUE)
+    ckpt <- list(dir = checkpoint_dir, flush_every = flush_every,
+                 resume = isTRUE(resume),
+                 fingerprint = .ckpt_fingerprint(names(theta0)))
+    res <- rwmh(log_post_fn, theta0, Sigma_prop,
+                n_draws = n_draws + n_warmup, n_burn = n_warmup,
+                checkpoint = ckpt, ...)
+  }
   new_dynhr_chains(res, "rwmh")
 }
 
@@ -250,13 +387,28 @@ mcmc <- function(log_post_fn, theta0, Sigma_prop,
 #' @return A \code{\link{dynhr_chains}} object.  The \code{$log_marginal_lik}
 #'   slot contains the log marginal likelihood estimate
 #'   \eqn{\log p(Y | \mathcal{M})}
-#' @seealso \code{\link{mcmc}}, \code{\link{nuts}}
+#' @seealso \code{\link{mcmc}}, \code{\link{nuts}}, \code{\link{dm_sample}}
 #'
 #' @references
 #'   Herbst, E. P., & Schorfheide, F. (2015). \emph{Bayesian Estimation of
 #'     DSGE Models}. Princeton University Press. Chapter 10 (SMC).
 #'   Chopin, N. (2002). A sequential particle filter method for static models.
 #'     \emph{Biometrika}, 89(3), 539-552.
+#' @examples
+#' model    <- parse_mod(system.file("extdata/models/nk_demo.mod",
+#'                                   package = "dynhr"), verbose = FALSE)
+#' compiled <- compile_model(model, verbose = FALSE)
+#' priors   <- prior_spec(model)
+#' obs_vars <- c("ygr", "infl", "intr")
+#' Y <- as.matrix(read.csv(system.file("extdata/models/nk_demo_data.csv",
+#'                                     package = "dynhr"))[, obs_vars])
+#' log_post <- make_posterior(model, data = Y, prior_spec = priors,
+#'                            obs_vars = obs_vars, compiled = compiled)
+#'
+#' set.seed(1)
+#' ## n_particles = 100 keeps the example quick; use 2000+ in practice
+#' chains <- smc(log_post, priors, n_particles = 100L, verbose = FALSE)
+#' chains$log_marginal_lik
 #' @export
 smc <- function(log_post_fn, prior_spec, n_particles = 2000L, ...) {
   res <- dynhr_smc(log_post_fn, prior_spec = prior_spec,
@@ -280,7 +432,8 @@ smc <- function(log_post_fn, prior_spec, n_particles = 2000L, ...) {
 #'   \code{adapt_mass}, \code{verbose}
 #' @return A \code{\link{dynhr_chains}} object.  The \code{$n_divergent}
 #'   slot reports divergent transitions (should be 0 in a well-tuned run)
-#' @seealso \code{\link{mcmc}}, \code{\link{smc}}, \code{\link{find_mode}}
+#' @seealso \code{\link{mcmc}}, \code{\link{smc}}, \code{\link{find_mode}},
+#'   \code{\link{dm_sample}}
 #'
 #' @references
 #'   Hoffman, M. D., & Gelman, A. (2014). The No-U-Turn sampler: Adaptively
@@ -288,6 +441,20 @@ smc <- function(log_post_fn, prior_spec, n_particles = 2000L, ...) {
 #'     \emph{Journal of Machine Learning Research}, 15(1), 1593-1623.
 #'   Neal, R. M. (2011). MCMC using Hamiltonian dynamics.
 #'     In \emph{Handbook of Markov Chain Monte Carlo}. Chapman & Hall/CRC.
+#' @examples
+#' ## NUTS needs a gradient; without an analytic one it finite-differences the
+#' ## target, so on a real DSGE posterior prefer make_posterior_grad(). Here a
+#' ## cheap analytic target keeps the example fast.
+#' log_post <- function(theta) {
+#'   ll <- -0.5 * sum(((theta - c(0.5, -0.2)) / c(1, 0.5))^2)
+#'   list(logpost = ll, loglik = ll, logprior = 0)
+#' }
+#'
+#' set.seed(1)
+#' chains <- nuts(log_post, theta0 = c(a = 0, b = 0),
+#'                n_draws = 200L, n_warmup = 200L, verbose = FALSE)
+#' chains$n_divergent          # 0 in a well-tuned run
+#' summary(chains)
 #' @export
 nuts <- function(log_post_fn, theta0, n_draws = 2000L, n_warmup = 1000L, ...) {
   res <- dynhr_nuts(log_post_fn, theta0,
@@ -314,7 +481,8 @@ nuts <- function(log_post_fn, theta0, n_draws = 2000L, n_warmup = 1000L, ...) {
 #' @return A \code{\link{dynhr_chains}} object.  The \code{$chain} matrix has
 #'   \eqn{n_{\text{iter}} \times n_{\text{chain}}} rows (all walkers, all
 #'   post-warmup iterations).
-#' @seealso \code{\link{mcmc}}, \code{\link{smc}}, \code{\link{nuts}}
+#' @seealso \code{\link{mcmc}}, \code{\link{smc}}, \code{\link{nuts}},
+#'   \code{\link{dm_sample}}
 #'
 #' @references
 #'   Boehl, G. (2022). DIME MCMC: A Swiss Army Knife for Bayesian Inference.
@@ -345,8 +513,39 @@ dime <- function(log_post_fn, prior_spec, n_chain = NULL,
 #'   first argument is a \code{dynhr_posterior_result}, the \code{report},
 #'   \code{report_file}, and \code{output_dir} arguments are available.
 #' @return Named list of \code{dynhr_diagnostic} objects.
+#'
+#' @section Coverage:
+#' The battery spans D0-D41.  \code{run_diagnostics()} wires D0-D37 and D41 and
+#' silently skips any stage whose inputs are absent, so it is safe to call with
+#' whatever pieces you have.  Three members are exported standalone instead,
+#' because they need only a model plus a parameter vector: D38
+#' (\code{\link{diag_sloppiness}}), D39 (\code{\link{diag_stability_map}}) and
+#' D40 (\code{\link{diag_near_unit_root}}).  See
+#' \code{vignette("diagnostics")} for the stage table.
+#'
 #' @seealso \code{\link{run_full_estimation}}, \code{\link{write_report}},
-#'   \code{\link{solve_model}}, \code{\link{run_posterior_estimation}}
+#'   \code{\link{solve_model}}, \code{\link{run_posterior_estimation}},
+#'   \code{\link{diag_sloppiness}}, \code{\link{diag_stability_map}},
+#'   \code{\link{diag_near_unit_root}}, \code{\link{dm_diagnostics}}
+#' @examples
+#' model    <- parse_mod(system.file("extdata/models/rbc.mod",
+#'                                   package = "dynhr"), verbose = FALSE)
+#' compiled <- compile_model(model, verbose = FALSE)
+#' steady   <- solve_steady(compiled, model$param_values,
+#'                          endo_names = model$var_names,
+#'                          exo_names  = model$varexo_names, verbose = FALSE)
+#' dr <- solve_perturbation(model, compiled, steady$values,
+#'                          model$param_values, verbose = FALSE)
+#' set.seed(1)
+#' Y <- as.matrix(simulate_model(dr, n_periods = 100L, model = model,
+#'                               burn_in = 20L)[, "y", drop = FALSE])
+#'
+#' ## Pre-estimation stages only: no draws, so D5-D7 and the fit block skip.
+#' diags <- suppressWarnings(
+#'   run_diagnostics(model = model, compiled = compiled, dr = dr,
+#'                   params = model$param_values, data = Y,
+#'                   obs_names = "y", verbose = FALSE))
+#' names(diags)
 #' @export
 run_diagnostics <- function(...) run_all_diagnostics(...)
 
@@ -358,38 +557,14 @@ run_diagnostics <- function(...) run_all_diagnostics(...)
 # ============================================================================
 # New simplified pipeline API (v0.3+)
 # ============================================================================
-
-#' Solve a DSGE model (parse -> compile -> steady -> perturbation)
-#'
-#' Convenience alias for \code{\link{solve_model}}.
-#'
-#' @param ...  Arguments forwarded to \code{\link{solve_model}}.
-#' @return A \code{dynhr_solved} object.
-#' @seealso \code{\link{solve_model}}, \code{\link{run_mode_finding}}
-#' @export
-solve_dsge <- function(...) solve_model(...)
-
-
-#' Run mode-finding for a solved DSGE model
-#'
-#' Convenience alias for \code{\link{run_mode_finding}}.
-#'
-#' @param ...  Arguments forwarded to \code{\link{run_mode_finding}}.
-#' @return A \code{dynhr_mode_result} object.
-#' @seealso \code{\link{run_mode_finding}}, \code{\link{run_posterior_estimation}}
-#' @export
-estimate_mode <- function(...) run_mode_finding(...)
-
-
-#' Run posterior estimation with multi-method dispatch
-#'
-#' Convenience alias for \code{\link{run_posterior_estimation}}.
-#'
-#' @param ...  Arguments forwarded to \code{\link{run_posterior_estimation}}.
-#' @return A \code{dynhr_posterior_result} object.
-#' @seealso \code{\link{run_posterior_estimation}}, \code{run_all_diagnostics}
-#' @export
-estimate_posterior <- function(...) run_posterior_estimation(...)
+#
+# The three `function(...)` pass-through aliases that used to live here --
+# solve_dsge() -> solve_model(), estimate_mode() -> run_mode_finding(),
+# estimate_posterior() -> run_posterior_estimation() -- were REMOVED in the
+# API-consistency wave. They added a second name for each verb with no
+# signature of their own (so `args()`, tab-completion and the help pages were
+# all empty `...`), and nothing in the package, the tests or the vignettes
+# called them. Use the canonical names directly.
 
 
 #' Two-stage SMC model-tempering (Mlikota & Schorfheide 2024)

@@ -371,7 +371,6 @@ List tpf_run_period_cpp(
     double          me_variance,   // > 0
     double          ess_target,    // default 0.5
     int             n_mh,          // mutation steps (default 1)
-    double          mh_scale,      // RWMH proposal scale
     int             max_stages,    // default 200
     Rcpp::Nullable<arma::mat> U_normals  = R_NilValue,
     Rcpp::Nullable<double>    U_resample = R_NilValue,
@@ -449,7 +448,9 @@ List tpf_run_period_cpp(
   //   Row  n_2s+n_e:         log_u pre-stored as log(Uniform(0,1)) = log(pnorm(z_u))
   //                          where z_u ~ N(0,1) stored in the buffer.
   // When U_mutation is NULL, draw from R's RNG (bit-identical to pre-Option-A).
-  // On exhaustion (col index >= n_cols), warn once and fall back to fresh draws.
+  // On exhaustion (col index >= n_cols) fall back to fresh draws and REPORT it
+  // to R (see below); the fallback draws are statistically identical
+  // N(0,1)/Uniform, so correctness is unaffected either way.
   arma::mat u_mut_mat;
   bool has_u_mut = U_mutation.isNotNull();
   arma::uword u_mut_ncols = 0;
@@ -457,12 +458,16 @@ List tpf_run_period_cpp(
     u_mut_mat   = Rcpp::as<arma::mat>(U_mutation);
     u_mut_ncols = u_mut_mat.n_cols;
   }
-  // Warn at most ONCE per session (not once per call): a static flag survives
-  // across the thousands of tpf_run_period_cpp invocations an MCMC/SBC run
-  // makes, so an undersized buffer reports the exhaustion a single time rather
-  // than flooding the log. The fresh-RNG fallback below is statistically
-  // identical N(0,1)/Uniform draws, so correctness is unaffected.
-  static bool u_mut_warned = false;
+  // B5: these two conditions used to call Rcpp::warning() from inside the
+  // kernel. Under options(warn = 2) R turns a warning into an ERROR, and R's
+  // error mechanism is a longjmp: it unwinds PAST every C++ destructor on the
+  // stack, including ~RNGScope, which is what writes the advanced RNG state
+  // back to .Random.seed. The result was a silently stale .Random.seed (and
+  // leaked Armadillo buffers) on exactly the runs a user asked to be strict.
+  // So the kernel only COUNTS/records, and the R wrapper raises the warning
+  // after the call returns -- where a longjmp is harmless.
+  int u_mid_exhausted = 0;        // times the U_mid fallback fired
+  int u_mut_need_col  = -1;       // first column index past the buffer, or -1
 
   for (int stage = 0; stage < max_stages; ++stage) {
 
@@ -519,11 +524,9 @@ List tpf_run_period_cpp(
         u_k = std::max(1e-15, std::min(1.0 - 1e-15, u_k));
         idx = systematic_resample_sorted_cpp(particles, w_norm, N, u_k);
       } else if (has_u_mid) {
-        // U_mid supplied but K slots exhausted: fall back to fresh draw
-        Rcpp::warning("tpf_run_period_cpp: U_mid slots exhausted (K=%d); "
-                      "falling back to fresh RNG draw for mid-stage resample. "
-                      "Increase max_stages_u to suppress.",
-                      (int)u_mid_vec.n_elem);
+        // U_mid supplied but K slots exhausted: fall back to fresh draw and
+        // record it for the R wrapper to warn about (B5).
+        ++u_mid_exhausted;
         idx = systematic_resample_cpp(w_norm, N);
       } else {
         // Non-CPM path: fresh RNG draw (bit-identical to pre-CPM code)
@@ -573,13 +576,10 @@ List tpf_run_period_cpp(
           arma::uword col_idx = (arma::uword)stage * (arma::uword)n_mh * N
                                 + (arma::uword)step * N + i;
           bool use_u_mut = has_u_mut && (col_idx < u_mut_ncols);
-          if (has_u_mut && col_idx >= u_mut_ncols && !u_mut_warned) {
-            Rcpp::warning("tpf_run_period_cpp: U_mutation columns exhausted "
-                          "(have %d, need col %d); falling back to fresh RNG draws. "
-                          "Increase max_stages_u or n_mh in max_stages_u.",
-                          (int)u_mut_ncols, (int)col_idx);
-            u_mut_warned = true;
-          }
+          // Record the FIRST offending column only; the R wrapper decides how
+          // loudly to report it (B5).
+          if (has_u_mut && col_idx >= u_mut_ncols && u_mut_need_col < 0)
+            u_mut_need_col = (int)col_idx;
 
           arma::vec z_sv(n_2s);
           arma::vec z_ev(n_e);
@@ -655,7 +655,12 @@ List tpf_run_period_cpp(
       _["phi_schedule"]     = phi_vec,
       _["U_used"]           = z_mat,         // CPM: shock normals used (pre-L_e)
       _["z_resample_used"]  = z_res_ret,     // CPM: z for phi=1 uniform (NaN if RNG-drawn)
-      _["u_mid_slots_used"] = u_mid_idx      // CPM: number of legacy U_mid slots consumed
+      _["u_mid_slots_used"] = u_mid_idx,     // CPM: number of legacy U_mid slots consumed
+      // B5 warning channel: raised by the R wrapper, never from the kernel.
+      _["u_mid_exhausted"]  = u_mid_exhausted,   // times the U_mid fallback fired
+      _["u_mid_slots"]      = (int)(has_u_mid ? u_mid_vec.n_elem : 0),
+      _["u_mut_need_col"]   = u_mut_need_col,    // first column past the buffer, -1 = none
+      _["u_mut_have_cols"]  = (int)u_mut_ncols
   );
 }
 

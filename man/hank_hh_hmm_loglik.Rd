@@ -10,7 +10,7 @@ hank_hh_hmm_loglik(
   blocks_k,
   Pi,
   aggregate_path,
-  me_var,
+  me_variance,
   a0_dist = NULL
 )
 }
@@ -34,7 +34,7 @@ checked for consistency).}
 \code{list(r_path, w_path)} of length-\code{T} level paths for a
 time-varying path (see Details).}
 
-\item{me_var}{Measurement-error variance: a scalar (recycled across
+\item{me_variance}{Measurement-error variance: a scalar (recycled across
 \code{obs_spec}) or a named numeric vector keyed by \code{obs_spec}.}
 
 \item{a0_dist}{Optional length-\code{n_e*n_a} initial distribution over

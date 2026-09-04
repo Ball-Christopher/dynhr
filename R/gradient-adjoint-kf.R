@@ -134,6 +134,9 @@
   n_T <- ncol(Y)
 
   has_me_extra    <- !is.null(me_extra)
+  ## Any TRUE observation noise at all (base me_variance or per-period
+  ## me_extra): both feed F AND the Joseph covariance term (F3-D).
+  has_me_true     <- has_me_extra || me_variance != 0
   has_shock_scale <- !is.null(shock_scale)
 
   ## -- Fast path: compiled adjoint recursion (kf_adjoint_cpp) ---------------
@@ -244,11 +247,12 @@
     } else {
       Se_t <- Sigma_e; HH_t <- HH; SS_t <- SS
     }
-    if (has_me_extra) {
-      me_diag_t <- me_diag + diag(me_extra[, t], n_obs)
-    } else {
-      me_diag_t <- me_diag
-    }
+    ## Full ME diagonal for this period as a VECTOR: base me_variance plus
+    ## this period's me_extra. Both are TRUE observation noise (F3-D), so both
+    ## enter F AND the Joseph covariance update.
+    me_vec_t <- if (has_me_extra) me_variance + me_extra[, t]
+                else rep(me_variance, n_obs)
+    me_diag_t <- diag(me_vec_t, n_obs)
 
     PZ <- P %*% tZZ
     Ft <- ZZ %*% PZ + HH_t + me_diag_t
@@ -278,11 +282,10 @@
 
     s <- as.numeric(TT %*% s) + as.numeric(K %*% v)
     P <- tcrossprod(A %*% P, A) + tcrossprod(B %*% Se_t, B)
-    ## Joseph true-noise term for me_extra (mirrors kalman_filter's standard
-    ## path): P' += K diag(me_extra[, t]) K'. me_variance stays F-only
-    ## (regularizer convention; no Joseph term).
-    if (has_me_extra)
-      P <- P + (K %*% diag(me_extra[, t], n_obs)) %*% t(K)
+    ## Joseph true-noise term for the FULL ME diagonal (mirrors
+    ## kalman_filter's standard path): P' += K diag(me_vec_t) K'.
+    if (has_me_true)
+      P <- P + (K %*% diag(me_vec_t, n_obs)) %*% t(K)
     P <- .sym(P)
   }
 
@@ -355,11 +358,14 @@
     ## bar_K_from_s: d/dK tr(bar_s' K v) => += outer(bar_s, v)
     bar_K <- outer(bar_s, v)                               # [n x q]
 
-    ## Adjoint of the me_extra Joseph term in P_t (P_t += K me_x K', with
-    ## me_x = diag(me_extra[, t]) being DATA, not differentiated): with
-    ## bar_P symmetrized above, d tr(bar_P K me_x K') / dK = 2 bar_P K me_x.
-    if (has_me_extra)
-      bar_K <- bar_K + 2 * bar_P %*% K %*% diag(me_extra[, t], n_obs)
+    ## Adjoint of the ME Joseph term in P_t (P_t += K me K', with
+    ## me = diag(me_variance + me_extra[, t]) being DATA, not differentiated):
+    ## with bar_P symmetrized above, d tr(bar_P K me K') / dK = 2 bar_P K me.
+    if (has_me_true) {
+      me_vec_b <- if (has_me_extra) me_variance + me_extra[, t]
+                  else rep(me_variance, n_obs)
+      bar_K <- bar_K + 2 * bar_P %*% K %*% diag(me_vec_b, n_obs)
+    }
 
     ## bar_v_from_s: d/dv tr(bar_s' K v) => K' bar_s
     bar_v <- as.numeric(t(K) %*% bar_s)                   # [q]

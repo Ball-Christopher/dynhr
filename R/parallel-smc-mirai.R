@@ -13,6 +13,15 @@
 ## .worker_lp from the daemon globalenv. The SMC bookkeeping (tempering,
 ## weights, ESS/resampling, marginal likelihood, adaptive mutation scaling)
 ## runs on the host, reusing the helpers in sampler-smc.R.
+##
+## Package-option shipping: this file starts NO daemon pool of its own -- both
+## provisioning paths below (.mirai_pool_closure / .mirai_pool_init, in
+## parallel-mirai.R) replay the host's `dynhr_set_options()` state on every
+## daemon via `.dynhr_daemon_state()` / `.dynhr_daemon_apply()`, so a
+## power_posterior / me_variance / debug_kf_errors set here reaches the workers.
+## Do not add a bare `mirai::daemons()` + `everywhere()` here without also
+## shipping that snapshot -- `.dynhr_opts` is a namespace-private environment,
+## not base `options()`, and does not cross a process boundary by itself.
 ## --------------------------------------------------------------------------
 
 

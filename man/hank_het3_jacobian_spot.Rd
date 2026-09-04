@@ -73,3 +73,4 @@ hank_het3_jacobian_spot(blk, T_h = 3, inputs = "rd", outputs = "C")
 \code{\link{hank_het3_jacobian_nd}} (the full oracle),
   \code{\link{hank_het3_jacobian_checkpoint}}
 }
+\keyword{internal}

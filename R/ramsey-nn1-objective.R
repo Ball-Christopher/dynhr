@@ -217,17 +217,3 @@
 .nn1_verify_blue_correction <- function(nn1_objective, tol = 1e-10) {
   nn1_objective$grad_at_ss < tol
 }
-
-
-#' Evaluate the modified (n,n+1) objective at a given state
-#'
-#' Given deviations x from SS, computes W_t^{(n,n+1)}(x) using the
-#' polynomial coefficients.
-#'
-#' @param x           Deviation vector (named numeric, deviations from SS).
-#' @param coefficients Polynomial coefficients from .nn1_build_modified_objective().
-#' @return Scalar value of W_t^{(n,n+1)}.
-#' @noRd
-.nn1_evaluate_objective <- function(x, coefficients) {
-  .eval_polynomial(x, coefficients)
-}

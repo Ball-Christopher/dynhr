@@ -4,7 +4,7 @@
 \alias{hank_state_space}
 \title{Truncated-MA state-space form of a general sequence-space HANK model}
 \usage{
-hank_state_space(model, shock_specs, observables, q = NULL)
+hank_state_space(model, shock_specs, obs_vars, q = NULL)
 }
 \arguments{
 \item{model}{A \code{\link{hank_model}} (e.g. from \code{\link{hank_ks_model}}
@@ -14,7 +14,7 @@ or the \code{model} field of \code{\link{hank_nk_hank}}).}
 each \code{list(rho = <AR(1) persistence>, sigma = <innovation std>)}.
 Names must match \code{model$exogenous} exactly (order-independent).}
 
-\item{observables}{Character vector of variable names (must be produced by
+\item{obs_vars}{Character vector of variable names (must be produced by
 the model, i.e. appear in \code{names(model$G)}) to treat as the
 observation vector, in order.}
 
@@ -24,7 +24,7 @@ default \code{model$T_h} (no truncation beyond the GE horizon).}
 \value{
 A lagged-timing \code{\link{new_dsge_ss}} object. Its
   \code{shock_names} field records \code{model$exogenous} order and
-  \code{obs_names} records \code{observables}; \code{Theta_list},
+  \code{obs_names} records \code{obs_vars}; \code{Theta_list},
   \code{rho_vec} and \code{q} record the per-shock MA coefficients,
   AR(1) persistences and truncation (consumed by
   \code{\link{hank_loglik_ar}}).

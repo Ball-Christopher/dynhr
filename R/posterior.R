@@ -344,7 +344,11 @@ apply_theta_to_params <- function(model, theta, params = NULL) {
 #'   so that SMC tempering, marginal-likelihood estimates, and other callers that
 #'   need the true likelihood are unaffected. Only \code{$logpost} is tempered.
 #'   Can also be set globally via
-#'   \code{dynhr_set_options(power_posterior = 0.5)}.
+#'   \code{dynhr_set_options(power_posterior = 0.5)}; the explicit argument
+#'   wins over the option. Applies to EVERY \code{likelihood} -- it is
+#'   forwarded to each likelihood's factory, which resolves it once at build
+#'   time, so the exponent is a fixed property of the returned closure and
+#'   cannot drift mid-run if some other code changes the option.
 #' @param pruned_order For \code{likelihood = "pruned"} or \code{"tpf"}: the
 #'   perturbation order
 #'   of the AFVRR pruned state space, \code{2L} (default) or \code{3L}. Order 3
@@ -399,7 +403,8 @@ make_log_posterior <- function(model, data, prior_spec, obs_vars = NULL,
                                likelihood = c("gaussian", "cumulant",
                                               "whittle", "tpf", "pskf",
                                               "student_t", "pruned",
-                                              "ppf", "copf", "sv_rbpf"),
+                                              "ppf", "copf", "sv_rbpf",
+                                              "global_pf"),
                                lik_init = "auto",
                                me_extra = NULL,
                                shock_scale = NULL,
@@ -415,6 +420,7 @@ make_log_posterior <- function(model, data, prior_spec, obs_vars = NULL,
   ## Individual args supplied alongside ctx are silently overridden by ctx.
   ms_spec_ctx        <- NULL
   ms_struct_spec_ctx <- NULL
+  ms_collapse_ctx    <- "gpb2"
   if (!is.null(ctx) && inherits(ctx, "dynhr_estimation_context")) {
     me_variance        <- ctx$me_variance
     likelihood         <- ctx$likelihood
@@ -426,6 +432,9 @@ make_log_posterior <- function(model, data, prior_spec, obs_vars = NULL,
     infeasible_penalty <- ctx$infeasible_penalty %||% infeasible_penalty
     ms_spec_ctx        <- ctx$ms_spec        # shock-variance MS path
     ms_struct_spec_ctx <- ctx$ms_struct_spec # structural MS path (new)
+    ## GPB collapse depth for the Kim filters (F3-C).  Older contexts predate
+    ## the field, so a missing entry means the historical GPB(2).
+    if (!is.null(ctx$ms_collapse)) ms_collapse_ctx <- ctx$ms_collapse
     student_df         <- ctx$student_df %||% student_df
     pruned_order       <- ctx$pruned_order %||% pruned_order
     ## tpf_options are merged into ... via do.call below when likelihood="tpf"
@@ -433,6 +442,28 @@ make_log_posterior <- function(model, data, prior_spec, obs_vars = NULL,
   likelihood <- match.arg(likelihood)
   if (!pruned_order %in% c(2L, 3L))
     stop("make_log_posterior: `pruned_order` must be 2 or 3.")
+
+  ## ---- Mixed-frequency support surface (R/mixed-frequency.R) -------------
+  ## `model$obs_aggregation` is consumed by kalman_filter()'s observation
+  ## assembly (fixed-weight state augmentation), so ONLY the Gaussian branch
+  ## honours it. Every other likelihood -- and the Markov-switching Kim filter
+  ## on the Gaussian branch -- builds its own observation equation and would
+  ## SILENTLY score the aggregate as if it were a contemporaneous observable.
+  ## Fail loudly instead of returning a quietly-wrong posterior.
+  if (!is.null(model$obs_aggregation)) {
+    if (!identical(likelihood, "gaussian"))
+      stop("make_log_posterior: likelihood = \"", likelihood, "\" does not ",
+           "support model$obs_aggregation (mixed-frequency temporal ",
+           "aggregation). Only likelihood = \"gaussian\" (the Kalman filter) ",
+           "implements the state augmentation; every other filter would ",
+           "silently ignore the spec. Use the Gaussian likelihood, or drop ",
+           "model$obs_aggregation.", call. = FALSE)
+    if (!is.null(ms_spec_ctx) || !is.null(ms_struct_spec_ctx))
+      stop("make_log_posterior: model$obs_aggregation (mixed-frequency ",
+           "temporal aggregation) is not supported with a Markov-switching ",
+           "specification: ms_kim_filter() builds its own observation ",
+           "equation and would ignore the aggregation.", call. = FALSE)
+  }
 
   ## Default obs_vars from the model's varobs declaration (parse_mod also
   ## exposes it as model$obs_vars) — pathological-DSGE paper gap #4.
@@ -584,7 +615,8 @@ make_log_posterior <- function(model, data, prior_spec, obs_vars = NULL,
     return(do.call(make_log_posterior_tpf,
                    c(list(model, data_tpf, prior_spec, obs_vars,
                           compiled, me_variance = me_variance,
-                          system_priors = system_priors),
+                          system_priors = system_priors,
+                          power = power),
                      tpf_extra_args)))
   }
 
@@ -612,6 +644,34 @@ make_log_posterior <- function(model, data, prior_spec, obs_vars = NULL,
                           obs_vars = obs_vars, compiled = compiled,
                           me_variance = me_variance, power = power),
                      sv_extra_args)))
+  }
+
+  if (likelihood == "global_pf") {
+    ## GLOBAL (projection) solution + bootstrap particle filter on the
+    ## resulting nonlinear policy (R/global-likelihood.R). The only likelihood
+    ## in the package that never linearises the model. Its `...` carries the
+    ## projection tuning (poly_degree / n_quad / n_nodes / state_domain /
+    ## solve_tol / solve_max_iter) and the filter tuning (n_particles /
+    ## ess_frac / seed); as on the sv_rbpf branch, forward ONLY those names so
+    ## that a caller splatting an unrelated `...` does not hit the strict
+    ## factory signature.
+    if (!is.null(shock_scale))
+      stop("make_log_posterior: likelihood = \"global_pf\" is incompatible ",
+           "with shock_scale (heteroskedastic_shocks).", call. = FALSE)
+    if (!is.null(me_extra))
+      stop("make_log_posterior: likelihood = \"global_pf\" is incompatible ",
+           "with me_extra.", call. = FALSE)
+    dots <- list(...)
+    gpf_extra_args <- dots[intersect(
+      names(dots),
+      c("n_particles", "poly_degree", "n_quad", "n_nodes", "state_domain",
+        "solve_tol", "solve_max_iter", "ess_frac", "seed"))]
+    return(do.call(make_log_posterior_global_pf,
+                   c(list(model = model, data = data, prior_spec = prior_spec,
+                          obs_vars = obs_vars, compiled = compiled,
+                          me_variance = me_variance, power = power,
+                          system_priors = system_priors),
+                     gpf_extra_args)))
   }
 
   if (likelihood == "ppf" || likelihood == "copf") {
@@ -650,8 +710,8 @@ make_log_posterior <- function(model, data, prior_spec, obs_vars = NULL,
     data_ppf <- if (ncol(data) == length(obs_vars)) t(data) else data
     ## The obc_ppf factory has a NARROWER interface than the Gaussian/TPF
     ## paths: it takes only (model, data, prior_spec, obs_vars, compiled,
-    ## specs, me_variance, N, proposal, regime_guess, seed). It does NOT accept
-    ## system_priors, power, lik_init, ctx, me_extra -- pass only its args. Any
+    ## specs, me_variance, N, proposal, regime_guess, seed, power). It does NOT
+    ## accept system_priors, lik_init, ctx, me_extra -- pass only its args. Any
     ## of {N, specs, proposal, regime_guess, seed} may be supplied via ... .
     dots      <- list(...)
     ppf_allow <- c("specs", "N", "proposal", "regime_guess", "seed")
@@ -662,7 +722,7 @@ make_log_posterior <- function(model, data, prior_spec, obs_vars = NULL,
       ppf_extra$proposal <- "copf"
     return(do.call(make_log_posterior_obc_ppf,
                    c(list(model, data_ppf, prior_spec, obs_vars, compiled,
-                          me_variance = me_variance),
+                          me_variance = me_variance, power = power),
                      ppf_extra)))
   }
 
@@ -680,7 +740,8 @@ make_log_posterior <- function(model, data, prior_spec, obs_vars = NULL,
       me_variance   = me_variance,
       system_priors = system_priors,
       cut_tol       = cut_tol,
-      max_q         = max_q
+      max_q         = max_q,
+      power         = power
     ))
   }
 
@@ -691,63 +752,45 @@ make_log_posterior <- function(model, data, prior_spec, obs_vars = NULL,
       stop("make_log_posterior: likelihood = \"student_t\" requires student_df ",
            "(degrees of freedom, a positive scalar).", call. = FALSE)
     nu <- student_df
-    return(local({
-      nu_ <- nu; mv_ <- me_variance; li_ <- lik_init
-      sys_cache_ <- cache_system_structure(compiled)
-      ss_warm_ <- NULL
-      function(theta) {
-        lp <- log_prior(theta, prior_spec)
-        if (!is.finite(lp))
-          return(list(logpost = -Inf, loglik = -Inf, logprior = lp))
-        params <- .apply_theta_to_params(model, theta)
-        ss_result <- solve_steady_state(model, compiled, params,
-                                        y0 = ss_warm_, verbose = FALSE)
-        if (is.null(ss_result) || !isTRUE(ss_result$converged)) {
-          ss_warm_ <<- NULL
-          return(list(logpost = -Inf, loglik = -Inf, logprior = lp))
-        }
-        ss_warm_ <<- ss_result$ss
-        params <- ss_result$params %||% params
-        sys <- extract_system_matrices_fast(sys_cache_, ss_result$ss, params)
-        dr  <- .solve_from_system(sys, model, compiled, ss_result$ss, params, FALSE)
-        if (is.null(dr) || !isTRUE(dr$bk_satisfied))
-          return(list(logpost = -Inf, loglik = -Inf, logprior = lp))
+    ## Adapter over the shared closure builder (R/posterior-closure.R). This
+    ## branch differs from the gaussian one in exactly three ways, all
+    ## expressed as hook arguments: no cold RETRY after a failed warm-started
+    ## steady-state solve, NO stationarity guard (the BK check alone), and the
+    ## system-prior density is added to $logpost WITHOUT folding into
+    ## $logprior. NB the lead_lag_incidence back-fill further down the
+    ## dispatcher is deliberately NOT applied here -- this branch never did.
+    return(.make_posterior_closure(
+      model, data, prior_spec, obs_vars, compiled,
+      loglik_fn = function(sol, params, ss, theta, me_floor_check, ...) {
         kf <- tryCatch(
-          kalman_filter_student_t(data, dr, model, params, obs_vars,
-                                  student_df  = nu_,
-                                  me_variance = mv_,
-                                  lik_init    = li_),
+          kalman_filter_student_t(data, sol$dr, model, params, obs_vars,
+                                  student_df  = nu,
+                                  me_variance = me_variance,
+                                  lik_init    = lik_init),
           error = function(e) {
             ## Same masking issue as the gaussian path: a genuine bug in the
-            ## Student-t filter is indistinguishable from an infeasible draw here.
-            ## dynhr_set_options(debug_kf_errors = TRUE) RE-RAISES for debugging.
+            ## Student-t filter is indistinguishable from an infeasible draw
+            ## here. dynhr_set_options(debug_kf_errors = TRUE) RE-RAISES.
             if (isTRUE(.dynhr_opt("debug_kf_errors", default = FALSE))) stop(e)
             NULL
           }
         )
-        if (is.null(kf) || !is.finite(kf$loglik))
-          return(list(logpost = -Inf, loglik = -Inf, logprior = lp))
-        loglik <- kf$loglik
-        sp_lp  <- if (!is.null(system_priors)) {
-          .eval_system_priors(
-            system_priors,
-            list(theta   = theta,
-                 model   = model,
-                 dr      = dr,
-                 Sigma_e = .get_shock_cov(model, model$varexo_names, params),
-                 params  = params))
-        } else 0
-        list(logpost = lp + power * loglik + sp_lp,
-             loglik  = loglik,
-             logprior = lp)
-      }
-    }))
+        if (is.null(kf) || !is.finite(kf$loglik)) return(NULL)
+        list(loglik = kf$loglik)
+      },
+      power             = power,
+      warm_retry        = FALSE,
+      stationarity      = "none",
+      needs_me_floor    = FALSE,
+      system_prior      = system_priors,
+      system_prior_mode = "extra"))
   }
 
   if (likelihood == "cumulant") {
     return(make_log_posterior_cumulant(model, data, prior_spec, obs_vars,
                                         compiled, me_variance = me_variance,
                                         system_priors = system_priors,
+                                        power = power,
                                         ...))
   }
 
@@ -758,10 +801,12 @@ make_log_posterior <- function(model, data, prior_spec, obs_vars = NULL,
     if (pruned_order == 3L)
       return(make_log_posterior_pruned3(model, data, prior_spec, obs_vars,
                                         compiled, me_variance = me_variance,
-                                        system_priors = system_priors))
+                                        system_priors = system_priors,
+                                        power = power))
     return(make_log_posterior_pruned(model, data, prior_spec, obs_vars,
                                       compiled, me_variance = me_variance,
-                                      system_priors = system_priors))
+                                      system_priors = system_priors,
+                                      power = power))
   }
 
   if (likelihood == "whittle") {
@@ -771,7 +816,8 @@ make_log_posterior <- function(model, data, prior_spec, obs_vars = NULL,
                                        compiled, me_variance = me_variance,
                                        freq_band = freq_band,
                                        system_priors = system_priors,
-                                       debias = debias_arg))
+                                       debias = debias_arg,
+                                       power = power))
   }
 
   ## ---- Structural MS-DSGE branch ------------------------------------------
@@ -809,6 +855,7 @@ make_log_posterior <- function(model, data, prior_spec, obs_vars = NULL,
       sbr_pre  <- ms_struct_spec_ctx$ss_by_regime      # NULL = solve per draw
       mv_ms    <- me_variance
       li_ms    <- lik_init
+      cl_ms    <- ms_collapse_ctx
       sp_ms    <- system_priors
       pw_ms    <- power
 
@@ -888,7 +935,8 @@ make_log_posterior <- function(model, data, prior_spec, obs_vars = NULL,
             params     = params_list[[1L]],   # common params for obs equation
             obs_vars   = obs_vars,
             me_variance = mv_ms,
-            lik_init    = li_ms
+            lik_init    = li_ms,
+            collapse    = cl_ms
           ),
           error = function(e) {
             if (isTRUE(.dynhr_opt("debug_kf_errors", default = FALSE))) stop(e)
@@ -921,83 +969,45 @@ make_log_posterior <- function(model, data, prior_spec, obs_vars = NULL,
       !is.null(compiled$model$lead_lag_incidence))
     compiled$lead_lag_incidence <- compiled$model$lead_lag_incidence
 
-  sys_cache <- cache_system_structure(compiled)
+  ## ---- Gaussian (Kalman filter) branch ------------------------------------
+  ## An adapter over the shared closure builder (R/posterior-closure.R). The
+  ## per-draw skeleton -- prior + support check, .apply_theta_to_params, the
+  ## warm-started steady-state solve with its cold retry and reset-on-failure,
+  ## the once-per-closure me-floor latch, the system prior, the `power`
+  ## tempering and the -Inf early returns -- lives THERE, once, instead of in
+  ## twelve near-identical copies. Only the two things that are genuinely this
+  ## branch's own stay here: the solve (whose infeasibility handling has to
+  ## honour `infeasible_penalty` and the lik_init/shock_scale-aware
+  ## stationarity rule) and the filter call.
 
-  ## Warm-start cache for the steady-state solve. Consecutive MCMC proposals
-  ## are close in parameter space, so the previously converged steady state is
-  ## an excellent initial guess: Newton converges in a handful of iterations
-  ## and the expensive optim fallback is never triggered. For models with a
-  ## closed-form steady_state_model block this is a no-op (analytical path is
-  ## hit first); for numerically-solved models it is the dominant per-draw
-  ## saving (see inst/benchmarks/posterior.R). Per-closure state, so each
-  ## parallel chain keeps its own warm start.
-  ss_warm <- NULL
-  ## me-floor hazard guard (see R/pruned-state-space.R and kalman_filter()'s
-  ## me_floor_check arg): warn at most once per closure, not once per draw.
-  .me_floor_checked <- FALSE
-
-  function(theta) {
-    lp <- log_prior(theta, prior_spec)
-    if (!is.finite(lp))
-      return(list(logpost = -Inf, loglik = -Inf, logprior = lp))
-
-    params <- .apply_theta_to_params(model, theta)
-
-    ss_result <- solve_steady_state(model, compiled, params,
-                                    y0 = ss_warm, verbose = FALSE)
-    if (is.null(ss_result) || !isTRUE(ss_result$converged)) {
-      ## The warm guess may have been misleading (e.g. a large jump in the
-      ## proposal). Retry once from the cold initval-based guess before
-      ## declaring the draw infeasible.
-      if (!is.null(ss_warm))
-        ss_result <- solve_steady_state(model, compiled, params,
-                                        verbose = FALSE)
-      if (is.null(ss_result) || !isTRUE(ss_result$converged)) {
-        ss_warm <<- NULL
-        return(list(logpost = -Inf, loglik = -Inf, logprior = lp))
-      }
-    }
-    ss_warm <<- ss_result$ss
-
-    ## Re-derive any steady_state_model-computed parameter so the linearization
-    ## point uses the consistent (not stale) p_c (no-op for non-SSM-parameter
-    ## models). Without this the dynamic system is built at an invalid steady
-    ## state (F != 0) with the wrong p_c, silently biasing the loglik (Tier 13 #1).
-    params <- ss_result$params %||% params
-    sys <- extract_system_matrices_fast(sys_cache, ss_result$ss, params)
-    dr  <- .solve_from_system(sys, model, compiled, ss_result$ss, params, FALSE)
+  ## Solve hook: first-order decision rule + BK check + stationarity guard,
+  ## with the continuous infeasibility penalty when it is switched on.
+  .gaussian_solve <- function(model, compiled, sys_cache, ss, params, theta) {
+    sys <- extract_system_matrices_fast(sys_cache, ss, params)
+    dr  <- .solve_from_system(sys, model, compiled, ss, params, FALSE)
     if (is.null(dr) || !isTRUE(dr$bk_satisfied)) {
-      if (is.null(.penalty_cfg)) {
-        return(list(logpost = -Inf, loglik = -Inf, logprior = lp))
-      }
-      ## Penalty mode: measure BK violation as the number of excess unstable
-      ## roots beyond the Blanchard-Kahn rank condition.  The penalty is
-      ## monotone in the violation count so the optimizer is pushed back toward
-      ## feasibility.  loglik stays -Inf (correctness); only logpost carries the
+      if (is.null(.penalty_cfg)) return(NULL)
+      ## Penalty mode: measure the BK violation as the continuous distance of
+      ## the misclassified eigenvalues from the unit circle. The penalty is
+      ## monotone in it so the optimizer is pushed back toward feasibility.
+      ## loglik stays -Inf (correctness); only logpost carries the
       ## gradient-restoring penalty.
       bk_viol <- .bk_eigen_violation(dr, model)
-      logpost_pen <- .penalty_cfg$floor -
-        .penalty_cfg$scale * (1 + bk_viol)
-      return(list(logpost = logpost_pen, loglik = -Inf, logprior = lp,
-                  infeasible = TRUE, violation = bk_viol))
+      return(.posterior_reject(
+        logpost = .penalty_cfg$floor - .penalty_cfg$scale * (1 + bk_viol),
+        loglik  = -Inf,
+        extra   = list(infeasible = TRUE, violation = bk_viol)))
     }
 
     ## Stationarity guard. The stable generalized eigenvalues from the QZ
     ## solve ARE the eigenvalues of the state-transition block
     ## ghx[state_idx, ] (verified bit-equal to eigen(ghx_state) across the
-    ## model corpus to ~1e-13), so reuse them instead of a fresh O(n^3)
-    ## eigen() call (~100 us/draw on the feasible path). They are ordered
-    ## stable-first and, given bk_satisfied, n_stable == n_state. This is NOT
-    ## redundant with the BK check: the QZ select tolerance (1+1e-6) can admit
-    ## a near-unit root that makes the stationary (Lyapunov-initialised) Kalman
-    ## filter invalid, so we still reject |lambda| >= 1 here.
-    ns <- length(dr$state_idx)
-    ev <- dr$eigenvalues
-    spectral_radius <- if (!is.null(ev) && length(ev) >= ns)
-      max(Mod(ev[seq_len(ns)]))
-    else
-      max(Mod(eigen(dr$ghx[dr$state_idx, , drop = FALSE],
-                    only.values = TRUE)$values))
+    ## model corpus to ~1e-13), so .posterior_spectral_radius() reuses them
+    ## instead of a fresh O(n^3) eigen() call (~100 us/draw on the feasible
+    ## path). This is NOT redundant with the BK check: the QZ select tolerance
+    ## (1+1e-6) can admit a near-unit root that makes the stationary
+    ## (Lyapunov-initialised) Kalman filter invalid.
+    ##
     ## A unit root makes the stationary Lyapunov P0 invalid (NaN), but the
     ## exact-diffuse initialization handles it (Koopman-Durbin / DK 2012 ch.5).
     ## Mirror kalman_filter's lik_init resolution: "auto" switches to the
@@ -1009,82 +1019,71 @@ make_log_posterior <- function(model, data, prior_spec, obs_vars = NULL,
     ## correct (not silently-wrong) posterior. Exception: a diffuse phase is
     ## unsupported with heteroskedastic shock_scale (kalman_filter stop()s), so
     ## unit-root draws are still rejected in that case.
+    spectral_radius <- .posterior_spectral_radius(dr, reuse = TRUE)
     init_in_force <- if (identical(lik_init, "auto"))
       (if (spectral_radius > 1 - 1e-6) "diffuse" else "stationary")
     else lik_init
     if (spectral_radius >= 1 &&
         (identical(init_in_force, "stationary") || !is.null(shock_scale))) {
-      if (is.null(.penalty_cfg)) {
-        return(list(logpost = -Inf, loglik = -Inf, logprior = lp))
-      }
-      ## Penalty mode: violation = sum of how far each stable eigenvalue exceeds
-      ## 1 in modulus.  Continuous across the feasibility boundary (zero exactly
-      ## at |lambda| = 1); monotone — larger eigenvalues give a larger penalty.
+      if (is.null(.penalty_cfg)) return(NULL)
+      ## Penalty mode: violation = how far the spectral radius exceeds 1.
+      ## Continuous across the feasibility boundary (zero exactly at
+      ## |lambda| = 1); monotone -- larger eigenvalues give a larger penalty.
       viol <- if (is.finite(spectral_radius)) max(spectral_radius - 1, 0) else 1
-      logpost_pen <- .penalty_cfg$floor -
-        .penalty_cfg$scale * (1 + viol)
-      return(list(logpost = logpost_pen, loglik = -Inf, logprior = lp,
-                  infeasible = TRUE, violation = viol))
+      return(.posterior_reject(
+        logpost = .penalty_cfg$floor - .penalty_cfg$scale * (1 + viol),
+        loglik  = -Inf,
+        extra   = list(infeasible = TRUE, violation = viol)))
     }
 
-    ## MS-DSGE path: use Kim-Nelson filter when ms_spec is present.
-    ## The non-MS (default) path is bit-identical when ms_spec is NULL.
-    if (!is.null(ms_spec_ctx)) {
-      kf <- tryCatch(
-        ms_kim_filter(t(data), dr, model, params, obs_vars,
-                      ms_spec     = ms_spec_ctx,
-                      me_variance = me_variance,
-                      lik_init    = lik_init),
-        error = function(e) {
-          if (isTRUE(.dynhr_opt("debug_kf_errors", default = FALSE))) stop(e)
-          NULL  # infeasible draw -> -Inf (see the non-MS branch's note)
-        }
-      )
-    } else {
-      kf <- tryCatch(
-        kalman_filter(data, dr, model, params, obs_vars,
-                      return_filtered = FALSE, me_variance = me_variance,
-                      lik_init = lik_init, me_extra = me_extra,
-                      shock_scale = shock_scale,
-                      me_floor_check = !.me_floor_checked &&
-                        isTRUE(getOption("dynhr.me_floor_check", TRUE))),
-        error = function(e) {
-          ## Lyapunov / inv_sympd / other KF failures must not propagate: they
-          ## indicate an infeasible parameter draw (singular covariance, unit-root
-          ## with stationary init, etc.). Return NULL -> -Inf rather than crashing
-          ## the optimizer chain (RC1b fix). A genuine code bug is indistinguishable
-          ## from an infeasible draw here and would be silently masked as a rejected
-          ## draw; dynhr_set_options(debug_kf_errors = TRUE) RE-RAISES instead, so a
-          ## masked bug surfaces during debugging.
-          if (isTRUE(.dynhr_opt("debug_kf_errors", default = FALSE))) stop(e)
-          NULL
-        }
-      )
-      .me_floor_checked <<- TRUE   # guard once per closure, not per MCMC draw
-    }
-    if (is.null(kf) || !is.finite(kf$loglik))
-      return(list(logpost = -Inf, loglik = -Inf, logprior = lp))
-
-    ## System priors: penalty terms on model features (IRF signs, variance
-    ## shares, etc.). Evaluated once from the already-solved dr; no re-solve.
-    if (!is.null(system_priors)) {
-      sp_lp <- .eval_system_priors(
-        system_priors,
-        list(theta   = theta,
-             model   = model,
-             dr      = dr,
-             Sigma_e = .get_shock_cov(model, model$varexo_names, params),
-             params  = params))
-      if (!is.finite(sp_lp))
-        return(list(logpost = -Inf, loglik = kf$loglik, logprior = lp))
-      lp <- lp + sp_lp
-    }
-
-    ## `power` tempers only the logpost; $loglik carries the raw likelihood so
-    ## SMC tempering, marginal-likelihood estimators, and diagnostics see the
-    ## true likelihood unchanged.
-    list(logpost = power * kf$loglik + lp, loglik = kf$loglik, logprior = lp)
+    list(sys = sys, dr = dr)
   }
+
+  .make_posterior_closure(
+    model, data, prior_spec, obs_vars, compiled,
+    solve_fn = .gaussian_solve,
+    loglik_fn = function(sol, params, ss, theta, me_floor_check, ...) {
+      ## MS-DSGE path: use the Kim-Nelson filter when ms_spec is present.
+      ## The non-MS (default) path is bit-identical when ms_spec is NULL.
+      kf <- if (!is.null(ms_spec_ctx)) {
+        tryCatch(
+          ms_kim_filter(t(data), sol$dr, model, params, obs_vars,
+                        ms_spec     = ms_spec_ctx,
+                        me_variance = me_variance,
+                        lik_init    = lik_init,
+                        collapse    = ms_collapse_ctx),
+          error = function(e) {
+            if (isTRUE(.dynhr_opt("debug_kf_errors", default = FALSE))) stop(e)
+            NULL  # infeasible draw -> -Inf (see the non-MS branch's note)
+          }
+        )
+      } else {
+        tryCatch(
+          kalman_filter(data, sol$dr, model, params, obs_vars,
+                        return_filtered = FALSE, me_variance = me_variance,
+                        lik_init = lik_init, me_extra = me_extra,
+                        shock_scale = shock_scale,
+                        me_floor_check = me_floor_check),
+          error = function(e) {
+            ## Lyapunov / inv_sympd / other KF failures must not propagate: they
+            ## indicate an infeasible parameter draw (singular covariance,
+            ## unit-root with stationary init, etc.). Return NULL -> -Inf rather
+            ## than crashing the optimizer chain (RC1b fix). A genuine code bug
+            ## is indistinguishable from an infeasible draw here and would be
+            ## silently masked as a rejected draw;
+            ## dynhr_set_options(debug_kf_errors = TRUE) RE-RAISES instead, so a
+            ## masked bug surfaces during debugging.
+            if (isTRUE(.dynhr_opt("debug_kf_errors", default = FALSE))) stop(e)
+            NULL
+          }
+        )
+      }
+      if (is.null(kf) || !is.finite(kf$loglik)) return(NULL)
+      list(loglik = kf$loglik)
+    },
+    power             = power,
+    system_prior      = system_priors,
+    system_prior_mode = "lp")
 }
 
 #' Build a per-period log-likelihood-contribution closure
@@ -1223,36 +1222,4 @@ make_loglik_contrib <- function(model, data, prior_spec = NULL, obs_vars = NULL,
 
     kf$loglik_contrib
   }
-}
-
-#' Print posterior summary table
-#' @noRd
-print_posterior <- function(mcmc, prior_spec) {
-  chain <- mcmc$chain
-  cat("\nPOSTERIOR SUMMARY\n")
-  cat(strrep("-", 80), "\n")
-  cat(sprintf("%-15s %10s %10s %10s %10s %10s\n",
-              "Parameter", "Prior Mean", "Post Mean", "Post Median", "5%", "95%"))
-  cat(strrep("-", 80), "\n")
-  for (i in seq_len(ncol(chain))) {
-    nm      <- colnames(chain)[i]
-    pr_mean <- prior_spec$mean[prior_spec$name == nm]
-    if (length(pr_mean) == 0) pr_mean <- NA
-    x <- chain[, i]
-    cat(sprintf("%-15s %10.4f %10.4f %10.4f %10.4f %10.4f\n",
-                nm, pr_mean, mean(x), median(x),
-                quantile(x, 0.05), quantile(x, 0.95)))
-  }
-  cat(strrep("-", 80), "\n")
-}
-
-#' @noRd
-print.EstimationResult <- function(x, ...) {
-  cat("=== DSGE Estimation Result ===\n")
-  cat("Observed vars:   ", paste(x$obs_vars, collapse = ", "), "\n")
-  cat("Estimated params:", ncol(x$mcmc$chain), "\n")
-  cat("MCMC draws:      ", x$mcmc$n_draws, "(burn-in:", x$mcmc$n_burn, ")\n")
-  cat("Acceptance rate: ", sprintf("%.1f%%", x$mcmc$acceptance_rate * 100), "\n")
-  cat("==============================\n")
-  invisible(x)
 }

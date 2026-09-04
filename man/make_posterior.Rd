@@ -52,6 +52,23 @@ parameter vector \eqn{\theta}, caching the model structure to avoid
 recompilation on each call.  Call this once before \code{\link{mcmc}},
 \code{\link{smc}}, or \code{\link{nuts}}.
 }
+\examples{
+## Model and data both ship with the package
+model    <- parse_mod(system.file("extdata/models/nk_demo.mod",
+                                  package = "dynhr"), verbose = FALSE)
+compiled <- compile_model(model, verbose = FALSE)
+priors   <- prior_spec(model)
+obs_vars <- c("ygr", "infl", "intr")
+Y <- as.matrix(read.csv(system.file("extdata/models/nk_demo_data.csv",
+                                    package = "dynhr"))[, obs_vars])
+
+log_post <- make_posterior(model, data = Y, prior_spec = priors,
+                           obs_vars = obs_vars, compiled = compiled)
+
+theta0 <- setNames(priors$mean, priors$name)
+str(log_post(theta0))
+}
 \seealso{
-\code{\link{prior_spec}}, \code{\link{find_mode}}, \code{\link{mcmc}}
+\code{\link{prior_spec}}, \code{\link{find_mode}}, \code{\link{mcmc}},
+  \code{\link{dm_posterior}} (the pipeline-object equivalent)
 }

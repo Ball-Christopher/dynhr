@@ -109,8 +109,8 @@ kalman_ss_loop_cpp <- function(Y_minus_d, ZZ, TT, K_ss, F_inv_ss, ll_ss_const, s
     .Call(`_dynhr_kalman_ss_loop_cpp`, Y_minus_d, ZZ, TT, K_ss, F_inv_ss, ll_ss_const, s, start_t, end_t, return_filtered)
 }
 
-kalman_standard_loop_cpp <- function(Y_minus_d, ZZ, TT, RR, DD, HH_full, Sigma_e, SS, P, ll_const, ss_tol, ll_min, return_filtered) {
-    .Call(`_dynhr_kalman_standard_loop_cpp`, Y_minus_d, ZZ, TT, RR, DD, HH_full, Sigma_e, SS, P, ll_const, ss_tol, ll_min, return_filtered)
+kalman_standard_loop_cpp <- function(Y_minus_d, ZZ, TT, RR, DD, HH_full, Sigma_e, SS, P, ll_const, ss_tol, ll_min, return_filtered, me_diag_vec) {
+    .Call(`_dynhr_kalman_standard_loop_cpp`, Y_minus_d, ZZ, TT, RR, DD, HH_full, Sigma_e, SS, P, ll_const, ss_tol, ll_min, return_filtered, me_diag_vec)
 }
 
 kalman_univariate_loop_cpp <- function(Y_minus_d, Zb, Tb, QQb, a, P_star, P_inf, me_variance, kalman_tol, diffuse_tol, conv_tol, max_diffuse, ll_min, return_filtered, n_state, ss_lock) {
@@ -178,8 +178,8 @@ tpf_propagate_particles <- function(particles, shocks, hx, hu, hxx, hxu, huu, hs
     .Call(`_dynhr_tpf_propagate_particles`, particles, shocks, hx, hu, hxx, hxu, huu, hss)
 }
 
-tpf_run_period_cpp <- function(particles, y_t, L_e, hx, hu, hxx, hxu, huu, hss, ZZ, DD, d_obs, ghss_obs, hxx_obs, hxu_obs, huu_obs, me_variance, ess_target, n_mh, mh_scale, max_stages, U_normals = NULL, U_resample = NULL, U_mid = NULL, U_mutation = NULL) {
-    .Call(`_dynhr_tpf_run_period_cpp`, particles, y_t, L_e, hx, hu, hxx, hxu, huu, hss, ZZ, DD, d_obs, ghss_obs, hxx_obs, hxu_obs, huu_obs, me_variance, ess_target, n_mh, mh_scale, max_stages, U_normals, U_resample, U_mid, U_mutation)
+tpf_run_period_cpp <- function(particles, y_t, L_e, hx, hu, hxx, hxu, huu, hss, ZZ, DD, d_obs, ghss_obs, hxx_obs, hxu_obs, huu_obs, me_variance, ess_target, n_mh, max_stages, U_normals = NULL, U_resample = NULL, U_mid = NULL, U_mutation = NULL) {
+    .Call(`_dynhr_tpf_run_period_cpp`, particles, y_t, L_e, hx, hu, hxx, hxu, huu, hss, ZZ, DD, d_obs, ghss_obs, hxx_obs, hxu_obs, huu_obs, me_variance, ess_target, n_mh, max_stages, U_normals, U_resample, U_mid, U_mutation)
 }
 
 tpf_log_weights <- function(particles, y_t, ZZ, DD, shocks, d_obs, ghss_obs, me_variance, phi) {

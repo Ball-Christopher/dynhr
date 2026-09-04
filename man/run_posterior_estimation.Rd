@@ -7,11 +7,11 @@
 run_posterior_estimation(
   mode_result,
   methods = c("RWMH"),
-  nburn = 5000L,
-  ndraws = 20000L,
-  nchains = 4L,
-  nparticles = 2000L,
-  nwalkers = NULL,
+  n_warmup = 5000L,
+  n_draws = 20000L,
+  n_chains = 4L,
+  n_particles = 2000L,
+  n_walkers = NULL,
   parallel = FALSE,
   parallel_backend = "mirai",
   n_cores = NULL,
@@ -40,19 +40,19 @@ run_posterior_estimation(
 \code{"RWMH"}, \code{"HMC"}, \code{"NUTS"}, \code{"SMC"}.
 Default \code{c("RWMH")}.}
 
-\item{nburn}{Burn-in / warmup draws per method. Recycled to
+\item{n_warmup}{Burn-in / warmup draws per method. Recycled to
 \code{length(methods)}.  Default \code{5000}.}
 
-\item{ndraws}{Post-warmup draws to retain per method. Recycled.
+\item{n_draws}{Post-warmup draws to retain per method. Recycled.
 Default \code{20000}.}
 
-\item{nchains}{Number of MCMC chains per method (for RWMH). Recycled.
+\item{n_chains}{Number of MCMC chains per method (for RWMH). Recycled.
 Default \code{4}.}
 
-\item{nparticles}{Number of SMC particles (only for \code{"SMC"}).
+\item{n_particles}{Number of SMC particles (only for \code{"SMC"}).
 Recycled.  Default \code{2000}.}
 
-\item{nwalkers}{Number of ensemble walkers for the DIME sampler
+\item{n_walkers}{Number of ensemble walkers for the DIME sampler
 (\code{NULL} = \code{max(5 * n_par, 20)}).  Ignored for all other
 samplers.}
 
@@ -69,7 +69,7 @@ results instead ship the already-built log-posterior closure once via
 (default).}
 
 \item{n_cores}{Worker (daemon) count when \code{parallel = TRUE}
-(\code{NULL} = auto-detect, capped at \code{nchains}).}
+(\code{NULL} = auto-detect, capped at \code{n_chains}).}
 
 \item{analytic_grad}{For \code{"NUTS"} on a standard Gaussian model, use the
 exact analytic gradient (\code{\link{make_posterior_grad}}) instead of a
@@ -159,14 +159,14 @@ restartable sampling. Supported for \code{"RWMH"}, \code{"NUTS"},
 mirai path for RWMH and NUTS). When set, each chain streams its draws to
 per-chain files (\code{chain_<id>.draws} / \code{.lp} / \code{.state.rds}) in
 flush-sized chunks, so RAM during sampling is bounded by the flush window
-rather than \code{ndraws * n_par}, and a restart state is saved after each
+rather than \code{n_draws * n_par}, and a restart state is saved after each
 flush. The files are per-chain, so parallel chains never collide. Flush size
 is set via \code{dynhr_set_options(checkpoint_flush_every = ...)} (default 1000).}
 
 \item{resume}{When \code{TRUE} and \code{checkpoint_dir} points at a prior
 run, continue each chain from its saved state -- RNG, position, scale and
 proposal covariance are restored exactly, so the continuation is identical
-to a single longer run -- adding \code{ndraws} more retained draws. The
+to a single longer run -- adding \code{n_draws} more retained draws. The
 saved model / prior / parameter configuration must match (it is enforced).}
 
 \item{verbose}{Print progress messages.}
@@ -214,13 +214,13 @@ mod  <- solve_model("my_model.mod")
 mode <- run_mode_finding(mod, data, obs_vars = c("y", "pi", "r"))
 
 # Single method
-post <- run_posterior_estimation(mode, methods = "RWMH", ndraws = 50000)
+post <- run_posterior_estimation(mode, methods = "RWMH", n_draws = 50000)
 
 # Multi-method dispatch
 post <- run_posterior_estimation(mode,
   methods = c("RWMH", "HMC", "NUTS", "RWMH"),
-  nburn   = c(10000,  1000,  500,    500),
-  ndraws  = 50000)
+  n_warmup = c(10000,  1000,  500,    500),
+  n_draws  = 50000)
 }
 
 }

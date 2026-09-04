@@ -5,7 +5,7 @@
 \title{Piecewise Kalman Filter with per-period inner convergence (GPR 2021)}
 \usage{
 kalman_filter_obc_pkf(
-  Y,
+  data,
   dr_slack,
   regime_cache,
   sys,
@@ -24,7 +24,7 @@ kalman_filter_obc_pkf(
 )
 }
 \arguments{
-\item{Y}{n_obs x T observation matrix}
+\item{data}{n_obs x T observation matrix}
 
 \item{dr_slack}{Slack-regime DecisionRules}
 

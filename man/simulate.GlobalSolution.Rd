@@ -22,5 +22,24 @@ Defaults to steady state.}
 A matrix of size \code{nsim x n_endo} with simulated paths.
 }
 \description{
-Stochastic simulation from the global policy function
+Period \eqn{t} draws \eqn{eps_t}, feeds it into the state lag through the
+solver's own AR(1) injection (\code{compute_next_lag()}), and evaluates
+the policy:
+\deqn{y_t = policy(s_{t-1} + \psi \epsilon_t / \rho), \quad
+      s_t = y_t[state\_names].}
+}
+\details{
+\strong{Timing (changed in F1-C).}  This is the timing
+\code{make_log_posterior_global_pf()}'s particle filter uses, and the two
+now agree period-for-period.  Previously the shock drawn in period
+\eqn{t} was applied to the state lag entering period \eqn{t+1}, which
+made the FIRST returned row deterministic (the shock-free policy value at
+\code{init_state}) and dropped the last drawn shock entirely: the old
+output's row \eqn{t+1} equals the new output's row \eqn{t}.  Any use that
+relied on a zero-shock first period must now drop it explicitly.
+
+\code{init_state} defaults to the steady state -- a COLD start.  For a
+draw from the model's stationary distribution, either discard a burn-in
+or pass an \code{init_state} drawn from the stationary state covariance
+(what the particle filter initialises its cloud with).
 }

@@ -10,7 +10,9 @@
 #include <functional>
 #include <atomic>
 #include <barrier>
+#include <exception>
 #include <memory>
+#include <mutex>
 #include <thread>
 #include <string>
 #include <vector>
@@ -586,41 +588,149 @@ static void egm3_expect(const double* Vd, const double* Vf, const double* Va,
   }
 }
 
+// Shared failure channel for the triple loop. Codes: 0 ok, 1 non-monotone
+// endogenous grid, 2 no valid active-set candidate, 3 a C++ exception escaped
+// the task body (bad_alloc from the per-worker scratch, an Armadillo
+// logic_error, ...). Code 3 exists because an exception that leaves a
+// std::thread body calls std::terminate -- the R session dies with no error at
+// all -- and because Rcpp::stop() from a worker would be worse still: R's
+// error mechanism longjmps, which is undefined behaviour off the main thread.
+namespace {
+struct Egm3Err {
+  std::atomic<int> code;
+  std::atomic<std::size_t> task;
+  std::mutex mu;
+  std::string what;                 // populated only for code 3
+  Egm3Err() : code(0), task(0) {}
+  void set(int c, std::size_t t) {
+    int expect = 0;
+    if (code.compare_exchange_strong(expect, c)) task.store(t);
+  }
+  void set_exception(const char* w, std::size_t t) {
+    try {
+      std::lock_guard<std::mutex> lk(mu);
+      int expect = 0;
+      if (code.compare_exchange_strong(expect, 3)) { task.store(t); what = w; }
+    } catch (...) {
+      set(3, t);                    // even copying the message can fail
+    }
+  }
+};
+}
+
 // The triple loop over a contiguous task range. Shared by the per-call
 // spawn path (hank_egm3_step_cpp) and the persistent pool (Egm3Pool): each
 // task writes a disjoint pidx3(e, ., f0, a0) slice, so output is bit-identical
 // for ANY partition of [0, ntask) and any thread count. First failure wins;
 // the losers' codes are discarded, which is fine because any one of them is
 // enough to abort the step.
+//
+// NOTHING may propagate out of here: this body IS a std::thread's entry point.
 static void egm3_run_tasks(const Egm3Ctx& X, std::size_t lo_t, std::size_t hi_t,
-                           std::atomic<int>& err,
-                           std::atomic<std::size_t>& err_task) {
-  const int nd=X.nd,nf=X.nf,na=X.na;
-  std::vector<double> de(nd),fe(nd),ae(nd),ce(nd);   // per-worker scratch
-  for(std::size_t t=lo_t;t<hi_t;++t){
-    if(err.load(std::memory_order_relaxed)) return;  // abandon early
-    const int a0=(int)(t%(std::size_t)na);
-    const int f0=(int)((t/(std::size_t)na)%(std::size_t)nf);
-    const int e=(int)(t/((std::size_t)na*(std::size_t)nf));
-    const int s=egm3_triple(X,e,f0,a0,de,fe,ae,ce);
-    if(s){int expect=0;
-      if(err.compare_exchange_strong(expect,s)) err_task.store(t);
-      return;}
+                           Egm3Err& err) {
+  std::size_t t = lo_t;
+  try {
+    const int nd=X.nd,nf=X.nf,na=X.na;
+    std::vector<double> de(nd),fe(nd),ae(nd),ce(nd);   // per-worker scratch
+    for(;t<hi_t;++t){
+      if(err.code.load(std::memory_order_relaxed)) return;  // abandon early
+      const int a0=(int)(t%(std::size_t)na);
+      const int f0=(int)((t/(std::size_t)na)%(std::size_t)nf);
+      const int e=(int)(t/((std::size_t)na*(std::size_t)nf));
+      const int s=egm3_triple(X,e,f0,a0,de,fe,ae,ce);
+      if(s){err.set(s,t);return;}
+    }
+  } catch (const std::exception& e) {
+    err.set_exception(e.what(), t);
+  } catch (...) {
+    err.set_exception("unknown C++ exception", t);
   }
 }
 
 // Errors are raised on the MAIN thread, after every worker has joined. The
 // message text is the step's regardless of which entry point ran it, so the
 // fused sweep fails exactly like the per-step R loop it replaces.
-static void egm3_raise(int e_code, std::size_t t, int nf, int na) {
+static void egm3_raise(const Egm3Err& err, int nf, int na) {
+  const int e_code = err.code.load();
+  const std::size_t t = err.task.load();
   const int a0=(int)(t%(std::size_t)na);
   const int f0=(int)((t/(std::size_t)na)%(std::size_t)nf);
   const int e=(int)(t/((std::size_t)na*(std::size_t)nf));
   if(e_code==1)
     stop("hank_egm3_step_cpp: non-monotone endogenous liquid grid at "
          "(e=%d, f=%d, a=%d)",e+1,f0+1,a0+1);
+  if(e_code==3)
+    stop("hank_egm3_step_cpp: worker thread failed at "
+         "(e=%d, f=%d, a=%d): %s",e+1,f0+1,a0+1,
+         err.what.empty() ? "C++ exception" : err.what.c_str());
   stop("hank_egm3_step_cpp: no active-set candidate satisfies joint KKT "
        "conditions at (e=%d, f=%d, a=%d)",e+1,f0+1,a0+1);
+}
+
+// Input-shape validation (B4). `dim(Vd)` used to be read with no check at all:
+// a Vd whose dim attribute had been dropped by an R-level drop()/as.vector()
+// yielded a zero-length IntegerVector, and dm[0..3] read four ints off the end
+// of it -- garbage extents, then out-of-bounds reads over every grid. Every
+// extent is checked against the grid lengths here, and the message names the
+// offending argument and the shape it must have. Mirrored in R by
+// .hank_egm3_step() (R/hank-egm3.R).
+static void egm3_check_shapes(const char* fn,
+                              const NumericVector& Vd, const NumericVector& Vf,
+                              const NumericVector& Va, const NumericVector& dg,
+                              const NumericVector& fg, const NumericVector& ag,
+                              const NumericVector& y, const NumericMatrix& Pi,
+                              int* ne_o, int* nd_o, int* nf_o, int* na_o) {
+  RObject dim_attr = Vd.attr("dim");
+  if (dim_attr.isNULL())
+    stop("%s: `Vd` must be a four-dimensional array "
+         "(n_e x n_d x n_f x n_a); it has no `dim` attribute.", fn);
+  IntegerVector dm(dim_attr);
+  if (dm.size() != 4)
+    stop("%s: `Vd` must be a four-dimensional array "
+         "(n_e x n_d x n_f x n_a); dim(Vd) has length %d.",
+         fn, (int)dm.size());
+  const int ne = dm[0], nd = dm[1], nf = dm[2], na = dm[3];
+  if (ne < 1 || nd < 1 || nf < 1 || na < 1)
+    stop("%s: every dimension of `Vd` must be >= 1; got %d x %d x %d x %d.",
+         fn, ne, nd, nf, na);
+  if (Pi.nrow() != ne || Pi.ncol() != ne)
+    stop("%s: `Pi` must be n_e x n_e = %d x %d (n_e = dim(Vd)[1]); "
+         "got %d x %d.", fn, ne, ne, (int)Pi.nrow(), (int)Pi.ncol());
+  if (y.size() != ne)
+    stop("%s: `y` must have length n_e = %d (= dim(Vd)[1]); got %d.",
+         fn, ne, (int)y.size());
+  if (dg.size() != nd)
+    stop("%s: `dg` must have length n_d = %d (= dim(Vd)[2]); got %d.",
+         fn, nd, (int)dg.size());
+  if (fg.size() != nf)
+    stop("%s: `fg` must have length n_f = %d (= dim(Vd)[3]); got %d.",
+         fn, nf, (int)fg.size());
+  if (ag.size() != na)
+    stop("%s: `ag` must have length n_a = %d (= dim(Vd)[4]); got %d.",
+         fn, na, (int)ag.size());
+  if (nf < 2 || na < 2)
+    stop("%s: the compiled kernel interpolates between grid points, so "
+         "`fg` and `ag` need at least 2 entries each; got n_f = %d, "
+         "n_a = %d.", fn, nf, na);
+  const R_xlen_t N = (R_xlen_t)ne * nd * nf * na;
+  if (Vf.size() != N)
+    stop("%s: `Vf` must have length n_e*n_d*n_f*n_a = %d (the length of "
+         "`Vd`); got %d.", fn, (int)N, (int)Vf.size());
+  if (Va.size() != N)
+    stop("%s: `Va` must have length n_e*n_d*n_f*n_a = %d (the length of "
+         "`Vd`); got %d.", fn, (int)N, (int)Va.size());
+  *ne_o = ne; *nd_o = nd; *nf_o = nf; *na_o = na;
+}
+
+// Worker count actually usable: never more tasks than exist, never more OS
+// threads than the machine can run (the triple loop is compute-bound and the
+// output is thread-count-invariant by construction, so this clamp cannot
+// change a single bit), never fewer than 1.
+static inline int egm3_nthreads(int threads, std::size_t ntask) {
+  int n = std::max(1, std::min(threads, (int)ntask));
+  const unsigned hc = std::thread::hardware_concurrency();
+  if (hc > 0u && n > (int)hc) n = (int)hc;
+  return n < 1 ? 1 : n;
 }
 
 // One compiled three-asset EGM backward step. The R implementation remains
@@ -637,10 +747,14 @@ List hank_egm3_step_cpp(NumericVector Vd_, NumericVector Vf_, NumericVector Va_,
                         double ra, double beta, double eis, double chi0,
                         double chi1, double chi2, double phi0, double phi1,
                         double phi2, double px = 1.0, int threads = 1) {
-  IntegerVector dm=Vd_.attr("dim");
-  const int ne=dm[0],nd=dm[1],nf=dm[2],na=dm[3];
+  int ne, nd, nf, na;
+  egm3_check_shapes("hank_egm3_step_cpp", Vd_, Vf_, Va_, dg_, fg_, ag_, y_,
+                    Pi_, &ne, &nd, &nf, &na);
   const std::size_t N=(std::size_t)ne*nd*nf*na;
   const double *dg=dg_.begin(),*fg=fg_.begin(),*ag=ag_.begin(),*y=y_.begin();
+  // SERIAL: no worker exists yet, so the longjmp-free throw this raises can
+  // only unwind main-thread frames.
+  Rcpp::checkUserInterrupt();
   std::vector<double> Ed(N),Ef(N),Ea(N);
   egm3_expect(Vd_.begin(),Vf_.begin(),Va_.begin(),Pi_.begin(),
               ne,nd,nf,na,Ed.data(),Ef.data(),Ea.data());
@@ -652,27 +766,36 @@ List hank_egm3_step_cpp(NumericVector Vd_, NumericVector Vf_, NumericVector Va_,
             Vdn.begin(),Vfn.begin(),Van.begin()};
 
   const std::size_t ntask=(std::size_t)ne*nf*na;
-  const int nthr=std::max(1,std::min(threads,(int)ntask));
-  std::atomic<int> err(0); std::atomic<std::size_t> err_task(0);
+  const int nthr=egm3_nthreads(threads,ntask);
+  Egm3Err err;
 
   if(nthr<=1){
-    egm3_run_tasks(X,0,ntask,err,err_task);
+    egm3_run_tasks(X,0,ntask,err);
   } else {
     std::vector<std::thread> pool; pool.reserve(nthr-1);
     const std::size_t chunk=(ntask+nthr-1)/nthr;
-    for(int k=1;k<nthr;++k){
-      const std::size_t lo_t=std::min(ntask,(std::size_t)k*chunk);
-      const std::size_t hi_t=std::min(ntask,lo_t+chunk);
-      if(lo_t<hi_t)
-        pool.emplace_back([&X,lo_t,hi_t,&err,&err_task]{
-          egm3_run_tasks(X,lo_t,hi_t,err,err_task);});
+    // Exception-safe spawn: if the k-th thread cannot be created, the ones
+    // already running must be told to stop and JOINED before `pool` is
+    // destroyed -- ~std::vector<std::thread> on a joinable thread calls
+    // std::terminate, i.e. kills the R session.
+    try {
+      for(int k=1;k<nthr;++k){
+        const std::size_t lo_t=std::min(ntask,(std::size_t)k*chunk);
+        const std::size_t hi_t=std::min(ntask,lo_t+chunk);
+        if(lo_t<hi_t)
+          pool.emplace_back([&X,lo_t,hi_t,&err]{
+            egm3_run_tasks(X,lo_t,hi_t,err);});
+      }
+    } catch (...) {
+      err.set(3,0);                     // makes the live workers abandon early
+      for(auto& th: pool) if(th.joinable()) th.join();
+      throw;
     }
-    egm3_run_tasks(X,0,std::min(ntask,chunk),err,err_task); // main takes chunk 0
+    egm3_run_tasks(X,0,std::min(ntask,chunk),err); // main takes chunk 0
     for(auto& th: pool) th.join();
   }
 
-  const int e_code=err.load();
-  if(e_code) egm3_raise(e_code,err_task.load(),nf,na);
+  if(err.code.load()) egm3_raise(err,nf,na);
 
   IntegerVector dims=IntegerVector::create(ne,nd,nf,na);for(auto v:{D,F,A,C,Chi,Phi,Vdn,Vfn,Van})v.attr("dim")=dims;
   return List::create(_["d"]=D,_["f"]=F,_["a"]=A,_["c"]=C,_["chi"]=Chi,_["phi"]=Phi,
@@ -705,6 +828,12 @@ List hank_egm3_solve_cpp(NumericVector Vd, NumericVector Vf, NumericVector Va,
   // return, and the caller's initial values really are unusable.
   std::string step_error; int step_status=0;
   for(it=1;it<=maxit;++it){
+    // SERIAL section of the outer iteration: hank_egm3_step_cpp spawns and
+    // joins its pool inside the call, so no worker is alive at this point and
+    // the interrupt's C++ throw can only unwind main-thread frames. Placed
+    // BEFORE the try so the step's own catch cannot swallow it (Rcpp's
+    // InterruptedException does not derive from std::exception either).
+    Rcpp::checkUserInterrupt();
     try {
       step=hank_egm3_step_cpp(Vd,Vf,Va,dg,fg,ag,y,Pi,rd,rf,ra,beta,eis,
                               chi0,chi1,chi2,phi0,phi1,phi2,px,threads);
@@ -751,19 +880,27 @@ List hank_egm3_solve_cpp(NumericVector Vd, NumericVector Vf, NumericVector Va,
 // (disjoint writes, no cross-thread reductions).
 class Egm3Pool {
  public:
-  Egm3Pool(const Egm3Ctx* ctx, std::size_t ntask, int nthr,
-           std::atomic<int>* err, std::atomic<std::size_t>* err_task)
+  Egm3Pool(const Egm3Ctx* ctx, std::size_t ntask, int nthr, Egm3Err* err)
     : ctx_(ctx), ntask_(ntask), nthr_(nthr),
-      chunk_((ntask + nthr - 1) / nthr), err_(err), err_task_(err_task),
-      bar_((std::ptrdiff_t)nthr), done_(false) {
+      chunk_((ntask + nthr - 1) / nthr), err_(err),
+      bar_((std::ptrdiff_t)nthr), done_(false), joined_(false) {
     pool_.reserve(nthr - 1);
-    for (int w = 1; w < nthr; ++w)
-      pool_.emplace_back([this, w] { this->worker(w); });
+    try {
+      for (int w = 1; w < nthr; ++w)
+        pool_.emplace_back([this, w] { this->worker(w); });
+    } catch (...) {
+      // The workers already created are parked at the top barrier and
+      // ~std::vector<std::thread> would call std::terminate on them. Release
+      // and join them first, THEN rethrow -- the destructor never runs for an
+      // object whose constructor threw.
+      shutdown();
+      throw;
+    }
   }
   // Run one backward step's triple loop. The caller must have refilled the
   // context's Ed/Ef/Ea slabs first (egm3_expect, main thread).
   void run_step() {
-    err_->store(0);                  // workers are parked; no race with this
+    err_->code.store(0);             // workers are parked; no race with this
     bar_.arrive_and_wait();          // release the workers into the tasks
     run_chunk(0);                    // main thread takes chunk 0
     bar_.arrive_and_wait();          // workers park at the top barrier again
@@ -771,11 +908,7 @@ class Egm3Pool {
   // Releases and joins the workers. Runs on the normal path AND during stack
   // unwinding if the main thread throws between steps (egm3_raise), so a
   // worker can never outlive the buffers it points at.
-  ~Egm3Pool() {
-    done_.store(true, std::memory_order_release);
-    bar_.arrive_and_wait();
-    for (auto& t : pool_) t.join();
-  }
+  ~Egm3Pool() { shutdown(); }
   Egm3Pool(const Egm3Pool&) = delete;
   Egm3Pool& operator=(const Egm3Pool&) = delete;
 
@@ -783,7 +916,21 @@ class Egm3Pool {
   void run_chunk(int w) {
     const std::size_t lo = std::min(ntask_, (std::size_t)w * chunk_);
     const std::size_t hi = std::min(ntask_, lo + chunk_);
-    if (lo < hi) egm3_run_tasks(*ctx_, lo, hi, *err_, *err_task_);
+    // egm3_run_tasks swallows every exception into err_ (code 3); nothing can
+    // propagate out of a worker body from here.
+    if (lo < hi) egm3_run_tasks(*ctx_, lo, hi, *err_);
+  }
+  // Idempotent: the constructor's failure path and the destructor both call
+  // it. Participants that were never created are DROPPED, or the barrier waits
+  // forever for arrivals that can never come.
+  void shutdown() {
+    if (joined_) return;
+    joined_ = true;
+    done_.store(true, std::memory_order_release);
+    for (std::size_t k = pool_.size() + 1; k < (std::size_t)nthr_; ++k)
+      bar_.arrive_and_drop();
+    bar_.arrive_and_wait();
+    for (auto& t : pool_) t.join();
   }
   void worker(int w) {
     for (;;) {
@@ -797,10 +944,10 @@ class Egm3Pool {
   std::size_t ntask_;
   int nthr_;
   std::size_t chunk_;
-  std::atomic<int>* err_;
-  std::atomic<std::size_t>* err_task_;
+  Egm3Err* err_;
   std::barrier<> bar_;
   std::atomic<bool> done_;
+  bool joined_;
   std::vector<std::thread> pool_;
 };
 
@@ -917,21 +1064,19 @@ List hank_curly_sweep3_cpp(NumericVector Vd_ss_, NumericVector Vf_ss_,
             Vdn.data(), Vfn.data(), Van.data()};
 
   const std::size_t ntask = (std::size_t)ne * nf * na;
-  const int nthr = std::max(1, std::min(threads, (int)ntask));
-  std::atomic<int> err(0); std::atomic<std::size_t> err_task(0);
+  const int nthr = egm3_nthreads(threads, ntask);
+  Egm3Err err;
   // Spawned ONCE, held across all dates and both legs -- the whole point.
   std::unique_ptr<Egm3Pool> pool;
-  if (nthr > 1) pool.reset(new Egm3Pool(&X, ntask, nthr, &err, &err_task));
+  if (nthr > 1) pool.reset(new Egm3Pool(&X, ntask, nthr, &err));
   auto run_leg = [&](const double* vd, const double* vf, const double* va) {
     egm3_expect(vd, vf, va, Pi_.begin(), ne, nd, nf, na,
                 Ed.data(), Ef.data(), Ea.data());
     if (pool) { pool->run_step(); }
-    else { err.store(0); egm3_run_tasks(X, 0, ntask, err, err_task); }
-    const int e_code = err.load();
-    if (e_code) {
-      const std::size_t t = err_task.load();
+    else { err.code.store(0); egm3_run_tasks(X, 0, ntask, err); }
+    if (err.code.load()) {
       pool.reset();                   // join before longjmp-ing out
-      egm3_raise(e_code, t, nf, na);
+      egm3_raise(err, nf, na);
     }
   };
 
@@ -940,6 +1085,11 @@ List hank_curly_sweep3_cpp(NumericVector Vd_ss_, NumericVector Vf_ss_,
   for (int k = 0; k < 6; ++k) if (want[k]) cy[k] = NumericVector(S);
 
   for (int s = 0; s < S; ++s) {
+    // SERIAL section of the date loop: the workers are parked at the top
+    // barrier, so this R-API call (and the C++ throw it raises, which unwinds
+    // through `pool`'s unique_ptr and JOINS them) is safe here and nowhere
+    // inside a leg.
+    Rcpp::checkUserInterrupt();
     // One SHARED scale for all three marginal values: they describe a single
     // perturbation direction, and scaling them separately would change it.
     const double h = delta_v / egm3_sweep_scale(dVd.data(), dVf.data(),

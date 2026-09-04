@@ -7,9 +7,9 @@
 hank_mixture_simulate(
   model,
   shock_specs,
-  observables = c("C", "K"),
+  obs_vars = c("C", "K"),
   T_data,
-  me_var,
+  me_variance,
   seed = NULL,
   q = NULL
 )
@@ -21,12 +21,12 @@ output).}
 \item{shock_specs}{Named list, one entry per \code{model$exogenous} shock
 (see \code{\link{hank_state_space}}).}
 
-\item{observables}{Character vector of observable names (default
+\item{obs_vars}{Character vector of observable names (default
 \code{c("C","K")}).}
 
 \item{T_data}{Integer: length of the simulated series.}
 
-\item{me_var}{Measurement-error variance added to every observable
+\item{me_variance}{Measurement-error variance added to every observable
 (independently at every date); use \code{0} for a noiseless simulation.}
 
 \item{seed}{Optional RNG seed (via \code{set.seed()}) for reproducibility;
@@ -37,7 +37,7 @@ if \code{NULL}, the caller's current RNG stream is used unmodified.}
 }
 \value{
 A \code{T_data x length(observables)} numeric matrix (columns named
-  by \code{observables}), demeaned (see Details), finite, and reproducible
+  by \code{obs_vars}), demeaned (see Details), finite, and reproducible
   given the same \code{seed}.
 }
 \description{

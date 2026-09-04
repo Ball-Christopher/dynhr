@@ -2,46 +2,49 @@
 ## --------------------------------------------------------------------------
 ## Phase-2 split from mcmc-parallel-monolith.R.
 ##
-## make_start_points()   -- dispersed MCMC starting points around the mode
 ## run_mcmc_parallel()   -- parallel RWMH via PSOCK cluster + dynhr_files sourcing
 ## run_mode_parallel()   -- parallel multi-start mode-finding via future
 ## --------------------------------------------------------------------------
 
 
-#' Generate dispersed MCMC starting points
+#' Replay the host's dynhr option state on every worker of a PSOCK cluster
 #'
-#' Chain 1 starts at `theta_mode`; chains 2..N are perturbed draws from
-#' N(theta_mode, 0.25 * Sigma_prop), clamped to prior bounds.
+#' `.dynhr_opts` is a namespace-private ENVIRONMENT (and the `dynhr.*` switches
+#' are base options), so a fresh PSOCK worker that merely `library(dynhr)`s
+#' starts with an EMPTY option store: `power_posterior`, `debug_kf_errors`,
+#' `dynhr.use_rcpp`, the hank backends and everything else set in the host
+#' session were silently invisible to the workers, which then evaluated a
+#' DIFFERENT posterior from the serial path. Only `me_variance` was ever shipped
+#' (explicitly, as an argument).
 #'
-#' @param theta_mode Named mode vector
-#' @param Sigma_prop Proposal covariance (n?--n)
-#' @param prior_spec Prior spec data.frame (from extract_prior_spec())
-#' @param n_chains   Number of chains
-#' @param seed_base  Base RNG seed (chain k uses seed_base + k)
-#' @return List of n_chains named parameter vectors
+#' Call this ONCE per cluster, at init, AFTER `library(dynhr)` and after any
+#' `dynhr_files` are sourced (a sourced copy of options.R installs its own empty
+#' store, which would otherwise clobber the replayed values) -- never per task,
+#' so the cost is O(n_workers).
+#'
+#' The `.dynhr_daemon_apply` FUNCTION OBJECT is shipped alongside the snapshot
+#' rather than being called as `dynhr:::.dynhr_daemon_apply` on the worker: a
+#' closure whose environment is a namespace serialises as a REFERENCE to that
+#' namespace, so the body travels from the host while `.dynhr_opts` resolves in
+#' the WORKER's own dynhr -- which is what must be written, and which also works
+#' when the worker's installed dynhr predates the helper.
+#'
+#' @param cl A PSOCK cluster from `parallel::makeCluster()`.
+#' @return (invisibly) the snapshot that was shipped.
 #' @noRd
-make_start_points <- function(theta_mode, Sigma_prop, prior_spec, n_chains,
-                              seed_base = 42L) {
-  n_par <- length(theta_mode)
-  L <- t(chol(Sigma_prop))
-
-  starts <- vector("list", n_chains)
-  for (ch in seq_len(n_chains)) {
-    set.seed(seed_base + ch)
-    if (ch == 1) {
-      starts[[ch]] <- theta_mode
-    } else {
-      z  <- rnorm(n_par)
-      th <- theta_mode + 0.5 * as.numeric(L %*% z)
-      names(th) <- names(theta_mode)
-      for (i in seq_len(n_par)) {
-        th[i] <- max(th[i], prior_spec$lower[i] + 1e-6)
-        th[i] <- min(th[i], prior_spec$upper[i] - 1e-6)
-      }
-      starts[[ch]] <- th
-    }
-  }
-  starts
+.dynhr_cluster_ship_options <- function(cl) {
+  state    <- .dynhr_daemon_state()
+  apply_fn <- .dynhr_daemon_apply
+  parallel::clusterCall(cl, function(state, apply_fn) {
+    apply_fn(state)
+    ## A sourced dev copy of options.R installs its OWN `.dynhr_opts` store in
+    ## globalenv, which shadows the namespace one for globalenv-resolved
+    ## functions; keep both in sync.
+    if (exists(".dynhr_daemon_apply", envir = globalenv(), inherits = FALSE))
+      get(".dynhr_daemon_apply", envir = globalenv())(state)
+    NULL
+  }, state = state, apply_fn = apply_fn)
+  invisible(state)
 }
 
 
@@ -147,6 +150,12 @@ run_mcmc_parallel <- function(
   parallel::clusterExport(cl, c("parsed_model", "Y", "prior_spec", "obs_names",
                                 "Sigma_prop"),
                           envir = environment())
+
+  ## Ship the HOST's dynhr option state to every worker (see
+  ## .dynhr_cluster_ship_options): without it the workers see an EMPTY option
+  ## store and evaluate a DIFFERENT posterior from the serial path. AFTER the
+  ## dynhr_files sourcing above, once per worker.
+  .dynhr_cluster_ship_options(cl)
 
   parallel::clusterExport(cl, "me_variance", envir = environment())
   parallel::clusterEvalQ(cl, {
@@ -333,9 +342,20 @@ run_mode_parallel <- function(
 
   t_global <- Sys.time()
 
+  ## Same option-shipping problem as the PSOCK path above (see
+  ## .dynhr_cluster_ship_options): a multisession worker starts with an empty
+  ## `.dynhr_opts` and none of the host's `dynhr.*` base options. Ship the
+  ## snapshot AND the apply function object as future globals; the function's
+  ## namespace environment re-resolves in the worker's own dynhr.
+  .dynhr_worker_opt_state <- .dynhr_daemon_state()
+  .dynhr_worker_opt_apply <- .dynhr_daemon_apply
+
   raw <- future.apply::future_lapply(configs, function(cfg) {
     suppressPackageStartupMessages(library(dynhr))
     for (f in dynhr_files) if (file.exists(f)) source(f, local = FALSE)
+    .dynhr_worker_opt_apply(.dynhr_worker_opt_state)
+    if (exists(".dynhr_daemon_apply", envir = globalenv(), inherits = FALSE))
+      get(".dynhr_daemon_apply", envir = globalenv())(.dynhr_worker_opt_state)
     .cm  <- compile_model(parsed_model, verbose = FALSE)
     .lp  <- make_log_posterior(parsed_model, Y, prior_spec, obs_names, .cm,
                                me_variance = me_variance)

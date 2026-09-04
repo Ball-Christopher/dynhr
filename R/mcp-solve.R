@@ -262,91 +262,6 @@
 # Backtracking line search
 # =============================================================================
 
-#' Armijo backtracking line search for MCP merit function
-#'
-#' Finds step length α ∈ (0, 1] such that:
-#'   θ(Y + α·Δ) ≤ θ(Y) + σ·α·∇θ(Y)·Δ
-#' where θ(Y) = ½ Σ φ(a, F)² is the squared FB merit function.
-#'
-#' The gradient ∇θ = J_stack' · R_stack is computed from the current
-#' Jacobian and residual.
-#'
-#' @param Y           T × n_endo matrix: current path
-#' @param delta_vec   Numeric vector (length T*n_endo): Newton direction
-#' @param R_stack     Numeric vector (length T*n_endo): current residual
-#' @param J_stack     dgCMatrix: current Jacobian
-#' @param theta_cur   Scalar: current merit function value
-#' @param fn_merit    Function to evaluate θ at a new Y
-#' @param sigma       Armijo parameter (default 1e-4)
-#' @param max_ls      Maximum line search iterations (default 20)
-#' @param n_endo      Integer: number of endogenous variables
-#' @param T           Integer: horizon
-#' @return List with:
-#'   $alpha      — step length
-#'   $theta_new  — merit value at Y + alpha*delta
-#'   $Y_new      — updated path matrix (or NULL if no tried step reduced merit)
-#'   $ls_iter    — iterations used
-#'   $accepted   — logical: TRUE if the Armijo condition was met
-#'
-#' @details
-#' On Armijo failure the search returns the smallest-merit trial point actually
-#' evaluated (when it strictly improves on the incumbent), rather than \code{NULL}
-#' with a discarded step. The previous behaviour — return NULL, caller applies a
-#' blind half Newton step — could blow the path up and singularise the next
-#' Jacobian on cold starts (issue M15).
-#' @noRd
-.mcp_line_search <- function(Y, delta_vec, R_stack, J_stack,
-                              theta_cur, fn_merit,
-                              sigma = 1e-4, max_ls = 20L,
-                              n_endo, T) {
-  # Compute gradient: ∇θ = J' · R
-  grad <- as.numeric(Matrix::crossprod(J_stack, R_stack))
-  directional_deriv <- sum(grad * delta_vec)
-
-  # If directional derivative is positive, Newton direction is not a descent
-  # direction.  Fall back to steepest descent: Δ = -∇θ
-  if (directional_deriv >= 0) {
-    delta_vec <- -grad
-    directional_deriv <- -sum(grad * grad)
-  }
-
-  alpha <- 1.0
-
-  # Track the best merit-decreasing trial point seen during backtracking (M15).
-  best_theta <- theta_cur
-  best_Y     <- NULL
-  best_alpha <- 0
-
-  for (ls_iter in seq_len(max_ls)) {
-    # Trial point
-    Y_trial <- Y
-    for (t in seq_len(T)) {
-      idx_t <- (t - 1L) * n_endo + seq_len(n_endo)
-      Y_trial[t, ] <- Y[t, ] + alpha * delta_vec[idx_t]
-    }
-
-    theta_new <- fn_merit(Y_trial)
-
-    if (is.finite(theta_new) && theta_new < best_theta) {
-      best_theta <- theta_new
-      best_Y     <- Y_trial
-      best_alpha <- alpha
-    }
-
-    # Armijo condition (isTRUE guards NaN merit values from invalid steps).
-    if (isTRUE(theta_new <= theta_cur + sigma * alpha * directional_deriv)) {
-      return(list(alpha = alpha, theta_new = theta_new,
-                  Y_new = Y_trial, ls_iter = ls_iter, accepted = TRUE))
-    }
-
-    alpha <- alpha * 0.5
-  }
-
-  # Armijo never satisfied: return the best vetted (merit-decreasing) point.
-  list(alpha = best_alpha, theta_new = best_theta,
-       Y_new = best_Y, ls_iter = max_ls, accepted = FALSE)
-}
-
 
 # =============================================================================
 # Main MCP solver
@@ -591,7 +506,7 @@ mcp_solve_path <- function(compiled,
 
       # ---- Line search or direct step ----
       if (line_search) {
-        ls <- .mcp_line_search(
+        ls <- .line_search(
           Y_loc, delta_vec, sys$R, sys$J, theta_cur, merit_fn,
           sigma = sigma_line, max_ls = 20L, n_endo = n_endo, T = T
         )

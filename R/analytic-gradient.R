@@ -222,6 +222,9 @@
   }
 
   ## R fallback (bit-equivalent reference; see test-kf-score-parity).
+  ## me_diag is TRUE observation noise (F3-D): it enters F AND the Joseph
+  ## covariance update.
+  has_me_true <- any(me_diag != 0)
   for (t in seq_len(n_T)) {
     v   <- Yd[, t] - as.numeric(ZZ %*% s)
     PZ  <- P %*% tZZ
@@ -259,11 +262,18 @@
              dRmKD %*% tcrossprod(Sigma_e, RmKD) +
              RmKD %*% tcrossprod(dSigma_list[[k]], RmKD) +
              RmKD %*% tcrossprod(Sigma_e, dRmKD)
+      ## Tangent of the ME Joseph term P' += K me K' (me is data):
+      ## dP' += dK me K' + K me dK'.
+      if (has_me_true)
+        dPn <- dPn + tcrossprod(dKg %*% me_diag, Kg) +
+               tcrossprod(Kg %*% me_diag, dKg)
       dPk[[k]] <- (dPn + t(dPn)) * 0.5
     }
 
     s <- as.numeric(TT %*% s + Kg %*% v)
     Pn <- tcrossprod(TmKZ %*% P, TmKZ) + tcrossprod(RmKD %*% Sigma_e, RmKD)
+    ## TRUE measurement-noise law (F3-D): P' += K me K'.
+    if (has_me_true) Pn <- Pn + tcrossprod(Kg %*% me_diag, Kg)
     P  <- (Pn + t(Pn)) * 0.5
   }
 

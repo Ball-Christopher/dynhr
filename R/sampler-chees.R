@@ -21,34 +21,6 @@
 # ChEES criterion helpers
 # ============================================================================
 
-#' Estimate the ChEES criterion from a batch of (theta, theta') pairs
-#'
-#' ChEES ∝ E[ (||theta'||^2 - ||theta||^2)^2 ]
-#'
-#' Given a matrix of starting positions (rows = samples) and a corresponding
-#' matrix of proposed positions, compute the mean squared change in the squared
-#' Euclidean norm.  A scalar estimate: we take the sample mean over the batch.
-#'
-#' When a mass matrix M (M_diag or M_inv) is supplied the squared norm is
-#' computed in the METRIC space: ||theta||^2_M = theta' M theta.  This matches
-#' the geometry in which the leapfrog dynamics live (Riemannian kinetic energy).
-#' With the diagonal path: ||theta||^2 = sum(theta^2 * M_mass_diag).
-##
-#' @param theta_start d-vector: starting position of one chain link
-#' @param theta_prop  d-vector: proposed position after trajectory
-#' @param M_mass_diag Mass diagonal (diagonal path).  If NULL, uses identity.
-#' @return scalar ChEES criterion value (always finite or 0)
-#' @noRd
-.chees_criterion <- function(theta_start, theta_prop, M_mass_diag = NULL) {
-  if (is.null(M_mass_diag)) {
-    M_mass_diag <- rep(1, length(theta_start))
-  }
-  sq_start <- sum(theta_start^2 * M_mass_diag)
-  sq_prop  <- sum(theta_prop^2  * M_mass_diag)
-  val <- (sq_prop - sq_start)^2
-  if (is.finite(val)) val else 0
-}
-
 
 # ============================================================================
 # dynhr_chees() -- ChEES-HMC sampler
