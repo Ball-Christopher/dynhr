@@ -127,7 +127,8 @@
                                   conv_tol, max_diffuse, ll_min,
                                   return_filtered, n_state,
                                   me_extra = NULL, shock_scale = NULL,
-                                  Sigma_e = NULL, e_idx = NULL) {
+                                  Sigma_e = NULL, e_idx = NULL,
+                                  det_rows = NULL, det_cols = NULL) {
   n_obs <- nrow(Y_minus_d)
   n_T   <- ncol(Y_minus_d)
   log2pi <- log(2 * pi)
@@ -146,6 +147,19 @@
   ## bakes column 1 into the INITIAL Pb before this loop starts.
   has_shock_scale_uni <- !is.null(shock_scale)
 
+  ## Deterministic known shocks: rows whose target state component has (at
+  ## this period) no prior variance at all, so the ordinary sequential update
+  ## is degenerate. See .kf_univariate_dispatch for why this is a mean shift.
+  n_det <- length(det_rows)
+  det_applied <- if (n_det) matrix(FALSE, n_det, n_T) else NULL
+  is_det_row <- logical(n_obs)
+  if (n_det) is_det_row[det_rows] <- TRUE
+  ## Per-period count of observation components skipped because their forecast
+  ## variance was (numerically) zero -- i.e. exactly predictable from what has
+  ## already been processed. Reported in kalman_filter()'s diagnostics so a
+  ## parity harness can see it without parsing a warning.
+  n_skipped <- integer(n_T)
+
   loglik <- 0
   ok     <- TRUE
   diffuse <- length(P_inf) > 0 && max(abs(P_inf)) > 0
@@ -156,6 +170,24 @@
 
   for (t in seq_len(n_T)) {
     if (diffuse && t > max_diffuse) { diffuse_failed <- TRUE; break }
+
+    ## Deterministic injections first: the period's observables load eps_t
+    ## through D, so their innovations have to be taken against a state that
+    ## already carries the shocks the caller supplied.
+    for (k in seq_len(n_det)) {
+      y_k <- Y_minus_d[det_rows[k], t]
+      if (!is.finite(y_k)) next                   # shock unknown this period
+      col <- det_cols[k]
+      F_k <- P_star[col, col] + me_variance +
+        if (has_me_extra_uni) me_extra[det_rows[k], t] else 0
+      if (F_k <= kalman_tol) {
+        ## P[col, ] is identically zero (a PSD matrix with a zero diagonal
+        ## entry has a zero row), so nothing but this mean moves, and the row
+        ## is skipped by the F_star guard below with a zero innovation.
+        a[col] <- y_k
+        det_applied[k, t] <- TRUE
+      }
+    }
 
     ll_t <- 0
     for (i in seq_len(n_obs)) {
@@ -186,8 +218,12 @@
         ll_t   <- ll_t - 0.5 * (log2pi + log(F_star) + v * v / F_star)
         a      <- a + K_star * (v / F_star)
         P_star <- P_star - tcrossprod(K_star) / F_star
+      } else if (!is_det_row[i]) {
+        ## Zero innovation variance: skip gracefully (singular F), and record
+        ## it. A deterministic known-shock row is not counted -- it was
+        ## applied above, not dropped.
+        n_skipped[t] <- n_skipped[t] + 1L
       }
-      ## else: zero innovation variance -- skip gracefully (singular F).
     }
 
     if (!is.finite(ll_t) || ll_t < ll_min) { ok <- FALSE; break }
@@ -217,7 +253,8 @@
 
   list(loglik = loglik, a = a, filtered = filtered, ok = ok,
        d_diffuse = d_diffuse, diffuse_failed = diffuse_failed,
-       ll_contrib = ll_contrib)
+       ll_contrib = ll_contrib, det_applied = det_applied, P = P_star,
+       n_skipped = n_skipped)
 }
 
 ### Builds the augmented system and dispatches to C++ or the R fallback.
@@ -267,8 +304,10 @@
   ## me_variance > 0 on the real observables. That forces the R loop, which is
   ## correct: the C++ kernel takes a single scalar and could not express the
   ## two different noise levels.
+  det_rows <- NULL; det_cols <- NULL; det_possible <- FALSE
   if (!is.null(known)) {
     n_k  <- length(known$idx)
+    n_obs_real <- nrow(Y_minus_d)
     Zk   <- matrix(0, n_k, nb)
     for (i in seq_len(n_k)) Zk[i, n_state + known$idx[i]] <- 1
     Zb   <- rbind(Zb, Zk)
@@ -280,6 +319,44 @@
     ## The injected rows are NA wherever the shock is unknown, so the frozen
     ## gain the lock assumes does not exist.
     ss_lock <- FALSE
+
+    ## ---- DETERMINISTIC known shocks (zero prior variance) ---------------
+    ## A shock with `stderr 0` is deterministic BEFORE conditioning, and the
+    ## observation row above cannot express that: F = Z P Z' + H is exactly
+    ## zero for it, so the sequential filter's `if (F_star > kalman_tol)`
+    ## guard skipped the row and the supplied value never reached the state
+    ## -- a silently ignored input, not a refused one.
+    ##
+    ## Zero prior variance does not mean "no information", it means the
+    ## component IS its mean; conditioning on eps_j = v is then a MEAN SHIFT
+    ## with no covariance update at all (the row and column of P are zero, so
+    ## nothing else moves), and it carries no density -- a point mass has no
+    ## dimension to integrate over. That is exactly the limit of the ordinary
+    ## update as the variance goes to zero: the filtered path converges to the
+    ## deterministic one, and the joint density's prior factor log p(eps = v)
+    ## drops out. So a deterministic injection reports the SAME number under
+    ## either semantics, and agrees with kalman_smoother() to machine
+    ## precision rather than up to a prior term.
+    ##
+    ## `det_rows`/`det_cols` name the observation row and the augmented-state
+    ## column of every candidate; the override is applied in the loop, where
+    ## the prior variance for the period is known. It must run BEFORE the
+    ## real observables of that period: y_t loads eps_t through D, so a
+    ## trailing override would leave the period's innovations computed
+    ## against a shock the caller had already told us.
+    det_rows <- n_obs_real + seq_len(n_k)
+    det_cols <- n_state + known$idx
+    ## Is any candidate actually deterministic? The eps block is rebuilt from
+    ## Sigma_e at every transition, so its prior variance at period t is
+    ## Sigma_e[j,j] scaled by shock_scale[j,t]^2 -- known statically, which is
+    ## what lets the C++ kernel (which has no override) be ruled out up front
+    ## rather than discovered mid-recursion.
+    sv <- diag(as.matrix(Sigma_e))[known$idx]
+    sv_mat <- matrix(sv, n_k, ncol(known$values))
+    if (!is.null(shock_scale))
+      sv_mat <- sv_mat * shock_scale[known$idx, , drop = FALSE]^2
+    det_possible <- any(!is.na(known$values) & known$sd == 0 &
+                        sv_mat <= kalman_tol)
   }
   QQb <- matrix(0, nb, nb)
   QQb[e_idx, e_idx] <- Sigma_e
@@ -305,24 +382,49 @@
   ## bakes a single time-invariant QQb and has no per-period rebuild hook.
   has_me_extra_d <- !is.null(me_extra) && any(me_extra != 0)
 
-  if (.HAS_RCPP_KALMAN_UNI() && !has_me_extra_d && !has_shock_scale_d) {
+  if (.HAS_RCPP_KALMAN_UNI() && !has_me_extra_d && !has_shock_scale_d &&
+      !det_possible) {
     out <- kalman_univariate_loop_cpp(Y_minus_d, Zb, Tb, QQb, a0, Pb, Pi,
                                       me_variance, kalman_tol, diffuse_tol,
                                       conv_tol, as.integer(max_diffuse),
                                       .KF_LL_MIN, return_filtered,
                                       as.integer(n_state), ss_lock)
     out$a <- as.numeric(out$a)
+    out$P_state <- out$P[s_idx, s_idx, drop = FALSE]
+    out$P <- NULL
     out
   } else {
-    .kf_univariate_loop_R(Y_minus_d, Zb, Tb, QQb, a0, Pb, Pi,
+    out <- .kf_univariate_loop_R(Y_minus_d, Zb, Tb, QQb, a0, Pb, Pi,
                           me_variance, kalman_tol, diffuse_tol,
                           conv_tol, max_diffuse, .KF_LL_MIN,
                           return_filtered, n_state,
                           me_extra = me_extra,
                           shock_scale = shock_scale,
-                          Sigma_e = Sigma_e, e_idx = e_idx)
+                          Sigma_e = Sigma_e, e_idx = e_idx,
+                          det_rows = det_rows, det_cols = det_cols)
+    out$P_state <- out$P[s_idx, s_idx, drop = FALSE]
+    out$P <- NULL
+    out
   }
 }
+
+### -- Routing table for $diagnostics ----------------------------------------
+###
+### Built on EVERY filter call, including the per-draw ones inside an MCMC
+### chain, so it goes through structure() rather than data.frame(): the latter
+### measured 0.065 ms against a 1.92 ms filter call on the rbc fixture (3.4%
+### of a small-model likelihood evaluation, which is exactly the kind of R
+### overhead the per-draw path is bound by), the former ~10x less.
+.kf_routing_df <- function(rows) {
+  n <- length(rows)
+  if (!n) rows <- list()
+  structure(list(from   = vapply(rows, `[[`, "", "from"),
+                 to     = vapply(rows, `[[`, "", "to"),
+                 reason = vapply(rows, `[[`, "", "reason")),
+            class = "data.frame",
+            row.names = if (n) seq_len(n) else integer(0))
+}
+
 
 ### -- Known historical shocks ------------------------------------------------
 ###
@@ -847,6 +949,19 @@
 #'   term if the conditional is what you want. \code{\link{kalman_smoother}}
 #'   conditions, so its \code{loglik} is the conditional one.
 #'
+#'   \strong{Deterministic shocks.} When the injected shock has \emph{no}
+#'   prior variance (a zero diagonal of \code{Sigma_e}, or a
+#'   \code{shock_scale} of zero at that period) the value is applied as a
+#'   deterministic INPUT: the state mean shifts and the covariance does not
+#'   move, because a component with zero variance IS its mean. A point mass
+#'   carries no density, so the two semantics coincide there -- the reported
+#'   log-likelihood is both the joint and the conditional one, and it agrees
+#'   with \code{\link{kalman_smoother}} exactly rather than up to a prior
+#'   term. It is also the limit of the positive-variance case: as the variance
+#'   goes to zero the filtered path converges to the deterministic one.
+#'   (Before 0.9.3.2 such a value was silently ignored -- the injected row's
+#'   forecast variance was exactly zero, so the sequential filter skipped it.)
+#'
 #'   Only the univariate (Koopman--Durbin) filter can express this: it runs on
 #'   the augmented state \eqn{[s_{t-1}; \varepsilon_t]}, where the shocks are
 #'   state components and a known shock is an exact observation of one. Passing
@@ -983,6 +1098,54 @@
 #'     Analysis}, 21(3), 281-296.
 #'   Strid, I., & Walentin, K. (2011). Block Kalman filtering for large-scale
 #'     DSGE models. \emph{Computational Economics}, 39(2), 145-160.
+#' @return A list with
+#'   \describe{
+#'     \item{\code{loglik}}{the log-likelihood.}
+#'     \item{\code{filtered_states}}{\code{n_state x T}, column \eqn{t} is
+#'       \eqn{s_{t|t}} (only when \code{return_filtered = TRUE}).}
+#'     \item{\code{loglik_contrib}}{per-period contributions, when asked for.}
+#'     \item{\code{final_state}, \code{final_cov}}{the state hand-off:
+#'       \eqn{s_{T|T}} and \eqn{Var(s_T \mid y_{1:T})}, named, in the same
+#'       convention \code{a0} / \code{P0} take. \code{final_cov} is
+#'       \code{NULL} for \code{method = "chandrasekhar"}, which never forms
+#'       \eqn{P}, and after a failed run.}
+#'     \item{\code{method}, \code{lik_init}, \code{d_diffuse},
+#'       \code{n_obs}, \code{n_T}}{what ran.}
+#'     \item{\code{diagnostics}}{machine-readable record of the run:
+#'       \code{method_requested} / \code{method_used},
+#'       \code{lik_init_requested} / \code{lik_init_used}, \code{routing}
+#'       (a data frame of \code{from} / \code{to} / \code{reason} rows, one
+#'       per automatic reroute or fallback), \code{diffuse_periods},
+#'       \code{missing_by_period} / \code{n_missing} (observations that were
+#'       absent), \code{dropped_by_period} / \code{n_dropped} (observations
+#'       that were present but exactly predictable, hence carried no
+#'       information), \code{known_shocks} (how many injected cells, and how
+#'       many of them were deterministic) and \code{loglik_type}
+#'       (\code{"marginal"}, \code{"joint"} or \code{"conditional"}).
+#'       \code{\link{kalman_smoother}} returns the same fields.}
+#'   }
+#'
+#' @section Filtering a split sample:
+#' \code{final_state} / \code{final_cov} are exactly what \code{a0} /
+#' \code{P0} take, so a sample can be filtered in two calls and the
+#' prediction-error decomposition holds to numerical tolerance:
+#'
+#' \preformatted{
+#' f1 <- kalman_filter(y[1:k, ], dr, model, params, obs_vars = obs)
+#' f2 <- kalman_filter(y[(k+1):T, ], dr, model, params, obs_vars = obs,
+#'                     a0 = f1$final_state, P0 = f1$final_cov)
+#' f1$loglik + f2$loglik   # == the unsplit loglik
+#' }
+#'
+#' Both are in DEVIATIONS from the steady state (the data is in levels and the
+#' filter subtracts \code{dr$ys[obs_vars]} itself), and \code{a0} is
+#' \eqn{s_0} -- the state one period BEFORE the first row of \code{data}, so
+#' the hand-off lines up without an off-by-one. Supplying \code{P0} sets
+#' \code{lik_init = "user"}, which is reported back in \code{$lik_init}.
+#' For latent history BEFORE the first observation, use
+#' \code{kalman_smoother(pre_sample = k)} instead: that estimates the padded
+#' periods from the data that follows them, which \code{a0} cannot do.
+#'
 #' @seealso \code{\link{kalman_smoother}}, \code{\link{make_posterior}},
 #'   \code{\link{kf_innovation_diagnostics}}
 #' @examples
@@ -1155,6 +1318,16 @@ kalman_filter <- function(data, dr, model, params, obs_vars,
   ll_const <- -0.5 * n_obs * log(2 * pi)
   has_missing <- anyNA(data)
 
+  ## ---- Structured run diagnostics (R4) -----------------------------------
+  ## Every routing decision below appends a (from, to, reason) row here, and
+  ## .kf_result() turns them into $diagnostics$routing. The point is that a
+  ## parity harness should not have to parse warning text to learn that
+  ## method = "auto" ran the univariate filter, or that a singular F sent a
+  ## multivariate path somewhere else: the run describes itself.
+  ##
+  ## Appended positionally (no `<<-`) so the record stays a plain local.
+  route_log <- list()
+
   ## ---- me_extra validation and routing ------------------------------------
   ## me_extra must be n_obs x T when non-NULL.
   has_me_extra <- FALSE
@@ -1177,7 +1350,12 @@ kalman_filter <- function(data, dr, model, params, obs_vars,
            "nonzero me_extra (time-varying ME variances require a per-period ",
            "R loop); use method = 'auto', 'standard', or 'univariate'.",
            call. = FALSE)
-    if (method == "auto") method <- "standard"
+    if (method == "auto") {
+      method <- "standard"
+      route_log[[length(route_log) + 1L]] <-
+        c(from = "auto", to = "standard",
+          reason = "me_extra (per-period measurement error) needs the R loop")
+    }
     ## has_missing is already TRUE whenever me_extra introduces NA rows; if
     ## not, mark it so the C++ dispatch inside METHOD 3 is also bypassed.
     has_missing <- TRUE
@@ -1203,8 +1381,12 @@ kalman_filter <- function(data, dr, model, params, obs_vars,
            "shock_scale (time-varying shock variances require a per-period R loop); ",
            "use method = 'auto', 'standard', or 'dare'.", call. = FALSE)
     ## C++ univariate bakes QQb once; force the R standard path.
-    if (method == "univariate") method <- "standard"
-    if (method == "auto")       method <- "standard"
+    if (method %in% c("univariate", "auto")) {
+      route_log[[length(route_log) + 1L]] <-
+        c(from = method, to = "standard",
+          reason = "shock_scale (per-period shock variances) needs the R loop")
+      method <- "standard"
+    }
     ## C++ standard fast path bakes HH/Sigma_e -- bypass it.
     has_missing <- TRUE
   }
@@ -1215,11 +1397,36 @@ kalman_filter <- function(data, dr, model, params, obs_vars,
          "Use lik_init = 'kappa' or 'stationary' with heteroskedastic shocks.",
          call. = FALSE)
 
+  ## ---- Known-shock metadata (R4) -----------------------------------------
+  ## Which injected cells are DETERMINISTIC -- zero prior variance, hence a
+  ## mean shift carrying no density (see .kf_univariate_dispatch). The same
+  ## static test the dispatch uses to rule out the C++ kernel, computed here
+  ## so the result can report what was applied and under which likelihood
+  ## convention, without re-deriving it from the recursion.
+  known_meta <- NULL
+  if (!is.null(known)) {
+    sv <- diag(as.matrix(Sigma_e))[known$idx]
+    sv_mat <- matrix(sv, length(known$idx), n_T)
+    if (has_shock_scale)
+      sv_mat <- sv_mat * shock_scale[known$idx, , drop = FALSE]^2
+    cell  <- !is.na(known$values)
+    hard  <- cell & known$sd == 0
+    known_meta <- list(names = known$names,
+                       n_cells = sum(cell),
+                       n_deterministic = sum(hard & sv_mat <= .KF_ZERO_VAR_TOL),
+                       n_soft = sum(cell & known$sd > 0))
+  }
+
   ## Precompute Y - d (broadcast d down each column) once: the per-step loops
   ## then need only one matrix-vector subtraction. Safe with missing data: NA
   ## propagates through Y - d and is caught by the same anyNA / is.finite
   ## checks downstream.
   Y_minus_d <- data - d
+  ## Per-period count of observations that are simply absent, kept apart from
+  ## the components a singular F drops: "not there" and "carries no
+  ## information" are different reasons for a shorter conditioning set, and a
+  ## parity harness has to be able to tell them apart.
+  missing_by_period <- as.integer(colSums(is.na(Y_minus_d)))
 
   ## -- Resolve lik_init = "auto" --------------------------------------
   ## Inspect the eigenvalues of TT. Roots well inside the unit circle => the
@@ -1323,8 +1530,18 @@ kalman_filter <- function(data, dr, model, params, obs_vars,
       ## -36.271, and filtered states that keep moving as kappa grows while
       ## the diffuse ones are scale-free to the last bit.
       method <- "univariate"
+      route_log[[length(route_log) + 1L]] <-
+        c(from = "auto", to = "univariate",
+          reason = paste("exact diffuse initialisation with missing",
+                         "observations: only the sequential filter can skip",
+                         "a component inside the diffuse phase"))
     }
-    else if (has_missing) method <- "standard"
+    else if (has_missing) {
+      method <- "standard"
+      route_log[[length(route_log) + 1L]] <-
+        c(from = "auto", to = "standard",
+          reason = "missing observations need the per-step loop")
+    }
     else if (lik_init %in% c("diffuse", "kappa")) {
       ## The exact-diffuse phase has no multivariate Rcpp fast path (the
       ## standard/chandrasekhar C++ kernels bake in a time-invariant gain), so
@@ -1345,6 +1562,12 @@ kalman_filter <- function(data, dr, model, params, obs_vars,
       method <- if (.HAS_RCPP_KALMAN_UNI() && is.null(me_extra) &&
                     me_variance == 0)
         "univariate" else "standard"
+      route_log[[length(route_log) + 1L]] <-
+        c(from = "auto", to = method,
+          reason = if (method == "univariate")
+            "diffuse initialisation: the sequential filter runs it natively"
+          else paste("diffuse initialisation with measurement error or",
+                     "me_extra: kept on the multivariate per-step loop"))
     }
     ## F4-B: the Chandrasekhar branch is exact again (see METHOD 2), so it is
     ## back in "auto" -- but only above the MEASURED crossover. The increment
@@ -1357,8 +1580,16 @@ kalman_filter <- function(data, dr, model, params, obs_vars,
     ##   ratio   1.11   0.61
     ## i.e. the old n_state > 50 rule was a ~1.9x PESSIMIZATION and the
     ## crossover sits near n_state = 100 (weakly dependent on n_obs).
-    else if (n_state > 100) method <- "chandrasekhar"
-    else                    method <- "standard"
+    else if (n_state > 100) {
+      method <- "chandrasekhar"
+      route_log[[length(route_log) + 1L]] <-
+        c(from = "auto", to = "chandrasekhar",
+          reason = sprintf("n_state = %d > 100 (measured crossover)", n_state))
+    } else {
+      method <- "standard"
+      route_log[[length(route_log) + 1L]] <-
+        c(from = "auto", to = "standard", reason = "default for n_state <= 100")
+    }
   }
 
   ## A user-supplied P0 is not the Lyapunov prior the Chandrasekhar increment
@@ -1379,6 +1610,10 @@ kalman_filter <- function(data, dr, model, params, obs_vars,
               "the augmented state [s_{t-1}; eps_t], where the shocks ARE state ",
               "components. Ignoring method = \"", method, "\" and reporting ",
               "method = \"univariate\".", call. = FALSE)
+    route_log[[length(route_log) + 1L]] <-
+      c(from = method, to = "univariate",
+        reason = paste("known_shocks observes eps directly, which only the",
+                       "augmented-state (univariate) filter can express"))
     method <- "univariate"
   }
 
@@ -1386,15 +1621,24 @@ kalman_filter <- function(data, dr, model, params, obs_vars,
   ## falls through to that branch's own scope guard, which refuses a non-
   ## Lyapunov initialisation loudly -- this file's rule is to refuse rather
   ## than quietly answer a different question.
-  if (lik_init == "user" && method == "chandrasekhar" && method_orig == "auto")
+  if (lik_init == "user" && method == "chandrasekhar" && method_orig == "auto") {
+    route_log[[length(route_log) + 1L]] <-
+      c(from = "chandrasekhar", to = "standard",
+        reason = "a user-supplied P0 is not the Lyapunov prior the Chandrasekhar recursion starts from")
     method <- "standard"
+  }
 
   ## A diffuse phase requires the per-step R loop (no Rcpp / Chandrasekhar
   ## fast path); for large state vectors with unit roots, fall back to the
   ## R "standard" loop entirely. This is a perf cost but correctness-first.
   use_diffuse_phase <- lik_init %in% c("diffuse", "kappa") &&
     method %in% c("standard", "dare", "chandrasekhar")
-  if (use_diffuse_phase && method == "chandrasekhar") method <- "standard"
+  if (use_diffuse_phase && method == "chandrasekhar") {
+    route_log[[length(route_log) + 1L]] <-
+      c(from = "chandrasekhar", to = "standard",
+        reason = "a diffuse phase needs the per-step loop")
+    method <- "standard"
+  }
 
   filtered <- if (return_filtered) matrix(0, n_state, n_T) else NULL
 
@@ -1415,6 +1659,75 @@ kalman_filter <- function(data, dr, model, params, obs_vars,
            "Use lik_init = \"auto\" or \"diffuse\" for nonstationary models.",
            call. = FALSE)
     P0
+  }
+
+  ## -- Result assembler: one shape for every exit --------------------------
+  ## Nine `return`s used to build the result list by hand, which is how the
+  ## per-path fields drifted apart in the first place. Everything that is the
+  ## same everywhere is assembled here instead, so `$diagnostics` has one
+  ## schema no matter which path ran, and a new field cannot be added to some
+  ## exits and forgotten at others.
+  ##
+  ## `final_state`/`final_cov` are the state hand-off: (s_{T|T}, Var(s_T|y))
+  ## in the SAME convention `a0`/`P0` take, so filtering a split sample is
+  ## kf2 <- kalman_filter(y2, ..., a0 = kf1$final_state, P0 = kf1$final_cov).
+  ## `final_cov` is NULL only where the path never forms P (Chandrasekhar
+  ## propagates low-rank increments instead) or where the run failed.
+  ##
+  ## `route_log` and `known_meta` are read from the enclosing frame at CALL
+  ## time, so every exit sees the routing decisions that actually happened.
+  .kf_result <- function(loglik, filtered_states, method_used, lik_init_used,
+                         d_diffuse, final_state = NULL, final_cov = NULL,
+                         loglik_contrib = NULL, dropped = NULL,
+                         known_applied = NULL, fallback = NULL,
+                         extra = list()) {
+    if (!is.null(final_state)) {
+      final_state <- as.numeric(final_state)
+      names(final_state) <- state_names_out
+    }
+    if (!is.null(final_cov)) {
+      final_cov <- as.matrix(final_cov)
+      dimnames(final_cov) <- list(state_names_out, state_names_out)
+    }
+    routes <- route_log
+    ## `fallback` is one row, or several: a singularity fallback into the
+    ## univariate filter can be followed by that filter's own diffuse -> kappa
+    ## fallback, and both belong in the record.
+    if (!is.null(fallback))
+      routes <- c(routes, if (is.list(fallback)) fallback else list(fallback))
+    routing <- .kf_routing_df(routes)
+    dd <- if (is.null(d_diffuse) || length(d_diffuse) != 1L) NA_integer_
+          else as.integer(d_diffuse)
+    if (is.null(dropped)) dropped <- integer(n_T)
+    ## Likelihood convention. Only the injected shocks can move it off
+    ## "marginal": a shock observed with a prior density contributes it
+    ## (JOINT), a deterministic one is a point mass and contributes nothing
+    ## (CONDITIONAL). A mixture of the two is joint in the ones that have a
+    ## density -- reported as "joint" so it is never read as conditional.
+    ll_type <- if (is.null(known_meta)) "marginal"
+      else if (known_meta$n_deterministic == known_meta$n_cells) "conditional"
+      else "joint"
+    c(list(loglik = loglik, filtered_states = filtered_states,
+           loglik_contrib = loglik_contrib,
+           n_obs = n_obs, n_T = n_T, method = method_used,
+           lik_init = lik_init_used, d_diffuse = dd,
+           final_state = final_state, final_cov = final_cov,
+           diagnostics = list(
+             method_requested   = method_orig,
+             method_used        = method_used,
+             lik_init_requested = lik_init_orig,
+             lik_init_used      = lik_init_used,
+             routing            = routing,
+             diffuse_periods    = if (is.na(dd)) integer(0) else seq_len(dd),
+             missing_by_period  = missing_by_period,
+             n_missing          = sum(missing_by_period),
+             dropped_by_period  = as.integer(dropped),
+             n_dropped          = sum(as.integer(dropped)),
+             known_shocks       = if (is.null(known_meta)) NULL
+                                  else c(known_meta,
+                                         list(n_applied = known_applied)),
+             loglik_type        = ll_type)),
+      extra)
   }
 
   ## -- Shared Phase-1 KF step (used by dare, chandrasekhar, and the
@@ -1456,7 +1769,7 @@ kalman_filter <- function(data, dr, model, params, obs_vars,
   ## every multivariate path (.kf_fail below), and (c) for the exact
   ## diffuse phase when F_inf is singular but nonzero (Case C).
 
-  .run_univariate <- function(li, ss_lock = FALSE) {
+  .run_univariate <- function(li, ss_lock = FALSE, fallback = NULL) {
     P_inf_state <- NULL
     if (li == "user") {
       P_state <- P0_mat
@@ -1495,6 +1808,11 @@ kalman_filter <- function(data, dr, model, params, obs_vars,
       ## diffuse path.
       warning("kalman_filter: univariate diffuse phase: P_inf did not ",
               "converge to zero; falling back to lik_init = \"kappa\".")
+      fb_diffuse <- c(from = "diffuse", to = "kappa",
+                      reason = "P_inf did not converge to zero within the sample")
+      fallback <- c(if (is.null(fallback)) list()
+                    else if (is.list(fallback)) fallback else list(fallback),
+                    list(fb_diffuse))
       li  <- "kappa"
       out <- .kf_univariate_dispatch(Y_minus_d, ZZ, TT, RR, DD, Sigma_e,
                                      a0_vec, .build_P0(TT, QQ),
@@ -1503,21 +1821,22 @@ kalman_filter <- function(data, dr, model, params, obs_vars,
                                      known = known)
     }
     if (!isTRUE(out$ok))
-      return(list(loglik = -Inf, filtered_states = NULL,
-                  n_obs = n_obs, n_T = n_T, method = "univariate",
-                  lik_init = li, d_diffuse = NA_integer_))
+      return(.kf_result(-Inf, NULL, "univariate", li, NA_integer_,
+                        fallback = fallback))
     filt <- NULL
     if (return_filtered && !is.null(out$filtered)) {
       filt <- out$filtered
       rownames(filt) <- state_names_out
     }
-    dd <- out$d_diffuse
-    if (is.null(dd) || length(dd) != 1L) dd <- NA_integer_
-    list(loglik = out$loglik, filtered_states = filt,
-         loglik_contrib = if (return_ll_contrib) as.numeric(out$ll_contrib)
-                          else NULL,
-         n_obs = n_obs, n_T = n_T, method = "univariate",
-         lik_init = li, d_diffuse = as.integer(dd))
+    .kf_result(out$loglik, filt, "univariate", li, out$d_diffuse,
+               final_state = out$a[seq_len(n_state)],
+               final_cov   = out$P_state,
+               loglik_contrib = if (return_ll_contrib)
+                 as.numeric(out$ll_contrib) else NULL,
+               dropped = out$n_skipped,
+               known_applied = if (is.null(out$det_applied)) NULL
+                               else sum(out$det_applied),
+               fallback = fallback)
   }
 
   ## -- A5: the singularity-fallback CONTRACT ----------------------------
@@ -1565,12 +1884,14 @@ kalman_filter <- function(data, dr, model, params, obs_vars,
   .kf_fallback_warned <- FALSE
 
   .kf_fail <- function(failed_method) {
-    hard_fail <- list(loglik = -Inf, filtered_states = NULL,
-                      n_obs = n_obs, n_T = n_T, method = failed_method,
-                      lik_init = lik_init, d_diffuse = d_diffuse)
+    fb <- c(from = failed_method, to = "univariate",
+            reason = paste("singular / non-positive-definite innovation",
+                           "covariance (or a non-finite step)"))
+    hard_fail <- .kf_result(-Inf, NULL, failed_method, lik_init, d_diffuse)
     if (!(me_variance == 0 && !has_me_extra && lik_init != "diffuse"))
       return(hard_fail)
-    out <- tryCatch(.run_univariate(lik_init), error = function(e) NULL)
+    out <- tryCatch(.run_univariate(lik_init, fallback = fb),
+                    error = function(e) NULL)
     if (is.null(out)) return(hard_fail)
     if (!.kf_fallback_warned) {
       .kf_fallback_warned <<- TRUE
@@ -1695,11 +2016,11 @@ kalman_filter <- function(data, dr, model, params, obs_vars,
     if (t_start > n_T) {
       ## The diffuse phase consumed the entire sample.
       if (return_filtered) rownames(filtered) <- state_names_out
-      return(list(loglik = loglik, filtered_states = filtered,
-                  loglik_contrib = ll_contrib,
-                  n_obs = n_obs, n_T = n_T, method = "dare",
-                  dare_iterations = NA_integer_, dare_p_drift = NA_real_,
-                  lik_init = lik_init, d_diffuse = d_diffuse))
+      return(.kf_result(loglik, filtered, "dare", lik_init, d_diffuse,
+                        final_state = s, final_cov = init_P,
+                        loglik_contrib = ll_contrib,
+                        extra = list(dare_iterations = NA_integer_,
+                                     dare_p_drift = NA_real_)))
     }
 
     for (t in t_start:n_T) {
@@ -1762,12 +2083,11 @@ kalman_filter <- function(data, dr, model, params, obs_vars,
     final_drift <- if (isTRUE(dare$converged)) max(abs(P - dare$P)) else NA_real_
 
     if (return_filtered) rownames(filtered) <- state_names_out
-    return(list(loglik = loglik, filtered_states = filtered,
-                loglik_contrib = ll_contrib,
-                n_obs = n_obs, n_T = n_T, method = "dare",
-                dare_iterations  = dare$iterations,
-                dare_p_drift     = final_drift,
-                lik_init = lik_init, d_diffuse = d_diffuse))
+    return(.kf_result(loglik, filtered, "dare", lik_init, d_diffuse,
+                      final_state = s, final_cov = P,
+                      loglik_contrib = ll_contrib,
+                      extra = list(dare_iterations = dare$iterations,
+                                   dare_p_drift    = final_drift)))
   }
 
 
@@ -1907,11 +2227,14 @@ kalman_filter <- function(data, dr, model, params, obs_vars,
     }
 
     if (return_filtered) rownames(filtered) <- state_names_out
-    return(list(loglik = loglik, filtered_states = filtered,
-                n_obs = n_obs, n_T = n_T, method = "chandrasekhar",
-                boot_steps = 0L,
-                ss_reached_at = ch_ss_step,
-                lik_init = lik_init, d_diffuse = d_diffuse))
+    ## No `final_cov`: this recursion propagates the low-rank increments
+    ## (W, M) precisely so that P is never formed. Ask for the state hand-off
+    ## with method = "standard" (or let "auto" pick it) rather than paying
+    ## O(n_state^2) per step to rebuild what this method exists to avoid.
+    return(.kf_result(loglik, filtered, "chandrasekhar", lik_init, d_diffuse,
+                      final_state = s, final_cov = NULL,
+                      extra = list(boot_steps = 0L,
+                                   ss_reached_at = ch_ss_step)))
   }
 
 
@@ -1956,17 +2279,15 @@ kalman_filter <- function(data, dr, model, params, obs_vars,
       filt <- out$filtered
       rownames(filt) <- state_names_out
     }
-    return(list(loglik = out$loglik, filtered_states = filt,
-                n_obs = n_obs, n_T = n_T, method = "standard",
-                lik_init = lik_init, d_diffuse = d_diffuse))
+    return(.kf_result(out$loglik, filt, "standard", lik_init, d_diffuse,
+                      final_state = out$s, final_cov = out$P))
   }
 
   if (init_t_start > n_T) {
     ## The diffuse phase consumed the entire sample.
     if (return_filtered) rownames(filtered) <- state_names_out
-    return(list(loglik = loglik, filtered_states = filtered,
-                n_obs = n_obs, n_T = n_T, method = "standard",
-                lik_init = lik_init, d_diffuse = d_diffuse))
+    return(.kf_result(loglik, filtered, "standard", lik_init, d_diffuse,
+                      final_state = s, final_cov = P))
   }
 
   for (t in init_t_start:n_T) {
@@ -2121,7 +2442,6 @@ kalman_filter <- function(data, dr, model, params, obs_vars,
   }
 
   if (return_filtered) rownames(filtered) <- state_names_out
-  list(loglik = loglik, filtered_states = filtered,
-       n_obs = n_obs, n_T = n_T, method = "standard",
-       lik_init = lik_init, d_diffuse = d_diffuse)
+  .kf_result(loglik, filtered, "standard", lik_init, d_diffuse,
+             final_state = s, final_cov = P)
 }

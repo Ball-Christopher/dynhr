@@ -1,6 +1,6 @@
 Package: dynhr
 Title: DSGE Modelling Toolkit (Parsing, Solving, Estimating, Diagnosing)
-Version: 0.9.3.1
+Version: 0.9.3.2
 Authors@R: c(
     person("Chris", "Ball", role = c("aut", "cre"),
            email = "chrispball1@gmail.com"))
@@ -169,6 +169,7 @@ Collate:
     'hessian-adjoint-analytic.R'
     'state-space.R'
     'spectral-density.R'
+    'smoother-diffuse.R'
     'smoother-monolith.R'
     'shock-decomposition.R'
     'conditional-forecast.R'

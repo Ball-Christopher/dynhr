@@ -52,6 +52,12 @@
 ## states when the Lyapunov solution is unavailable.
 .DIFFUSE_SCALE <- 1e6
 
+## Kalman filtering: the forecast variance below which a component is treated
+## as having NO prior variance at all -- exactly predictable, hence skipped by
+## the sequential filter, and (for an injected known shock) deterministic. The
+## same default `kalman_tol` the filter and smoother entry points take.
+.KF_ZERO_VAR_TOL <- 1e-10
+
 ## suppress R CMD check NOTE about "no visible binding for global variable"
 ## introduced by ggplot2 / data.table NSE inside the monolith files. These
 ## are temporary; once each file is split they get proper

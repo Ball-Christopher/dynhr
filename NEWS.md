@@ -1,3 +1,123 @@
+# dynhr 0.9.3.2
+
+The follow-up to 0.9.3.1, from a second report against the same surface. Four
+behavioural gaps, one of which was a silent wrong answer.
+
+**Two existing calls return different numbers, both deliberately.**
+
+1. `kalman_filter(known_shocks = ...)` on a shock with **zero prior variance**
+   used to ignore the injected value completely. The injected row's forecast
+   variance is exactly zero, so the sequential filter's `F > kalman_tol` guard
+   skipped it and the shock never reached the transition -- no warning, and a
+   filtered path that stayed on its unforced trajectory. On the one-state
+   fixture in `test-statespace-semantics.R` the filtered state was
+   `0 0 0 0 0 0` where the answer is `0 1 0.8 0.64 0.512 0.4096`, and the
+   log-likelihood was -10.257 instead of -13.741. If you have conditioned on a
+   deterministic shock (`stderr 0`, or a `shock_scale` of zero at that period),
+   re-run it.
+
+2. `kalman_smoother()` on a **unit-root model with `lik_init = "auto"`** now
+   runs the exact diffuse recursion instead of substituting `P0 = 1e6 * I`.
+   The smoothed states move by ~1e-8 (the fallback was accurate); the
+   log-likelihood moves by a lot, because the kappa one carried an arbitrary
+   additive constant and could not be compared with anything. It now equals
+   `kalman_filter(lik_init = "diffuse", method = "univariate")` to machine
+   precision. `lik_init = "kappa"` still asks for the old prior explicitly.
+
+Everything else in this release is additive.
+
+## Filtering and smoothing
+
+- **Deterministic known shocks.** A shock with no prior variance is
+  deterministic BEFORE conditioning, so an injected value is an INPUT, not an
+  observation carrying no information. It is now applied as a mean shift with
+  no covariance update -- which is exactly what conditioning on a degenerate
+  component is, and exactly the limit of the ordinary update as the variance
+  vanishes. A point mass carries no density, so the joint and the conditional
+  likelihood coincide there and the filter agrees with the smoother to machine
+  precision rather than up to a `log p(eps = v)` term.
+
+- **`kalman_filter()` reports the state hand-off: `final_state`,
+  `final_cov`.** `s_{T|T}` and `Var(s_T | y_{1:T})`, named, in the same
+  convention `a0` / `P0` take -- so a split sample can be filtered in two
+  calls and the prediction-error decomposition holds:
+
+  ```r
+  f1 <- kalman_filter(y[1:k, ],     dr, m, p, obs_vars = obs)
+  f2 <- kalman_filter(y[(k+1):T, ], dr, m, p, obs_vars = obs,
+                      a0 = f1$final_state, P0 = f1$final_cov)
+  f1$loglik + f2$loglik           # == the unsplit loglik
+  ```
+
+  Pinned to 1e-9 for `standard`, `univariate` and `dare` in
+  `test-statespace-semantics.R`. `final_cov` is `NULL` for
+  `method = "chandrasekhar"`, which propagates low-rank increments precisely
+  so that P is never formed -- reporting NULL is the honest answer, and "auto"
+  does not choose that method below `n_state = 100`.
+
+  Before this, `a0` and `P0` existed but there was no way to get a covariance
+  out of the filter to put into them.
+
+- **Exact diffuse smoothing (`lik_init = "diffuse"` on
+  `kalman_smoother()`).** A new sequential (Koopman-Durbin) smoother on the
+  augmented state `[s_{t-1}; eps_t]` -- `R/smoother-diffuse.R`. The augmented
+  form is what makes it tractable: dynhr's shocks enter the observation
+  equation directly, and the textbook diffuse recursions assume uncorrelated
+  noise, which the augmentation restores. It also makes the disturbance
+  smoother free -- `E[eps_t | y]` is a block of the smoothed state, so there
+  is no second recursion to keep consistent with the first.
+
+  The recursions are derived in the file as the `kappa -> Inf` expansion of
+  the ordinary ones, not quoted, and every `L` is a rank-one update, so the
+  `N` recursion costs O(nb^2) per observable rather than O(nb^3).
+
+  Certified against `.gls_smoother()` with zero prior precision on the diffuse
+  coordinates -- a projection, no recursion, no kappa: **3e-15** on states,
+  shocks and the pre-sample initial state, where the old fallback managed
+  5e-8. The likelihood matches the filter's exact diffuse value to 12 digits.
+  Missing observations do not downgrade it: "missing", "diffuse" and "exactly
+  predictable" are three independent decisions per (period, observable) in a
+  sequential filter.
+
+- **Structured run diagnostics: `$diagnostics` on both entry points.** Same
+  field names on the filter and the smoother, so a parity harness reads either
+  without a special case: `method_requested` / `method_used`,
+  `lik_init_requested` / `lik_init_used`, `routing` (a data frame of
+  `from` / `to` / `reason`, one row per automatic reroute or fallback),
+  `diffuse_periods`, `missing_by_period` / `n_missing`, `dropped_by_period` /
+  `n_dropped`, `known_shocks` and `loglik_type`.
+
+  `missing` and `dropped` are counted separately on purpose: "not observed"
+  and "observed but exactly predictable" shorten the conditioning set for
+  different reasons, and conflating them hides a stochastic singularity.
+  `loglik_type` is `"marginal"`, `"joint"` (an injected shock with a prior
+  density) or `"conditional"` (all injections deterministic; also the
+  smoother's convention).
+
+- **`pre_sample` now pads `known_shocks` too.** The backfill rows are
+  prepended before the known-shock matrix is validated, so an `n_exo x T`
+  matrix on the caller's sample used to be rejected as the wrong width. It is
+  padded with `NA` (= unknown) instead. The pre-sample series are also read
+  after the deterministic trajectory is added back, so a backfill run together
+  with `known_shocks` reports the padded periods with the injected shocks in
+  them.
+
+## Testing
+
+- `test-statespace-semantics.R` (new): the four requests plus the requested
+  A-F regression matrix over (missing data, zero covariance, unit root, known
+  shocks). The matrix asserts **superposition** rather than a pinned number --
+  injecting a deterministic shock must equal subtracting its trajectory from
+  the data and injecting nothing, which is linearity of the state space and
+  needs no oracle.
+
+- `test-kalman-smoother-exact.R` block (d) is inverted: it recorded that the
+  smoother had NO exact-diffuse initialisation. It now pins that the exact
+  answer IS the `kappa -> Inf` limit -- along the RIGHT approximating sequence
+  (`P_star + kappa * P_inf`, diffuse only in the unit-root direction). The old
+  `kappa * I` fallback is diffuse in every direction, a different prior whose
+  limit is 9.3e-4 away and flat in kappa.
+
 # dynhr 0.9.3.1
 
 A filtering and smoothing release. No export is added or removed and every

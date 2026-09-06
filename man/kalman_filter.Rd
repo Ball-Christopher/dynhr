@@ -170,6 +170,19 @@ prior the Chandrasekhar increment recursion is initialised from, so
   term if the conditional is what you want. \code{\link{kalman_smoother}}
   conditions, so its \code{loglik} is the conditional one.
 
+  \strong{Deterministic shocks.} When the injected shock has \emph{no}
+  prior variance (a zero diagonal of \code{Sigma_e}, or a
+  \code{shock_scale} of zero at that period) the value is applied as a
+  deterministic INPUT: the state mean shifts and the covariance does not
+  move, because a component with zero variance IS its mean. A point mass
+  carries no density, so the two semantics coincide there -- the reported
+  log-likelihood is both the joint and the conditional one, and it agrees
+  with \code{\link{kalman_smoother}} exactly rather than up to a prior
+  term. It is also the limit of the positive-variance case: as the variance
+  goes to zero the filtered path converges to the deterministic one.
+  (Before 0.9.3.2 such a value was silently ignored -- the injected row's
+  forecast variance was exactly zero, so the sequential filter skipped it.)
+
   Only the univariate (Koopman--Durbin) filter can express this: it runs on
   the augmented state \eqn{[s_{t-1}; \varepsilon_t]}, where the shocks are
   state components and a known shock is an exact observation of one. Passing
@@ -191,6 +204,34 @@ combination of observables (see
 \code{getOption("dynhr.me_floor_check", TRUE)}. Only evaluated on the
 stationary (non-\code{shock_scale}) baseline system; scoped to the
 scalar \code{me_variance} floor, not \code{me_extra}.}
+}
+\value{
+A list with
+  \describe{
+    \item{\code{loglik}}{the log-likelihood.}
+    \item{\code{filtered_states}}{\code{n_state x T}, column \eqn{t} is
+      \eqn{s_{t|t}} (only when \code{return_filtered = TRUE}).}
+    \item{\code{loglik_contrib}}{per-period contributions, when asked for.}
+    \item{\code{final_state}, \code{final_cov}}{the state hand-off:
+      \eqn{s_{T|T}} and \eqn{Var(s_T \mid y_{1:T})}, named, in the same
+      convention \code{a0} / \code{P0} take. \code{final_cov} is
+      \code{NULL} for \code{method = "chandrasekhar"}, which never forms
+      \eqn{P}, and after a failed run.}
+    \item{\code{method}, \code{lik_init}, \code{d_diffuse},
+      \code{n_obs}, \code{n_T}}{what ran.}
+    \item{\code{diagnostics}}{machine-readable record of the run:
+      \code{method_requested} / \code{method_used},
+      \code{lik_init_requested} / \code{lik_init_used}, \code{routing}
+      (a data frame of \code{from} / \code{to} / \code{reason} rows, one
+      per automatic reroute or fallback), \code{diffuse_periods},
+      \code{missing_by_period} / \code{n_missing} (observations that were
+      absent), \code{dropped_by_period} / \code{n_dropped} (observations
+      that were present but exactly predictable, hence carried no
+      information), \code{known_shocks} (how many injected cells, and how
+      many of them were deterministic) and \code{loglik_type}
+      (\code{"marginal"}, \code{"joint"} or \code{"conditional"}).
+      \code{\link{kalman_smoother}} returns the same fields.}
+  }
 }
 \description{
 Evaluates the log-likelihood of a DSGE model under the Gaussian state-space
@@ -305,6 +346,29 @@ the (correct) stationary likelihood there. To force the exact-diffuse
 treatment for every near-unit root, pass \code{lik_init = "diffuse"}
 explicitly.
 }
+\section{Filtering a split sample}{
+
+\code{final_state} / \code{final_cov} are exactly what \code{a0} /
+\code{P0} take, so a sample can be filtered in two calls and the
+prediction-error decomposition holds to numerical tolerance:
+
+\preformatted{
+f1 <- kalman_filter(y[1:k, ], dr, model, params, obs_vars = obs)
+f2 <- kalman_filter(y[(k+1):T, ], dr, model, params, obs_vars = obs,
+                    a0 = f1$final_state, P0 = f1$final_cov)
+f1$loglik + f2$loglik   # == the unsplit loglik
+}
+
+Both are in DEVIATIONS from the steady state (the data is in levels and the
+filter subtracts \code{dr$ys[obs_vars]} itself), and \code{a0} is
+\eqn{s_0} -- the state one period BEFORE the first row of \code{data}, so
+the hand-off lines up without an off-by-one. Supplying \code{P0} sets
+\code{lik_init = "user"}, which is reported back in \code{$lik_init}.
+For latent history BEFORE the first observation, use
+\code{kalman_smoother(pre_sample = k)} instead: that estimates the padded
+periods from the data that follows them, which \code{a0} cannot do.
+}
+
 \examples{
 model    <- parse_mod(system.file("extdata/models/rbc.mod",
                                   package = "dynhr"), verbose = FALSE)

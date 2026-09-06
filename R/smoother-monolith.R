@@ -329,12 +329,30 @@ build_dsge_state_space <- function(m, dr, obs_vars, verbose = TRUE,
 #'   \code{NULL} (default) means the model's steady state
 #'   \code{dr$ys[obs_vars]}, as in \code{\link{kalman_filter}()}. Pass
 #'   \code{d = 0} to smooth data that is already in deviations.
-#' @param lik_init Initialisation of \eqn{P_{0|0}}: \code{"auto"} (default)
-#'   uses the unconditional Lyapunov covariance and falls back to a
-#'   large-diagonal prior on a unit root; \code{"stationary"} demands the
-#'   Lyapunov solution and errors if it does not exist; \code{"kappa"} forces
-#'   the large-diagonal prior. There is no exact-diffuse option -- use
-#'   \code{\link{kalman_filter}(lik_init = "diffuse")} for that.
+#' @param lik_init Initialisation of \eqn{P_{0|0}}:
+#'   \describe{
+#'     \item{\code{"auto"}}{(default) the unconditional Lyapunov covariance
+#'       when it exists, and the EXACT diffuse smoother when it does not
+#'       (unit roots in \eqn{T}).}
+#'     \item{\code{"stationary"}}{demand the Lyapunov solution; error if it
+#'       does not exist.}
+#'     \item{\code{"diffuse"}}{the exact diffuse recursion
+#'       (Koopman--Durbin, sequential form on the augmented state). On a model
+#'       with no unit roots this IS the stationary initialisation, and the
+#'       result says so in \code{diagnostics$lik_init_used}.}
+#'     \item{\code{"kappa"}}{the old large-diagonal prior
+#'       \eqn{P_0 = 10^6 I}. Kept for continuity with earlier releases and
+#'       for comparing against \code{kalman_filter(lik_init = "kappa")};
+#'       its log-likelihood carries an arbitrary additive constant, so it is
+#'       not comparable across initialisations.}
+#'   }
+#'   \strong{Changed in 0.9.3.2:} \code{"auto"} used to fall back to
+#'   \code{"kappa"} on a unit root, with a warning saying the loglik had a
+#'   kappa-dependent offset. It now runs the exact recursion, whose
+#'   log-likelihood matches
+#'   \code{kalman_filter(lik_init = "diffuse", method = "univariate")} to
+#'   machine precision. Smoothed states move by ~1e-8 (the fallback was
+#'   accurate; the likelihood was the part that was not).
 #' @param kalman_tol Conditional-variance floor below which an observation
 #'   component is treated as carrying no information and dropped for that
 #'   period, matching \code{\link{kalman_filter}}'s univariate fallback.
@@ -354,7 +372,18 @@ build_dsge_state_space <- function(m, dr, obs_vars, verbose = TRUE,
 #'
 #'   Together, \code{a0} and \code{P0} are how a state is carried across a
 #'   sample split -- take \code{filtered_states} and \code{filtered_cov} at
-#'   the last period of the first block and hand them to the second.
+#'   the last period of the first block and hand them to the second, or take
+#'   \code{final_state} / \code{final_cov} from \code{\link{kalman_filter}},
+#'   which are the same pair under the same convention.
+#'
+#'   \code{a0}/\code{P0} and \code{pre_sample} answer different questions and
+#'   compose: \code{a0}/\code{P0} SET the prior at \eqn{s_0} (what you know
+#'   before the sample), while \code{pre_sample} ESTIMATES periods before
+#'   \eqn{s_0} from the data that follows them. Use the first to carry a
+#'   state forward across a split, the second to backcast a latent history.
+#'   \code{P0} and \code{lik_init = "diffuse"} are mutually exclusive: they
+#'   are two different priors, and passing both is an error rather than a
+#'   silent preference.
 #' @param pre_sample Number of periods BEFORE the first observation to
 #'   backfill (default \code{0}). The latent history is estimated from the
 #'   data that follows it, and the results come back in
@@ -367,10 +396,10 @@ build_dsge_state_space <- function(m, dr, obs_vars, verbose = TRUE,
 #'   this is the ordinary backward pass run over \code{pre_sample} padded
 #'   rows -- the same mechanism that has always produced the single
 #'   \code{smoothed_initial} period. The log-likelihood is unchanged (missing
-#'   rows contribute nothing). \strong{Exact for a stationary model}, where
-#'   \eqn{P_0} is the unconditional covariance; on a unit-root model the
-#'   backfill inherits the kappa fallback and its arbitrary constant, pending
-#'   an exact diffuse smoother.
+#'   rows contribute nothing). Exact for a stationary model, where \eqn{P_0}
+#'   is the unconditional covariance, and (since 0.9.3.2) exact on a unit-root
+#'   model too, where it inherits the exact diffuse initialisation rather than
+#'   the kappa fallback's arbitrary constant.
 #' @param known_shocks Known historical shock values: an \code{n_exo x T}
 #'   matrix carrying the value where a shock is known and \code{NA} where it is
 #'   not -- the \code{NA}-as-unknown convention \code{data} uses, and the
@@ -406,7 +435,17 @@ build_dsge_state_space <- function(m, dr, obs_vars, verbose = TRUE,
 #'   \eqn{t} is \eqn{s_{t|T}}), \code{smoothed_shocks}, \code{filtered_states},
 #'   \code{filtered_cov} / \code{predicted_cov} / \code{smoothed_cov},
 #'   \code{smoothed_initial} (\eqn{s_{0|T}}),
-#'   \code{smoothed_initial_cov} (\eqn{V_{0|T}}) and \code{loglik}.
+#'   \code{smoothed_initial_cov} (\eqn{V_{0|T}}), \code{loglik}, and
+#'   \code{diagnostics} -- the same machine-readable record
+#'   \code{\link{kalman_filter}} returns (see its \code{Value} section),
+#'   with \code{method_requested = NA} because the smoother takes no
+#'   \code{method} argument and \code{method_used} naming the recursion that
+#'   ran (\code{"durbin-koopman"} or \code{"sequential-diffuse"}).
+#'
+#'   During a diffuse phase the reported \code{filtered_cov} /
+#'   \code{predicted_cov} are the PROPER (\eqn{P_{star}}) part; the diffuse
+#'   part is unbounded by construction. \code{diagnostics$diffuse_periods}
+#'   says which periods those are.
 #' @seealso \code{\link{kalman_filter}} for the filtered pass and the exact
 #'   diffuse likelihood, \code{\link{build_dsge_state_space}} for the state
 #'   space this builds internally, \code{\link{smoother2histval}} to turn a
@@ -441,7 +480,8 @@ kalman_smoother <- function(data, dr, model, params = NULL,
                             obs_vars, me_variance = 0,
                             d = NULL, Q = NULL, me_extra = NULL,
                             shock_scale = NULL,
-                            lik_init = c("auto", "stationary", "kappa"),
+                            lik_init = c("auto", "stationary", "kappa",
+                                         "diffuse"),
                             kalman_tol = 1e-10, a0 = NULL, P0 = NULL,
                             pre_sample = 0L, known_shocks = NULL) {
   lik_init <- match.arg(lik_init)
@@ -504,10 +544,12 @@ kalman_smoother <- function(data, dr, model, params = NULL,
 #' @noRd
 .kalman_smoother_ss <- function(data, ss, d = NULL, me_variance = 0,
                                 Q = NULL, me_extra = NULL, shock_scale = NULL,
-                                lik_init = c("auto", "stationary", "kappa"),
+                                lik_init = c("auto", "stationary", "kappa",
+                                             "diffuse"),
                                 kalman_tol = 1e-10, a0 = NULL, P0 = NULL,
                                 pre_sample = 0L, known_shocks = NULL) {
   lik_init <- match.arg(lik_init)
+  lik_init_orig <- lik_init        # for $diagnostics (R4)
 
   ## ---- Pre-sample backfill ------------------------------------------------
   ## Latent states BEFORE the first observation, which is what a "backcast" of
@@ -537,6 +579,16 @@ kalman_smoother <- function(data, dr, model, params = NULL,
       me_extra <- cbind(matrix(0, nrow(me_extra), pre_sample), me_extra)
     if (!is.null(shock_scale))
       shock_scale <- cbind(matrix(1, nrow(shock_scale), pre_sample), shock_scale)
+    ## known_shocks is n_exo x T on the CALLER's sample, and the validation
+    ## below runs against the padded one -- so pad it here with "unknown"
+    ## rather than making the caller pad by hand (and then wonder why the
+    ## injected periods moved).
+    if (!is.null(known_shocks)) {
+      known_shocks <- as.matrix(known_shocks)
+      known_shocks <- cbind(matrix(NA_real_, nrow(known_shocks), pre_sample,
+                                   dimnames = list(rownames(known_shocks), NULL)),
+                            known_shocks)
+    }
   }
 
   ## Observation intercept. kalman_filter() subtracts d = dr$ys[obs_vars] from
@@ -590,9 +642,105 @@ kalman_smoother <- function(data, dr, model, params = NULL,
     shock_scale <- sc
   }
 
+  ## ---- Structured run diagnostics (R4) -----------------------------------
+  ## Same field names as kalman_filter()$diagnostics, so a parity harness can
+  ## read either without a special case. `method_requested` is NA here because
+  ## the smoother takes no `method` argument -- which recursion ran is reported
+  ## in `method_used`.
+  .smoother_diagnostics <- function(lik_init_used, d_diffuse = NA_integer_,
+                                    dropped = NULL, data = NULL,
+                                    method_used = "sequential-diffuse",
+                                    routing = list()) {
+    n_per <- if (is.null(data)) 0L else nrow(data)
+    miss  <- if (is.null(data)) integer(0)
+             else as.integer(rowSums(is.na(as.matrix(data))))
+    if (is.null(dropped)) dropped <- integer(n_per)
+    if (!identical(lik_init_orig, lik_init_used))
+      routing <- c(routing, list(c(
+        from = lik_init_orig, to = lik_init_used,
+        reason = if (identical(lik_init_used, "diffuse"))
+          "unit root(s) in T: the unconditional state covariance does not exist"
+        else if (identical(lik_init_used, "stationary"))
+          "no unit roots: the exact diffuse initialisation is the stationary one"
+        else "requested initialisation was not available")))
+    routing <- .kf_routing_df(routing)
+    dd <- if (length(d_diffuse) != 1L || is.na(d_diffuse)) NA_integer_
+          else as.integer(d_diffuse)
+    list(method_requested   = NA_character_,
+         method_used        = method_used,
+         lik_init_requested = lik_init_orig,
+         lik_init_used      = lik_init_used,
+         routing            = routing,
+         diffuse_periods    = if (is.na(dd)) integer(0) else seq_len(dd),
+         missing_by_period  = miss,
+         n_missing          = sum(miss),
+         dropped_by_period  = as.integer(dropped),
+         n_dropped          = sum(as.integer(dropped)),
+         known_shocks       = if (is.null(known_sm)) NULL else
+           list(names = known_sm$names,
+                n_cells = sum(!is.na(known_sm$values)),
+                n_applied = sum(!is.na(known_sm$values))),
+         ## The smoother conditions on an injected shock (it splits the
+         ## deterministic trajectory off); kalman_filter() reports the joint.
+         loglik_type        = if (is.null(known_sm)) "marginal" else "conditional")
+  }
+
+  ## ---- Shared exit ------------------------------------------------------
+  ## Both recursions (the DK backward pass below and the exact-diffuse
+  ## sequential smoother) produce the same `out`, and both owe the caller the
+  ## same two corrections afterwards: add the deterministic known-shock
+  ## trajectory back, and split the padded pre-sample rows out so every
+  ## returned series is aligned with the data that was passed in. Doing it in
+  ## one place is what keeps the two paths returning the same object.
+  .smoother_finish <- function(out) {
+    if (!is.null(known_sm)) {
+      out$smoothed_states  <- out$smoothed_states + s_det[-1L, , drop = FALSE]
+      out$filtered_states  <- out$filtered_states + s_det[-1L, , drop = FALSE]
+      out$smoothed_initial <- out$smoothed_initial + s_det[1L, ]
+      kv_na <- known_sm$values
+      for (i in seq_along(known_sm$idx)) {
+        hit <- which(!is.na(kv_na[i, ]))
+        out$smoothed_shocks[hit, known_sm$idx[i]] <- kv_na[i, hit]
+      }
+    }
+    if (pre_sample > 0L) {
+      k  <- pre_sample
+      ix <- seq_len(k)
+      n_all <- nrow(out$smoothed_states)
+      keep  <- (k + 1L):n_all
+      ## Read from the CORRECTED series (post add-back), or a pre-sample
+      ## backfill run together with known_shocks would report the padded
+      ## periods without the deterministic trajectory in them.
+      out$presample_states <- out$smoothed_states[ix, , drop = FALSE]
+      out$presample_shocks <- out$smoothed_shocks[ix, , drop = FALSE]
+      out$presample_cov    <- out$smoothed_cov[, , ix, drop = FALSE]
+      out$smoothed_states <- out$smoothed_states[keep, , drop = FALSE]
+      out$smoothed_shocks <- out$smoothed_shocks[keep, , drop = FALSE]
+      out$filtered_states <- out$filtered_states[keep, , drop = FALSE]
+      out$filtered_cov    <- out$filtered_cov[, , keep, drop = FALSE]
+      out$predicted_cov   <- out$predicted_cov[, , keep, drop = FALSE]
+      out$smoothed_cov    <- out$smoothed_cov[, , keep, drop = FALSE]
+      out$pre_sample      <- k
+      ## The per-period diagnostics describe the CALLER's sample too: the
+      ## padded rows are all-missing by construction and counting them as
+      ## missing observations would be an artefact of the padding.
+      if (!is.null(out$diagnostics)) {
+        d <- out$diagnostics
+        d$presample_periods <- k
+        d$missing_by_period <- d$missing_by_period[keep]
+        d$dropped_by_period <- d$dropped_by_period[keep]
+        d$n_missing <- sum(d$missing_by_period)
+        d$n_dropped <- sum(d$dropped_by_period)
+        out$diagnostics <- d
+      }
+    }
+    out
+  }
+
   ## Counters for the singular-F diagnostic raised after the forward pass.
   n_sing_periods <- 0L
   n_sing_dropped <- 0L
+  sing_by_period <- integer(nrow(data))
 
   ## Convert current-state dsge_ss to lagged-state before extracting matrices.
   ## ss_convert_timing() is a no-op when ss$timing == "lagged".
@@ -695,26 +843,93 @@ kalman_smoother <- function(data, dr, model, params = NULL,
   } else {
     solve_lyapunov(TT_mat, RQR)
   }
+  if (!is.null(P0_user) && identical(lik_init, "diffuse"))
+    stop("kalman_smoother: `P0` and lik_init = \"diffuse\" are two different ",
+         "initialisations -- the exact-diffuse recursion builds its own ",
+         "(P_inf, P_star) split and has nothing to do with a supplied P0. ",
+         "Pass one or the other. `a0` composes with either.", call. = FALSE)
   if (is.null(P0_user) && identical(lik_init, "stationary") && anyNA(P_ss))
     stop("kalman_smoother: lik_init = \"stationary\" was requested but the ",
          "Lyapunov solve returned NaN -- TT has unit-root eigenvalues, so the ",
          "unconditional state covariance does not exist. Use lik_init = ",
          "\"kappa\" (or \"auto\") for a nonstationary model.", call. = FALSE)
   if (anyNA(P_ss)) {
-    ## Unit roots detected: use a diffuse (large-diagonal) prior so the
-    ## smoother does not crash.  The smoothed states will be valid but the
-    ## loglik has a kappa-dependent additive offset (not suitable for
-    ## cross-method comparison; use kalman_filter(lik_init="diffuse") for
-    ## exact diffuse likelihood evaluation).
-    if (!identical(lik_init, "kappa"))
-    warning("kalman_smoother: unit root(s) detected in TT -- ",
-            "solve_lyapunov() returned NaN. ",
-            "Falling back to diffuse prior P0 = ", .DIFFUSE_SCALE,
-            " * I(", n_s, "). ",
-            "Smoothed states are valid; loglik has a kappa-dependent offset. ",
-            "Use kalman_filter(lik_init=\"diffuse\") for exact diffuse loglik.",
-            call. = FALSE)
-    P_ss <- .DIFFUSE_SCALE * diag(n_s)
+    ## Unit roots detected. This used to warn and substitute a large finite
+    ## prior P0 = 1e6 * I -- an approximating sequence whose smoothed states
+    ## are close (measured: ~5e-8 on the local-level fixture) but whose
+    ## log-likelihood carries an arbitrary kappa-dependent additive constant,
+    ## so it could not be compared with anything. lik_init = "auto" now runs
+    ## the EXACT diffuse smoother instead (.smoother_diffuse_seq); "kappa"
+    ## still asks for the old finite prior explicitly.
+    if (identical(lik_init, "kappa")) P_ss <- .DIFFUSE_SCALE * diag(n_s)
+    else                              lik_init <- "diffuse"
+  }
+
+  ## ---- Exact diffuse smoothing -------------------------------------------
+  ## The sequential smoother in R/smoother-diffuse.R does the whole job --
+  ## forward and backward -- on the augmented state, so this branch builds its
+  ## inputs and leaves through the shared exit rather than continuing into the
+  ## multivariate DK pass below.
+  if (identical(lik_init, "diffuse")) {
+    dp <- .kf_diffuse_P0(TT_mat, RQR)
+    if (dp$nunit == 0L) {
+      ## Nothing is actually diffuse: the exact answer IS the stationary one.
+      lik_init <- "stationary"
+      P_ss     <- solve_lyapunov(TT_mat, RQR)
+    } else {
+      nb   <- n_s + n_shk
+      s_ix <- seq_len(n_s); e_ix <- n_s + seq_len(n_shk)
+      Sig_list <- lapply(seq_len(TT), function(t)
+        if (has_shock_scale) { sc <- shock_scale[, t]; Q * outer(sc, sc) } else Q)
+      Zb  <- cbind(Z_mat, D_mat)
+      Tb  <- rbind(cbind(TT_mat, R_mat), matrix(0, n_shk, nb))
+      Gm  <- cbind(TT_mat, R_mat)
+      Ps1 <- matrix(0, nb, nb)
+      Ps1[s_ix, s_ix] <- dp$P_star; Ps1[e_ix, e_ix] <- Sig_list[[1L]]
+      Pi1 <- matrix(0, nb, nb); Pi1[s_ix, s_ix] <- dp$P_inf
+      me_mat <- matrix(me_variance, n_obs, TT)
+      if (has_me_extra) me_mat <- me_mat + me_extra
+      Ydev <- t(as.matrix(data))
+      if (!is.null(d_obs)) Ydev <- Ydev - d_obs
+      ds <- .smoother_diffuse_seq(Ydev, Zb, Tb, Gm, Sig_list,
+                                  c(a0_user, numeric(n_shk)), Ps1, Pi1,
+                                  me_mat, s_ix, e_ix, kalman_tol = kalman_tol)
+      if (isTRUE(ds$diffuse_failed))
+        warning("kalman_smoother: the diffuse phase did not end within the ",
+                "sample -- P_inf never decayed, so some diffuse direction is ",
+                "not identified by the data. The smoothed states are the ",
+                "minimum-norm answer in that direction and the reported ",
+                "covariances carry the proper part only. This usually means ",
+                "an unobserved unit root: check that every nonstationary ",
+                "state is loaded by some observable.", call. = FALSE)
+      nm  <- ss$state_names; shk <- ss$shock_names
+      dn3 <- list(nm, nm, NULL)
+      colnames(ds$smoothed_states) <- nm
+      colnames(ds$filtered_states) <- nm
+      colnames(ds$smoothed_shocks) <- shk
+      names(ds$smoothed_initial)   <- nm
+      dimnames(ds$smoothed_initial_cov) <- list(nm, nm)
+      dimnames(ds$filtered_cov)  <- dn3
+      dimnames(ds$predicted_cov) <- dn3
+      dimnames(ds$smoothed_cov)  <- dn3
+      out <- list(
+        smoothed_states = ds$smoothed_states,
+        smoothed_shocks = ds$smoothed_shocks,
+        filtered_states = ds$filtered_states,
+        filtered_cov    = ds$filtered_cov,
+        predicted_cov   = ds$predicted_cov,
+        smoothed_cov    = ds$smoothed_cov,
+        P_filt_last     = ds$filtered_cov[, , TT],
+        smoothed_initial     = ds$smoothed_initial,
+        smoothed_initial_cov = ds$smoothed_initial_cov,
+        loglik          = ds$loglik,
+        diagnostics     = .smoother_diagnostics(
+          lik_init_used = "diffuse",
+          ## An unfinished diffuse phase means EVERY period is still in it.
+          d_diffuse = if (isTRUE(ds$diffuse_failed)) TT else ds$d_diffuse,
+          dropped = ds$n_skipped, data = data))
+      return(.smoother_finish(out))
+    }
   }
 
   ## ---- Forward pass (Kalman filter) ----
@@ -847,6 +1062,7 @@ kalman_smoother <- function(data, dr, model, params = NULL,
       keep <- .smoother_informative_obs(F_t, kalman_tol)
       n_sing_periods <- n_sing_periods + 1L
       n_sing_dropped <- n_sing_dropped + sum(!keep)
+      sing_by_period[t] <- sum(!keep)
 
       if (!any(keep)) {
         ## No component carries information: predict-only, exactly as for an
@@ -1059,40 +1275,15 @@ kalman_smoother <- function(data, dr, model, params = NULL,
     ## Pre-sample smoothed moments, free from the same backward recursion.
     smoothed_initial     = s0_smooth,    # s_{0|T}
     smoothed_initial_cov = V0_smooth,    # V_{0|T}
-    loglik          = loglik
+    loglik          = loglik,
+    diagnostics     = .smoother_diagnostics(
+      lik_init_used = if (!is.null(P0_user)) "user" else
+                      if (identical(lik_init, "kappa")) "kappa" else "stationary",
+      dropped = sing_by_period, data = data,
+      method_used = "durbin-koopman")
   )
 
-  ## Add the deterministic trajectory back, and report the known shocks at the
-  ## values they were given -- they are inputs, not estimates.
-  if (!is.null(known_sm)) {
-    out$smoothed_states <- out$smoothed_states + s_det[-1L, , drop = FALSE]
-    out$filtered_states <- out$filtered_states + s_det[-1L, , drop = FALSE]
-    out$smoothed_initial <- out$smoothed_initial + s_det[1L, ]
-    kv_na <- known_sm$values
-    for (i in seq_along(known_sm$idx)) {
-      hit <- which(!is.na(kv_na[i, ]))
-      out$smoothed_shocks[hit, known_sm$idx[i]] <- kv_na[i, hit]
-    }
-  }
-
-  ## Split the padded periods back out so every returned series is aligned with
-  ## the data the caller passed, not with the padded matrix.
-  if (pre_sample > 0L) {
-    k  <- pre_sample
-    ix <- seq_len(k)
-    out$presample_states <- s_smooth[ix, , drop = FALSE]
-    out$presample_shocks <- eps_smooth[ix, , drop = FALSE]
-    out$presample_cov    <- V_smooth[, , ix, drop = FALSE]
-    keep <- (k + 1L):TT
-    out$smoothed_states <- s_smooth[keep, , drop = FALSE]
-    out$smoothed_shocks <- eps_smooth[keep, , drop = FALSE]
-    out$filtered_states <- s_filt[keep, , drop = FALSE]
-    out$filtered_cov    <- P_filt[, , keep, drop = FALSE]
-    out$predicted_cov   <- P_pred[, , keep, drop = FALSE]
-    out$smoothed_cov    <- V_smooth[, , keep, drop = FALSE]
-    out$pre_sample      <- k
-  }
-  out
+  .smoother_finish(out)
 }
 
 

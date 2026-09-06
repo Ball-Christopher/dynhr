@@ -174,6 +174,11 @@ List kalman_standard_loop_cpp(const arma::mat& Y_minus_d,
 
   return List::create(_["loglik"]     = loglik,
                       _["s"]          = s,
+                      // Var(s_T | y_1..T): the state hand-off a split sample
+                      // needs as its P0 (kalman_filter's `final_cov`). Frozen
+                      // at the steady-state value once the lock engages, which
+                      // is the same approximation the loglik already makes.
+                      _["P"]          = P,
                       _["filtered"]   = return_filtered ? Rcpp::wrap(filtered)
                                                         : R_NilValue,
                       _["ok"]         = ok,

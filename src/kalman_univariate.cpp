@@ -53,6 +53,9 @@ List kalman_univariate_loop_cpp(const arma::mat& Y_minus_d,
   bool   diffuse_failed = false;
   int    d_diffuse    = NA_INTEGER;
   arma::vec ll_contrib(n_T, arma::fill::zeros);
+  // Per-period count of observation components skipped because their
+  // forecast variance was (numerically) zero (see the skip branch below).
+  arma::ivec n_skipped(n_T, arma::fill::zeros);
   arma::mat filtered;
   if (return_filtered) filtered.zeros(n_state, n_T);
 
@@ -160,10 +163,15 @@ List kalman_univariate_loop_cpp(const arma::mat& Y_minus_d,
           cst_seq.push_back(0.5 * (log2pi + std::log(F_star)));
         }
       }
-      // else: (numerically) zero innovation variance -- the observable is
-      // an exact linear combination of already-processed information.
-      // Skip it gracefully (no inversion), per Koopman & Durbin (2000).
-      // This is what makes singular F a non-event on this path.
+      else {
+        // (numerically) zero innovation variance -- the observable is
+        // an exact linear combination of already-processed information.
+        // Skip it gracefully (no inversion), per Koopman & Durbin (2000).
+        // This is what makes singular F a non-event on this path. Counted so
+        // kalman_filter() can report it as structured diagnostics rather than
+        // leaving the caller to infer it.
+        n_skipped(t) += 1;
+      }
     }
 
     if (!std::isfinite(ll_t) || ll_t < ll_min) { ok = false; break; }
@@ -222,11 +230,16 @@ List kalman_univariate_loop_cpp(const arma::mat& Y_minus_d,
 
   return List::create(_["loglik"]         = loglik,
                       _["a"]              = a,
+                      // Final start-of-next-period covariance of the AUGMENTED
+                      // state [s_T; eps_{T+1}]; the caller slices the state
+                      // block out of it (kalman_filter's `final_cov`).
+                      _["P"]              = P_star,
                       _["filtered"]       = return_filtered
                                               ? Rcpp::wrap(filtered)
                                               : R_NilValue,
                       _["ok"]             = ok,
                       _["d_diffuse"]      = d_diffuse,
                       _["diffuse_failed"] = diffuse_failed,
-                      _["ll_contrib"]     = ll_contrib);
+                      _["ll_contrib"]     = ll_contrib,
+                      _["n_skipped"]      = n_skipped);
 }

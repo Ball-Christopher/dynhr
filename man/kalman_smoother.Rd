@@ -15,7 +15,7 @@ kalman_smoother(
   Q = NULL,
   me_extra = NULL,
   shock_scale = NULL,
-  lik_init = c("auto", "stationary", "kappa"),
+  lik_init = c("auto", "stationary", "kappa", "diffuse"),
   kalman_tol = 1e-10,
   a0 = NULL,
   P0 = NULL,
@@ -67,12 +67,30 @@ measurement-error variances (from a \code{filter_tunes} block), or
 standard-deviation scale factors (from a \code{heteroskedastic_shocks}
 block), or \code{NULL} (constant shock variances).}
 
-\item{lik_init}{Initialisation of \eqn{P_{0|0}}: \code{"auto"} (default)
-uses the unconditional Lyapunov covariance and falls back to a
-large-diagonal prior on a unit root; \code{"stationary"} demands the
-Lyapunov solution and errors if it does not exist; \code{"kappa"} forces
-the large-diagonal prior. There is no exact-diffuse option -- use
-\code{\link{kalman_filter}(lik_init = "diffuse")} for that.}
+\item{lik_init}{Initialisation of \eqn{P_{0|0}}:
+\describe{
+  \item{\code{"auto"}}{(default) the unconditional Lyapunov covariance
+    when it exists, and the EXACT diffuse smoother when it does not
+    (unit roots in \eqn{T}).}
+  \item{\code{"stationary"}}{demand the Lyapunov solution; error if it
+    does not exist.}
+  \item{\code{"diffuse"}}{the exact diffuse recursion
+    (Koopman--Durbin, sequential form on the augmented state). On a model
+    with no unit roots this IS the stationary initialisation, and the
+    result says so in \code{diagnostics$lik_init_used}.}
+  \item{\code{"kappa"}}{the old large-diagonal prior
+    \eqn{P_0 = 10^6 I}. Kept for continuity with earlier releases and
+    for comparing against \code{kalman_filter(lik_init = "kappa")};
+    its log-likelihood carries an arbitrary additive constant, so it is
+    not comparable across initialisations.}
+}
+\strong{Changed in 0.9.3.2:} \code{"auto"} used to fall back to
+\code{"kappa"} on a unit root, with a warning saying the loglik had a
+kappa-dependent offset. It now runs the exact recursion, whose
+log-likelihood matches
+\code{kalman_filter(lik_init = "diffuse", method = "univariate")} to
+machine precision. Smoothed states move by ~1e-8 (the fallback was
+accurate; the likelihood was the part that was not).}
 
 \item{kalman_tol}{Conditional-variance floor below which an observation
 component is treated as carrying no information and dropped for that
@@ -95,7 +113,18 @@ unconditional one.}
 
   Together, \code{a0} and \code{P0} are how a state is carried across a
   sample split -- take \code{filtered_states} and \code{filtered_cov} at
-  the last period of the first block and hand them to the second.}
+  the last period of the first block and hand them to the second, or take
+  \code{final_state} / \code{final_cov} from \code{\link{kalman_filter}},
+  which are the same pair under the same convention.
+
+  \code{a0}/\code{P0} and \code{pre_sample} answer different questions and
+  compose: \code{a0}/\code{P0} SET the prior at \eqn{s_0} (what you know
+  before the sample), while \code{pre_sample} ESTIMATES periods before
+  \eqn{s_0} from the data that follows them. Use the first to carry a
+  state forward across a split, the second to backcast a latent history.
+  \code{P0} and \code{lik_init = "diffuse"} are mutually exclusive: they
+  are two different priors, and passing both is an error rather than a
+  silent preference.}
 
 \item{pre_sample}{Number of periods BEFORE the first observation to
   backfill (default \code{0}). The latent history is estimated from the
@@ -109,10 +138,10 @@ unconditional one.}
   this is the ordinary backward pass run over \code{pre_sample} padded
   rows -- the same mechanism that has always produced the single
   \code{smoothed_initial} period. The log-likelihood is unchanged (missing
-  rows contribute nothing). \strong{Exact for a stationary model}, where
-  \eqn{P_0} is the unconditional covariance; on a unit-root model the
-  backfill inherits the kappa fallback and its arbitrary constant, pending
-  an exact diffuse smoother.}
+  rows contribute nothing). Exact for a stationary model, where \eqn{P_0}
+  is the unconditional covariance, and (since 0.9.3.2) exact on a unit-root
+  model too, where it inherits the exact diffuse initialisation rather than
+  the kappa fallback's arbitrary constant.}
 
 \item{known_shocks}{Known historical shock values: an \code{n_exo x T}
   matrix carrying the value where a shock is known and \code{NA} where it is
@@ -138,7 +167,17 @@ List with \code{smoothed_states} (\eqn{T \times n_{state}}, row
   \eqn{t} is \eqn{s_{t|T}}), \code{smoothed_shocks}, \code{filtered_states},
   \code{filtered_cov} / \code{predicted_cov} / \code{smoothed_cov},
   \code{smoothed_initial} (\eqn{s_{0|T}}),
-  \code{smoothed_initial_cov} (\eqn{V_{0|T}}) and \code{loglik}.
+  \code{smoothed_initial_cov} (\eqn{V_{0|T}}), \code{loglik}, and
+  \code{diagnostics} -- the same machine-readable record
+  \code{\link{kalman_filter}} returns (see its \code{Value} section),
+  with \code{method_requested = NA} because the smoother takes no
+  \code{method} argument and \code{method_used} naming the recursion that
+  ran (\code{"durbin-koopman"} or \code{"sequential-diffuse"}).
+
+  During a diffuse phase the reported \code{filtered_cov} /
+  \code{predicted_cov} are the PROPER (\eqn{P_{star}}) part; the diffuse
+  part is unbounded by construction. \code{diagnostics$diffuse_periods}
+  says which periods those are.
 }
 \description{
 DSGE form (note timing: \eqn{y_t} depends on \eqn{s_{t-1}}):
