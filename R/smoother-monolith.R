@@ -338,6 +338,57 @@ build_dsge_state_space <- function(m, dr, obs_vars, verbose = TRUE,
 #' @param kalman_tol Conditional-variance floor below which an observation
 #'   component is treated as carrying no information and dropped for that
 #'   period, matching \code{\link{kalman_filter}}'s univariate fallback.
+#' @param a0 Initial state mean \eqn{s_{0|0}}, length \code{n_state}, in
+#'   \strong{deviations from the steady state} (the convention
+#'   \code{smoothed_states} is in -- \code{data} is in levels, the states are
+#'   not). \code{NULL} (default) starts at the steady state. Matched by name
+#'   when named. The pre-sample \code{smoothed_initial} is then
+#'   \eqn{s_{0|T}} under YOUR prior rather than under the model's
+#'   unconditional one.
+#' @param P0 Initial state covariance \eqn{P_{0|0}}, \code{n_state x n_state}
+#'   (or a scalar for a multiple of the identity), symmetric and positive
+#'   semi-definite. \code{NULL} (default) uses \code{lik_init}. Supplying it
+#'   replaces that whole ladder, including the unit-root fallback and its
+#'   warning: the caller has said what the prior is, so there is nothing left
+#'   to fall back from.
+#'
+#'   Together, \code{a0} and \code{P0} are how a state is carried across a
+#'   sample split -- take \code{filtered_states} and \code{filtered_cov} at
+#'   the last period of the first block and hand them to the second.
+#' @param pre_sample Number of periods BEFORE the first observation to
+#'   backfill (default \code{0}). The latent history is estimated from the
+#'   data that follows it, and the results come back in
+#'   \code{presample_states}, \code{presample_shocks} and
+#'   \code{presample_cov} -- chronological, so the last row is the period
+#'   immediately before \code{data}. Every other returned series stays
+#'   aligned with \code{data}.
+#'
+#'   No new recursion is involved: an all-missing period is predict-only, so
+#'   this is the ordinary backward pass run over \code{pre_sample} padded
+#'   rows -- the same mechanism that has always produced the single
+#'   \code{smoothed_initial} period. The log-likelihood is unchanged (missing
+#'   rows contribute nothing). \strong{Exact for a stationary model}, where
+#'   \eqn{P_0} is the unconditional covariance; on a unit-root model the
+#'   backfill inherits the kappa fallback and its arbitrary constant, pending
+#'   an exact diffuse smoother.
+#' @param known_shocks Known historical shock values: an \code{n_exo x T}
+#'   matrix carrying the value where a shock is known and \code{NA} where it is
+#'   not -- the \code{NA}-as-unknown convention \code{data} uses, and the
+#'   \code{n_exo x T} shape \code{shock_scale} uses. Rows are matched BY NAME
+#'   when the matrix has rownames. \code{NULL} (default), or a matrix that is
+#'   all \code{NA}, is a no-op.
+#'
+#'   Use it for a shock you actually know: an announced policy change, a
+#'   measured intervention, a judgemental adjustment carried over from another
+#'   exercise.
+#'
+#'   A known shock is a deterministic part of the system, so it splits off
+#'   exactly: its trajectory is subtracted from the data, the ordinary
+#'   recursion runs on the remainder, and the trajectory is added back. The
+#'   injected values are returned in \code{smoothed_shocks} as themselves --
+#'   they are inputs, not estimates. \code{loglik} is the CONDITIONAL
+#'   \eqn{\log p(y \mid \varepsilon = v)}; see \code{\link{kalman_filter}}
+#'   for the joint.
 #' @param Q      n_shock x n_shock shock covariance. Default \code{NULL}:
 #'   use \code{ss$Sigma_e} (the covariance from the \code{shocks;} block),
 #'   which makes the forward-pass \code{loglik} identical to
@@ -391,7 +442,8 @@ kalman_smoother <- function(data, dr, model, params = NULL,
                             d = NULL, Q = NULL, me_extra = NULL,
                             shock_scale = NULL,
                             lik_init = c("auto", "stationary", "kappa"),
-                            kalman_tol = 1e-10) {
+                            kalman_tol = 1e-10, a0 = NULL, P0 = NULL,
+                            pre_sample = 0L, known_shocks = NULL) {
   lik_init <- match.arg(lik_init)
 
   ## ---- One shape, one data convention -----------------------------------
@@ -426,7 +478,9 @@ kalman_smoother <- function(data, dr, model, params = NULL,
                                params = params)
   .kalman_smoother_ss(data, ss, d = d, me_variance = me_variance, Q = Q,
                       me_extra = me_extra, shock_scale = shock_scale,
-                      lik_init = lik_init, kalman_tol = kalman_tol)
+                      lik_init = lik_init, kalman_tol = kalman_tol,
+                      a0 = a0, P0 = P0, pre_sample = pre_sample,
+                      known_shocks = known_shocks)
 }
 
 
@@ -451,8 +505,39 @@ kalman_smoother <- function(data, dr, model, params = NULL,
 .kalman_smoother_ss <- function(data, ss, d = NULL, me_variance = 0,
                                 Q = NULL, me_extra = NULL, shock_scale = NULL,
                                 lik_init = c("auto", "stationary", "kappa"),
-                                kalman_tol = 1e-10) {
+                                kalman_tol = 1e-10, a0 = NULL, P0 = NULL,
+                                pre_sample = 0L, known_shocks = NULL) {
   lik_init <- match.arg(lik_init)
+
+  ## ---- Pre-sample backfill ------------------------------------------------
+  ## Latent states BEFORE the first observation, which is what a "backcast" of
+  ## the unobserved history means. No new recursion is needed: an all-missing
+  ## period is already predict-only, so prepending `pre_sample` rows of NA lets
+  ## the ordinary Durbin-Koopman backward pass estimate those periods from the
+  ## data that follows them. That is exactly how the single pre-sample period
+  ## in `smoothed_initial` has always been produced -- this generalises it to
+  ## k periods and returns them separately, rather than making the caller pad
+  ## the matrix by hand and re-align every output.
+  ##
+  ## Exact for a stationary model, where P_0 is the unconditional covariance.
+  ## On a unit-root model it inherits the kappa fallback below, so the backfill
+  ## carries the same kappa-dependent offset the loglik does.
+  pre_sample <- as.integer(pre_sample)
+  if (length(pre_sample) != 1L || is.na(pre_sample) || pre_sample < 0L)
+    stop("kalman_smoother: `pre_sample` must be a single non-negative integer.",
+         call. = FALSE)
+  if (pre_sample > 0L) {
+    n_obs_in <- ncol(data)
+    data <- rbind(matrix(NA_real_, pre_sample, n_obs_in,
+                         dimnames = list(NULL, colnames(data))),
+                  as.matrix(data))
+    ## me_extra is n_obs x T and shock_scale is n_shk x T: pad on the LEFT with
+    ## the neutral value, or the per-period columns silently shift by k.
+    if (!is.null(me_extra))
+      me_extra <- cbind(matrix(0, nrow(me_extra), pre_sample), me_extra)
+    if (!is.null(shock_scale))
+      shock_scale <- cbind(matrix(1, nrow(shock_scale), pre_sample), shock_scale)
+  }
 
   ## Observation intercept. kalman_filter() subtracts d = dr$ys[obs_vars] from
   ## the data; so does this, via the state space's own `d` field.
@@ -466,6 +551,44 @@ kalman_smoother <- function(data, dr, model, params = NULL,
                  length(d_obs), if (length(d_obs) == 1L) "y" else "ies",
                  ncol(data)), call. = FALSE)
   if (!is.null(d_obs) && all(d_obs == 0)) d_obs <- NULL
+
+  ## ---- Known historical shocks -------------------------------------------
+  ## A known shock is a DETERMINISTIC part of the system, so it splits off
+  ## exactly and the recursion never has to know about it. With
+  ## eps_{j,t} = v_t known,
+  ##   s_t = T s_{t-1} + R_j v_t + R_-j eps_{-j,t}
+  ##   y_t = Z s_{t-1} + D_j v_t + D_-j eps_{-j,t}
+  ## so subtracting the deterministic trajectory from the data leaves an
+  ## ordinary smoothing problem in the unknown shocks, and the trajectory is
+  ## added back afterwards. The known shock's variance is switched off in those
+  ## periods -- there is nothing left to estimate about it.
+  ##
+  ## This is a different mechanism from kalman_filter()'s, which observes eps
+  ## directly on its augmented state. They must agree, and a test pins that.
+  known_sm <- NULL
+  if (!is.null(known_shocks)) {
+    known_sm <- .kf_known_shocks(known_shocks, NULL, ss$shock_names, nrow(data),
+                                 what = "kalman_smoother")
+  }
+  if (!is.null(known_sm)) {
+    kv <- known_sm$values; kv[is.na(kv)] <- 0        # 0 outside the known periods
+    kidx <- known_sm$idx
+    s_det <- matrix(0, nrow(data) + 1L, ss$n_state)  # row t+1 holds s^det_t
+    y_det <- matrix(0, nrow(data), ss$n_obs)
+    for (t in seq_len(nrow(data))) {
+      y_det[t, ] <- as.numeric(ss$Z_mat %*% s_det[t, ] +
+                               ss$D_mat[, kidx, drop = FALSE] %*% kv[, t])
+      s_det[t + 1L, ] <- as.numeric(ss$T_mat %*% s_det[t, ] +
+                                    ss$R_mat[, kidx, drop = FALSE] %*% kv[, t])
+    }
+    data <- data - y_det
+    ## Switch the known shocks off where they are known: shock_scale already
+    ## carries exactly this per-period, per-shock semantics.
+    sc <- if (is.null(shock_scale)) matrix(1, ss$n_shock, nrow(data))
+          else shock_scale
+    sc[kidx, ] <- sc[kidx, , drop = FALSE] * (is.na(known_sm$values) + 0)
+    shock_scale <- sc
+  }
 
   ## Counters for the singular-F diagnostic raised after the forward pass.
   n_sing_periods <- 0L
@@ -554,7 +677,15 @@ kalman_smoother <- function(data, dr, model, params = NULL,
   ## fall back to large diagonal for near-unit-root / nonstationary models
   ## (solve_lyapunov returns a NaN matrix when the doubling algorithm diverges
   ## and the vec-Lyapunov system is singular).
-  P_ss <- if (identical(lik_init, "kappa")) {
+  ## A supplied P0 short-circuits the whole initialisation ladder below --
+  ## including its unit-root warning, which is about a fallback that no longer
+  ## applies once the caller has said what the prior is.
+  P0_user <- .kf_init_cov(P0, ss$state_names, n_s, what = "kalman_smoother")
+  a0_user <- .kf_init_mean(a0, ss$state_names, n_s, what = "kalman_smoother")
+
+  P_ss <- if (!is.null(P0_user)) {
+    P0_user
+  } else if (identical(lik_init, "kappa")) {
     ## Forced diffuse-style prior. kalman_filter() REFUSES lik_init = "auto"
     ## together with shock_scale on a nonstationary model and tells the caller
     ## to pass "kappa" or "stationary" explicitly; before this argument existed
@@ -564,7 +695,7 @@ kalman_smoother <- function(data, dr, model, params = NULL,
   } else {
     solve_lyapunov(TT_mat, RQR)
   }
-  if (identical(lik_init, "stationary") && anyNA(P_ss))
+  if (is.null(P0_user) && identical(lik_init, "stationary") && anyNA(P_ss))
     stop("kalman_smoother: lik_init = \"stationary\" was requested but the ",
          "Lyapunov solve returned NaN -- TT has unit-root eigenvalues, so the ",
          "unconditional state covariance does not exist. Use lik_init = ",
@@ -615,7 +746,10 @@ kalman_smoother <- function(data, dr, model, params = NULL,
   dk_D     <- vector("list", TT)   # Dt  (n_ok x n_shk)
   dk_Q     <- vector("list", TT)   # Q_t (n_shk x n_shk) -- needed when shock_scale active
 
-  s_tt <- rep(0, n_s)
+  ## s_{0|0}. Zero is the steady state in this package's deviation convention;
+  ## `a0` moves it, which is what makes a hand-off from an earlier sample (or
+  ## from smoother2histval()) possible.
+  s_tt <- a0_user
   P_tt <- P_ss
   loglik <- 0
 
@@ -879,7 +1013,11 @@ kalman_smoother <- function(data, dr, model, params = NULL,
 
     ## Smoothed lagged state / covariance: r_t and N_t now hold r_{t-1}, N_{t-1}.
     ## (drop = FALSE: n_s == 1 would otherwise collapse the slice to a scalar)
-    s_in <- if (t == 1L) rep(0, n_s) else s_filt[t - 1L, ]
+    ## t == 1 reaches BEFORE the sample: the pair here is (s_{0|0}, P_{0|0}),
+    ## i.e. the prior itself. This read zero unconditionally, which silently
+    ## ignored `a0` on the backward pass while the forward pass honoured it --
+    ## visible only in smoothed_initial, and only once a0 was non-zero.
+    s_in <- if (t == 1L) a0_user else s_filt[t - 1L, ]
     P_in <- if (t == 1L) P_ss        else
       matrix(P_filt[, , t - 1L], n_s, n_s)
     s_lag[t, ]   <- s_in + as.numeric(P_in %*% r_t)
@@ -909,7 +1047,7 @@ kalman_smoother <- function(data, dr, model, params = NULL,
   dimnames(P_pred)   <- list(ss$state_names, ss$state_names, NULL)
   dimnames(V_smooth) <- list(ss$state_names, ss$state_names, NULL)
 
-  list(
+  out <- list(
     smoothed_states = s_smooth,
     smoothed_shocks = eps_smooth,
     filtered_states = s_filt,
@@ -923,6 +1061,38 @@ kalman_smoother <- function(data, dr, model, params = NULL,
     smoothed_initial_cov = V0_smooth,    # V_{0|T}
     loglik          = loglik
   )
+
+  ## Add the deterministic trajectory back, and report the known shocks at the
+  ## values they were given -- they are inputs, not estimates.
+  if (!is.null(known_sm)) {
+    out$smoothed_states <- out$smoothed_states + s_det[-1L, , drop = FALSE]
+    out$filtered_states <- out$filtered_states + s_det[-1L, , drop = FALSE]
+    out$smoothed_initial <- out$smoothed_initial + s_det[1L, ]
+    kv_na <- known_sm$values
+    for (i in seq_along(known_sm$idx)) {
+      hit <- which(!is.na(kv_na[i, ]))
+      out$smoothed_shocks[hit, known_sm$idx[i]] <- kv_na[i, hit]
+    }
+  }
+
+  ## Split the padded periods back out so every returned series is aligned with
+  ## the data the caller passed, not with the padded matrix.
+  if (pre_sample > 0L) {
+    k  <- pre_sample
+    ix <- seq_len(k)
+    out$presample_states <- s_smooth[ix, , drop = FALSE]
+    out$presample_shocks <- eps_smooth[ix, , drop = FALSE]
+    out$presample_cov    <- V_smooth[, , ix, drop = FALSE]
+    keep <- (k + 1L):TT
+    out$smoothed_states <- s_smooth[keep, , drop = FALSE]
+    out$smoothed_shocks <- eps_smooth[keep, , drop = FALSE]
+    out$filtered_states <- s_filt[keep, , drop = FALSE]
+    out$filtered_cov    <- P_filt[, , keep, drop = FALSE]
+    out$predicted_cov   <- P_pred[, , keep, drop = FALSE]
+    out$smoothed_cov    <- V_smooth[, , keep, drop = FALSE]
+    out$pre_sample      <- k
+  }
+  out
 }
 
 

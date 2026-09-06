@@ -20,6 +20,10 @@ kalman_filter(
   me_extra = NULL,
   shock_scale = NULL,
   obs_aggregation = NULL,
+  a0 = NULL,
+  P0 = NULL,
+  known_shocks = NULL,
+  known_shocks_sd = NULL,
   me_floor_check = getOption("dynhr.me_floor_check", TRUE)
 )
 }
@@ -64,7 +68,8 @@ covariances and the exact-diffuse phase with singular \code{F_inf}).}
 \item{lik_init}{character; initialization of the state covariance \code{P0}
 (and, for unit-root models, the diffuse covariance): \code{"auto"}
 (default), \code{"stationary"}, \code{"diffuse"}, or \code{"kappa"}.
-See Details.}
+See Details. Supplying \code{P0} overrides this and is reported back as
+\code{lik_init = "user"}.}
 
 \item{me_extra}{\code{n_obs x T} matrix of additional per-observable,
 per-period measurement-error variances (default \code{NULL}, no extra
@@ -88,10 +93,9 @@ update.  Concretely: \code{method = "auto"} routes to
 nonzero \code{me_extra} raises an error; the DARE drift diagnostic
 (\code{dare_p_drift}) is skipped (\code{NA}) because \code{P} has no
 time-invariant fixed point under per-period \code{F_t}.  Note also that the
-exact-diffuse phase (\code{lik_init = "diffuse"}) does not support
-missing observations and falls back to \code{"kappa"} whenever
-\code{me_extra} introduces NA rows (see Landmine 2 in the
-filter-tunes brief).}
+exact-diffuse phase with missing observations (including NA rows
+introduced by \code{me_extra}) runs on the sequential univariate filter,
+which handles it exactly -- see \code{lik_init} in Details.}
 
 \item{shock_scale}{\code{n_exo x T} matrix of shock standard-deviation
 scale factors (multiplicative, so 1 = baseline).  At period \code{t}
@@ -128,6 +132,54 @@ Consumed by the Gaussian Kalman likelihood only: the other likelihoods in
 Markov-switching Kim filter reject it, and the ANALYTIC score
 (\code{make_posterior_grad}) has no aggregation awareness -- sample a
 mixed-frequency posterior with a gradient-free sampler.}
+
+\item{a0}{Initial state mean, length \code{n_state}, in \strong{deviations
+from the steady state} -- the convention the filter's own
+\code{filtered_states} are in. \code{NULL} (default) starts at the steady
+state, i.e. a vector of zeros. Matched BY NAME when named (a same-length
+vector in a different order is a reorder request, not a relabelling); the
+state names are the \code{rownames} of \code{filtered_states}. Composes
+with every \code{lik_init}, including \code{"diffuse"}.}
+
+\item{P0}{Initial state covariance, \code{n_state x n_state} (or a scalar
+for a multiple of the identity). \code{NULL} (default) takes the
+covariance implied by \code{lik_init}. Must be symmetric and positive
+semi-definite; matched by \code{dimnames} when it has them. Mutually
+exclusive with \code{lik_init = "diffuse"}, which builds its own
+\code{(P_inf, P_star)} split. A supplied \code{P0} is not the Lyapunov
+prior the Chandrasekhar increment recursion is initialised from, so
+\code{method = "auto"} routes to \code{"standard"} and explicit
+\code{method = "chandrasekhar"} is refused.}
+
+\item{known_shocks}{Known historical shock values: an \code{n_exo x T}
+  matrix carrying the value where a shock is known and \code{NA} where it is
+  not -- the \code{NA}-as-unknown convention \code{data} uses, and the
+  \code{n_exo x T} shape \code{shock_scale} uses. Rows are matched BY NAME
+  when the matrix has rownames. \code{NULL} (default), or a matrix that is
+  all \code{NA}, is a no-op.
+
+  Use it for a shock you actually know: an announced policy change, a
+  measured intervention, a judgemental adjustment carried over from another
+  exercise.
+
+  \strong{Semantics.} The known value is treated as an OBSERVATION, so the
+  reported log-likelihood is the \strong{joint} \eqn{\log p(y, \varepsilon =
+  v)} -- the known shock is data, and it informs that shock's own standard
+  error. It therefore differs from the conditional \eqn{\log p(y \mid
+  \varepsilon = v)} by exactly \eqn{\log p(\varepsilon = v)}; subtract that
+  term if the conditional is what you want. \code{\link{kalman_smoother}}
+  conditions, so its \code{loglik} is the conditional one.
+
+  Only the univariate (Koopman--Durbin) filter can express this: it runs on
+  the augmented state \eqn{[s_{t-1}; \varepsilon_t]}, where the shocks are
+  state components and a known shock is an exact observation of one. Passing
+  \code{known_shocks} therefore routes to \code{method = "univariate"}.}
+
+\item{known_shocks_sd}{Optional standard errors for \code{known_shocks},
+same shape (or a scalar). The injection is then SOFT -- the value is an
+observation with that standard deviation rather than an exact constraint,
+which is what a judgemental adjustment usually is. \code{NULL} or
+\code{NA} means exact.}
 
 \item{me_floor_check}{Logical: when \code{me_variance > 0}, compare it
 against the smallest eigenvalue of the model-implied (ME-free) steady-

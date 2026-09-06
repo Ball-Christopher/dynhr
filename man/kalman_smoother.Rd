@@ -16,7 +16,11 @@ kalman_smoother(
   me_extra = NULL,
   shock_scale = NULL,
   lik_init = c("auto", "stationary", "kappa"),
-  kalman_tol = 1e-10
+  kalman_tol = 1e-10,
+  a0 = NULL,
+  P0 = NULL,
+  pre_sample = 0L,
+  known_shocks = NULL
 )
 }
 \arguments{
@@ -73,6 +77,61 @@ the large-diagonal prior. There is no exact-diffuse option -- use
 \item{kalman_tol}{Conditional-variance floor below which an observation
 component is treated as carrying no information and dropped for that
 period, matching \code{\link{kalman_filter}}'s univariate fallback.}
+
+\item{a0}{Initial state mean \eqn{s_{0|0}}, length \code{n_state}, in
+\strong{deviations from the steady state} (the convention
+\code{smoothed_states} is in -- \code{data} is in levels, the states are
+not). \code{NULL} (default) starts at the steady state. Matched by name
+when named. The pre-sample \code{smoothed_initial} is then
+\eqn{s_{0|T}} under YOUR prior rather than under the model's
+unconditional one.}
+
+\item{P0}{Initial state covariance \eqn{P_{0|0}}, \code{n_state x n_state}
+  (or a scalar for a multiple of the identity), symmetric and positive
+  semi-definite. \code{NULL} (default) uses \code{lik_init}. Supplying it
+  replaces that whole ladder, including the unit-root fallback and its
+  warning: the caller has said what the prior is, so there is nothing left
+  to fall back from.
+
+  Together, \code{a0} and \code{P0} are how a state is carried across a
+  sample split -- take \code{filtered_states} and \code{filtered_cov} at
+  the last period of the first block and hand them to the second.}
+
+\item{pre_sample}{Number of periods BEFORE the first observation to
+  backfill (default \code{0}). The latent history is estimated from the
+  data that follows it, and the results come back in
+  \code{presample_states}, \code{presample_shocks} and
+  \code{presample_cov} -- chronological, so the last row is the period
+  immediately before \code{data}. Every other returned series stays
+  aligned with \code{data}.
+
+  No new recursion is involved: an all-missing period is predict-only, so
+  this is the ordinary backward pass run over \code{pre_sample} padded
+  rows -- the same mechanism that has always produced the single
+  \code{smoothed_initial} period. The log-likelihood is unchanged (missing
+  rows contribute nothing). \strong{Exact for a stationary model}, where
+  \eqn{P_0} is the unconditional covariance; on a unit-root model the
+  backfill inherits the kappa fallback and its arbitrary constant, pending
+  an exact diffuse smoother.}
+
+\item{known_shocks}{Known historical shock values: an \code{n_exo x T}
+  matrix carrying the value where a shock is known and \code{NA} where it is
+  not -- the \code{NA}-as-unknown convention \code{data} uses, and the
+  \code{n_exo x T} shape \code{shock_scale} uses. Rows are matched BY NAME
+  when the matrix has rownames. \code{NULL} (default), or a matrix that is
+  all \code{NA}, is a no-op.
+
+  Use it for a shock you actually know: an announced policy change, a
+  measured intervention, a judgemental adjustment carried over from another
+  exercise.
+
+  A known shock is a deterministic part of the system, so it splits off
+  exactly: its trajectory is subtracted from the data, the ordinary
+  recursion runs on the remainder, and the trajectory is added back. The
+  injected values are returned in \code{smoothed_shocks} as themselves --
+  they are inputs, not estimates. \code{loglik} is the CONDITIONAL
+  \eqn{\log p(y \mid \varepsilon = v)}; see \code{\link{kalman_filter}}
+  for the joint.}
 }
 \value{
 List with \code{smoothed_states} (\eqn{T \times n_{state}}, row

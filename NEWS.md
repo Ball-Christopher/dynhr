@@ -1,3 +1,130 @@
+# dynhr 0.9.3.1
+
+A filtering and smoothing release. No export is added or removed and every
+addition is an optional argument on a function that already existed, so no
+existing call signature changes.
+
+**One existing call DOES return a different number, deliberately.**
+`lik_init = "diffuse"` with missing observations used to warn and silently
+downgrade to `"kappa"`: -44.097 where the exact diffuse log-likelihood is
+-36.271 on the local-level fixture with three gaps. That is the fix in this
+release rather than a side effect of it -- but if you have run a
+diffuse-initialised filter on data with gaps, you were getting the kappa
+answer, and you will now get a different (correct) one.
+
+Every other new argument is inert when omitted, and that is asserted rather
+than assumed: `a0 = 0`, `pre_sample = 0` and an all-`NA` `known_shocks` each
+reproduce the 0.9.3 result at `tolerance = 0`.
+
+The rest closes gaps that had been worked around by hand: no way to set the
+initial state, no way to backfill the latent history before the sample, and no
+way to tell the filter about a shock you already know.
+
+## Filtering and smoothing
+
+- **Known historical shocks can be injected: `known_shocks` on
+  `kalman_filter()` and `kalman_smoother()`.** An `n_exo x T` matrix carrying
+  the value where a shock is known and `NA` where it is not -- the
+  `NA`-as-unknown convention `data` already uses, and the `n_exo x T` shape
+  `shock_scale` already uses, with rows matched by name. For an announced
+  policy change, a measured intervention, or a judgemental adjustment;
+  `known_shocks_sd` (filter) makes the injection soft rather than exact.
+
+  The two entry points reach it by different mechanisms, because their
+  recursions differ. The filter's univariate path already runs on the
+  augmented state `[s_{t-1}; eps_t]`, so the shocks ARE state components there
+  and a known shock is an exact observation of one -- passing `known_shocks`
+  routes to `method = "univariate"`. The smoother instead splits the known
+  shock off as the deterministic part of the system, smooths the remainder,
+  and adds it back. Both were checked against closed forms that use no
+  recursion at all (`helper-gls-smoother.R`): the smoother matches a
+  projection oracle to 2e-16, and the filter matches an analytic joint density
+  to 1e-10.
+
+  **Semantics, because it is a modelling choice rather than a detail:** the
+  filter treats the known value as an observation and reports the JOINT
+  `log p(y, eps = v)`, so a known shock informs that shock's own standard
+  error. The smoother conditions. The two differ by exactly `log p(eps = v)`
+  -- verified to 0.0e+00 -- so subtract that term if you want the conditional
+  likelihood.
+
+
+- **`kalman_filter()` and `kalman_smoother()` take `a0` and `P0`.** The
+  initial state mean and covariance were hard-coded -- zero, and whatever
+  `lik_init` implied -- so there was no way to carry a state across a sample
+  split, condition on a known history, or hand the smoother a prior of your
+  own. The internals had always taken them; only the public shape was missing.
+  `a0` is in **deviations from the steady state** (the convention the states
+  are reported in; `data` is in levels) and is matched BY NAME when named.
+  `P0` must be symmetric and positive semi-definite, may be a scalar for a
+  multiple of the identity, and is reported back as `lik_init = "user"`.
+
+  The identity that pins this: splitting a sample at `k`, filtering the first
+  block, and starting the second from `(filtered_states[k, ],
+  filtered_cov[, , k])` reproduces the whole-sample log-likelihood -- verified
+  to 5e-13 on `nk_demo`.
+
+  Two traps were found while wiring it, both of the "accepted, validated,
+  reported, then silently dropped" kind: `kalman_standard_loop_cpp()` takes no
+  initial state (it starts at zero unconditionally), so the default fast path
+  for a stationary model now falls through to the R loop whenever `a0` is
+  non-zero; and the smoother's backward pass read a hard zero for
+  \eqn{s_{0|0}}, which would have ignored `a0` in `smoothed_initial` while the
+  forward pass honoured it.
+
+- **`lik_init = "diffuse"` now works with missing observations.** It used to
+  warn and downgrade to `"kappa"`, which answers a different question: on a
+  local-level model with three gaps, -44.097 against the exact -36.271. The
+  exact-diffuse recursion and missing data meet in the sequential
+  (Koopman-Durbin univariate) filter, which skips a missing observable one at
+  a time -- as it already did for every other initialisation -- so the
+  capability was implemented and unreachable rather than absent. `method =
+  "auto"` now routes the combination there; an explicit multivariate method
+  reroutes with one notice rather than downgrading.
+
+  The difference is not stylistic: the exact-diffuse filtered states are
+  invariant to the diffuse scale to the last bit, while the `"kappa"` states
+  keep moving as kappa grows (5.4e-5 from 1e4 to 1e6, 5.4e-7 from 1e6 to 1e8)
+  -- an approximating sequence, not the answer. Complete-data results are
+  unchanged, and on a single unit root the two diffuse conventions still agree
+  to 5e-12.
+
+- **`kalman_smoother(pre_sample = k)`** backfills `k` periods of latent
+  history before the first observation and returns them in
+  `presample_states` / `presample_shocks` / `presample_cov`, chronological,
+  with every other series still aligned to `data`. No new recursion: an
+  all-missing period is predict-only, so this is the ordinary backward pass
+  over `k` padded rows -- the mechanism that has always produced the single
+  `smoothed_initial` period, and the last backfilled row reproduces it
+  exactly. The log-likelihood is unchanged and the in-sample states move by
+  2e-14. `me_extra` and `shock_scale` are padded with it, so their per-period
+  columns stay aligned.
+
+- **How far the smoother's kappa fallback sits from the exact diffuse answer
+  is now measured, not assumed.** `helper-gls-smoother.R` computes the
+  smoother by projection instead of recursion -- the diffuse case is a zero on
+  the prior precision, not a separate algorithm -- and is certified against
+  the existing smoother on a stationary model to 3e-16 before being used
+  where the answer is unknown. On a unit-root fixture the kappa fallback's
+  smoothed states are within **5e-8 absolute on a state of scale 3.3**, about
+  eight significant figures. The error falls as `1/kappa` and then RISES
+  again as round-off takes over (5.0e-6, 5.0e-8, 4.8e-9, 2.8e-7 at kappa
+  1e4/1e6/1e8/1e10), so raising `.DIFFUSE_SCALE` is not the fix -- but nor is
+  the fallback the crude approximation it looked like. An exact diffuse
+  SMOOTHER remains unimplemented; the tests now state its acceptance
+  criterion. Where the diffuse treatment genuinely matters is the
+  log-likelihood's unbounded kappa-dependent constant, and
+  `kalman_filter(lik_init = "diffuse")` already handles that exactly.
+
+- Multi-period pre-sample backfill needs no manual padding: the argument
+  above wraps it. On `nk_demo` with four padded periods
+  the in-sample states are unchanged to 2e-14, the log-likelihood is identical
+  (missing rows contribute nothing), the transition identity holds across the
+  pad boundary to 2e-16, and the last padded row reproduces
+  `smoothed_initial`. Exact for a stationary model, since `P_0` is then the
+  unconditional covariance; on a unit-root model it inherits the smoother's
+  kappa fallback, which awaits an exact diffuse smoother.
+
 # dynhr 0.9.3
 
 This release adds four new estimation and solution capabilities — global

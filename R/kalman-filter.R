@@ -235,7 +235,8 @@
                                     max_diffuse = 100L,
                                     me_extra = NULL,
                                     ss_lock = FALSE,
-                                    shock_scale = NULL) {
+                                    shock_scale = NULL,
+                                    known = NULL) {
   ## The steady-state lock assumes a constant present-observable pattern, so it
   ## is only valid on a complete panel. Disable it if any observation is missing
   ## (the filter then runs the exact full recursion). The R fallback ignores
@@ -254,6 +255,32 @@
 
   Zb <- cbind(ZZ, DD)
   Tb <- rbind(cbind(TT, RR), matrix(0, n_exo, nb))
+
+  ## ---- Known shocks: one extra observation row per known shock ------------
+  ## Row j is [0_{n_state}, e_j'], so it observes eps_j directly. The data row
+  ## carries the known value and NA elsewhere, and the loop's existing
+  ## `if (!is.finite(y_i)) next` handles the unknown periods -- the injection
+  ## is only "on" in the periods the caller named.
+  ##
+  ## The measurement variance for these rows goes through me_extra, not the
+  ## scalar me_variance, so that a HARD injection (variance 0) can coexist with
+  ## me_variance > 0 on the real observables. That forces the R loop, which is
+  ## correct: the C++ kernel takes a single scalar and could not express the
+  ## two different noise levels.
+  if (!is.null(known)) {
+    n_k  <- length(known$idx)
+    Zk   <- matrix(0, n_k, nb)
+    for (i in seq_len(n_k)) Zk[i, n_state + known$idx[i]] <- 1
+    Zb   <- rbind(Zb, Zk)
+    me_full <- matrix(me_variance, nrow(Y_minus_d), ncol(Y_minus_d))
+    if (!is.null(me_extra)) me_full <- me_full + me_extra
+    me_extra <- rbind(me_full, known$sd^2)
+    me_variance <- 0
+    Y_minus_d <- rbind(Y_minus_d, unname(known$values))
+    ## The injected rows are NA wherever the shock is unknown, so the frozen
+    ## gain the lock assumes does not exist.
+    ss_lock <- FALSE
+  }
   QQb <- matrix(0, nb, nb)
   QQb[e_idx, e_idx] <- Sigma_e
 
@@ -296,6 +323,143 @@
                           Sigma_e = Sigma_e, e_idx = e_idx)
   }
 }
+
+### -- Known historical shocks ------------------------------------------------
+###
+### `known_shocks` is n_exo x T: the VALUE where a shock is known, NA where it
+### is not. NA-as-unknown is the same convention `data` already uses, and the
+### n_exo x T shape is the one `shock_scale` already uses, so a caller who has
+### met either has met this.
+###
+### The mechanism costs almost nothing because of an accident of the univariate
+### filter: it runs on the AUGMENTED state x_t = [s_{t-1}; eps_t] (see
+### .kf_univariate_dispatch), so the shocks ARE state components there. A known
+### shock is then an exact observation of a component that already exists -- an
+### extra observation row Z = [0, e_j'] with zero measurement error -- and the
+### periods where it is unknown are NA rows, which the loop already skips one
+### observable at a time. No new recursion, and no change to the ones that are
+### there.
+###
+### `known_shocks_sd` makes the injection SOFT: the value is then an observation
+### with that standard deviation rather than an exact constraint, which is what
+### a judgemental adjustment ("about 0.7, but I would not die for it") actually
+### is. NA or 0 means exact.
+.kf_known_shocks <- function(known_shocks, known_shocks_sd, shock_names, n_T,
+                             what = "kalman_filter") {
+  if (is.null(known_shocks)) return(NULL)
+  n_e <- length(shock_names)
+  K <- as.matrix(known_shocks)
+  if (nrow(K) != n_e || ncol(K) != n_T)
+    stop(sprintf("%s: `known_shocks` must be n_exo x T (%d x %d); got %d x %d.",
+                 what, n_e, n_T, nrow(K), ncol(K)), call. = FALSE)
+  if (!is.null(rownames(K))) {
+    if (!setequal(rownames(K), shock_names))
+      stop(sprintf("%s: `known_shocks` rownames do not match the model's shocks (%s).",
+                   what, paste(shock_names, collapse = ", ")), call. = FALSE)
+    K <- K[shock_names, , drop = FALSE]
+  }
+  if (any(is.finite(K) & !is.finite(K)) || any(!is.na(K) & !is.finite(K)))
+    stop(what, ": `known_shocks` entries must be finite or NA.", call. = FALSE)
+
+  S <- NULL
+  if (!is.null(known_shocks_sd)) {
+    S <- as.matrix(known_shocks_sd)
+    if (length(S) == 1L) S <- matrix(as.numeric(S), n_e, n_T)
+    if (nrow(S) != n_e || ncol(S) != n_T)
+      stop(sprintf("%s: `known_shocks_sd` must be n_exo x T (%d x %d) or a scalar; got %d x %d.",
+                   what, n_e, n_T, nrow(S), ncol(S)), call. = FALSE)
+    if (!is.null(rownames(S)) && setequal(rownames(S), shock_names))
+      S <- S[shock_names, , drop = FALSE]
+    if (any(!is.na(S) & (!is.finite(S) | S < 0)))
+      stop(what, ": `known_shocks_sd` must be non-negative and finite (or NA).",
+           call. = FALSE)
+    S[is.na(S)] <- 0
+  }
+  rows <- which(rowSums(!is.na(K)) > 0L)     # only shocks that are ever known
+  if (!length(rows)) return(NULL)
+  list(idx = rows, values = K[rows, , drop = FALSE],
+       sd = if (is.null(S)) matrix(0, length(rows), n_T) else S[rows, , drop = FALSE],
+       names = shock_names[rows])
+}
+
+
+### -- User-supplied initial condition (a0 / P0) ------------------------------
+###
+### Both entry points hard-coded a zero-mean state and a lik_init-derived P0,
+### so there was no way to start the recursion anywhere else -- no way to carry
+### a state across a sample split, to condition on a known history, or to hand
+### the smoother a prior of your own. The internal machinery always took them
+### (.kf_univariate_dispatch(s0, P_state, P_inf_state), .kf_diffuse_phase(s0,
+### ...)); only the public shape was missing.
+###
+### `a0` is in DEVIATIONS from the steady state, like every state quantity in
+### this package -- the observables are in levels and the filter subtracts
+### `dr$ys[obs_vars]`, but the STATE vector it reports is deviations. Passing a
+### level here is the same class of error the smoother's missing intercept was.
+###
+### Matched BY NAME whenever `a0` is named: a same-length vector in a different
+### order is a reorder request, and silently accepting it by position would
+### load each state into the wrong equation while every dimension still checked
+### out (the rule .fbt_data() already applies to observables).
+.kf_init_mean <- function(a0, state_names, n_state, what = "kalman_filter") {
+  if (is.null(a0)) return(numeric(n_state))
+  a0 <- unlist(a0, use.names = TRUE)
+  if (!is.numeric(a0) || anyNA(a0) || any(!is.finite(a0)))
+    stop(what, ": `a0` must be finite and numeric.", call. = FALSE)
+  if (!is.null(names(a0)) && !is.null(state_names)) {
+    miss <- setdiff(state_names, names(a0))
+    if (length(miss))
+      stop(sprintf("%s: `a0` is named but does not cover every state: %s. The states are: %s.",
+                   what, paste(miss, collapse = ", "),
+                   paste(state_names, collapse = ", ")), call. = FALSE)
+    extra <- setdiff(names(a0), state_names)
+    if (length(extra))
+      stop(sprintf("%s: `a0` names entries that are not states: %s.",
+                   what, paste(extra, collapse = ", ")), call. = FALSE)
+    return(as.numeric(a0[state_names]))
+  }
+  if (length(a0) != n_state)
+    stop(sprintf(paste0("%s: `a0` has %d entr%s but the model has %d state(s)",
+                        "%s. Name it to be matched by name."),
+                 what, length(a0), if (length(a0) == 1L) "y" else "ies", n_state,
+                 if (is.null(state_names)) ""
+                 else paste0(" (", paste(state_names, collapse = ", "), ")")),
+         call. = FALSE)
+  as.numeric(a0)
+}
+
+### P0 validation. Symmetrised on the way through (round-off in a
+### user-constructed covariance is expected); a genuinely asymmetric or
+### negative-definite matrix is refused rather than silently repaired.
+.kf_init_cov <- function(P0, state_names, n_state, what = "kalman_filter") {
+  if (is.null(P0)) return(NULL)
+  if (length(P0) == 1L && is.numeric(P0)) P0 <- diag(as.numeric(P0), n_state)
+  P0 <- as.matrix(P0)
+  if (!is.numeric(P0) || nrow(P0) != n_state || ncol(P0) != n_state)
+    stop(sprintf("%s: `P0` must be %d x %d (or a scalar for a multiple of the identity); got %d x %d.",
+                 what, n_state, n_state, nrow(P0), ncol(P0)), call. = FALSE)
+  if (anyNA(P0) || any(!is.finite(P0)))
+    stop(what, ": `P0` must be finite.", call. = FALSE)
+  if (!is.null(rownames(P0)) && !is.null(state_names)) {
+    if (!setequal(rownames(P0), state_names))
+      stop(what, ": `P0` has dimnames that do not match the state names.",
+           call. = FALSE)
+    P0 <- P0[state_names, state_names, drop = FALSE]
+  }
+  asym <- max(abs(P0 - t(P0)))
+  if (asym > 1e-8 * max(1, max(abs(P0))))
+    stop(sprintf("%s: `P0` is not symmetric (max |P0 - t(P0)| = %.3g).",
+                 what, asym), call. = FALSE)
+  P0 <- (P0 + t(P0)) * 0.5
+  ev <- tryCatch(min(eigen(P0, symmetric = TRUE, only.values = TRUE)$values),
+                 error = function(e) NA_real_)
+  if (is.finite(ev) && ev < -1e-8 * max(1, max(abs(P0))))
+    stop(sprintf("%s: `P0` is not positive semi-definite (smallest eigenvalue %.3g).",
+                 what, ev), call. = FALSE)
+  dimnames(P0) <- if (is.null(state_names)) NULL else list(state_names, state_names)
+  P0
+}
+
 
 ### -- DARE solver (unchanged from v3) --------------------------------------------
 
@@ -587,7 +751,24 @@
 #' @param lik_init character; initialization of the state covariance \code{P0}
 #'   (and, for unit-root models, the diffuse covariance): \code{"auto"}
 #'   (default), \code{"stationary"}, \code{"diffuse"}, or \code{"kappa"}.
-#'   See Details.
+#'   See Details. Supplying \code{P0} overrides this and is reported back as
+#'   \code{lik_init = "user"}.
+#' @param a0 Initial state mean, length \code{n_state}, in \strong{deviations
+#'   from the steady state} -- the convention the filter's own
+#'   \code{filtered_states} are in. \code{NULL} (default) starts at the steady
+#'   state, i.e. a vector of zeros. Matched BY NAME when named (a same-length
+#'   vector in a different order is a reorder request, not a relabelling); the
+#'   state names are the \code{rownames} of \code{filtered_states}. Composes
+#'   with every \code{lik_init}, including \code{"diffuse"}.
+#' @param P0 Initial state covariance, \code{n_state x n_state} (or a scalar
+#'   for a multiple of the identity). \code{NULL} (default) takes the
+#'   covariance implied by \code{lik_init}. Must be symmetric and positive
+#'   semi-definite; matched by \code{dimnames} when it has them. Mutually
+#'   exclusive with \code{lik_init = "diffuse"}, which builds its own
+#'   \code{(P_inf, P_star)} split. A supplied \code{P0} is not the Lyapunov
+#'   prior the Chandrasekhar increment recursion is initialised from, so
+#'   \code{method = "auto"} routes to \code{"standard"} and explicit
+#'   \code{method = "chandrasekhar"} is refused.
 #' @param me_extra \code{n_obs x T} matrix of additional per-observable,
 #'   per-period measurement-error variances (default \code{NULL}, no extra
 #'   variance).  Like the scalar \code{me_variance}, \code{me_extra} is TRUE
@@ -610,10 +791,9 @@
 #'   nonzero \code{me_extra} raises an error; the DARE drift diagnostic
 #'   (\code{dare_p_drift}) is skipped (\code{NA}) because \code{P} has no
 #'   time-invariant fixed point under per-period \code{F_t}.  Note also that the
-#'   exact-diffuse phase (\code{lik_init = "diffuse"}) does not support
-#'   missing observations and falls back to \code{"kappa"} whenever
-#'   \code{me_extra} introduces NA rows (see Landmine 2 in the
-#'   filter-tunes brief).
+#'   exact-diffuse phase with missing observations (including NA rows
+#'   introduced by \code{me_extra}) runs on the sequential univariate filter,
+#'   which handles it exactly -- see \code{lik_init} in Details.
 #' @param shock_scale \code{n_exo x T} matrix of shock standard-deviation
 #'   scale factors (multiplicative, so 1 = baseline).  At period \code{t}
 #'   the effective shock covariance is
@@ -648,6 +828,34 @@
 #'   Markov-switching Kim filter reject it, and the ANALYTIC score
 #'   (\code{make_posterior_grad}) has no aggregation awareness -- sample a
 #'   mixed-frequency posterior with a gradient-free sampler.
+#' @param known_shocks Known historical shock values: an \code{n_exo x T}
+#'   matrix carrying the value where a shock is known and \code{NA} where it is
+#'   not -- the \code{NA}-as-unknown convention \code{data} uses, and the
+#'   \code{n_exo x T} shape \code{shock_scale} uses. Rows are matched BY NAME
+#'   when the matrix has rownames. \code{NULL} (default), or a matrix that is
+#'   all \code{NA}, is a no-op.
+#'
+#'   Use it for a shock you actually know: an announced policy change, a
+#'   measured intervention, a judgemental adjustment carried over from another
+#'   exercise.
+#'
+#'   \strong{Semantics.} The known value is treated as an OBSERVATION, so the
+#'   reported log-likelihood is the \strong{joint} \eqn{\log p(y, \varepsilon =
+#'   v)} -- the known shock is data, and it informs that shock's own standard
+#'   error. It therefore differs from the conditional \eqn{\log p(y \mid
+#'   \varepsilon = v)} by exactly \eqn{\log p(\varepsilon = v)}; subtract that
+#'   term if the conditional is what you want. \code{\link{kalman_smoother}}
+#'   conditions, so its \code{loglik} is the conditional one.
+#'
+#'   Only the univariate (Koopman--Durbin) filter can express this: it runs on
+#'   the augmented state \eqn{[s_{t-1}; \varepsilon_t]}, where the shocks are
+#'   state components and a known shock is an exact observation of one. Passing
+#'   \code{known_shocks} therefore routes to \code{method = "univariate"}.
+#' @param known_shocks_sd Optional standard errors for \code{known_shocks},
+#'   same shape (or a scalar). The injection is then SOFT -- the value is an
+#'   observation with that standard deviation rather than an exact constraint,
+#'   which is what a judgemental adjustment usually is. \code{NULL} or
+#'   \code{NA} means exact.
 #' @param me_floor_check Logical: when \code{me_variance > 0}, compare it
 #'   against the smallest eigenvalue of the model-implied (ME-free) steady-
 #'   state innovation covariance \code{F} and warn when the assumed
@@ -809,6 +1017,10 @@ kalman_filter <- function(data, dr, model, params, obs_vars,
                           me_extra = NULL,
                           shock_scale = NULL,
                           obs_aggregation = NULL,
+                          a0 = NULL,
+                          P0 = NULL,
+                          known_shocks = NULL,
+                          known_shocks_sd = NULL,
                           me_floor_check = getOption("dynhr.me_floor_check",
                                                      TRUE)) {
 
@@ -885,6 +1097,24 @@ kalman_filter <- function(data, dr, model, params, obs_vars,
     d <- d * mf$scale
   }
 
+  ## -- User-supplied initial condition -----------------------------------
+  ## Validated here, once TT/n_state/state_names_out are final (the
+  ## mixed-frequency augmentation above adds states, so a0/P0 must cover them
+  ## too -- name them and the match is checked for you).
+  a0_vec <- .kf_init_mean(a0, state_names_out, n_state)
+  P0_mat <- .kf_init_cov(P0, state_names_out, n_state)
+  if (!is.null(P0_mat)) {
+    if (lik_init_orig == "diffuse")
+      stop("kalman_filter: `P0` and lik_init = \"diffuse\" are two different ",
+           "initialisations -- the exact-diffuse recursion builds its own ",
+           "(P_inf, P_star) split and has nothing to do with a supplied P0. ",
+           "Pass one or the other. `a0` composes with either.", call. = FALSE)
+    ## "user" is an INTERNAL lik_init value: it exists so the two
+    ## `if (lik_init == "stationary")` sites below cannot overwrite P0 with the
+    ## Lyapunov solution, and so that $lik_init reports what was actually run.
+    lik_init <- "user"
+  }
+
   Sigma_e <- .get_shock_cov(model, exo, params)
   QQ      <- tcrossprod(RR %*% Sigma_e, RR)
   HH      <- tcrossprod(DD %*% Sigma_e, DD)
@@ -915,6 +1145,7 @@ kalman_filter <- function(data, dr, model, params, obs_vars,
   if (is.null(dim(data))) data <- matrix(data, nrow = n_obs)
   if (nrow(data) != n_obs) data <- t(data)
   n_T <- ncol(data)
+  known <- .kf_known_shocks(known_shocks, known_shocks_sd, exo, n_T)
 
   ## A low-frequency series stored on the high-frequency grid must be spaced
   ## in multiples of its aggregation length; a misaligned column would
@@ -1049,7 +1280,12 @@ kalman_filter <- function(data, dr, model, params, obs_vars,
   ## that risks cross-method comparison (method_orig != "auto" and
   ## method_orig != "univariate" and lik_init_orig != "auto").
   ## Normal usage (method = "auto", lik_init = "auto") never warns here.
+  ## Skipped when the diffuse + missing-data reroute below is going to fire:
+  ## that path emits a more specific notice which already carries this caveat,
+  ## and two warnings saying "use univariate" about a call that is ABOUT to use
+  ## univariate is noise.
   if (lik_init_orig %in% c("diffuse", "kappa") &&
+      !(has_missing && lik_init_orig == "diffuse") &&
       method_orig %in% c("standard", "dare", "chandrasekhar", "reference")) {
     has_unit_roots <- if (exists("tt_evals"))   # reuse from "auto" branch
       any(Mod(tt_evals) > 1 - 1e-6)
@@ -1073,7 +1309,22 @@ kalman_filter <- function(data, dr, model, params, obs_vars,
     ## correctness oracle for testing, not as a speed path. "auto" therefore
     ## still picks the fast methods: standard with self-lock for the common
     ## case, chandrasekhar for large state vectors.
-    if (has_missing)       method <- "standard"
+    if (has_missing && lik_init == "diffuse") {
+      ## The exact-diffuse recursion and missing observations meet only in the
+      ## SEQUENTIAL (univariate) filter. .kf_diffuse_phase() processes the
+      ## observation vector as a block and bails out on any NA -- correctly, it
+      ## has no way to drop a component -- whereas the univariate loop skips a
+      ## missing observable one at a time, which is exactly right and is what
+      ## it already does for every other initialisation.
+      ##
+      ## This used to fall through to "standard", which then downgraded
+      ## lik_init to "kappa" and returned a DIFFERENT likelihood: on the
+      ## local-level fixture with three gaps, -44.097 against the exact
+      ## -36.271, and filtered states that keep moving as kappa grows while
+      ## the diffuse ones are scale-free to the last bit.
+      method <- "univariate"
+    }
+    else if (has_missing) method <- "standard"
     else if (lik_init %in% c("diffuse", "kappa")) {
       ## The exact-diffuse phase has no multivariate Rcpp fast path (the
       ## standard/chandrasekhar C++ kernels bake in a time-invariant gain), so
@@ -1109,6 +1360,34 @@ kalman_filter <- function(data, dr, model, params, obs_vars,
     else if (n_state > 100) method <- "chandrasekhar"
     else                    method <- "standard"
   }
+
+  ## A user-supplied P0 is not the Lyapunov prior the Chandrasekhar increment
+  ## recursion is initialised from, and that branch refuses it loudly below --
+  ## so route around it. Deliberately OUTSIDE the `if (method == "auto")`
+  ## chain above: dropping it in between two `else if` arms silently re-parses
+  ## the tail of the chain as `if (user) ... else if (n_state > 100) ... else
+  ## "standard"`, which sends EVERY call to "standard" no matter what the
+  ## earlier arms decided.
+  ## Known shocks are observations of eps, and eps is only a state component on
+  ## the univariate path (x_t = [s_{t-1}; eps_t]). The multivariate recursions
+  ## have nowhere to put the constraint, so route rather than refuse -- the same
+  ## call made for the exact-diffuse phase with missing data.
+  if (!is.null(known) && method != "univariate") {
+    if (method_orig != "auto")
+      warning("kalman_filter: `known_shocks` observes eps directly, which only ",
+              "the univariate (Koopman-Durbin) filter can express -- it runs on ",
+              "the augmented state [s_{t-1}; eps_t], where the shocks ARE state ",
+              "components. Ignoring method = \"", method, "\" and reporting ",
+              "method = \"univariate\".", call. = FALSE)
+    method <- "univariate"
+  }
+
+  ## ...but only when "auto" chose it. An EXPLICIT method = "chandrasekhar"
+  ## falls through to that branch's own scope guard, which refuses a non-
+  ## Lyapunov initialisation loudly -- this file's rule is to refuse rather
+  ## than quietly answer a different question.
+  if (lik_init == "user" && method == "chandrasekhar" && method_orig == "auto")
+    method <- "standard"
 
   ## A diffuse phase requires the per-step R loop (no Rcpp / Chandrasekhar
   ## fast path); for large state vectors with unit roots, fall back to the
@@ -1179,7 +1458,9 @@ kalman_filter <- function(data, dr, model, params, obs_vars,
 
   .run_univariate <- function(li, ss_lock = FALSE) {
     P_inf_state <- NULL
-    if (li == "diffuse") {
+    if (li == "user") {
+      P_state <- P0_mat
+    } else if (li == "diffuse") {
       P0u <- .kf_diffuse_P0(TT, QQ)
       if (P0u$nunit == 0L) {
         li      <- "stationary"
@@ -1199,11 +1480,15 @@ kalman_filter <- function(data, dr, model, params, obs_vars,
     ## diffuse Case C restart) must honor shock_scale the same way the
     ## multivariate paths do -- see .kf_univariate_dispatch / .kf_univariate_loop_R.
     ss_arg <- if (has_shock_scale) shock_scale else NULL
+    ## The steady-state lock freezes the gain on the converged tail, which is
+    ## reasoning about the STATIONARY prior; a supplied P0 is not that, so the
+    ## lock is dropped rather than assumed to still apply.
     out <- .kf_univariate_dispatch(Y_minus_d, ZZ, TT, RR, DD, Sigma_e,
-                                   numeric(n_state), P_state, P_inf_state,
+                                   a0_vec, P_state, P_inf_state,
                                    me_variance, return_filtered,
-                                   me_extra = me_extra, ss_lock = ss_lock,
-                                   shock_scale = ss_arg)
+                                   me_extra = me_extra,
+                                   ss_lock = ss_lock && is.null(P0_mat),
+                                   shock_scale = ss_arg, known = known)
     if (isTRUE(out$diffuse_failed)) {
       ## P_inf never decayed (unobserved unit root) or the sample ended
       ## inside the diffuse phase: same kappa fallback as the multivariate
@@ -1212,9 +1497,10 @@ kalman_filter <- function(data, dr, model, params, obs_vars,
               "converge to zero; falling back to lik_init = \"kappa\".")
       li  <- "kappa"
       out <- .kf_univariate_dispatch(Y_minus_d, ZZ, TT, RR, DD, Sigma_e,
-                                     numeric(n_state), .build_P0(TT, QQ),
+                                     a0_vec, .build_P0(TT, QQ),
                                      NULL, me_variance, return_filtered,
-                                     me_extra = me_extra, shock_scale = ss_arg)
+                                     me_extra = me_extra, shock_scale = ss_arg,
+                                     known = known)
     }
     if (!isTRUE(out$ok))
       return(list(loglik = -Inf, filtered_states = NULL,
@@ -1307,20 +1593,35 @@ kalman_filter <- function(data, dr, model, params, obs_vars,
   ## "kappa" and "diffuse" require methods %in% c("standard", "dare") (forced
   ## above); "stationary" / "auto"-resolved-to-"stationary" reuse the
   ## historical solve_lyapunov(TT, QQ) P0 unconditionally.
-  init_s <- numeric(n_state)
+  init_s <- a0_vec
   init_P <- NULL
   init_loglik <- 0
   init_t_start <- 1L
 
-  if (lik_init == "kappa") {
+  if (lik_init == "user") {
+    init_P <- P0_mat
+  } else if (lik_init == "kappa") {
     init_P <- .build_P0(TT, QQ)
   } else if (lik_init == "diffuse") {
     if (has_missing) {
-      warning("kalman_filter: lik_init = \"diffuse\" does not support ",
-              "missing observations during the diffuse phase; falling ",
-              "back to lik_init = \"kappa\".")
-      lik_init <- "kappa"
-      init_P <- .build_P0(TT, QQ)
+      ## The caller asked for a multivariate method explicitly (method = "auto"
+      ## already routes this combination to the univariate filter). Route it
+      ## anyway rather than downgrading: the sequential filter evaluates the
+      ## EXACT diffuse likelihood with gaps, which is what was asked for, while
+      ## the old "kappa" downgrade answered a different question -- on the
+      ## local-level fixture with three gaps, -44.097 instead of -36.271.
+      warning("kalman_filter: method = \"", method, "\" cannot run the ",
+              "exact-diffuse recursion with missing observations (the ",
+              "multivariate diffuse phase has no way to drop one component of ",
+              "the observation vector). Using the UNIVARIATE (Koopman-Durbin) ",
+              "filter, which does it exactly, and reporting method = ",
+              "\"univariate\". On a model with TWO OR MORE unit roots the two ",
+              "diffuse conventions differ by an additive constant (see the ",
+              "unit-root note in ?kalman_filter), so do not compare this ",
+              "log-likelihood with one from a complete-data multivariate run; ",
+              "pass method = \"univariate\" throughout instead.",
+              call. = FALSE)
+      return(.run_univariate("diffuse"))
     } else {
       P0 <- .kf_diffuse_P0(TT, QQ)
       diff_out <- .kf_diffuse_phase(data, d, ZZ, TT, RR, DD, QQ, HH, SS, Sigma_e,
@@ -1548,7 +1849,9 @@ kalman_filter <- function(data, dr, model, params, obs_vars,
     W         <- K
     M         <- -F_mat
 
-    s <- numeric(n_state); loglik <- 0
+    ## a0 composes with the increment recursion (only P0 is constrained to the
+    ## Lyapunov prior, which the scope guard above enforces).
+    s <- a0_vec; loglik <- 0
     ch_ss_step <- NA_integer_
 
     for (t in seq_len(n_T)) {
@@ -1635,8 +1938,13 @@ kalman_filter <- function(data, dr, model, params, obs_vars,
   ## time-invariant Sigma_e/HH/SS and cannot express a per-period scale), but
   ## gate on it directly here too so this fast path can never silently ignore
   ## shock_scale if that has_missing coupling is ever loosened.
+  ## `a0` gate: kalman_standard_loop_cpp() takes no initial state -- it starts
+  ## the recursion at zero, unconditionally. Without this test a non-zero `a0`
+  ## would be accepted, validated, reported, and then SILENTLY DROPPED on the
+  ## default fast path for every stationary model. Fall through to the R loop,
+  ## which reads init_s.
   if (!has_missing && !has_shock_scale && lik_init == "stationary" &&
-      .HAS_RCPP_KALMAN()) {
+      all(a0_vec == 0) && .HAS_RCPP_KALMAN()) {
     out <- kalman_standard_loop_cpp(Y_minus_d, ZZ, TT, RR, DD, HH + me_diag,
                                     Sigma_e, SS, P, ll_const, ss_tol,
                                     .KF_LL_MIN, return_filtered,
