@@ -24,6 +24,8 @@ kalman_filter(
   P0 = NULL,
   known_shocks = NULL,
   known_shocks_sd = NULL,
+  shock_means = NULL,
+  shock_timing = c("dated", "transition_next"),
   me_floor_check = getOption("dynhr.me_floor_check", TRUE)
 )
 }
@@ -194,6 +196,49 @@ observation with that standard deviation rather than an exact constraint,
 which is what a judgemental adjustment usually is. \code{NULL} or
 \code{NA} means exact.}
 
+\item{shock_means}{Deterministic shock MEANS: an \code{n_exo x T} matrix of
+  mean shifts, \code{NULL} (default) for none. \code{NA} and \code{0} both
+  mean "no shift here", so the same matrix shape used for
+  \code{known_shocks} works. Rows are matched BY NAME when the matrix has
+  rownames.
+
+  \strong{This is a different statement from \code{known_shocks}, and the
+  difference is the point of having both.} \code{known_shocks} says the
+  REALISATION is known, \eqn{\varepsilon_{j,t} = v}: the shock stops being
+  random, its variance is used up, and (where it has a prior density) the
+  value enters the likelihood. \code{shock_means} says the MEAN is known,
+  \eqn{E[\varepsilon_{j,t}] = m}, and the shock \strong{keeps its
+  variance}: nothing is observed, nothing about \eqn{m} is estimated, and
+  the likelihood gains no term. It is a deterministic INPUT -- the analogue
+  of a \code{vary} / plan path in other state-space packages, entering the
+  transition and measurement constants as \eqn{R m_t} and \eqn{D m_t}
+  before the update.
+
+  Because the system is linear the two coincide exactly for a shock with no
+  prior variance (a \code{stderr 0} shock, or a \code{shock_scale} of zero
+  at that period): knowing the mean and knowing the realisation are then the
+  same statement, and both entry points return the same states and the same
+  log-likelihood. They are pinned against each other by test.
+
+  No method routing is involved: the mean path splits off as a deterministic
+  trajectory that is subtracted from the data and added back to the reported
+  states, so every \code{method} evaluates it identically, and zero-variance
+  shocks, missing observations and \code{a0}/\code{P0} are non-events.}
+
+\item{shock_timing}{How to read the columns of \code{shock_means}:
+\describe{
+  \item{\code{"dated"}}{(default) column \eqn{t} is the shock DATED
+    \eqn{t}. It enters \eqn{s_t} and \eqn{y_t}, the same dating
+    \code{known_shocks} and \code{shock_scale} use for their columns.}
+  \item{\code{"transition_next"}}{column \eqn{t} drives the transition
+    OUT of period \eqn{t}, so it enters \eqn{s_{t+1}} and
+    \eqn{y_{t+1}} -- the whole matrix shifted one column right, with the
+    last column falling outside the sample. This is the convention to pass
+    when adapting a path written for a package that dates its input by the
+    transition rather than by the shock.}
+}
+Ignored when \code{shock_means} is \code{NULL}.}
+
 \item{me_floor_check}{Logical: when \code{me_variance > 0}, compare it
 against the smallest eigenvalue of the model-implied (ME-free) steady-
 state innovation covariance \code{F} and warn when the assumed
@@ -209,8 +254,14 @@ scalar \code{me_variance} floor, not \code{me_extra}.}
 A list with
   \describe{
     \item{\code{loglik}}{the log-likelihood.}
-    \item{\code{filtered_states}}{\code{n_state x T}, column \eqn{t} is
-      \eqn{s_{t|t}} (only when \code{return_filtered = TRUE}).}
+    \item{\code{updated_states}, \code{predicted_states}}{the two state
+      paths, \code{n_state x T}, with the timing in the names:
+      \code{updated_states[, t]} is \eqn{s_{t|t}} (conditioned on
+      \eqn{y_{1:t}}) and \code{predicted_states[, t]} is \eqn{s_{t|t-1}}
+      (conditioned on \eqn{y_{1:t-1}}, with \eqn{s_{1|0}} taken from
+      \code{a0}). Both only when \code{return_filtered = TRUE}.}
+    \item{\code{filtered_states}}{the SAME matrix as
+      \code{updated_states}, under the name the rest of the package uses.}
     \item{\code{loglik_contrib}}{per-period contributions, when asked for.}
     \item{\code{final_state}, \code{final_cov}}{the state hand-off:
       \eqn{s_{T|T}} and \eqn{Var(s_T \mid y_{1:T})}, named, in the same
@@ -346,6 +397,87 @@ the (correct) stationary likelihood there. To force the exact-diffuse
 treatment for every near-unit root, pass \code{lik_init = "diffuse"}
 explicitly.
 }
+\section{State timing}{
+
+The state space is written in LAGGED form -- \eqn{s_t = T s_{t-1} +
+R \varepsilon_t} and \eqn{y_t = Z s_{t-1} + D \varepsilon_t} -- so
+\eqn{s_t} is the model's state variables dated \eqn{t}, and
+\code{updated_states[, t]} is those variables conditioned on data through
+\eqn{t}. \code{predicted_states} is the one-step-ahead pair,
+\eqn{s_{t|t-1}}; it needs nothing extra from the recursion, because
+\eqn{E[\varepsilon_t] = 0} in the deviation system makes
+\eqn{s_{t|t-1} = T s_{t-1|t-1}} exactly (plus \eqn{R m_t} when a
+\code{shock_means} path is supplied).
+
+A unit pulse in \code{shock_means} with no data to update on therefore
+traces the model's own impulse response exactly: with
+\code{shock_timing = "dated"} and a pulse in column 1,
+\code{updated_states[, t]} is \eqn{T^{t-1} R e_j}, and the two paths
+coincide because there is nothing to update with. That identity is the
+bridge to a package that reports shock responses on a different grid --
+compare against it once, choose the \code{shock_timing} that lines up, and
+the convention is then stated in the call rather than applied by hand.
+}
+
+\section{Matching another package's shock timing}{
+
+Two packages can inject the same deterministic shock path and produce
+responses one period apart, purely because they index the input
+differently. \code{shock_timing} exists so that difference is declared in
+the call instead of applied by hand to the output.
+
+\strong{For IRIS, the answer is the default and no shift is needed.}
+Verified against IRIS Toolbox Release 20180308 under Octave: with
+\code{shock_means} and \code{shock_timing = "dated"}, dynhr reproduces
+\code{filter(m, d, range, 'vary=', j)} to machine precision -- on all three
+of IRIS's outputs and on the smoothed shocks -- while
+\code{"transition_next"} is measurably wrong for it. The names line up
+one-for-one:
+
+\tabular{ll}{
+  IRIS \code{'output=', 'predict'} \tab \code{predicted_states} \cr
+  IRIS \code{'output=', 'filter'}  \tab \code{updated_states}   \cr
+  IRIS \code{'output=', 'smooth'}  \tab \code{smoothed_states} (from
+    \code{\link{kalman_smoother}}) \cr
+  IRIS \code{'vary='} shock tunes  \tab \code{shock_means}
+}
+
+If you previously needed a one-period shift to line the two up, the cause
+was the MECHANISM rather than the timing: \code{known_shocks} is an exact
+observation of the shock, whereas an IRIS \code{vary} tune sets the mean
+and leaves the shock random -- so its smoothed shock is revised away from
+the injected value, and no shift of an exactly-pinned path can reproduce
+that. \code{shock_means} is the matching statement; use it and drop the
+adapter.
+
+For any other reference implementation, three lines settle it, with no data
+needed:
+
+\preformatted{
+Yna <- Y; Yna[] <- NA                  # same shape, no observations
+M   <- matrix(0, n_exo, T, dimnames = list(exo_names, NULL))
+M["e_j", 1] <- 1                       # unit pulse in the FIRST column
+kalman_filter(Yna, dr, model, params, obs_vars = obs,
+              return_filtered = TRUE, shock_means = M)$updated_states[, 1:4]
+}
+
+With no observations there is nothing to update with, so the filtered path
+IS the deterministic path, and the deterministic path of a unit pulse is
+the model's impulse response: under \code{"dated"} that is
+\eqn{T^{t-1} R e_j}, with the IMPACT in column 1 -- the same column as the
+pulse -- and \code{predicted_states} identical to it. Produce the other
+package's response to the same pulse and compare: impact in the same period
+means keep \code{"dated"}; impact one period later means
+\code{"transition_next"}, which is exactly the same as shifting the matrix
+one column right yourself.
+
+Do not infer the answer from a HISTORICAL filtered path, where an offset in
+the shock input and an offset in the state output look alike. The pulse
+experiment fixes the input convention with no data in play, and
+\code{updated_states} / \code{predicted_states} then fix the output
+convention by name (\eqn{s_{t|t}} against \eqn{s_{t|t-1}}).
+}
+
 \section{Filtering a split sample}{
 
 \code{final_state} / \code{final_cov} are exactly what \code{a0} /

@@ -1,3 +1,102 @@
+# dynhr 0.9.3.3
+
+A third report against the filtering surface, this one a feature request
+rather than a defect: an IRIS-compatible deterministic shock-mean path, and an
+explicit state-timing contract on the result.
+
+**Verified against IRIS itself.** With `shock_means` and the default
+`shock_timing = "dated"`, dynhr reproduces IRIS's
+`filter(m, d, range, 'vary=', j)` to machine precision -- on all three of its
+outputs and on the smoothed shocks -- with **no adapter shift of any kind**
+(checked against IRIS Toolbox Release 20180308 under Octave; the reference
+values are transcribed into `test-shock-means.R` at full precision, since IRIS
+is not a dependency). The names line up one-for-one: IRIS `'predict'` /
+`'filter'` / `'smooth'` are dynhr `predicted_states` / `updated_states` /
+`smoothed_states`.
+
+If you previously needed a one-period shift to line the two up, the cause was
+the MECHANISM, not the timing. `known_shocks` is an exact observation of the
+shock; an IRIS `vary` tune sets the mean and leaves the shock random, so its
+smoothed shock is *revised away* from the injected value -- 1.3516 against an
+injected 1.5 on the fixture -- and no shift of an exactly-pinned path can
+reproduce that. `shock_means` is the matching statement. IRIS says as much in
+its own source: "The std dev of the tuned shocks remain unchanged and hence
+the filtered shocks can differ from its tunes".
+
+
+A third report against the filtering surface, this one a feature request
+rather than a defect: an IRIS-compatible deterministic shock-mean path, and an
+explicit state-timing contract on the result.
+
+## Filtering
+
+- **`shock_means` on `kalman_filter()` and `kalman_smoother()`: deterministic
+  shock MEANS.** An
+  `n_exo x T` matrix of mean shifts (`NA` and `0` both mean "no shift here", so
+  the matrix shape `known_shocks` uses works unchanged), with rows matched by
+  name.
+
+  **This is a different statement from `known_shocks`, and the difference is
+  the point of having both.** `known_shocks` says the REALISATION is known,
+  `eps = v`: the shock stops being random, its variance is used up, and where
+  it has a prior density the value enters the likelihood. `shock_means` says
+  the MEAN is known and the shock **keeps its variance**: nothing is observed,
+  nothing about `m` is estimated, and the likelihood gains no term. It is a
+  deterministic input, entering the transition and measurement constants as
+  `R m_t` and `D m_t` before the update.
+
+  The two coincide exactly for a shock with no prior variance -- knowing the
+  mean and knowing the realisation are then the same statement -- and the
+  tests pin both halves: identical states and log-likelihood there, materially
+  different where the shock still has variance. Agreement alone would prove
+  nothing, since an argument that was quietly ignored would also produce it.
+
+  No method routing is involved. The mean path splits off as a deterministic
+  trajectory subtracted from the data and added back to the reported states,
+  so every `method` evaluates it identically (`known_shocks`, by contrast, can
+  only be expressed on the augmented state and forces `method = "univariate"`),
+  and zero-variance shocks, missing observations, `a0`/`P0` and both diffuse
+  recursions are non-events.
+
+- **`shock_timing`** selects how the columns are read: `"dated"` (default)
+  makes column `t` the shock dated `t`, entering `s_t` and `y_t` -- the dating
+  `known_shocks` and `shock_scale` already use -- while
+  `"transition_next"` reads column `t` as driving the transition OUT of period
+  `t`, so it lands on `s_{t+1}`. The second is the one-period adapter shift a
+  caller comparing against a package with the other convention would otherwise
+  apply by hand; it is now stated in the call.
+
+- **`updated_states` and `predicted_states`**, with the timing in the names:
+  `updated_states[, t]` is `s_{t|t}` and `predicted_states[, t]` is `s_{t|t-1}`
+  (with `s_{1|0}` from `a0`). `filtered_states` is the same matrix as
+  `updated_states`, kept under the name the rest of the package uses. The
+  prediction needs nothing extra from the recursions: `E[eps_t] = 0` in the
+  deviation system makes `s_{t|t-1} = T s_{t-1|t-1}` exact.
+
+  A unit pulse in `shock_means` with no data to update on therefore traces the
+  model's own impulse response exactly -- `updated_states[, t] = T^(t-1) R e_j`
+  under `"dated"`, with the two paths coinciding because there is nothing to
+  update with. That identity is what a cross-package shock-response comparison
+  reduces to once the timing is fixed, and it is asserted to 1e-12 without
+  needing the other package present.
+
+- **One deliberate asymmetry between the two entry points.** A known shock's
+  REALISATION is fixed, so `kalman_smoother()` reports the injected value back
+  as itself; a MEAN leaves the shock random, so `smoothed_shocks` reports
+  `m_t + u_{t|T}` -- the mean plus the smoothed deviation around it. A smoother
+  that returned the mean unrevised would be ignoring the data; one that
+  ignored the mean would be ignoring the input. The two coincide on a
+  zero-variance shock, where there is no deviation left to revise.
+
+- `kalman_smoother()` also gains `updated_states` and `predicted_states` under
+  the same names, the latter being the mean counterpart of `predicted_cov` --
+  computed all along and simply not returned. Note the orientation differs
+  from the filter's by long-standing convention: rows are periods here.
+
+- `$diagnostics$shock_means` reports the timing, the number of shifted cells
+  and which shocks they belong to, on both entry points. `loglik_type` stays
+  `"marginal"`: an input conditions nothing.
+
 # dynhr 0.9.3.2
 
 The follow-up to 0.9.3.1, from a second report against the same surface. Four

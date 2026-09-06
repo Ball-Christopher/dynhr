@@ -408,6 +408,91 @@
   }
 }
 
+### -- Deterministic shock MEANS ---------------------------------------------
+###
+### A different statement from `known_shocks`, and the difference is the whole
+### point of having both:
+###
+###   known_shocks  eps_{j,t} = v          the REALISATION is known. The shock
+###                                        stops being random: its variance is
+###                                        used up, and (with a prior density)
+###                                        the value informs the likelihood.
+###   shock_means   E[eps_{j,t}] = m       the MEAN is known and the shock
+###                                        keeps its variance. Nothing is
+###                                        observed and nothing is estimated
+###                                        about m; it is an INPUT.
+###
+### The second is IRIS's `filter(..., 'vary', J)`: a deterministic path added
+### to the transition and measurement constants before the Kalman update. It
+### is not expressible as an observation of eps, and forcing it through the
+### augmented-state route would both change the covariance and add a density
+### term that does not belong.
+###
+### It IS expressible as a data adjustment, because the system is linear.
+### With eps_t = m_t + u_t, u_t ~ N(0, Sigma_e):
+###   s_t = T s_{t-1} + R eps_t = s^det_t + s~_t,  s^det_t = T s^det_{t-1} + R m_t
+###   y_t = Z s_{t-1} + D eps_t = y^det_t          + y~_t,  y^det_t = Z s^det_{t-1} + D m_t
+### so subtracting y^det from the data leaves an ORDINARY filtering problem in
+### s~ with no input at all, and s^det is added back to the reported states
+### afterwards. No covariance changes (a mean shift moves no second moment),
+### no likelihood term is added, and every method works unmodified -- no
+### routing to the univariate filter, no new recursion, and zero-variance
+### shocks and missing observations are non-events.
+###
+### TIMING. `shock_means[, t]` is the shock DATED t by default, exactly as
+### `known_shocks` and `shock_scale` date their columns: it enters s_t and y_t.
+### `shock_timing = "transition_next"` instead reads column t as driving the
+### transition OUT of period t, so it enters s_{t+1} and y_{t+1} -- one column
+### to the right, which is the adapter shift a caller comparing against a
+### package with the other convention would otherwise apply by hand.
+.kf_shock_means <- function(shock_means, shock_timing, shock_names, n_T,
+                            what = "kalman_filter") {
+  if (is.null(shock_means)) return(NULL)
+  n_e <- length(shock_names)
+  M <- as.matrix(shock_means)
+  if (nrow(M) != n_e || ncol(M) != n_T)
+    stop(sprintf("%s: `shock_means` must be n_exo x T (%d x %d); got %d x %d.",
+                 what, n_e, n_T, nrow(M), ncol(M)), call. = FALSE)
+  if (!is.null(rownames(M))) {
+    if (!setequal(rownames(M), shock_names))
+      stop(sprintf("%s: `shock_means` rownames do not match the model's shocks (%s).",
+                   what, paste(shock_names, collapse = ", ")), call. = FALSE)
+    M <- M[shock_names, , drop = FALSE]
+  }
+  if (any(!is.na(M) & !is.finite(M)))
+    stop(what, ": `shock_means` entries must be finite or NA.", call. = FALSE)
+  ## NA means "no shift here", i.e. zero -- the same shape a caller builds for
+  ## `known_shocks`, where NA means "unknown". A mean of zero IS no shift, so
+  ## the two readings coincide and neither surprises.
+  M[is.na(M)] <- 0
+  if (identical(shock_timing, "transition_next")) {
+    ## Column t drives the transition out of t, so it lands on t+1. The last
+    ## column would land outside the sample; it is dropped, which is what
+    ## "the sample ends" means, not an error.
+    M <- cbind(matrix(0, n_e, 1L), M[, -n_T, drop = FALSE])
+  }
+  if (all(M == 0)) return(NULL)
+  M
+}
+
+### The deterministic trajectory implied by a mean path: y^det (subtracted from
+### the data) and s^det (added back to the reported states). Column t of
+### `s_det` is s^det_t; `s_det_prev` carries s^det_{t-1}, which is what the
+### observation row and the one-step prediction load.
+.kf_det_path <- function(M, TT, RR, ZZ, DD) {
+  n_T <- ncol(M); n_s <- nrow(TT); n_o <- nrow(ZZ)
+  s_det <- matrix(0, n_s, n_T)
+  y_det <- matrix(0, n_o, n_T)
+  s_prev <- numeric(n_s)
+  for (t in seq_len(n_T)) {
+    y_det[, t] <- drop(ZZ %*% s_prev) + drop(DD %*% M[, t])
+    s_prev     <- drop(TT %*% s_prev) + drop(RR %*% M[, t])
+    s_det[, t] <- s_prev
+  }
+  list(s_det = s_det, y_det = y_det)
+}
+
+
 ### -- Routing table for $diagnostics ----------------------------------------
 ###
 ### Built on EVERY filter call, including the per-draw ones inside an MCMC
@@ -971,6 +1056,47 @@
 #'   observation with that standard deviation rather than an exact constraint,
 #'   which is what a judgemental adjustment usually is. \code{NULL} or
 #'   \code{NA} means exact.
+#' @param shock_means Deterministic shock MEANS: an \code{n_exo x T} matrix of
+#'   mean shifts, \code{NULL} (default) for none. \code{NA} and \code{0} both
+#'   mean "no shift here", so the same matrix shape used for
+#'   \code{known_shocks} works. Rows are matched BY NAME when the matrix has
+#'   rownames.
+#'
+#'   \strong{This is a different statement from \code{known_shocks}, and the
+#'   difference is the point of having both.} \code{known_shocks} says the
+#'   REALISATION is known, \eqn{\varepsilon_{j,t} = v}: the shock stops being
+#'   random, its variance is used up, and (where it has a prior density) the
+#'   value enters the likelihood. \code{shock_means} says the MEAN is known,
+#'   \eqn{E[\varepsilon_{j,t}] = m}, and the shock \strong{keeps its
+#'   variance}: nothing is observed, nothing about \eqn{m} is estimated, and
+#'   the likelihood gains no term. It is a deterministic INPUT -- the analogue
+#'   of a \code{vary} / plan path in other state-space packages, entering the
+#'   transition and measurement constants as \eqn{R m_t} and \eqn{D m_t}
+#'   before the update.
+#'
+#'   Because the system is linear the two coincide exactly for a shock with no
+#'   prior variance (a \code{stderr 0} shock, or a \code{shock_scale} of zero
+#'   at that period): knowing the mean and knowing the realisation are then the
+#'   same statement, and both entry points return the same states and the same
+#'   log-likelihood. They are pinned against each other by test.
+#'
+#'   No method routing is involved: the mean path splits off as a deterministic
+#'   trajectory that is subtracted from the data and added back to the reported
+#'   states, so every \code{method} evaluates it identically, and zero-variance
+#'   shocks, missing observations and \code{a0}/\code{P0} are non-events.
+#' @param shock_timing How to read the columns of \code{shock_means}:
+#'   \describe{
+#'     \item{\code{"dated"}}{(default) column \eqn{t} is the shock DATED
+#'       \eqn{t}. It enters \eqn{s_t} and \eqn{y_t}, the same dating
+#'       \code{known_shocks} and \code{shock_scale} use for their columns.}
+#'     \item{\code{"transition_next"}}{column \eqn{t} drives the transition
+#'       OUT of period \eqn{t}, so it enters \eqn{s_{t+1}} and
+#'       \eqn{y_{t+1}} -- the whole matrix shifted one column right, with the
+#'       last column falling outside the sample. This is the convention to pass
+#'       when adapting a path written for a package that dates its input by the
+#'       transition rather than by the shock.}
+#'   }
+#'   Ignored when \code{shock_means} is \code{NULL}.
 #' @param me_floor_check Logical: when \code{me_variance > 0}, compare it
 #'   against the smallest eigenvalue of the model-implied (ME-free) steady-
 #'   state innovation covariance \code{F} and warn when the assumed
@@ -1101,8 +1227,14 @@
 #' @return A list with
 #'   \describe{
 #'     \item{\code{loglik}}{the log-likelihood.}
-#'     \item{\code{filtered_states}}{\code{n_state x T}, column \eqn{t} is
-#'       \eqn{s_{t|t}} (only when \code{return_filtered = TRUE}).}
+#'     \item{\code{updated_states}, \code{predicted_states}}{the two state
+#'       paths, \code{n_state x T}, with the timing in the names:
+#'       \code{updated_states[, t]} is \eqn{s_{t|t}} (conditioned on
+#'       \eqn{y_{1:t}}) and \code{predicted_states[, t]} is \eqn{s_{t|t-1}}
+#'       (conditioned on \eqn{y_{1:t-1}}, with \eqn{s_{1|0}} taken from
+#'       \code{a0}). Both only when \code{return_filtered = TRUE}.}
+#'     \item{\code{filtered_states}}{the SAME matrix as
+#'       \code{updated_states}, under the name the rest of the package uses.}
 #'     \item{\code{loglik_contrib}}{per-period contributions, when asked for.}
 #'     \item{\code{final_state}, \code{final_cov}}{the state hand-off:
 #'       \eqn{s_{T|T}} and \eqn{Var(s_T \mid y_{1:T})}, named, in the same
@@ -1124,6 +1256,83 @@
 #'       (\code{"marginal"}, \code{"joint"} or \code{"conditional"}).
 #'       \code{\link{kalman_smoother}} returns the same fields.}
 #'   }
+#'
+#' @section State timing:
+#' The state space is written in LAGGED form -- \eqn{s_t = T s_{t-1} +
+#' R \varepsilon_t} and \eqn{y_t = Z s_{t-1} + D \varepsilon_t} -- so
+#' \eqn{s_t} is the model's state variables dated \eqn{t}, and
+#' \code{updated_states[, t]} is those variables conditioned on data through
+#' \eqn{t}. \code{predicted_states} is the one-step-ahead pair,
+#' \eqn{s_{t|t-1}}; it needs nothing extra from the recursion, because
+#' \eqn{E[\varepsilon_t] = 0} in the deviation system makes
+#' \eqn{s_{t|t-1} = T s_{t-1|t-1}} exactly (plus \eqn{R m_t} when a
+#' \code{shock_means} path is supplied).
+#'
+#' A unit pulse in \code{shock_means} with no data to update on therefore
+#' traces the model's own impulse response exactly: with
+#' \code{shock_timing = "dated"} and a pulse in column 1,
+#' \code{updated_states[, t]} is \eqn{T^{t-1} R e_j}, and the two paths
+#' coincide because there is nothing to update with. That identity is the
+#' bridge to a package that reports shock responses on a different grid --
+#' compare against it once, choose the \code{shock_timing} that lines up, and
+#' the convention is then stated in the call rather than applied by hand.
+#'
+#' @section Matching another package's shock timing:
+#' Two packages can inject the same deterministic shock path and produce
+#' responses one period apart, purely because they index the input
+#' differently. \code{shock_timing} exists so that difference is declared in
+#' the call instead of applied by hand to the output.
+#'
+#' \strong{For IRIS, the answer is the default and no shift is needed.}
+#' Verified against IRIS Toolbox Release 20180308 under Octave: with
+#' \code{shock_means} and \code{shock_timing = "dated"}, dynhr reproduces
+#' \code{filter(m, d, range, 'vary=', j)} to machine precision -- on all three
+#' of IRIS's outputs and on the smoothed shocks -- while
+#' \code{"transition_next"} is measurably wrong for it. The names line up
+#' one-for-one:
+#'
+#' \tabular{ll}{
+#'   IRIS \code{'output=', 'predict'} \tab \code{predicted_states} \cr
+#'   IRIS \code{'output=', 'filter'}  \tab \code{updated_states}   \cr
+#'   IRIS \code{'output=', 'smooth'}  \tab \code{smoothed_states} (from
+#'     \code{\link{kalman_smoother}}) \cr
+#'   IRIS \code{'vary='} shock tunes  \tab \code{shock_means}
+#' }
+#'
+#' If you previously needed a one-period shift to line the two up, the cause
+#' was the MECHANISM rather than the timing: \code{known_shocks} is an exact
+#' observation of the shock, whereas an IRIS \code{vary} tune sets the mean
+#' and leaves the shock random -- so its smoothed shock is revised away from
+#' the injected value, and no shift of an exactly-pinned path can reproduce
+#' that. \code{shock_means} is the matching statement; use it and drop the
+#' adapter.
+#'
+#' For any other reference implementation, three lines settle it, with no data
+#' needed:
+#'
+#' \preformatted{
+#' Yna <- Y; Yna[] <- NA                  # same shape, no observations
+#' M   <- matrix(0, n_exo, T, dimnames = list(exo_names, NULL))
+#' M["e_j", 1] <- 1                       # unit pulse in the FIRST column
+#' kalman_filter(Yna, dr, model, params, obs_vars = obs,
+#'               return_filtered = TRUE, shock_means = M)$updated_states[, 1:4]
+#' }
+#'
+#' With no observations there is nothing to update with, so the filtered path
+#' IS the deterministic path, and the deterministic path of a unit pulse is
+#' the model's impulse response: under \code{"dated"} that is
+#' \eqn{T^{t-1} R e_j}, with the IMPACT in column 1 -- the same column as the
+#' pulse -- and \code{predicted_states} identical to it. Produce the other
+#' package's response to the same pulse and compare: impact in the same period
+#' means keep \code{"dated"}; impact one period later means
+#' \code{"transition_next"}, which is exactly the same as shifting the matrix
+#' one column right yourself.
+#'
+#' Do not infer the answer from a HISTORICAL filtered path, where an offset in
+#' the shock input and an offset in the state output look alike. The pulse
+#' experiment fixes the input convention with no data in play, and
+#' \code{updated_states} / \code{predicted_states} then fix the output
+#' convention by name (\eqn{s_{t|t}} against \eqn{s_{t|t-1}}).
 #'
 #' @section Filtering a split sample:
 #' \code{final_state} / \code{final_cov} are exactly what \code{a0} /
@@ -1184,8 +1393,11 @@ kalman_filter <- function(data, dr, model, params, obs_vars,
                           P0 = NULL,
                           known_shocks = NULL,
                           known_shocks_sd = NULL,
+                          shock_means = NULL,
+                          shock_timing = c("dated", "transition_next"),
                           me_floor_check = getOption("dynhr.me_floor_check",
                                                      TRUE)) {
+  shock_timing <- match.arg(shock_timing)
 
   ## "reference" is an alias for "dare" -- both run the per-step textbook
   ## Kalman filter with no steady-state shortcut. "dare" is kept for
@@ -1309,6 +1521,23 @@ kalman_filter <- function(data, dr, model, params, obs_vars,
   if (nrow(data) != n_obs) data <- t(data)
   n_T <- ncol(data)
   known <- .kf_known_shocks(known_shocks, known_shocks_sd, exo, n_T)
+  mean_path <- .kf_shock_means(shock_means, shock_timing, exo, n_T)
+
+  ## Two deterministic statements about the same shock in the same period are
+  ## a contradiction, not a composition: `known_shocks` fixes the realisation,
+  ## so a mean for it is already spoken for. Different shocks, or different
+  ## periods, compose fine and are left alone.
+  if (!is.null(mean_path) && !is.null(known)) {
+    clash <- !is.na(known$values) & mean_path[known$idx, , drop = FALSE] != 0
+    if (any(clash)) {
+      hit <- which(apply(clash, 1L, any))
+      stop(sprintf(paste0("kalman_filter: `shock_means` and `known_shocks` both ",
+                          "specify %s. A known shock's REALISATION is fixed, so ",
+                          "its mean is already determined -- pass one or the ",
+                          "other for a given shock and period."),
+                   paste(known$names[hit], collapse = ", ")), call. = FALSE)
+    }
+  }
 
   ## A low-frequency series stored on the high-frequency grid must be spaced
   ## in multiples of its aggregation length; a misaligned column would
@@ -1421,6 +1650,25 @@ kalman_filter <- function(data, dr, model, params, obs_vars,
   ## then need only one matrix-vector subtraction. Safe with missing data: NA
   ## propagates through Y - d and is caught by the same anyNA / is.finite
   ## checks downstream.
+  ## ---- Deterministic shock means: split the trajectory off ---------------
+  ## See .kf_shock_means. Subtracting y^det leaves an ordinary filtering
+  ## problem; s^det is added back in .kf_result(). Runs AFTER the
+  ## mixed-frequency augmentation, so it uses the same TT/RR/ZZ/DD the
+  ## recursions do.
+  ##
+  ## The subtraction is applied to `data` and NOT to `Y_minus_d` alone,
+  ## because Y_minus_d is not the only thing the recursions read: the dare
+  ## loop forms its own innovation as `data[, t] - ZZ %*% s - d`, and
+  ## .kf_diffuse_phase() takes `data` and `d` separately. Adjusting only the
+  ## precomputed matrix left both of those evaluating the UNSHIFTED model --
+  ## caught by the cross-method test, which is why it asserts every method
+  ## rather than trusting one.
+  det_path <- NULL
+  if (!is.null(mean_path)) {
+    det_path <- .kf_det_path(mean_path, TT, RR, ZZ, DD)
+    data     <- data - det_path$y_det
+  }
+
   Y_minus_d <- data - d
   ## Per-period count of observations that are simply absent, kept apart from
   ## the components a singular F drops: "not there" and "carries no
@@ -1681,8 +1929,36 @@ kalman_filter <- function(data, dr, model, params, obs_vars,
                          loglik_contrib = NULL, dropped = NULL,
                          known_applied = NULL, fallback = NULL,
                          extra = list()) {
+    ## ---- Timing contract, and the deterministic add-back ----------------
+    ## Two state paths are reported, and the names say which is which rather
+    ## than leaving "filtered" to be interpreted:
+    ##   updated_states[, t]   = s_{t|t}    conditioned on y_1..t
+    ##   predicted_states[, t] = s_{t|t-1}  conditioned on y_1..t-1
+    ## `filtered_states` is the SAME matrix as `updated_states`, kept because
+    ## it is the name the rest of the package and every existing caller uses.
+    ##
+    ## The prediction needs no extra state from the recursions: E[eps_t] = 0 in
+    ## the deviation system, so s_{t|t-1} = T s_{t-1|t-1} exactly, with
+    ## s_{1|0} = T a0. A deterministic mean path adds R m_t on top, which is
+    ## precisely s^det_t - T s^det_{t-1}; so predicting from the STOCHASTIC
+    ## filtered path and then adding s^det gives both series in one step.
+    predicted_states <- NULL
+    if (!is.null(filtered_states)) {
+      prev <- cbind(a0_vec, filtered_states[, -n_T, drop = FALSE])
+      predicted_states <- TT %*% prev
+      if (!is.null(det_path)) {
+        filtered_states  <- filtered_states  + det_path$s_det
+        predicted_states <- predicted_states + det_path$s_det
+      }
+      rownames(filtered_states)  <- state_names_out
+      rownames(predicted_states) <- state_names_out
+    }
     if (!is.null(final_state)) {
       final_state <- as.numeric(final_state)
+      ## The hand-off is the TOTAL state, so a second call started from it
+      ## carries the deterministic level already accumulated and restarts its
+      ## own mean path from zero.
+      if (!is.null(det_path)) final_state <- final_state + det_path$s_det[, n_T]
       names(final_state) <- state_names_out
     }
     if (!is.null(final_cov)) {
@@ -1708,6 +1984,8 @@ kalman_filter <- function(data, dr, model, params, obs_vars,
       else if (known_meta$n_deterministic == known_meta$n_cells) "conditional"
       else "joint"
     c(list(loglik = loglik, filtered_states = filtered_states,
+           updated_states = filtered_states,
+           predicted_states = predicted_states,
            loglik_contrib = loglik_contrib,
            n_obs = n_obs, n_T = n_T, method = method_used,
            lik_init = lik_init_used, d_diffuse = dd,
@@ -1726,6 +2004,13 @@ kalman_filter <- function(data, dr, model, params, obs_vars,
              known_shocks       = if (is.null(known_meta)) NULL
                                   else c(known_meta,
                                          list(n_applied = known_applied)),
+             ## A deterministic mean path is an INPUT, so it is reported as
+             ## one: it conditions nothing and adds no density term, and
+             ## `loglik_type` stays "marginal" for it.
+             shock_means        = if (is.null(mean_path)) NULL
+                                  else list(timing = shock_timing,
+                                            n_cells = sum(mean_path != 0),
+                                            names = exo[rowSums(mean_path != 0) > 0]),
              loglik_type        = ll_type)),
       extra)
   }

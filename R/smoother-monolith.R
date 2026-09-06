@@ -418,6 +418,24 @@ build_dsge_state_space <- function(m, dr, obs_vars, verbose = TRUE,
 #'   they are inputs, not estimates. \code{loglik} is the CONDITIONAL
 #'   \eqn{\log p(y \mid \varepsilon = v)}; see \code{\link{kalman_filter}}
 #'   for the joint.
+#' @param shock_means Deterministic shock MEANS, an \code{n_exo x T} matrix of
+#'   mean shifts (\code{NA} and \code{0} both mean "no shift here"), rows
+#'   matched by name. The same argument \code{\link{kalman_filter}} takes, with
+#'   the same meaning and the same mechanism -- see there for the distinction
+#'   from \code{known_shocks}, which is the point of having both.
+#'
+#'   One thing differs, and it follows from that distinction: a known shock's
+#'   REALISATION is fixed, so \code{smoothed_shocks} reports the injected value
+#'   back as itself, whereas a MEAN leaves the shock random, so
+#'   \code{smoothed_shocks} reports \eqn{m_t + u_{t|T}} -- the mean plus the
+#'   smoothed deviation around it. A smoother that returned the mean unrevised
+#'   would be ignoring the data; one that ignored the mean would be ignoring
+#'   the input.
+#' @param shock_timing How to read the columns of \code{shock_means}:
+#'   \code{"dated"} (default) or \code{"transition_next"}. See
+#'   \code{\link{kalman_filter}}, whose \emph{Matching another package's
+#'   shock timing} section gives the experiment that settles which one a given
+#'   reference implementation uses.
 #' @param Q      n_shock x n_shock shock covariance. Default \code{NULL}:
 #'   use \code{ss$Sigma_e} (the covariance from the \code{shocks;} block),
 #'   which makes the forward-pass \code{loglik} identical to
@@ -432,7 +450,13 @@ build_dsge_state_space <- function(m, dr, obs_vars, verbose = TRUE,
 #'   standard-deviation scale factors (from a \code{heteroskedastic_shocks}
 #'   block), or \code{NULL} (constant shock variances).
 #' @return List with \code{smoothed_states} (\eqn{T \times n_{state}}, row
-#'   \eqn{t} is \eqn{s_{t|T}}), \code{smoothed_shocks}, \code{filtered_states},
+#'   \eqn{t} is \eqn{s_{t|T}}), \code{smoothed_shocks}, and the two forward
+#'   paths under the same names \code{\link{kalman_filter}} uses --
+#'   \code{updated_states} (row \eqn{t} is \eqn{s_{t|t}}) and
+#'   \code{predicted_states} (row \eqn{t} is \eqn{s_{t|t-1}}), the mean
+#'   counterpart of \code{predicted_cov}. \code{filtered_states} is the same
+#'   matrix as \code{updated_states}. Note the orientation differs from the
+#'   filter's: here rows are periods. Also
 #'   \code{filtered_cov} / \code{predicted_cov} / \code{smoothed_cov},
 #'   \code{smoothed_initial} (\eqn{s_{0|T}}),
 #'   \code{smoothed_initial_cov} (\eqn{V_{0|T}}), \code{loglik}, and
@@ -483,8 +507,11 @@ kalman_smoother <- function(data, dr, model, params = NULL,
                             lik_init = c("auto", "stationary", "kappa",
                                          "diffuse"),
                             kalman_tol = 1e-10, a0 = NULL, P0 = NULL,
-                            pre_sample = 0L, known_shocks = NULL) {
+                            pre_sample = 0L, known_shocks = NULL,
+                            shock_means = NULL,
+                            shock_timing = c("dated", "transition_next")) {
   lik_init <- match.arg(lik_init)
+  shock_timing <- match.arg(shock_timing)
 
   ## ---- One shape, one data convention -----------------------------------
   ## Up to 0.9.3 this function took a pre-built `dsge_ss` as its second
@@ -520,7 +547,8 @@ kalman_smoother <- function(data, dr, model, params = NULL,
                       me_extra = me_extra, shock_scale = shock_scale,
                       lik_init = lik_init, kalman_tol = kalman_tol,
                       a0 = a0, P0 = P0, pre_sample = pre_sample,
-                      known_shocks = known_shocks)
+                      known_shocks = known_shocks, shock_means = shock_means,
+                      shock_timing = shock_timing)
 }
 
 
@@ -547,8 +575,11 @@ kalman_smoother <- function(data, dr, model, params = NULL,
                                 lik_init = c("auto", "stationary", "kappa",
                                              "diffuse"),
                                 kalman_tol = 1e-10, a0 = NULL, P0 = NULL,
-                                pre_sample = 0L, known_shocks = NULL) {
+                                pre_sample = 0L, known_shocks = NULL,
+                                shock_means = NULL,
+                                shock_timing = c("dated", "transition_next")) {
   lik_init <- match.arg(lik_init)
+  shock_timing <- match.arg(shock_timing)
   lik_init_orig <- lik_init        # for $diagnostics (R4)
 
   ## ---- Pre-sample backfill ------------------------------------------------
@@ -588,6 +619,15 @@ kalman_smoother <- function(data, dr, model, params = NULL,
       known_shocks <- cbind(matrix(NA_real_, nrow(known_shocks), pre_sample,
                                    dimnames = list(rownames(known_shocks), NULL)),
                             known_shocks)
+    }
+    ## Same for a mean path: zero is "no shift", so the padded periods are
+    ## unforced -- which is what a backcast of the history before the sample
+    ## means when the sample's own inputs are known.
+    if (!is.null(shock_means)) {
+      shock_means <- as.matrix(shock_means)
+      shock_means <- cbind(matrix(0, nrow(shock_means), pre_sample,
+                                  dimnames = list(rownames(shock_means), NULL)),
+                           shock_means)
     }
   }
 
@@ -642,6 +682,43 @@ kalman_smoother <- function(data, dr, model, params = NULL,
     shock_scale <- sc
   }
 
+  ## ---- Deterministic shock MEANS -----------------------------------------
+  ## The same split as above, for a different statement. `known_shocks` fixes
+  ## the REALISATION, so the smoother reports the injected value back as
+  ## itself. `shock_means` fixes the MEAN and the shock keeps its variance, so
+  ## the smoother still estimates the deviation around it and reports
+  ## eps_{t|T} = m_t + u_{t|T}. Anything else would be ignoring either the
+  ## input or the data. See .kf_shock_means() in R/kalman-filter.R.
+  ##
+  ## Both entry points run before ss_convert_timing(), which is a no-op for
+  ## every state space this package builds (`timing = "lagged"`); a hand-built
+  ## dsge_ss declaring another timing would need them moved after it.
+  mean_path <- .kf_shock_means(shock_means, shock_timing, ss$shock_names,
+                               nrow(data), what = "kalman_smoother")
+  if (!is.null(mean_path) && !is.null(known_sm)) {
+    clash <- !is.na(known_sm$values) &
+      mean_path[known_sm$idx, , drop = FALSE] != 0
+    if (any(clash))
+      stop(sprintf(paste0("kalman_smoother: `shock_means` and `known_shocks` ",
+                          "both specify %s. A known shock's REALISATION is ",
+                          "fixed, so its mean is already determined -- pass ",
+                          "one or the other for a given shock and period."),
+                   paste(known_sm$names[which(apply(clash, 1L, any))],
+                         collapse = ", ")), call. = FALSE)
+  }
+  m_det <- NULL
+  if (!is.null(mean_path)) {
+    m_det <- matrix(0, nrow(data) + 1L, ss$n_state)   # row t+1 holds s^det_t
+    y_md  <- matrix(0, nrow(data), ss$n_obs)
+    for (t in seq_len(nrow(data))) {
+      y_md[t, ] <- as.numeric(ss$Z_mat %*% m_det[t, ] +
+                              ss$D_mat %*% mean_path[, t])
+      m_det[t + 1L, ] <- as.numeric(ss$T_mat %*% m_det[t, ] +
+                                    ss$R_mat %*% mean_path[, t])
+    }
+    data <- data - y_md
+  }
+
   ## ---- Structured run diagnostics (R4) -----------------------------------
   ## Same field names as kalman_filter()$diagnostics, so a parity harness can
   ## read either without a special case. `method_requested` is NA here because
@@ -680,8 +757,13 @@ kalman_smoother <- function(data, dr, model, params = NULL,
            list(names = known_sm$names,
                 n_cells = sum(!is.na(known_sm$values)),
                 n_applied = sum(!is.na(known_sm$values))),
+         shock_means        = if (is.null(mean_path)) NULL else
+           list(timing = shock_timing,
+                n_cells = sum(mean_path != 0),
+                names = ss$shock_names[rowSums(mean_path != 0) > 0]),
          ## The smoother conditions on an injected shock (it splits the
          ## deterministic trajectory off); kalman_filter() reports the joint.
+         ## A mean path conditions nothing -- it is an input, not an event.
          loglik_type        = if (is.null(known_sm)) "marginal" else "conditional")
   }
 
@@ -693,6 +775,15 @@ kalman_smoother <- function(data, dr, model, params = NULL,
   ## returned series is aligned with the data that was passed in. Doing it in
   ## one place is what keeps the two paths returning the same object.
   .smoother_finish <- function(out) {
+    if (!is.null(mean_path)) {
+      out$smoothed_states  <- out$smoothed_states  + m_det[-1L, , drop = FALSE]
+      out$filtered_states  <- out$filtered_states  + m_det[-1L, , drop = FALSE]
+      out$predicted_states <- out$predicted_states + m_det[-1L, , drop = FALSE]
+      out$smoothed_initial <- out$smoothed_initial + m_det[1L, ]
+      ## The shock is NOT fixed by a mean, so the estimate is the mean plus
+      ## the smoothed deviation around it.
+      out$smoothed_shocks  <- out$smoothed_shocks + t(mean_path)
+    }
     if (!is.null(known_sm)) {
       out$smoothed_states  <- out$smoothed_states + s_det[-1L, , drop = FALSE]
       out$filtered_states  <- out$filtered_states + s_det[-1L, , drop = FALSE]
@@ -714,9 +805,10 @@ kalman_smoother <- function(data, dr, model, params = NULL,
       out$presample_states <- out$smoothed_states[ix, , drop = FALSE]
       out$presample_shocks <- out$smoothed_shocks[ix, , drop = FALSE]
       out$presample_cov    <- out$smoothed_cov[, , ix, drop = FALSE]
-      out$smoothed_states <- out$smoothed_states[keep, , drop = FALSE]
-      out$smoothed_shocks <- out$smoothed_shocks[keep, , drop = FALSE]
-      out$filtered_states <- out$filtered_states[keep, , drop = FALSE]
+      out$smoothed_states  <- out$smoothed_states[keep, , drop = FALSE]
+      out$smoothed_shocks  <- out$smoothed_shocks[keep, , drop = FALSE]
+      out$filtered_states  <- out$filtered_states[keep, , drop = FALSE]
+      out$predicted_states <- out$predicted_states[keep, , drop = FALSE]
       out$filtered_cov    <- out$filtered_cov[, , keep, drop = FALSE]
       out$predicted_cov   <- out$predicted_cov[, , keep, drop = FALSE]
       out$smoothed_cov    <- out$smoothed_cov[, , keep, drop = FALSE]
@@ -734,6 +826,12 @@ kalman_smoother <- function(data, dr, model, params = NULL,
         out$diagnostics <- d
       }
     }
+    ## The timing contract, in the names, matching kalman_filter(): row t of
+    ## `updated_states` is s_{t|t} and row t of `predicted_states` is
+    ## s_{t|t-1}. `filtered_states` is the same matrix as `updated_states`,
+    ## under the name the rest of the package uses. Aliased LAST, after every
+    ## correction above, so the two cannot drift apart.
+    out$updated_states <- out$filtered_states
     out
   }
 
@@ -904,8 +1002,9 @@ kalman_smoother <- function(data, dr, model, params = NULL,
                 "state is loaded by some observable.", call. = FALSE)
       nm  <- ss$state_names; shk <- ss$shock_names
       dn3 <- list(nm, nm, NULL)
-      colnames(ds$smoothed_states) <- nm
-      colnames(ds$filtered_states) <- nm
+      colnames(ds$smoothed_states)  <- nm
+      colnames(ds$filtered_states)  <- nm
+      colnames(ds$predicted_states) <- nm
       colnames(ds$smoothed_shocks) <- shk
       names(ds$smoothed_initial)   <- nm
       dimnames(ds$smoothed_initial_cov) <- list(nm, nm)
@@ -916,6 +1015,7 @@ kalman_smoother <- function(data, dr, model, params = NULL,
         smoothed_states = ds$smoothed_states,
         smoothed_shocks = ds$smoothed_shocks,
         filtered_states = ds$filtered_states,
+        predicted_states = ds$predicted_states,
         filtered_cov    = ds$filtered_cov,
         predicted_cov   = ds$predicted_cov,
         smoothed_cov    = ds$smoothed_cov,
@@ -1255,6 +1355,7 @@ kalman_smoother <- function(data, dr, model, params = NULL,
 
   colnames(s_smooth)   <- ss$state_names
   colnames(s_filt)     <- ss$state_names
+  colnames(s_pred)     <- ss$state_names
   colnames(eps_smooth) <- ss$shock_names
   names(s0_smooth)     <- ss$state_names
   dimnames(V0_smooth)  <- list(ss$state_names, ss$state_names)
@@ -1267,6 +1368,10 @@ kalman_smoother <- function(data, dr, model, params = NULL,
     smoothed_states = s_smooth,
     smoothed_shocks = eps_smooth,
     filtered_states = s_filt,
+    ## The mean counterpart of predicted_cov, and the same timing contract
+    ## kalman_filter() reports: row t is s_{t|t-1}. It was computed all along
+    ## and simply not returned.
+    predicted_states = s_pred,
     ## Per-period state covariances (n_state x n_state x T):
     filtered_cov    = P_filt,            # P_{t|t}
     predicted_cov   = P_pred,            # P_{t|t-1}

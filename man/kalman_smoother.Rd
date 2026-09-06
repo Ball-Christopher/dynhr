@@ -20,7 +20,9 @@ kalman_smoother(
   a0 = NULL,
   P0 = NULL,
   pre_sample = 0L,
-  known_shocks = NULL
+  known_shocks = NULL,
+  shock_means = NULL,
+  shock_timing = c("dated", "transition_next")
 )
 }
 \arguments{
@@ -161,10 +163,36 @@ unconditional one.}
   they are inputs, not estimates. \code{loglik} is the CONDITIONAL
   \eqn{\log p(y \mid \varepsilon = v)}; see \code{\link{kalman_filter}}
   for the joint.}
+
+\item{shock_means}{Deterministic shock MEANS, an \code{n_exo x T} matrix of
+  mean shifts (\code{NA} and \code{0} both mean "no shift here"), rows
+  matched by name. The same argument \code{\link{kalman_filter}} takes, with
+  the same meaning and the same mechanism -- see there for the distinction
+  from \code{known_shocks}, which is the point of having both.
+
+  One thing differs, and it follows from that distinction: a known shock's
+  REALISATION is fixed, so \code{smoothed_shocks} reports the injected value
+  back as itself, whereas a MEAN leaves the shock random, so
+  \code{smoothed_shocks} reports \eqn{m_t + u_{t|T}} -- the mean plus the
+  smoothed deviation around it. A smoother that returned the mean unrevised
+  would be ignoring the data; one that ignored the mean would be ignoring
+  the input.}
+
+\item{shock_timing}{How to read the columns of \code{shock_means}:
+\code{"dated"} (default) or \code{"transition_next"}. See
+\code{\link{kalman_filter}}, whose \emph{Matching another package's
+shock timing} section gives the experiment that settles which one a given
+reference implementation uses.}
 }
 \value{
 List with \code{smoothed_states} (\eqn{T \times n_{state}}, row
-  \eqn{t} is \eqn{s_{t|T}}), \code{smoothed_shocks}, \code{filtered_states},
+  \eqn{t} is \eqn{s_{t|T}}), \code{smoothed_shocks}, and the two forward
+  paths under the same names \code{\link{kalman_filter}} uses --
+  \code{updated_states} (row \eqn{t} is \eqn{s_{t|t}}) and
+  \code{predicted_states} (row \eqn{t} is \eqn{s_{t|t-1}}), the mean
+  counterpart of \code{predicted_cov}. \code{filtered_states} is the same
+  matrix as \code{updated_states}. Note the orientation differs from the
+  filter's: here rows are periods. Also
   \code{filtered_cov} / \code{predicted_cov} / \code{smoothed_cov},
   \code{smoothed_initial} (\eqn{s_{0|T}}),
   \code{smoothed_initial_cov} (\eqn{V_{0|T}}), \code{loglik}, and
