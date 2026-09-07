@@ -493,6 +493,39 @@
 }
 
 
+### -- A model with NO shock variance at all ---------------------------------
+###
+### `stderr 0` on ONE shock is legitimate and supported -- it is what makes a
+### deterministic `known_shocks` injection or a `shock_means` path meaningful.
+### ALL of them being zero is a different thing: the model then has no
+### stochastic structure whatsoever, the likelihood is a point mass, and the
+### smoothed states are whatever the initialisation happens to pin down. It is
+### almost always a `.mod` file with no `shocks;` block, which dynhr resolves
+### to a zero Sigma_e without complaint.
+###
+### Worth catching loudly because the symptoms are indirect and land far from
+### the cause. Reported case: a two-state model with cross-loaded exact
+### observations and `lik_init = "kappa"` returned a historical decomposition
+### whose components did not add up (residual 7.9e-3). The mechanism is that
+### with Q = 0 the whole path is determined by s_0, and s_{0|T} is computed as
+### P_{0|0} r_0 with P_{0|0} = kappa * I -- a large number times a small one,
+### so kappa's round-off lands directly in the initial state and s_1 no longer
+### equals T s_0. Give the model a `shocks;` block and the same case balances
+### to 1.1e-10 (kappa) or 1.7e-16 (the exact-diffuse/stationary default).
+.kf_warn_zero_shock_cov <- function(Sigma_e, what) {
+  if (is.null(Sigma_e) || !length(Sigma_e)) return(invisible(FALSE))
+  if (any(abs(Sigma_e) > 0)) return(invisible(FALSE))
+  warning(what, ": every shock has zero variance -- Sigma_e is entirely zero, ",
+          "so the model has no stochastic structure and the likelihood and ",
+          "smoothed states are degenerate. The usual cause is a `.mod` file ",
+          "with no `shocks;` block. A per-shock `stderr 0` is supported (it is ",
+          "what makes a deterministic `known_shocks` or `shock_means` ",
+          "injection meaningful); ALL of them being zero is almost always the ",
+          "missing block.", call. = FALSE)
+  invisible(TRUE)
+}
+
+
 ### -- Numerically singular F: chol() succeeding is NOT the test -------------
 ###
 ### A Cholesky factorisation can succeed on a matrix that is singular to
@@ -1518,6 +1551,7 @@ kalman_filter <- function(data, dr, model, params, obs_vars,
   }
 
   Sigma_e <- .get_shock_cov(model, exo, params)
+  .kf_warn_zero_shock_cov(Sigma_e, "kalman_filter")
   QQ      <- tcrossprod(RR %*% Sigma_e, RR)
   HH      <- tcrossprod(DD %*% Sigma_e, DD)
   SS      <- RR %*% Sigma_e %*% t(DD)

@@ -1,3 +1,79 @@
+# dynhr 0.9.3.6
+
+## A model with no shock variance is now called out at the source
+
+Reported as a historical-decomposition add-up failure: a two-state linear model
+with cross-loaded exact observations (`y1 = x`, `y2 = x + z`) and
+`lik_init = "kappa"` gave `adding_up_residual` 7.9e-3, while the independent,
+duplicate and single-observable variants balanced to 1e-17. The natural reading
+-- that the cross-loaded geometry breaks the singular-innovation path -- is not
+what was happening.
+
+**The reproducer's model has no `shocks;` block, so `Sigma_e` is entirely
+zero.** The model has no stochastic structure at all. With `Q = 0` the whole
+path is determined by `s_0`, and under a kappa prior `s_{0|T}` is computed as
+`P_{0|0} r_0` with `P_{0|0} = 1e6 * I` -- a large number times a small one --
+so kappa's round-off lands directly in the initial state and `s_1` stops
+equalling `T s_0`. The cross-loaded geometry only decides whether that
+round-off is *visible*; the other three variants are degenerate in ways that
+happen to hide it.
+
+Give the same model a `shocks;` block and it balances to 1.1e-10 under kappa
+and 1.7e-16 on the default initialisation, dropping nothing at all -- the
+singular-innovation path is not even entered.
+
+`kalman_filter()` and `kalman_smoother()` now warn when EVERY shock has zero
+variance, naming the missing `shocks;` block as the usual cause. A per-shock
+`stderr 0` stays legitimate and silent -- it is what makes a deterministic
+`known_shocks` or `shock_means` injection meaningful; all of them being zero is
+the different thing.
+
+## `adding_up_residual` is necessary but not sufficient, and now says so
+
+The decomposition propagates its components with `T_mat`/`R_mat` while the
+add-up check rebuilds the path from the smoother's states separately -- so what
+can that comparison actually see? Measured, by corrupting the smoother's output
+so the answer is known by construction:
+
+| corruption (nk_demo)               | `adding_up` | `transition` |
+|------------------------------------|-------------|--------------|
+| shock at t = 1                     | 2.56        | 2.57         |
+| shock mid-sample                   | 2.56        | 2.57         |
+| state mid-sample                   | 1.00        | 1.00         |
+| shock at the LAST period           | **5.9e-15** | 2.57         |
+| all shocks x1.5 in the LAST period | **5.9e-15** | 0.82         |
+| state at the LAST period           | **5.9e-15** | 1.00         |
+
+The contemporaneous `ghu %*% eps_t` term appears identically on both sides of
+the adding-up comparison and CANCELS, so a shock error is visible only through
+its propagated (t+1 onward) effect, damped by T -- and the final period is not
+checked at all.
+
+`historical_decomposition()` therefore also returns `$transition_residual`,
+`$transition_residual_by_period`, `$transition_worst_period` and
+`$transition_ok`: the direct question, does the smoother's own output satisfy
+its own transition, `s_t = T s_{t-1} + R eps_t`, period by period. It has
+neither blind spot and catches all six corruptions. **Look at it first** when a
+decomposition will not add up -- it separates "the decomposition is wrong" from
+"its INPUTS are incoherent", and the per-period vector localises the latter. On
+the reported case it puts the entire error in period 1, which is what
+identified the initial state as the culprit.
+
+This also answers the report's second acceptance criterion directly: the
+decomposition no longer returns a non-additive result as if it were valid --
+it warns, says which of the two checks failed, and where.
+
+Nothing about the computed contributions changes.
+
+## Cross-loaded exact observations, pinned as coherent
+
+Three observables each loading both states, none with measurement error, the
+third an exact combination of the other two -- a predictable component dropped
+in every period (160 of 160), and with ragged edges the dropped SET varying
+period to period (130 of 160). Transition residual 6.7e-16 and 1.3e-15, with
+the smoothed states exact against the simulated truth. Both are regression
+tests now, as is the reporter's own four-variant reproducer.
+
 # dynhr 0.9.3.5
 
 **A successful Cholesky is not a test that the innovation covariance is

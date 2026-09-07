@@ -59,7 +59,9 @@ List of class \code{dynhr_shock_decomposition} with
   the sum of all components = the smoothed series in deviations from
   steady state), \code{$initial}, \code{$s0}, \code{$components},
   \code{$adding_up_residual} / \code{$adding_up_relative} /
-  \code{$adding_up_ok} / \code{$adding_up_tol}, \code{$timing} (the
+  \code{$adding_up_ok} / \code{$adding_up_tol},
+  \code{$transition_residual} / \code{$transition_residual_by_period} /
+  \code{$transition_worst_period} / \code{$transition_ok}, \code{$timing} (the
   dating convention in words), and \code{$has_nonlinear_column} /
   \code{$has_residual_column}.
 }
@@ -126,11 +128,37 @@ input shows up in ITS OWN shock's column and the adding-up is unaffected.
 The \code{shock_timing} choice is likewise settled upstream, in the
 smoother call, and never re-enters here.
 
-\strong{The adding-up diagnostic.} \code{$adding_up_residual} is always
-present: a number when \code{smoothed_states} is available to check
-against, and \code{NA} with \code{$adding_up_note} when it is not.
-\code{$adding_up_relative} scales it by the path, \code{$adding_up_ok}
-compares it against \code{tol}, and a failure warns with the likely causes.
+\strong{The two diagnostics, and why there are two.}
+\code{$adding_up_residual} compares the components -- propagated
+internally by \code{T_mat}/\code{R_mat} from \code{s0} -- against a path
+rebuilt from the smoother's OWN states. It is always present: a number when
+\code{smoothed_states} is available, \code{NA} with
+\code{$adding_up_note} when it is not.
+
+It is \strong{necessary but not sufficient}. The contemporaneous
+\eqn{ghu\,\varepsilon_t} term appears identically on both sides and
+cancels, so a shock error is visible only through its propagated
+(\eqn{t+1} onward) effect -- and the LAST period is therefore not checked
+at all. Measured on \code{nk_demo}: perturbing the final period's shock by
+1.0, or every shock in that period by 50\%, or the final state by 1.0,
+leaves \code{adding_up_residual} at 5.9e-15, while the same perturbation
+mid-sample shows as 2.6 and 1.0.
+
+\code{$transition_residual} has neither blind spot. It asks the direct
+question -- does the smoother's own output satisfy its own transition,
+\eqn{s_t = T s_{t-1} + R \varepsilon_t}, period by period? -- and catches
+all six of those perturbations. \strong{Look at it first} when a
+decomposition will not add up: it distinguishes "the decomposition is
+wrong" from "its INPUTS are incoherent", and
+\code{$transition_residual_by_period} with
+\code{$transition_worst_period} localises the latter. That is how the
+singular-innovation defect fixed in 0.9.3.5 was pinned to the single period
+in which \code{chol()} had happened to succeed.
+
+Both compare against \code{tol} (relative to the path's scale) and warn on
+failure. A drop of predictable observation components -- see the smoother's
+\code{$diagnostics$dropped_by_period} -- is the usual context for a
+transition failure.
 }
 
 \section{Relation to IRIS simulate(..., 'contributions', true)}{

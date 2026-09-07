@@ -866,6 +866,8 @@ kalman_smoother <- function(data, dr, model, params = NULL,
     }
   }
 
+  .kf_warn_zero_shock_cov(Q, "kalman_smoother")
+
   ## ---- me_extra validation ------------------------------------------------
   ## me_extra (n_obs x T) holds per-period per-observable extra ME variances
   ## (filter_tunes soft tunes: stderr^2 at tune periods, 0 elsewhere).
@@ -1494,11 +1496,37 @@ kalman_smoother <- function(data, dr, model, params = NULL,
 #' The \code{shock_timing} choice is likewise settled upstream, in the
 #' smoother call, and never re-enters here.
 #'
-#' \strong{The adding-up diagnostic.} \code{$adding_up_residual} is always
-#' present: a number when \code{smoothed_states} is available to check
-#' against, and \code{NA} with \code{$adding_up_note} when it is not.
-#' \code{$adding_up_relative} scales it by the path, \code{$adding_up_ok}
-#' compares it against \code{tol}, and a failure warns with the likely causes.
+#' \strong{The two diagnostics, and why there are two.}
+#' \code{$adding_up_residual} compares the components -- propagated
+#' internally by \code{T_mat}/\code{R_mat} from \code{s0} -- against a path
+#' rebuilt from the smoother's OWN states. It is always present: a number when
+#' \code{smoothed_states} is available, \code{NA} with
+#' \code{$adding_up_note} when it is not.
+#'
+#' It is \strong{necessary but not sufficient}. The contemporaneous
+#' \eqn{ghu\,\varepsilon_t} term appears identically on both sides and
+#' cancels, so a shock error is visible only through its propagated
+#' (\eqn{t+1} onward) effect -- and the LAST period is therefore not checked
+#' at all. Measured on \code{nk_demo}: perturbing the final period's shock by
+#' 1.0, or every shock in that period by 50\%, or the final state by 1.0,
+#' leaves \code{adding_up_residual} at 5.9e-15, while the same perturbation
+#' mid-sample shows as 2.6 and 1.0.
+#'
+#' \code{$transition_residual} has neither blind spot. It asks the direct
+#' question -- does the smoother's own output satisfy its own transition,
+#' \eqn{s_t = T s_{t-1} + R \varepsilon_t}, period by period? -- and catches
+#' all six of those perturbations. \strong{Look at it first} when a
+#' decomposition will not add up: it distinguishes "the decomposition is
+#' wrong" from "its INPUTS are incoherent", and
+#' \code{$transition_residual_by_period} with
+#' \code{$transition_worst_period} localises the latter. That is how the
+#' singular-innovation defect fixed in 0.9.3.5 was pinned to the single period
+#' in which \code{chol()} had happened to succeed.
+#'
+#' Both compare against \code{tol} (relative to the path's scale) and warn on
+#' failure. A drop of predictable observation components -- see the smoother's
+#' \code{$diagnostics$dropped_by_period} -- is the usual context for a
+#' transition failure.
 #'
 #' @section Relation to IRIS simulate(..., 'contributions', true):
 #' Verified equal to \strong{2e-16} on a two-shock linear model (IRIS Toolbox
@@ -1526,7 +1554,9 @@ kalman_smoother <- function(data, dr, model, params = NULL,
 #'   the sum of all components = the smoothed series in deviations from
 #'   steady state), \code{$initial}, \code{$s0}, \code{$components},
 #'   \code{$adding_up_residual} / \code{$adding_up_relative} /
-#'   \code{$adding_up_ok} / \code{$adding_up_tol}, \code{$timing} (the
+#'   \code{$adding_up_ok} / \code{$adding_up_tol},
+#'   \code{$transition_residual} / \code{$transition_residual_by_period} /
+#'   \code{$transition_worst_period} / \code{$transition_ok}, \code{$timing} (the
 #'   dating convention in words), and \code{$has_nonlinear_column} /
 #'   \code{$has_residual_column}.
 #' @export
@@ -1690,11 +1720,39 @@ historical_decomposition <- function(smoothed_shocks, ss, s0 = NULL,
   } else {
     smoothed <- matrix(0, TT, n_end)
     s_prev   <- s0
+    ## ---- Transition coherence, checked DIRECTLY ---------------------------
+    ## The adding-up check compares the components (propagated internally by
+    ## T_mat/R_mat from s0) against a path rebuilt from the SMOOTHER's own
+    ## states -- so it sees an incoherence between those two only through the
+    ## `ghx %*% state` channel, and it has two blind spots that matter:
+    ##
+    ##   * the contemporaneous `ghu %*% eps_t` term appears IDENTICALLY on
+    ##     both sides and cancels, so a shock error is visible only through
+    ##     its propagated (t+1 onward) effect, damped by T;
+    ##   * consequently the LAST period is not checked at all. Measured on
+    ##     nk_demo: perturbing the final period's shock by 1.0, or every shock
+    ##     in that period by 50%, or the final state by 1.0, leaves
+    ##     adding_up_residual at 5.9e-15 -- completely undetected, while the
+    ##     same perturbation mid-sample shows up as 2.6 and 1.0.
+    ##
+    ## So a small adding-up residual is NECESSARY but NOT SUFFICIENT evidence
+    ## that the inputs are coherent. The direct test has neither blind spot:
+    ## does the smoother's own output satisfy its own transition,
+    ## s_t = T s_{t-1} + R eps_t, period by period? That is the quantity that
+    ## actually broke under the singular-F defect fixed in 0.9.3.5, and it is
+    ## the one to look at first when a decomposition will not add up -- the
+    ## per-period vector localises it, which is how that defect was pinned to
+    ## the single period where chol() had succeeded.
+    tres   <- numeric(TT)
+    tprev  <- s0
     for (t in seq_len(TT)) {
       eps_t <- smoothed_shocks[t, ]
       eps_t[is.na(eps_t)] <- 0
       smoothed[t, ] <- as.numeric(ghx %*% s_prev + ghu %*% eps_t)
       s_prev        <- smoothed_states[t, ]
+      tres[t] <- max(abs(as.numeric(smoothed_states[t, ]) -
+                         as.numeric(TT_mat %*% tprev + R_mat %*% eps_t)))
+      tprev   <- as.numeric(smoothed_states[t, ])
     }
     colnames(smoothed)     <- ss$endo_names
     out$smoothed           <- smoothed
@@ -1703,6 +1761,24 @@ historical_decomposition <- function(smoothed_shocks, ss, s0 = NULL,
     out$adding_up_residual <- resid
     out$adding_up_relative <- resid / scale
     out$adding_up_ok       <- resid <= tol * scale
+
+    sscale <- max(1, max(abs(smoothed_states)))
+    out$transition_residual            <- max(tres)
+    out$transition_residual_by_period  <- tres
+    out$transition_worst_period        <- which.max(tres)
+    out$transition_ok <- max(tres) <= tol * sscale
+    if (!isTRUE(out$transition_ok))
+      warning(sprintf(paste0(
+        "historical_decomposition: the smoother's own states and shocks do ",
+        "not satisfy the transition -- max |s_t - T s_{t-1} - R eps_t| = ",
+        "%.3g (%.3g relative), worst at period %d of %d, against a tolerance ",
+        "of %.3g. The decomposition is faithfully reporting an incoherence in ",
+        "its INPUTS, not creating one: see $transition_residual_by_period to ",
+        "localise it. A drop of predictable observation components (see the ",
+        "smoother's $diagnostics$dropped_by_period) is the usual context."),
+        max(tres), max(tres) / sscale, which.max(tres), TT, tol),
+        call. = FALSE)
+
     if (!isTRUE(out$adding_up_ok))
       warning(sprintf(paste0(
         "historical_decomposition: the components do not add up -- residual ",
@@ -1714,6 +1790,10 @@ historical_decomposition <- function(smoothed_shocks, ss, s0 = NULL,
         "states came from a different state space than `ss`; or the model is ",
         "not linear, in which case the pruned-state-space decomposition is ",
         "the right tool."), resid, out$adding_up_relative, tol), call. = FALSE)
+  }
+  if (is.null(smoothed_states)) {
+    out$transition_residual <- NA_real_
+    out$transition_ok       <- NA
   }
 
   structure(out, class = c("dynhr_shock_decomposition", "list"))
