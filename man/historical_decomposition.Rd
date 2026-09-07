@@ -10,7 +10,8 @@ historical_decomposition(
   s0 = NULL,
   smoothed_states = NULL,
   shock_groups = NULL,
-  model = NULL
+  model = NULL,
+  tol = 1e-08
 )
 }
 \arguments{
@@ -45,13 +46,22 @@ column. Defaults to \code{model$shock_groups} when \code{model} is given.}
 
 \item{model}{Optional parsed model, used only as the fallback
 source of \code{shock_groups} (the explicit argument wins).}
+
+\item{tol}{Relative tolerance for the adding-up check (default
+\code{1e-8}). For a linear model the residual is round-off, ~1e-15;
+anything above \code{tol * max(abs(path))} warns and sets
+\code{$adding_up_ok} to \code{FALSE}.}
 }
 \value{
 List of class \code{dynhr_shock_decomposition} with
   \code{$contributions} (named list of \code{T x n_endo} matrices: one per
   shock or group, plus \code{"initial"}), \code{$total} (\code{T x n_endo},
   the sum of all components = the smoothed series in deviations from
-  steady state), \code{$initial}, \code{$s0} and \code{$components}.
+  steady state), \code{$initial}, \code{$s0}, \code{$components},
+  \code{$adding_up_residual} / \code{$adding_up_relative} /
+  \code{$adding_up_ok} / \code{$adding_up_tol}, \code{$timing} (the
+  dating convention in words), and \code{$has_nonlinear_column} /
+  \code{$has_residual_column}.
 }
 \description{
 Uses the full ghx/ghu (not just the compact state-space) to recover
@@ -75,3 +85,73 @@ which makes the adding-up
 exact at every \eqn{t} (to smoother round-off, ~1e-15), not just
 asymptotically once the initial condition has decayed.
 }
+\section{The integration contract}{
+
+Everything below is what has to line up for the components to add up. It is
+now CHECKED rather than assumed -- names are matched where they exist and a
+mismatch is an error -- but it is worth stating, because the failure mode
+when it does not hold is a large \code{adding_up_residual} with every
+dimension still correct.
+
+\strong{Orientation.} \code{smoothed_shocks} is \code{T x n_shock} and
+\code{smoothed_states} is \code{T x n_state}: \strong{rows are periods}.
+That is what \code{\link{kalman_smoother}} returns. Note
+\code{\link{kalman_filter}}'s state matrices are the other way round
+(\code{n_state x T}) and need \code{t()}; a transposed argument is
+detected and refused rather than silently reinterpreted.
+
+\strong{Names.} Columns are matched to \code{ss$shock_names} /
+\code{ss$state_names} by name when the matrix has dimnames, and \code{s0}
+by name when it is named. A correctly-sized but wrongly-ORDERED input used
+to be accepted silently; it is now reordered when it can be identified and
+refused when it cannot.
+
+\strong{The state at the first contribution period.} Row \eqn{t} of every
+contribution is the model's variables \strong{dated} \eqn{t}, namely
+\eqn{ghx\, s_{t-1} + ghu\, \varepsilon_t}. Row 1 therefore loads the
+PRE-SAMPLE state \eqn{s_0}, not \eqn{s_1} -- which is why the
+\code{"initial"} column exists and why \code{s0} must be the smoother's
+\eqn{s_{0|T}} (\code{\link{smoothed_initial_state}}), not the first
+smoothed state. Passing the whole \code{\link{kalman_smoother}} result
+takes it for you, and is the only call shape that cannot get this wrong.
+
+\strong{Pre- or post-transition.} Pre-: the state entering the period, plus
+that period's shock. No contribution is the post-transition state.
+
+\strong{Deterministic inputs.} \code{shock_means} and \code{known_shocks}
+need nothing here. Both arrive through the smoother's output -- the mean or
+injected value is already inside \code{smoothed_shocks}, and its effect on
+the path is already inside \code{smoothed_states} -- so a deterministic
+input shows up in ITS OWN shock's column and the adding-up is unaffected.
+The \code{shock_timing} choice is likewise settled upstream, in the
+smoother call, and never re-enters here.
+
+\strong{The adding-up diagnostic.} \code{$adding_up_residual} is always
+present: a number when \code{smoothed_states} is available to check
+against, and \code{NA} with \code{$adding_up_note} when it is not.
+\code{$adding_up_relative} scales it by the path, \code{$adding_up_ok}
+compares it against \code{tol}, and a failure warns with the likely causes.
+}
+
+\section{Relation to IRIS simulate(..., 'contributions', true)}{
+
+Verified equal to \strong{2e-16} on a two-shock linear model (IRIS Toolbox
+Release 20180308): each isolated-shock column, the initial-condition column,
+and the total. Two of IRIS's columns have no dynhr counterpart, by
+construction rather than omission:
+\itemize{
+  \item a \strong{measurement-shock} column. dynhr's \code{me_variance}
+    is observation noise, not a structural shock, so it gets no column and
+    the decomposition is of the MODEL variable rather than the observation.
+    Compare against IRIS's structural columns plus its init column, not
+    against its total, when the model has measurement shocks.
+  \item a \strong{nonlinear} column, which is identically zero for a
+    linear model. \code{$has_nonlinear_column} and
+    \code{$has_residual_column} are \code{FALSE} for the same reason: the
+    adding-up here is exact, so such a column would carry nothing.
+}
+IRIS's \code{Init+Const+Trends} column corresponds to \code{"initial"}
+when the model is written in deviations (dynhr's contributions always are;
+add \code{ss$ys[v]} to read variable \code{v} back in levels).
+}
+

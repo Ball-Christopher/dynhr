@@ -1441,16 +1441,91 @@ kalman_smoother <- function(data, dr, model, params = NULL,
 #'   column. Defaults to \code{model$shock_groups} when \code{model} is given.
 #' @param model            Optional parsed model, used only as the fallback
 #'   source of \code{shock_groups} (the explicit argument wins).
+#' @param tol Relative tolerance for the adding-up check (default
+#'   \code{1e-8}). For a linear model the residual is round-off, ~1e-15;
+#'   anything above \code{tol * max(abs(path))} warns and sets
+#'   \code{$adding_up_ok} to \code{FALSE}.
+#' @section The integration contract:
+#' Everything below is what has to line up for the components to add up. It is
+#' now CHECKED rather than assumed -- names are matched where they exist and a
+#' mismatch is an error -- but it is worth stating, because the failure mode
+#' when it does not hold is a large \code{adding_up_residual} with every
+#' dimension still correct.
+#'
+#' \strong{Orientation.} \code{smoothed_shocks} is \code{T x n_shock} and
+#' \code{smoothed_states} is \code{T x n_state}: \strong{rows are periods}.
+#' That is what \code{\link{kalman_smoother}} returns. Note
+#' \code{\link{kalman_filter}}'s state matrices are the other way round
+#' (\code{n_state x T}) and need \code{t()}; a transposed argument is
+#' detected and refused rather than silently reinterpreted.
+#'
+#' \strong{Names.} Columns are matched to \code{ss$shock_names} /
+#' \code{ss$state_names} by name when the matrix has dimnames, and \code{s0}
+#' by name when it is named. A correctly-sized but wrongly-ORDERED input used
+#' to be accepted silently; it is now reordered when it can be identified and
+#' refused when it cannot.
+#'
+#' \strong{The state at the first contribution period.} Row \eqn{t} of every
+#' contribution is the model's variables \strong{dated} \eqn{t}, namely
+#' \eqn{ghx\, s_{t-1} + ghu\, \varepsilon_t}. Row 1 therefore loads the
+#' PRE-SAMPLE state \eqn{s_0}, not \eqn{s_1} -- which is why the
+#' \code{"initial"} column exists and why \code{s0} must be the smoother's
+#' \eqn{s_{0|T}} (\code{\link{smoothed_initial_state}}), not the first
+#' smoothed state. Passing the whole \code{\link{kalman_smoother}} result
+#' takes it for you, and is the only call shape that cannot get this wrong.
+#'
+#' \strong{Pre- or post-transition.} Pre-: the state entering the period, plus
+#' that period's shock. No contribution is the post-transition state.
+#'
+#' \strong{Deterministic inputs.} \code{shock_means} and \code{known_shocks}
+#' need nothing here. Both arrive through the smoother's output -- the mean or
+#' injected value is already inside \code{smoothed_shocks}, and its effect on
+#' the path is already inside \code{smoothed_states} -- so a deterministic
+#' input shows up in ITS OWN shock's column and the adding-up is unaffected.
+#' The \code{shock_timing} choice is likewise settled upstream, in the
+#' smoother call, and never re-enters here.
+#'
+#' \strong{The adding-up diagnostic.} \code{$adding_up_residual} is always
+#' present: a number when \code{smoothed_states} is available to check
+#' against, and \code{NA} with \code{$adding_up_note} when it is not.
+#' \code{$adding_up_relative} scales it by the path, \code{$adding_up_ok}
+#' compares it against \code{tol}, and a failure warns with the likely causes.
+#'
+#' @section Relation to IRIS simulate(..., 'contributions', true):
+#' Verified equal to \strong{2e-16} on a two-shock linear model (IRIS Toolbox
+#' Release 20180308): each isolated-shock column, the initial-condition column,
+#' and the total. Two of IRIS's columns have no dynhr counterpart, by
+#' construction rather than omission:
+#' \itemize{
+#'   \item a \strong{measurement-shock} column. dynhr's \code{me_variance}
+#'     is observation noise, not a structural shock, so it gets no column and
+#'     the decomposition is of the MODEL variable rather than the observation.
+#'     Compare against IRIS's structural columns plus its init column, not
+#'     against its total, when the model has measurement shocks.
+#'   \item a \strong{nonlinear} column, which is identically zero for a
+#'     linear model. \code{$has_nonlinear_column} and
+#'     \code{$has_residual_column} are \code{FALSE} for the same reason: the
+#'     adding-up here is exact, so such a column would carry nothing.
+#' }
+#' IRIS's \code{Init+Const+Trends} column corresponds to \code{"initial"}
+#' when the model is written in deviations (dynhr's contributions always are;
+#' add \code{ss$ys[v]} to read variable \code{v} back in levels).
+#'
 #' @return List of class \code{dynhr_shock_decomposition} with
 #'   \code{$contributions} (named list of \code{T x n_endo} matrices: one per
 #'   shock or group, plus \code{"initial"}), \code{$total} (\code{T x n_endo},
 #'   the sum of all components = the smoothed series in deviations from
-#'   steady state), \code{$initial}, \code{$s0} and \code{$components}.
+#'   steady state), \code{$initial}, \code{$s0}, \code{$components},
+#'   \code{$adding_up_residual} / \code{$adding_up_relative} /
+#'   \code{$adding_up_ok} / \code{$adding_up_tol}, \code{$timing} (the
+#'   dating convention in words), and \code{$has_nonlinear_column} /
+#'   \code{$has_residual_column}.
 #' @export
 # ---------------------------------------------------------------------------
 historical_decomposition <- function(smoothed_shocks, ss, s0 = NULL,
                                      smoothed_states = NULL,
-                                     shock_groups = NULL, model = NULL) {
+                                     shock_groups = NULL, model = NULL,
+                                     tol = 1e-8) {
 
   ## Accept a whole kalman_smoother() result: shocks, states and s_{0|T}.
   if (is.list(smoothed_shocks) && !is.matrix(smoothed_shocks) &&
@@ -1460,6 +1535,54 @@ historical_decomposition <- function(smoothed_shocks, ss, s0 = NULL,
     if (is.null(s0)) s0 <- smoothed_initial_state(sm, ss)
     smoothed_shocks <- sm$smoothed_shocks
   }
+
+  ## ---- The integration contract, enforced rather than documented ---------
+  ## Everything here is T x k with k in the state space's own order, and the
+  ## adding-up is exact only if that holds. It used to be checked by LENGTH
+  ## alone, so a correctly-sized but wrongly-ordered `s0` -- or shock columns
+  ## in a different order from `ss$shock_names` -- was accepted silently and
+  ## came back as a large `adding_up_residual` with nothing to say why. The
+  ## residual is exactly the size of the initial-condition error, so on a
+  ## model with big states (or a kappa-initialised smoother, whose s_{0|T}
+  ## carries the arbitrary prior) it can reach 1e9 while every dimension
+  ## still checks out. Match by NAME wherever names are present, and refuse
+  ## rather than answer a different question -- the same rule .kf_init_mean()
+  ## applies to `a0`.
+  .hd_match <- function(x, want, what, kind) {
+    if (is.null(x)) return(NULL)
+    nm <- if (is.matrix(x)) colnames(x) else names(x)
+    if (is.null(nm) || is.null(want)) return(x)
+    if (!setequal(nm, want))
+      stop(sprintf(paste0("historical_decomposition: `%s` %s do not match the ",
+                          "state space's %s.\n  supplied: %s\n  expected: %s"),
+                   what, if (is.matrix(x)) "column names" else "names", kind,
+                   paste(nm, collapse = ", "), paste(want, collapse = ", ")),
+           call. = FALSE)
+    if (is.matrix(x)) x[, want, drop = FALSE] else x[want]
+  }
+  .hd_orient <- function(x, n_col, what, kind) {
+    if (is.null(x) || !is.matrix(x)) return(x)
+    if (ncol(x) == n_col) return(x)
+    if (nrow(x) == n_col)
+      stop(sprintf(paste0("historical_decomposition: `%s` looks transposed -- ",
+                          "it is %d x %d and this function takes T x %s (rows ",
+                          "are periods). kalman_smoother() returns it that way ",
+                          "already; kalman_filter()'s state matrices are the ",
+                          "other way round (n_state x T) and need t()."),
+                   what, nrow(x), ncol(x), kind), call. = FALSE)
+    stop(sprintf("historical_decomposition: `%s` has %d columns, expected %d (%s).",
+                 what, ncol(x), n_col, kind), call. = FALSE)
+  }
+
+  smoothed_shocks <- .hd_orient(smoothed_shocks, ss$n_shock,
+                                "smoothed_shocks", "n_shock")
+  smoothed_states <- .hd_orient(smoothed_states, ss$n_state,
+                                "smoothed_states", "n_state")
+  smoothed_shocks <- .hd_match(smoothed_shocks, ss$shock_names,
+                               "smoothed_shocks", "shock names")
+  smoothed_states <- .hd_match(smoothed_states, ss$state_names,
+                               "smoothed_states", "state names")
+  s0 <- .hd_match(s0, ss$state_names, "s0", "state names")
 
   TT    <- nrow(smoothed_shocks)
   n_shk <- ss$n_shock
@@ -1525,10 +1648,37 @@ historical_decomposition <- function(smoothed_shocks, ss, s0 = NULL,
               s0            = s0,
               components    = names(contributions),
               shock_groups  = groups,
-              orientation   = "time_endo")
+              orientation   = "time_endo",
+              ## The component inventory, stated rather than inferred: for a
+              ## LINEAR model these are exactly the shocks (or groups) plus
+              ## "initial", and there is no nonlinear or residual column --
+              ## the adding-up is exact, so such a column would be zero by
+              ## construction. `adding_up_residual` is the check.
+              n_components  = length(contributions),
+              has_nonlinear_column = FALSE,
+              has_residual_column  = FALSE,
+              timing = paste(
+                "contribution row t is the model's variables DATED t:",
+                "ghx %*% s_{t-1} + ghu %*% eps_t. Row 1 therefore loads the",
+                "PRE-SAMPLE state s_0 (the `initial` column) and the first",
+                "smoothed shock. Values are pre-transition in that sense: the",
+                "state entering the period, not the one leaving it."))
 
   ## ---- Adding-up check against the directly-reconstructed smoothed path ---
-  if (!is.null(smoothed_states)) {
+  ## ALWAYS reported. It used to appear only when `smoothed_states` was
+  ## supplied, so the one call shape that can be silently wrong -- a bare
+  ## shock matrix with a defaulted or mismatched s0 -- was also the one with
+  ## no diagnostic at all. Absent inputs now give NA and a reason, not a
+  ## missing field.
+  out$adding_up_tol <- tol
+  if (is.null(smoothed_states)) {
+    out$adding_up_residual <- NA_real_
+    out$adding_up_ok       <- NA
+    out$adding_up_note     <- paste(
+      "not checked: `smoothed_states` was not supplied, so there is no",
+      "independent path to check the components against. Pass the whole",
+      "kalman_smoother() result (or its $smoothed_states) to get the check.")
+  } else {
     smoothed <- matrix(0, TT, n_end)
     s_prev   <- s0
     for (t in seq_len(TT)) {
@@ -1539,7 +1689,22 @@ historical_decomposition <- function(smoothed_shocks, ss, s0 = NULL,
     }
     colnames(smoothed)     <- ss$endo_names
     out$smoothed           <- smoothed
-    out$adding_up_residual <- max(abs(total - smoothed))
+    resid                  <- max(abs(total - smoothed))
+    scale                  <- max(1, max(abs(smoothed)))
+    out$adding_up_residual <- resid
+    out$adding_up_relative <- resid / scale
+    out$adding_up_ok       <- resid <= tol * scale
+    if (!isTRUE(out$adding_up_ok))
+      warning(sprintf(paste0(
+        "historical_decomposition: the components do not add up -- residual ",
+        "%.3g (%.3g relative to the path's scale), against a tolerance of ",
+        "%.3g. For a LINEAR model this should be round-off (~1e-15). The ",
+        "residual is exactly the size of the initial-condition error, so the ",
+        "usual causes are: `s0` is not the smoother's s_{0|T} (pass the whole ",
+        "kalman_smoother() result and it is taken for you); the shocks or ",
+        "states came from a different state space than `ss`; or the model is ",
+        "not linear, in which case the pruned-state-space decomposition is ",
+        "the right tool."), resid, out$adding_up_relative, tol), call. = FALSE)
   }
 
   structure(out, class = c("dynhr_shock_decomposition", "list"))

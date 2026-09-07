@@ -72,6 +72,21 @@ smoothed_initial_state <- function(smoother, ss, Q = NULL) {
     stop("smoothed_initial_state: `smoother` must be a kalman_smoother() ",
          "result with a $smoothed_states matrix.", call. = FALSE)
 
+  ## `pre_sample` FIRST: with a backfill the smoother returns its series
+  ## trimmed to the caller's sample, but `smoothed_initial` is still s_{0|T}
+  ## for the PADDED one -- the state k periods earlier. The anchor the
+  ## decomposition needs is the period immediately before the returned rows,
+  ## which is the LAST pre-sample row (they are chronological). Using
+  ## smoothed_initial there put the initial-condition trajectory k periods out
+  ## of phase and broke the adding-up (measured 3.8e-2 at k = 2 on the
+  ## two-shock fixture), with every dimension still correct.
+  if (!is.null(smoother$presample_states) &&
+      nrow(smoother$presample_states) > 0L) {
+    out <- as.numeric(smoother$presample_states[nrow(smoother$presample_states), ])
+    names(out) <- ss$state_names
+    return(out)
+  }
+
   ## Exact route: the DK backward pass already computed s_{0|T}.
   if (!is.null(smoother$smoothed_initial)) {
     out <- as.numeric(smoother$smoothed_initial)

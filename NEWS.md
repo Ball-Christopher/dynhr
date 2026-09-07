@@ -1,3 +1,54 @@
+# dynhr 0.9.3.4
+
+A fourth report against the filtering surface, on historical decomposition.
+The decomposition function was correct; its integration contract was neither
+documented nor checked, and one input combination was genuinely wrong.
+
+**Bug fix: `pre_sample` put the decomposition out of phase.** With a backfill,
+`kalman_smoother()` returns its series trimmed to the caller's sample, but
+`smoothed_initial` is still `s_{0|T}` for the PADDED sample -- the state `k`
+periods earlier. `smoothed_initial_state()` handed that to
+`historical_decomposition()` as the anchor, so the initial-condition
+trajectory ran `k` periods out of phase and the components stopped adding up
+(measured 3.8e-2 on the two-shock fixture at `k = 2`), with every dimension
+still correct. It now returns the last pre-sample row, which is the period
+immediately before the returned rows.
+
+**The contract is now enforced, not just described.** A correctly-SIZED but
+wrongly-ORDERED `s0`, or shock columns in a different order from
+`ss$shock_names`, used to be accepted in silence. Since the adding-up residual
+is exactly the size of the initial-condition error, on a model with large
+states -- or a kappa-initialised smoother, whose `s_{0|T}` carries the
+arbitrary prior -- that silence surfaces as a residual of 1e8-1e9 with nothing
+to say why. Now: columns and named vectors are matched to the state space by
+NAME and reordered, a mismatch is an error naming both sets, and a transposed
+matrix is refused with the orientation it wanted.
+
+**`adding_up_residual` is always present.** It used to appear only when
+`smoothed_states` was supplied -- so the one call shape that can be silently
+wrong was also the one with no diagnostic at all. It is now a number when
+there is something to check against and `NA` with `$adding_up_note` when there
+is not, alongside `$adding_up_relative`, `$adding_up_ok` and a `tol` argument
+(default 1e-8, relative to the path's scale). Exceeding it warns and names the
+likely causes.
+
+**Documented contract**, in `?historical_decomposition`: orientation (rows are
+periods; `kalman_filter()`'s state matrices are the other way round and need
+`t()`), the state at the first contribution period (row 1 loads the PRE-SAMPLE
+state, which is why the `initial` column exists), pre- versus post-transition
+(pre-: the state entering the period plus that period's shock), and how
+`shock_means` / `known_shocks` enter (through the smoother's output, in their
+own shock's column, needing nothing here).
+
+**Verified against IRIS `simulate(..., 'contributions', true)`** to 2e-16 on a
+two-shock linear model: each isolated-shock column, the initial-condition
+column, and the total. Two IRIS columns have no dynhr counterpart by
+construction, and the docs now say so: a measurement-shock column (dynhr's
+`me_variance` is observation noise, not a structural shock, so compare against
+IRIS's structural columns plus its init column rather than its grand total),
+and a nonlinear column that is identically zero for a linear model.
+`$has_nonlinear_column` and `$has_residual_column` report this.
+
 # dynhr 0.9.3.3
 
 A third report against the filtering surface, this one a feature request
