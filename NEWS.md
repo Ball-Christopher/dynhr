@@ -1,3 +1,43 @@
+# dynhr 0.9.3.7
+
+**`dr$Sigma_e` was silently ignored by the Kalman path, and there was no way
+to inject a covariance deliberately.**
+
+Follow-up to the 0.9.3.6 report, from the real model behind it. That model had
+TWO zero shock rows, and the adapter working around them patched
+`dr$Sigma_e` -- which changed nothing. `solve_perturbation()` populates that
+field (from its own `Sigma_e` argument when given, otherwise from the shocks
+block) and `compute_irfs()` / `compute_moments()` honour it, so patching it is
+a natural thing to try. `kalman_filter()` and `build_dsge_state_space()` both
+recomputed from `.get_shock_cov(model, exo, params)` and ignored it, with no
+override argument anywhere. The zero rows survived into `ss$Sigma_e` and
+surfaced far downstream as a decomposition that would not add up.
+
+- **`build_dsge_state_space(..., Sigma_e = )`** is the injection point: an
+  explicit covariance overrides everything, unambiguously.
+
+- **A disagreeing `dr$Sigma_e` is now reported.** The warning says it is not
+  used, why, how to inject one deliberately, and that `compute_irfs()` /
+  `compute_moments()` *do* honour it -- that asymmetry being the whole trap. An
+  agreeing `dr$Sigma_e` says nothing, so the ordinary path is silent.
+
+- **`ss$zero_variance_shocks`** records which shocks carry no variance, and
+  `historical_decomposition()`'s incoherence warning names them. This is
+  recorded rather than warned about at construction, because a per-shock
+  `stderr 0` is legitimate -- it is what makes a deterministic `known_shocks`
+  or `shock_means` injection meaningful. It surfaces only when something
+  actually fails to add up, which is the partial-zero case 0.9.3.6's all-zero
+  guard correctly stays quiet about.
+
+**`params` remains authoritative, and that is deliberate.** Preferring
+`dr$Sigma_e` was implemented first and the Markov-switching P = I oracle
+rejected it within minutes: that test evaluates a fixed-regime likelihood by
+reusing ONE solved decision rule while passing RESCALED `params`, and the stale
+`dr$Sigma_e` made the filter ignore the rescaling -- 737 nats of error across
+7 failures. Solve-once, evaluate-at-many-params is exactly what estimation
+does, so `params` has to win. `kalman_filter()` is unchanged byte for byte;
+there is now a regression test pinning the reuse pattern and the reason.
+
 # dynhr 0.9.3.6
 
 ## A model with no shock variance is now called out at the source

@@ -9,7 +9,8 @@ build_dsge_state_space(
   dr,
   obs_vars,
   verbose = TRUE,
-  params = m$param_values
+  params = m$param_values,
+  Sigma_e = NULL
 )
 }
 \arguments{
@@ -25,6 +26,19 @@ build_dsge_state_space(
 covariance \code{Sigma_e} from the \code{shocks;} block (default:
 \code{m$param_values}). Pass the draw-specific vector when \code{dr}
 was solved at non-default parameters.}
+
+\item{Sigma_e}{Optional \code{n_exo x n_exo} shock covariance, overriding
+  the one implied by the model's \code{shocks;} block at \code{params}.
+  \code{NULL} (default) derives it, which is what nearly every caller
+  wants.
+
+  This is the deliberate injection point. Note that \code{dr$Sigma_e} is
+  NOT consulted here: \code{params} stays authoritative so that one solved
+  decision rule can be reused while the likelihood is evaluated at many
+  parameter values -- the pattern estimation depends on. A \code{dr} whose
+  \code{Sigma_e} disagrees with \code{params} raises a warning saying so,
+  because \code{\link{compute_irfs}} and \code{\link{compute_moments}}
+  DO honour that field and the asymmetry is easy to trip over.}
 }
 \value{
 List with T_mat, R_mat, Z_mat, D_mat, Sigma_e, ghx, ghu,

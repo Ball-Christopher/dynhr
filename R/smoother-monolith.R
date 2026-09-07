@@ -37,6 +37,18 @@
 #'   covariance \code{Sigma_e} from the \code{shocks;} block (default:
 #'   \code{m$param_values}). Pass the draw-specific vector when \code{dr}
 #'   was solved at non-default parameters.
+#' @param Sigma_e  Optional \code{n_exo x n_exo} shock covariance, overriding
+#'   the one implied by the model's \code{shocks;} block at \code{params}.
+#'   \code{NULL} (default) derives it, which is what nearly every caller
+#'   wants.
+#'
+#'   This is the deliberate injection point. Note that \code{dr$Sigma_e} is
+#'   NOT consulted here: \code{params} stays authoritative so that one solved
+#'   decision rule can be reused while the likelihood is evaluated at many
+#'   parameter values -- the pattern estimation depends on. A \code{dr} whose
+#'   \code{Sigma_e} disagrees with \code{params} raises a warning saying so,
+#'   because \code{\link{compute_irfs}} and \code{\link{compute_moments}}
+#'   DO honour that field and the asymmetry is easy to trip over.
 #' @return List with T_mat, R_mat, Z_mat, D_mat, Sigma_e, ghx, ghu,
 #'   indices, names, and the observation intercept \code{d =
 #'   dr$ys[obs_vars]} (with the full steady state in \code{ys}). The
@@ -45,7 +57,7 @@
 #' @export
 # ---------------------------------------------------------------------------
 build_dsge_state_space <- function(m, dr, obs_vars, verbose = TRUE,
-                                   params = m$param_values) {
+                                   params = m$param_values, Sigma_e = NULL) {
   
   endo_names <- m$var_names
   n_endo     <- length(endo_names)
@@ -165,7 +177,15 @@ build_dsge_state_space <- function(m, dr, obs_vars, verbose = TRUE,
   ## Shock covariance from the shocks; block. ghx/ghu are unit-shock
   ## responses (Sigma_e is NOT baked into them), so downstream filters
   ## must use this as Q -- kalman_smoother() defaults to it.
-  Sigma_e <- .get_shock_cov(m, m$varexo_names, params)
+  ## `params` is authoritative (see .kf_report_sigma_e_conflict for why it is
+  ## NOT dr$Sigma_e); an explicit `Sigma_e` argument overrides both, and a
+  ## disagreeing dr$Sigma_e is reported rather than silently ignored.
+  if (is.null(Sigma_e)) {
+    Sigma_e <- .get_shock_cov(m, m$varexo_names, params)
+    .kf_report_sigma_e_conflict(m, dr, m$varexo_names, params, Sigma_e)
+  } else {
+    Sigma_e <- as.matrix(Sigma_e)
+  }
 
   ## Observation intercept. Every filtering and smoothing entry point takes
   ## observables in LEVELS and subtracts the model's own steady state; the
@@ -187,6 +207,12 @@ build_dsge_state_space <- function(m, dr, obs_vars, verbose = TRUE,
       Z_mat             = Z_mat,
       D_mat             = D_mat,
       Sigma_e           = Sigma_e,
+      ## Which shocks carry no variance at all. A per-shock `stderr 0` is
+      ## legitimate -- it is what makes a deterministic known_shocks or
+      ## shock_means injection meaningful -- so this is RECORDED rather than
+      ## warned about, and surfaced by historical_decomposition() only when
+      ## something actually fails to add up.
+      zero_variance_shocks = m$varexo_names[diag(as.matrix(Sigma_e)) == 0],
       d                 = ys_obs,               # obs intercept: ys[obs_vars]
       ys                = dr$ys,                # full steady state (all endo)
       ghx               = dr$ghx,
@@ -1775,8 +1801,14 @@ historical_decomposition <- function(smoothed_shocks, ss, s0 = NULL,
         "of %.3g. The decomposition is faithfully reporting an incoherence in ",
         "its INPUTS, not creating one: see $transition_residual_by_period to ",
         "localise it. A drop of predictable observation components (see the ",
-        "smoother's $diagnostics$dropped_by_period) is the usual context."),
-        max(tres), max(tres) / sscale, which.max(tres), TT, tol),
+        "smoother's $diagnostics$dropped_by_period) is the usual context%s."),
+        max(tres), max(tres) / sscale, which.max(tres), TT, tol,
+        if (length(ss$zero_variance_shocks))
+          paste0("; note that these shocks carry NO variance, which is the ",
+                 "usual reason and is often a missing or partial `shocks;` ",
+                 "block: ",
+                 paste(ss$zero_variance_shocks, collapse = ", "))
+        else ""),
         call. = FALSE)
 
     if (!isTRUE(out$adding_up_ok))

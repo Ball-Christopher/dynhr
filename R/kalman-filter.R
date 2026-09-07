@@ -493,6 +493,51 @@
 }
 
 
+### -- Which Sigma_e wins, and why it is NOT dr$Sigma_e ----------------------
+###
+### `solve_perturbation()` populates `dr$Sigma_e`, compute_irfs() and
+### compute_moments() honour it, and there is no override argument on
+### `build_dsge_state_space()` -- so patching `dr$Sigma_e` and expecting the
+### Kalman path to follow is a natural thing to try. It does not work, and used
+### to fail in SILENCE: a model whose shocks block was missing (or partly
+### missing) kept its zero rows into the state space and surfaced far
+### downstream as a historical decomposition that would not add up. Reported
+### against a real model with TWO zero shock rows.
+###
+### The fix is NOT to prefer `dr$Sigma_e`. That was tried and the
+### Markov-switching oracle rejected it immediately: `ms_kim_filter`'s P = I
+### test evaluates a fixed-regime likelihood by reusing ONE solved `dr` while
+### passing RESCALED `params`, and preferring the (stale) `dr$Sigma_e` made the
+### filter ignore the rescaling -- 737 nats of error. That solve-once,
+### evaluate-at-many-params pattern is exactly what estimation does, so
+### `params` has to stay authoritative.
+###
+### So: the model + params derivation wins, `dr$Sigma_e` is REPORTED when it
+### disagrees rather than used, and `build_dsge_state_space()` gained an
+### explicit `Sigma_e` argument as the unambiguous injection point.
+.kf_report_sigma_e_conflict <- function(model, dr, exo, params, resolved,
+                                        what = "build_dsge_state_space") {
+  from_dr <- dr$Sigma_e
+  if (is.null(from_dr)) return(invisible(FALSE))
+  from_dr <- as.matrix(from_dr)
+  if (!identical(dim(from_dr), dim(resolved))) return(invisible(FALSE))
+  if (!is.null(rownames(from_dr)) && setequal(rownames(from_dr), exo))
+    from_dr <- from_dr[exo, exo, drop = FALSE]
+  if (isTRUE(all.equal(unname(from_dr), unname(resolved), tolerance = 1e-12)))
+    return(invisible(FALSE))
+  warning(what, ": `dr$Sigma_e` disagrees with the covariance implied by the ",
+          "model's shocks block at these `params`, and it is NOT used here -- ",
+          "`params` is authoritative, so that a decision rule solved once can ",
+          "be reused while the likelihood is evaluated at many parameter ",
+          "values. To inject a covariance deliberately, pass `Sigma_e =` to ",
+          "build_dsge_state_space(); to change the model, edit the `shocks;` ",
+          "block. (compute_irfs() and compute_moments() DO honour ",
+          "dr$Sigma_e -- that difference is the trap this warning exists for.)",
+          call. = FALSE)
+  invisible(TRUE)
+}
+
+
 ### -- A model with NO shock variance at all ---------------------------------
 ###
 ### `stderr 0` on ONE shock is legitimate and supported -- it is what makes a
