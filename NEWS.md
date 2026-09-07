@@ -1,3 +1,65 @@
+# dynhr 0.9.3.5
+
+**A successful Cholesky is not a test that the innovation covariance is
+invertible, and every multivariate path was using it as one.**
+
+Reported from a shock- and historical-decomposition matching exercise:
+`me_variance = 0` gave adding-up residuals of ~2e6 and `me_variance = 1e-12`
+about 4. The decomposition was reporting the problem faithfully -- its
+residual tracks the smoother's own transition residual, and the smoother's
+states and shocks had stopped being consistent with each other.
+
+**The defect.** `chol()` can factorise a matrix that is singular to round-off
+and return a garbage pivot. On a stochastically singular system -- more
+observables than shocks, or an observable that is an exact combination of
+others -- that produces a finite, badly wrong answer instead of a detected
+failure. Measured on a two-observable / one-shock fixture with
+`me_variance = 0`: the innovation covariance had `rcond` 1.8e-17 and a
+NEGATIVE determinant, `chol()` succeeded, and
+
+```
+kalman_filter()   +292.7      <- garbage, and too HIGH
+kalman_smoother()  -10.8      <- dropped the component in 19 of 20 periods
+univariate filter  -26.8      <- correct
+```
+
+The smoother's error sat entirely in the ONE period where `chol()` happened to
+succeed: its smoothed states were exact while its smoothed shocks were
+inconsistent with them by 0.18. A likelihood that is too high is the dangerous
+direction -- an optimiser walks straight into it.
+
+**The fix**, in the three places that inverted F: after a successful `chol()`,
+test the pivots. The i-th squared diagonal of the Cholesky factor IS that
+observable's conditional variance -- the same quantity the univariate filter
+has always skipped on, and the one `.smoother_informative_obs()` already used
+to pick the informative subset. It was simply never consulted when `chol()`
+succeeded. Sites: `.kf_step()` (the `standard` and `dare` paths), the C++
+`kalman_standard_loop_cpp` fast path, and the smoother's forward pass.
+
+**After the fix, every path agrees.** All five filter methods and the smoother
+return -26.828497 on that fixture, each multivariate path detecting the
+singularity and rerouting to the univariate filter, which drops the
+uninformative component instead of inverting through it. The decomposition
+residual goes from 2.9e-1 to 8.9e-16 at `me_variance = 0`, and from 3.4e-4 to
+2.7e-15 at 1e-12.
+
+**Where the boundary sits.** A component whose conditional variance is below
+`kalman_tol` (default 1e-10, relative to F's scale) is dropped and the answer
+is exact. Above it the component genuinely carries information and the
+accuracy is the conditioning limit of inverting F, about `eps / me_variance` --
+a numerical fact rather than a defect, and one that
+`historical_decomposition()`'s adding-up check now surfaces rather than
+leaving to be discovered downstream.
+
+**One test changed meaning.** `test-kalman-smoother-na.R`'s "loglik decreases
+when data are removed" used a fixture that is an AR(1) plus an ALIAS -- two
+observables, one shock -- and blanked one of them. It passed only because the
+smoother was inverting through the singular F, so the "information" being
+removed was round-off. With an exact alias, removing either series alone costs
+nothing, because the other still pins the state; only removing both does. The
+test now asserts that, which is sharper than what it replaced: the two
+one-column runs agree with the full run to the bit and with each other.
+
 # dynhr 0.9.3.4
 
 A fourth report against the filtering surface, on historical decomposition.

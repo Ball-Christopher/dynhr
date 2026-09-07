@@ -520,8 +520,8 @@ BEGIN_RCPP
 END_RCPP
 }
 // kalman_standard_loop_cpp
-List kalman_standard_loop_cpp(const arma::mat& Y_minus_d, const arma::mat& ZZ, const arma::mat& TT, const arma::mat& RR, const arma::mat& DD, const arma::mat& HH_full, const arma::mat& Sigma_e, const arma::mat& SS, arma::mat P, double ll_const, double ss_tol, double ll_min, bool return_filtered, const arma::vec& me_diag_vec);
-RcppExport SEXP _dynhr_kalman_standard_loop_cpp(SEXP Y_minus_dSEXP, SEXP ZZSEXP, SEXP TTSEXP, SEXP RRSEXP, SEXP DDSEXP, SEXP HH_fullSEXP, SEXP Sigma_eSEXP, SEXP SSSEXP, SEXP PSEXP, SEXP ll_constSEXP, SEXP ss_tolSEXP, SEXP ll_minSEXP, SEXP return_filteredSEXP, SEXP me_diag_vecSEXP) {
+List kalman_standard_loop_cpp(const arma::mat& Y_minus_d, const arma::mat& ZZ, const arma::mat& TT, const arma::mat& RR, const arma::mat& DD, const arma::mat& HH_full, const arma::mat& Sigma_e, const arma::mat& SS, arma::mat P, double ll_const, double ss_tol, double ll_min, bool return_filtered, const arma::vec& me_diag_vec, double kalman_tol);
+RcppExport SEXP _dynhr_kalman_standard_loop_cpp(SEXP Y_minus_dSEXP, SEXP ZZSEXP, SEXP TTSEXP, SEXP RRSEXP, SEXP DDSEXP, SEXP HH_fullSEXP, SEXP Sigma_eSEXP, SEXP SSSEXP, SEXP PSEXP, SEXP ll_constSEXP, SEXP ss_tolSEXP, SEXP ll_minSEXP, SEXP return_filteredSEXP, SEXP me_diag_vecSEXP, SEXP kalman_tolSEXP) {
 BEGIN_RCPP
     Rcpp::RObject rcpp_result_gen;
     Rcpp::RNGScope rcpp_rngScope_gen;
@@ -539,7 +539,8 @@ BEGIN_RCPP
     Rcpp::traits::input_parameter< double >::type ll_min(ll_minSEXP);
     Rcpp::traits::input_parameter< bool >::type return_filtered(return_filteredSEXP);
     Rcpp::traits::input_parameter< const arma::vec& >::type me_diag_vec(me_diag_vecSEXP);
-    rcpp_result_gen = Rcpp::wrap(kalman_standard_loop_cpp(Y_minus_d, ZZ, TT, RR, DD, HH_full, Sigma_e, SS, P, ll_const, ss_tol, ll_min, return_filtered, me_diag_vec));
+    Rcpp::traits::input_parameter< double >::type kalman_tol(kalman_tolSEXP);
+    rcpp_result_gen = Rcpp::wrap(kalman_standard_loop_cpp(Y_minus_d, ZZ, TT, RR, DD, HH_full, Sigma_e, SS, P, ll_const, ss_tol, ll_min, return_filtered, me_diag_vec, kalman_tol));
     return rcpp_result_gen;
 END_RCPP
 }
@@ -838,7 +839,7 @@ static const R_CallMethodDef CallEntries[] = {
     {"_dynhr_kf_adjoint_cpp", (DL_FUNC) &_dynhr_kf_adjoint_cpp, 18},
     {"_dynhr_kf_adjoint_uni_cpp", (DL_FUNC) &_dynhr_kf_adjoint_uni_cpp, 17},
     {"_dynhr_kalman_ss_loop_cpp", (DL_FUNC) &_dynhr_kalman_ss_loop_cpp, 10},
-    {"_dynhr_kalman_standard_loop_cpp", (DL_FUNC) &_dynhr_kalman_standard_loop_cpp, 14},
+    {"_dynhr_kalman_standard_loop_cpp", (DL_FUNC) &_dynhr_kalman_standard_loop_cpp, 15},
     {"_dynhr_kalman_univariate_loop_cpp", (DL_FUNC) &_dynhr_kalman_univariate_loop_cpp, 16},
     {"_dynhr_kf_adjoint_diffuse_cpp", (DL_FUNC) &_dynhr_kf_adjoint_diffuse_cpp, 9},
     {"_dynhr_kf_loglik_dG_cpp", (DL_FUNC) &_dynhr_kf_loglik_dG_cpp, 15},

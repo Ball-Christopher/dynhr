@@ -8,6 +8,8 @@
 // Args mirror the R helper one-for-one to keep the switch trivial.
 
 #include <RcppArmadillo.h>
+#include <limits>
+#include <algorithm>
 // [[Rcpp::depends(RcppArmadillo)]]
 
 using Rcpp::List;
@@ -88,7 +90,8 @@ List kalman_standard_loop_cpp(const arma::mat& Y_minus_d,
                               double ss_tol,
                               double ll_min,
                               bool return_filtered,
-                              const arma::vec& me_diag_vec) {
+                              const arma::vec& me_diag_vec,
+                              double kalman_tol) {
   const arma::uword n_state = TT.n_rows;
   const arma::uword n_T     = Y_minus_d.n_cols;
   arma::vec s(n_state, arma::fill::zeros);
@@ -123,6 +126,20 @@ List kalman_standard_loop_cpp(const arma::mat& Y_minus_d,
       Ft += HH_full;
       Ft = 0.5 * (Ft + Ft.t());
       if (!arma::chol(Rc, Ft)) { ok = false; break; }   // upper: Ft = Rc'Rc
+      // ...and a successful chol() is NOT a sufficient test: on a
+      // stochastically singular system it can succeed with a pivot at
+      // round-off and return a finite, badly wrong likelihood (measured
+      // +292.7 against a correct -26.8). The squared diagonal of the factor
+      // IS each component's conditional variance -- the same quantity the
+      // univariate filter skips on. Mirrors .kf_F_singular() in
+      // R/kalman-filter.R; keep the two in step.
+      {
+        const arma::vec piv = arma::square(Rc.diag());
+        const double cut = std::max(kalman_tol,
+          static_cast<double>(Ft.n_rows) * arma::abs(Ft.diag()).max() *
+          std::numeric_limits<double>::epsilon());
+        if (!piv.is_finite() || piv.min() <= cut) { ok = false; break; }
+      }
       // Non-throwing form: chol() success does not imply inv_sympd() success
       // (see kalman_adjoint.cpp) -- degrade gracefully instead of throwing.
       if (!arma::inv_sympd(Fi, Ft)) { ok = false; break; }

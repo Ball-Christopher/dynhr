@@ -109,8 +109,8 @@ kalman_ss_loop_cpp <- function(Y_minus_d, ZZ, TT, K_ss, F_inv_ss, ll_ss_const, s
     .Call(`_dynhr_kalman_ss_loop_cpp`, Y_minus_d, ZZ, TT, K_ss, F_inv_ss, ll_ss_const, s, start_t, end_t, return_filtered)
 }
 
-kalman_standard_loop_cpp <- function(Y_minus_d, ZZ, TT, RR, DD, HH_full, Sigma_e, SS, P, ll_const, ss_tol, ll_min, return_filtered, me_diag_vec) {
-    .Call(`_dynhr_kalman_standard_loop_cpp`, Y_minus_d, ZZ, TT, RR, DD, HH_full, Sigma_e, SS, P, ll_const, ss_tol, ll_min, return_filtered, me_diag_vec)
+kalman_standard_loop_cpp <- function(Y_minus_d, ZZ, TT, RR, DD, HH_full, Sigma_e, SS, P, ll_const, ss_tol, ll_min, return_filtered, me_diag_vec, kalman_tol) {
+    .Call(`_dynhr_kalman_standard_loop_cpp`, Y_minus_d, ZZ, TT, RR, DD, HH_full, Sigma_e, SS, P, ll_const, ss_tol, ll_min, return_filtered, me_diag_vec, kalman_tol)
 }
 
 kalman_univariate_loop_cpp <- function(Y_minus_d, Zb, Tb, QQb, a, P_star, P_inf, me_variance, kalman_tol, diffuse_tol, conv_tol, max_diffuse, ll_min, return_filtered, n_state, ss_lock) {

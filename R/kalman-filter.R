@@ -493,6 +493,33 @@
 }
 
 
+### -- Numerically singular F: chol() succeeding is NOT the test -------------
+###
+### A Cholesky factorisation can succeed on a matrix that is singular to
+### round-off and hand back a garbage pivot, and every multivariate path here
+### used chol() as its ONLY singularity test. On a stochastically singular
+### system (more observables than shocks, or an observable that is an exact
+### combination of others) that produces a finite, badly wrong answer rather
+### than a detected failure: measured on a 2-observable / 1-shock fixture with
+### me_variance = 0, F had rcond 1.8e-17 and a NEGATIVE determinant, chol()
+### succeeded, and the filter returned loglik +292.7 where the correct value
+### is -26.8. A likelihood that is too HIGH is the dangerous direction -- an
+### optimiser walks straight into it.
+###
+### The right test is already in the package, twice: the univariate filter
+### skips an observable whose conditional variance is below `kalman_tol`, and
+### .smoother_informative_obs() picks the informative subset by the same rule.
+### The i-th squared diagonal of the Cholesky factor IS that conditional
+### variance, so the test costs one `diag()` on a factorisation that has
+### already been computed.
+.kf_F_singular <- function(Fc, Ft, tol = .KF_ZERO_VAR_TOL) {
+  piv <- diag(Fc)^2
+  if (!length(piv)) return(FALSE)
+  cut <- max(tol, nrow(Ft) * max(abs(diag(Ft))) * .Machine$double.eps)
+  !all(is.finite(piv)) || min(piv) <= cut
+}
+
+
 ### -- Routing table for $diagnostics ----------------------------------------
 ###
 ### Built on EVERY filter call, including the per-draw ones inside an MCMC
@@ -2028,6 +2055,10 @@ kalman_filter <- function(data, dr, model, params, obs_vars,
     ## univariate filter (see .kf_fail) instead of erroring out.
     Fc <- tryCatch(chol(Ft), error = function(e) NULL)
     if (is.null(Fc)) return(NULL)
+    ## ...and a successful chol() is not enough: see .kf_F_singular. Returning
+    ## NULL routes to .kf_fail(), whose univariate retry drops the
+    ## uninformative component instead of inverting through it.
+    if (.kf_F_singular(Fc, Ft)) return(NULL)
     Fi  <- chol2inv(Fc)
     ldf <- 2 * sum(log(diag(Fc)))
     ll  <- ll_const - 0.5 * (ldf + drop(crossprod(v, Fi %*% v)))
@@ -2556,7 +2587,8 @@ kalman_filter <- function(data, dr, model, params, obs_vars,
     out <- kalman_standard_loop_cpp(Y_minus_d, ZZ, TT, RR, DD, HH + me_diag,
                                     Sigma_e, SS, P, ll_const, ss_tol,
                                     .KF_LL_MIN, return_filtered,
-                                    rep(me_variance, n_obs))
+                                    rep(me_variance, n_obs),
+                                    .KF_ZERO_VAR_TOL)
     if (!out$ok)
       return(.kf_fail("standard"))
     filt <- NULL

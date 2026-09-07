@@ -1128,6 +1128,15 @@ kalman_smoother <- function(data, dr, model, params = NULL,
     ## base chol() THROWS on a non-PD matrix (it never returns NULL), so the
     ## singular-F branch below must catch the error to run at all.
     F_ch <- tryCatch(chol(F_t), error = function(e) NULL)
+    ## A successful chol() does not mean F is safely invertible: on a
+    ## stochastically singular system it can succeed with a pivot at round-off
+    ## and return a badly wrong update. Measured on a 2-observable / 1-shock
+    ## fixture, the drop path fired in 19 of 20 periods and the ONE period
+    ## where chol() happened to succeed carried the entire error -- smoothed
+    ## states exact, smoothed shocks inconsistent with them by 0.18, which
+    ## surfaced downstream as a historical_decomposition() adding-up residual.
+    ## The pivots are the conditional variances; test them.
+    if (!is.null(F_ch) && .kf_F_singular(F_ch, F_t, kalman_tol)) F_ch <- NULL
 
     if (is.null(F_ch)) {
       ## ---- SINGULAR / NON-PD INNOVATION COVARIANCE ------------------------
