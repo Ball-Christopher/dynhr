@@ -1,511 +1,459 @@
 ## R/diag-pre-d30-arbitrary-precision.R
 ## --------------------------------------------------------------------------
-## Phase H: D30 — Arbitrary-Precision Rank Checks (Qu & Tkachenko 2023)
+## Phase H: D30 -- Arbitrary-Precision Rank Checks
 ##
-## Re-runs the rank check from D1/D19 at elevated precision to confirm that
-## near-zero singular values are genuinely zero (or not). Floating-point
-## cancellation at machine epsilon (~2e-16 for double) can produce spurious
-## near-zero singular values that mislead rank decisions. Arbitrary-precision
-## computation distinguishes structural zeros from numerical artefacts.
+## Re-computes the local identification rank (D1) with the WHOLE pipeline in
+## multiple precision: the moment function is evaluated on mpfr parameters,
+## the Jacobian is a central difference at an mpfr step, and the SVD is a
+## one-sided Jacobi SVD in mpfr.  A double-precision finite-difference
+## Jacobian carries truncation + rounding error of ~1e-10 relative, so a
+## genuine singular value of ~1e-9 is indistinguishable from a structural
+## zero in double; at 128 bits the finite-difference error is ~1e-26 and the
+## two cases separate by many orders of magnitude.
 ##
-## Backends (in order of preference):
-##   1. **Rmpfr** (R Multiple Precision Floating-point Reliable) — pure R
-##      extension wrapping GNU MPFR.  Preferred: no external runtime
-##      dependency, works on any platform with the Rmpfr package installed.
-##      Precision controlled via \code{precBits} (default 128 bits ~ 38
-##      decimal digits).
+## Converting a double Jacobian to mpfr gains NOTHING (the error is already
+## baked in), so the high-precision path requires a moment function that is
+## generic over Rmpfr numbers (`hp_solve_fn`).  Its precision is verified
+## with a sub-double-epsilon probe before it is trusted.  Without such a
+## function, or without Rmpfr, D30 reports the double baseline only and
+## returns pass = NA -- it never claims a high-precision verdict it did not
+## compute.
 ##
-##      Rmpfr does not provide a direct \code{svd()} method for mpfrMatrix.
-##      Instead we form \eqn{J'J} at mpfr precision (using Rmpfr's S4 methods
-##      for \code{t()} and \code{\%*\%} on mpfr matrices), convert to double,
-##      and compute the eigen-decomposition.  Singular values are the square
-##      roots of the eigenvalues of \eqn{J'J}.  This retains the benefit of
-##      high-precision inner products in the Jacobian cross-product.
-##
-##   2. **JuliaCall** — if Rmpfr is unavailable and Julia is installed,
-##      uses Julia's BigFloat via JuliaCall for the SVD computation.
-##   3. **Base R** — standard double-precision SVD, always available as
-##      a baseline for comparison.
-##
-## The package does NOT depend on Julia or Rmpfr at runtime — both are
-## \code{Suggests} only.  The diagnostic checks availability at run time
-## and produces a clear message if neither high-precision backend is
-## available.
-##
-## References:
-##   Qu, Z., & Tkachenko, D. (2023). Arbitrary-precision identification
-##     in DSGE models. Working paper.
-##   Iskrev, N. (2010). Local identification in DSGE models.
-##   Mächler, M. (2014). "Rmpfr: R MPFR — Multiple Precision
-##     Floating-Point Reliable." R package version 0.5-0.
+## Both precisions use the same rank rule as D1
+## (`.ident_equilibrated_rank()`: row max-abs / column 2-norm
+## equilibration, tolerance = max(machine, 10 * ||Je(h) - Je(2h)||_2)),
+## with the machine epsilon of the respective precision.
 ## --------------------------------------------------------------------------
 
 #' D30. Arbitrary-Precision Rank Checks
 #'
-#' Re-runs the SVD-based rank analysis from D1/D19 at elevated precision
-#' (default 128 bits ~ 38 decimal digits) to distinguish structural zeros
-#' from floating-point artefacts in the singular value spectrum.
+#' Re-computes the D1 local-identification rank in multiple precision to
+#' separate structural rank deficiency from finite-difference / rounding
+#' noise.
 #'
-#' The diagnostic:
 #' \enumerate{
-#'   \item Computes the standard double-precision SVD of the moment
-#'     Jacobian (from \code{model_solve_fn}) as a baseline.
-#'   \item Re-computes the Jacobian and its SVD at elevated precision
-#'     using either \strong{Rmpfr} (preferred) or \strong{Julia BigFloat}
-#'     (fallback).  Precision is controlled by \code{prec_bits} (default
-#'     128 bits).
-#'   \item Compares singular values between double and high precision,
-#'     and reports any rank discrepancies.
-#'   \item If no high-precision backend is available, reports baseline
-#'     results + instruction to install Rmpfr.
+#'   \item Double baseline: central-difference Jacobian of
+#'     \code{model_solve_fn} at steps \code{eps} and \code{2 * eps}, ranked
+#'     with \code{.ident_equilibrated_rank()} (identical rule to D1).
+#'   \item High precision (Rmpfr): \code{hp_solve_fn} is evaluated on
+#'     \code{Rmpfr::mpfr(theta, prec_bits)}; the Jacobian is a central
+#'     difference at relative step \eqn{2^{-\lfloor prec/3 \rfloor}} (and
+#'     twice that, for the noise estimate), equilibrated the same way, and
+#'     its singular values come from a one-sided Jacobi SVD carried out in
+#'     mpfr.  The tolerance is
+#'     \eqn{\max(\max(m,n)\,\sigma_1 2^{-prec},\; 10\,\|J_e(h)-J_e(2h)\|_2)}.
+#'   \item Verdict: directions below the high-precision tolerance are
+#'     structural; directions the double check calls unidentified but the
+#'     high-precision check resolves are numerical artefacts.
 #' }
 #'
-#' \strong{Precision-tolerance caveat:} the rank threshold is currently
-#' \code{rank_tol_factor * max(sv) * .Machine$double.eps} at \emph{both}
-#' precisions.  Because the threshold uses double-precision machine epsilon
-#' regardless of \code{prec_bits}, the rank decision can only differ between
-#' double and high-precision if the high-precision inner products in
-#' \eqn{J'J} shift a singular value across the \emph{double}-epsilon
-#' threshold.  To detect rank differences that require genuine
-#' precision-appropriate tolerances, set
-#' \code{rank_tol_factor = max(dim(J)) * (2^{-prec_bits} / .Machine$double.eps)}.
-#' The current default does \emph{not} do this.
+#' \code{hp_solve_fn} must propagate mpfr numbers end to end (plain R
+#' arithmetic and \code{exp}/\code{log}/\code{sqrt}/... do; \code{solve()},
+#' \code{eigen()}, compiled code and \code{as.numeric()} do not).  Before
+#' use it is checked to (a) return an mpfr vector of the right length,
+#' (b) agree with \code{model_solve_fn} in double, and (c) respond to a
+#' parameter perturbation of \eqn{2^{-3 prec/4}} (far below double epsilon)
+#' with the slope of its own Jacobian -- a function that routes through
+#' double fails (c).  If any check fails, or \code{hp_solve_fn} is
+#' \code{NULL}, or Rmpfr is not installed, or \code{backend = "base"}, only
+#' the double baseline is reported and \code{pass = NA}.
+#'
+#' \strong{This diagnostic is deliberately opt-in, and it is not the
+#' package's answer to finite-difference noise.} That answer is
+#' \code{.ident_equilibrated_rank()} -- the FD-noise-aware equilibrated rank
+#' test shared by D1, D20 and D28, which compares the singular values against
+#' a noise floor estimated from a second Jacobian at step \code{2 * eps}
+#' instead of trying to out-precision the noise. That is what the literature
+#' does too: Iskrev (2010) builds his rank test on \emph{analytic} derivatives
+#' of the moment mapping, sidestepping FD error entirely, and Dynare's
+#' \code{identification} command applies a relative singular-value cutoff
+#' (\code{tol_rank}) to an analytically differentiated Jacobian. No
+#' identification paper (Iskrev 2010, Ratto & Iskrev 2011, Mutschler 2015,
+#' Qu & Tkachenko 2012/2017, Komunjer & Ng 2011, Kociecki 2018) and no
+#' toolbox surveyed (Dynare, IRIS, MacroModelling.jl, RISE) proposes or ships
+#' a multiple-precision Lyapunov/QZ path for identification, and mpfr
+#' arithmetic buys nothing unless the \emph{input} derivatives are already
+#' high precision -- which is exactly why a genuine mpfr-generic
+#' \code{hp_solve_fn} is required rather than an internal double-to-mpfr
+#' conversion. Use D30 when you have such a function and want to confirm that
+#' a borderline direction is structural; otherwise read D1/D20.
 #'
 #' @param model_solve_fn  Function: theta -> named numeric vector of moments.
 #' @param theta           Named numeric vector of parameter values.
 #' @param param_names     Character vector of parameter names.
 #' @param moment_names    Character vector of moment names.
-#' @param prec_bits       Bit precision for arbitrary-precision computation
-#'   (default 128).  Higher values (e.g. 256) give more safety at the cost
-#'   of speed.
-#' @param backend         Character: \code{"auto"} (try Rmpfr then JuliaCall),
-#'   \code{"Rmpfr"}, \code{"JuliaCall"}, or \code{"base"} (double only).
-#' @param eps             Step size for finite differences in double precision
-#'   (default 1e-5).  For high precision, the step is scaled appropriately.
-#' @param rank_tol_factor  Factor times \code{.Machine$double.eps} for the
-#'   SVD rank threshold, applied at \emph{both} double and high precision.
-#'   Default is \code{max(n_moments, n_params)} (standard double-precision
-#'   SVD tolerance).  \strong{This factor does not change with
-#'   \code{prec_bits}.}  Genuine precision-dependent rank differences
-#'   require setting this to the ratio of double-eps to mpfr-eps
-#'   (~\code{2^{-53} / 2^{-prec_bits}}); the default will not detect
-#'   near-zero SVs that fall below the double-eps threshold but above the
-#'   mpfr-eps threshold.  Use a larger value (e.g. 100) to be more
-#'   conservative in the double-precision baseline only.
+#' @param hp_solve_fn     Optional mpfr-generic version of
+#'   \code{model_solve_fn} (often the same function). \code{NULL} disables
+#'   the high-precision check.
+#' @param prec_bits       MPFR precision in bits (integer >= 64, default 128).
+#' @param backend         \code{"auto"} / \code{"Rmpfr"} (high precision via
+#'   Rmpfr; \code{"Rmpfr"} warns if it is not installed) or \code{"base"}
+#'   (double baseline only, \code{pass = NA}).
+#' @param eps             Double finite-difference step (default 1e-5).
+#' @param weak_rel        Relative singular-value level below which an
+#'   identified direction is reported as weak (default 1e-3, as D1).
 #' @param verbose         Print progress messages.
+#' @param meta            Optional plot metadata (\code{diag_meta()}).
 #'
-#' @return A \code{dynhr_diagnostic} list with:
-#'   \item{result}{List containing:
-#'     \itemize{
-#'       \item \code{double_svd} — standard double-precision SVD result.
-#'       \item \code{high_prec_svd} — arbitrary-precision SVD result
-#'         (or NULL if backend unavailable).
-#'       \item \code{double_rank} — rank from double precision.
-#'       \item \code{high_prec_rank} — rank from high precision (or NA).
-#'       \item \code{rank_consistent} — whether ranks agree.
-#'       \item \code{sv_comparison} — data.frame comparing singular values.
-#'       \item \code{backend_used} — which backend was used.
-#'       \item \code{param_names} — parameter names.
-#'     }}
-#'   \item{pass}{Logical — TRUE if ranks are consistent across precisions.}
-#'   \item{plots}{List of ggplot2 objects.}
-#'   \item{summary}{Human-readable summary.}
-#'
-#' @note Rmpfr is the strongly preferred backend.  Install it with:
-#'   \code{install.packages("Rmpfr")}
-#'   This requires the GMP and MPFR system libraries on your platform.
-#'
-#' @references
-#'   Qu, Z., & Tkachenko, D. (2023). Arbitrary-precision identification in
-#'     DSGE models. Working paper.
-#'   Machler, M. (2014). Rmpfr: R MPFR -- Multiple Precision Floating-Point
-#'     Reliable. R package.
-#'
+#' @return A \code{dynhr_diagnostic}; \code{result} holds
+#'   \code{double_rank}, \code{double_tol}, \code{double_fd_noise},
+#'   \code{high_prec_rank}, \code{high_prec_tol}, \code{high_prec_fd_noise},
+#'   \code{sv_comparison} (equilibrated singular values at both
+#'   precisions), \code{structural_dirs}, \code{artefact_dirs},
+#'   \code{weak_dirs}, \code{null_space} (high-precision right singular
+#'   vectors of the structural directions, double), \code{rank_consistent},
+#'   \code{backend_used} (\code{"Rmpfr"} or \code{"none"}),
+#'   \code{hp_status} (why the high-precision check did or did not run),
+#'   \code{prec_bits}, \code{param_names}.  \code{pass} is \code{TRUE} when
+#'   the high-precision rank is full, \code{FALSE} when it is deficient, and
+#'   \code{NA} when no high-precision check was performed.
 #' @noRd
 d30_arbitrary_precision_rank <- function(model_solve_fn,
                                           theta,
                                           param_names = NULL,
                                           moment_names = NULL,
+                                          hp_solve_fn = NULL,
                                           prec_bits = 128L,
-                                          backend = c("auto", "Rmpfr", "JuliaCall", "base"),
+                                          backend = c("auto", "Rmpfr", "base"),
                                           eps = 1e-5,
-                                          rank_tol_factor = NULL,
+                                          weak_rel = 1e-3,
                                           verbose = FALSE,
                                           meta = NULL) {
   backend <- match.arg(backend)
 
-  # ---- 0. Early validation for graceful NULL handling ----
-  if (is.null(theta) || is.null(model_solve_fn)) {
+  if (is.null(theta) || !is.function(model_solve_fn)) {
     return(.make_result(
       pass    = NA,
       summary = "D30 Arbitrary-Precision Rank: theta or model_solve_fn is NULL."
     ))
   }
-
-  # ---- 1. Defaults ----
+  if (!is.numeric(prec_bits) || length(prec_bits) != 1L || !is.finite(prec_bits) ||
+      prec_bits < 64) {
+    .dynhr_abort("d30: `prec_bits` must be a single number >= 64.")
+  }
+  prec_bits <- as.integer(prec_bits)
+  theta <- unlist(theta)
   n_par <- length(theta)
-  if (is.null(param_names)) param_names <- names(theta) %||% paste0("theta_", seq_len(n_par))
-  if (is.null(moment_names)) {
-    f0 <- model_solve_fn(theta)
-    if (is.null(f0) || length(f0) == 0) {
-      return(.make_result(
-        pass    = NA,
-        summary = "D30 Arbitrary-Precision Rank: model_solve_fn returned NULL or empty."
-      ))
-    }
-    moment_names <- if (!is.null(names(f0))) names(f0) else paste0("m_", seq_along(f0))
+  if (is.null(param_names) || length(param_names) != n_par) {
+    param_names <- names(theta) %||% paste0("theta_", seq_len(n_par))
   }
-  if (is.null(rank_tol_factor)) {
-    n_mom <- length(moment_names)
-    rank_tol_factor <- max(n_mom, n_par)
+  names(theta) <- param_names
+
+  f0 <- model_solve_fn(theta)
+  if (is.null(f0) || length(f0) == 0L || !all(is.finite(f0))) {
+    return(.make_result(
+      pass    = NA,
+      summary = "D30 Arbitrary-Precision Rank: model_solve_fn returned NULL, empty or non-finite moments."
+    ))
+  }
+  if (is.null(moment_names) || length(moment_names) != length(f0)) {
+    moment_names <- names(f0) %||% paste0("m_", seq_along(f0))
   }
 
-  # ---- 2. Double-precision baseline ----
-  if (verbose) cat("[d30] Computing double-precision SVD baseline...\n")
-  J_double <- .numerical_jacobian(model_solve_fn, theta, eps = eps)
-  colnames(J_double) <- param_names
-  rownames(J_double) <- moment_names
+  # ---- 1. Double baseline (same rule as D1) ----
+  if (verbose) .dynhr_cat("[d30] Double-precision baseline...\n")
+  J  <- .numerical_jacobian(model_solve_fn, theta, eps = eps)
+  J2 <- .numerical_jacobian(model_solve_fn, theta, eps = 2 * eps)
+  if (!all(is.finite(J)) || !all(is.finite(J2))) {
+    return(.make_result(
+      pass    = NA,
+      summary = "D30 Arbitrary-Precision Rank: double Jacobian is non-finite; rank undetermined."
+    ))
+  }
+  dimnames(J) <- list(moment_names, param_names)
+  dimnames(J2) <- dimnames(J)
+  rk_d <- .ident_equilibrated_rank(J, J2, weak_rel = weak_rel)
+  sv_d <- unname(rk_d$singular_values)
+  if (verbose) .dynhr_cat(sprintf("[d30] double: rank %d / %d (tol %.2e, %s)\n",
+                                  rk_d$rank, n_par, rk_d$tol, rk_d$tol_source))
 
-    svd_double <- svd(J_double)
-    tol_double <- rank_tol_factor * max(svd_double$d) * .Machine$double.eps
-    rank_double <- sum(svd_double$d > tol_double)
-
-    if (verbose) cat(sprintf("[d30] Double precision: rank = %d / %d (tol = %.2e)\n",
-                             rank_double, n_par, tol_double))
-
-    # ---- 3. High-precision computation ----
-    high_prec_svd <- NULL
-    rank_high <- NA_integer_
-    backend_used <- "base"
-
-    # Resolve backend
-    use_rmpfr <- FALSE
-    use_julia <- FALSE
-
-    if (backend == "auto") {
-      use_rmpfr <- requireNamespace("Rmpfr", quietly = TRUE)
-      if (!use_rmpfr) {
-        use_julia <- requireNamespace("JuliaCall", quietly = TRUE)
-      }
-    } else if (backend == "Rmpfr") {
-      use_rmpfr <- requireNamespace("Rmpfr", quietly = TRUE)
-      if (!use_rmpfr && verbose) cat("[d30] Rmpfr not available.\n")
-    } else if (backend == "JuliaCall") {
-      use_julia <- requireNamespace("JuliaCall", quietly = TRUE)
-      if (!use_julia && verbose) cat("[d30] JuliaCall not available.\n")
+  # ---- 2. High-precision path: availability ----
+  hp <- NULL
+  hp_status <- NULL
+  if (backend == "base") {
+    hp_status <- "backend = 'base' requested: double baseline only"
+  } else if (!requireNamespace("Rmpfr", quietly = TRUE)) {
+    hp_status <- "Rmpfr is not installed (install.packages('Rmpfr'))"
+    if (backend == "Rmpfr") .dynhr_warn(paste0("d30: backend = 'Rmpfr' requested but ", hp_status, "."))
+  } else if (!is.function(hp_solve_fn)) {
+    hp_status <- paste0("no mpfr-generic hp_solve_fn supplied (a Jacobian computed ",
+                        "in double gains nothing from mpfr)")
+  } else {
+    if (verbose) .dynhr_cat(sprintf("[d30] Rmpfr path at %d bits...\n", prec_bits))
+    hp <- .d30_hp_rank(hp_solve_fn, theta, f0, J, prec_bits, weak_rel)
+    hp_status <- hp$status
+    if (!isTRUE(hp$ok)) {
+      .dynhr_warn(paste0("d30: high-precision check not performed: ", hp_status, "."))
+      hp <- NULL
     }
+  }
+  hp_ran <- !is.null(hp)
 
-    if (use_rmpfr) {
-      if (verbose) cat(sprintf("[d30] Using Rmpfr with precBits = %d...\n", prec_bits))
-      high_prec_svd <- .d30_svd_rmpfr(model_solve_fn, theta, prec_bits, eps)
-      backend_used <- "Rmpfr"
-    } else if (use_julia) {
-      if (verbose) cat(sprintf("[d30] Using Julia BigFloat with precision = %d bits...\n", prec_bits))
-      high_prec_svd <- .d30_svd_julia(model_solve_fn, theta, prec_bits, eps)
-      backend_used <- "JuliaCall"
+  # ---- 3. Comparison ----
+  rank_high <- if (hp_ran) hp$rank else NA_integer_
+  sv_h <- if (hp_ran) hp$singular_values else rep(NA_real_, n_par)
+  sv_comparison <- data.frame(
+    index      = seq_len(n_par),
+    double     = sv_d,
+    high_prec  = sv_h,
+    double_class = ifelse(sv_d <= rk_d$tol, "Unidentified",
+                   ifelse(sv_d < rk_d$weak_threshold, "Weak", "Identified")),
+    high_prec_class = if (hp_ran) hp$sv_class else NA_character_,
+    stringsAsFactors = FALSE
+  )
+  structural <- if (hp_ran) which(hp$sv_class == "Unidentified") else integer(0)
+  weak_dirs  <- if (hp_ran) which(hp$sv_class == "Weak") else integer(0)
+  artefact   <- if (hp_ran) which(sv_comparison$double_class == "Unidentified" &
+                                  hp$sv_class != "Unidentified") else integer(0)
+  rank_consistent <- if (hp_ran) rk_d$rank == rank_high else NA
+  pass_val <- if (hp_ran) rank_high == n_par else NA
+  null_space <- if (hp_ran) hp$V[, structural, drop = FALSE] else NULL
+  structural_params <- if (hp_ran && length(structural))
+    unique(unlist(lapply(structural, function(k) {
+      v <- abs(hp$V[, k]); param_names[v >= 0.5 * max(v)] }))) else character(0)
+
+  # ---- 4. Plot ----
+  plots <- list()
+  if (requireNamespace("ggplot2", quietly = TRUE)) {
+    plots$sv_comparison <- .apply_meta(
+      .d30_plot(sv_comparison, rk_d, hp, n_par, prec_bits, hp_status), meta)
+  }
+
+  # ---- 5. Result + text ----
+  result <- list(
+    double_rank        = rk_d$rank,
+    double_tol         = rk_d$tol,
+    double_fd_noise    = rk_d$fd_noise,
+    high_prec_rank     = rank_high,
+    high_prec_tol      = if (hp_ran) hp$tol else NA_real_,
+    high_prec_fd_noise = if (hp_ran) hp$fd_noise else NA_real_,
+    rank_consistent    = rank_consistent,
+    sv_comparison      = sv_comparison,
+    structural_dirs    = structural,
+    structural_params  = structural_params,
+    artefact_dirs      = artefact,
+    weak_dirs          = weak_dirs,
+    null_space         = null_space,
+    backend_used       = if (hp_ran) "Rmpfr" else "none",
+    hp_status          = hp_status,
+    prec_bits          = prec_bits,
+    param_names        = param_names
+  )
+
+  if (!hp_ran) {
+    summary_str <- sprintf(paste0(
+      "D30 Arbitrary-Precision Rank: double rank=%d/%d (tol=%.2e). ",
+      "High-precision check NOT performed: %s."), rk_d$rank, n_par, rk_d$tol, hp_status)
+    llm_str <- sprintf(paste0(
+      "[INFO] D30 Arbitrary-Precision Rank double_rank=%d/%d high_prec=not_run\n",
+      "  reason: %s\n",
+      "  action: pass an mpfr-generic hp_solve_fn (d30_hp_solve_fn) with Rmpfr installed"),
+      rk_d$rank, n_par, hp_status)
+  } else {
+    verdict <- if (isTRUE(pass_val)) {
+      if (length(artefact)) sprintf(
+        "Identified at %d bits: %d double-precision deficient direction(s) are finite-difference/rounding artefacts.",
+        prec_bits, length(artefact))
+      else sprintf("Full rank confirmed at %d bits.", prec_bits)
     } else {
-      if (verbose) {
-        cat("[d30] No high-precision backend available.\n")
-        cat("[d30] Install Rmpfr (install.packages('Rmpfr')) for arbitrary-precision SVD.\n")
-        cat("[d30] JuliaCall is an alternative fallback.\n")
-      }
+      sprintf("STRUCTURAL rank deficiency confirmed at %d bits (%d direction(s); involving %s).",
+              prec_bits, length(structural), paste(structural_params, collapse = ", "))
     }
+    if (length(weak_dirs)) verdict <- paste0(verdict, sprintf(
+      " %d weak but real direction(s) (sv < %.0e * sv_max).", length(weak_dirs), weak_rel))
+    summary_str <- sprintf(
+      "D30 Arbitrary-Precision Rank: double rank=%d/%d (tol=%.2e) vs %d-bit rank=%d/%d (tol=%.2e). %s",
+      rk_d$rank, n_par, rk_d$tol, prec_bits, rank_high, n_par, hp$tol, verdict)
+    llm_str <- sprintf(paste0(
+      "[%s] D30 Arbitrary-Precision Rank double_rank=%d high_prec_rank=%d n_par=%d prec_bits=%d ",
+      "structural=%d artefacts=%d weak=%d min_sv_hp=%.3e hp_tol=%.3e\n  action: %s"),
+      if (isTRUE(pass_val)) "PASS" else "FAIL",
+      rk_d$rank, rank_high, n_par, prec_bits, length(structural), length(artefact),
+      length(weak_dirs), min(sv_h), hp$tol,
+      if (isTRUE(pass_val)) "none (identification holds in high precision)"
+      else paste0("reparameterise or calibrate one of: ", paste(structural_params, collapse = ", ")))
+  }
 
-    # Compute high-precision rank if SVD is available
-    if (!is.null(high_prec_svd) && !is.null(high_prec_svd$d)) {
-      hp_sv <- as.numeric(high_prec_svd$d)
-      tol_high <- rank_tol_factor * max(hp_sv) * .Machine$double.eps
-      rank_high <- sum(hp_sv > tol_high)
-      if (verbose) cat(sprintf("[d30] High precision (%s): rank = %d / %d\n",
-                               backend_used, rank_high, n_par))
-    }
-
-    # ---- 4. Comparison ----
-    rank_consistent <- is.na(rank_high) || (rank_double == rank_high)
-
-    # Align high-precision SV count with double-precision SV count.
-    # svd(J) returns min(nrow,ncol) singular values (e.g. 16 for 16x20 J),
-    # while J'J eigen gives ncol (20) values. Truncate to match.
-    n_sv <- length(svd_double$d)
-    hp_sv <- if (!is.null(high_prec_svd) && !is.null(high_prec_svd$d))
-      as.numeric(high_prec_svd$d)[seq_len(n_sv)] else rep(NA_real_, n_sv)
-    sv_comparison <- data.frame(
-      index = seq_len(n_sv),
-      double = svd_double$d,
-      high_prec = hp_sv,
-      ratio = if (!is.null(high_prec_svd))
-        svd_double$d / pmax(hp_sv, 1e-300) else NA_real_,
-      stringsAsFactors = FALSE
-    )
-
-    # Find singular values near the rank threshold
-    borderline <- which(svd_double$d > tol_double * 0.1 &
-                         svd_double$d < tol_double * 10)
-
-    # ---- 5. Plots ----
-    plots <- list()
-    if (requireNamespace("ggplot2", quietly = TRUE)) {
-      # Only include "base" (high_prec) series when a high-precision backend is
-      # available; otherwise the second series is all 1e-300 and creates a
-      # misleading blank band in the middle of the plot.
-      hp_available <- backend_used != "base"
-      if (hp_available) {
-        sv_long <- data.frame(
-          index     = rep(sv_comparison$index, 2),
-          value     = c(log10(pmax(sv_comparison$double, 1e-300)),
-                        log10(pmax(sv_comparison$high_prec, 1e-300))),
-          precision = rep(c("double", backend_used), each = nrow(sv_comparison)),
-          stringsAsFactors = FALSE
-        )
-      } else {
-        sv_long <- data.frame(
-          index     = sv_comparison$index,
-          value     = log10(pmax(sv_comparison$double, 1e-300)),
-          precision = "double",
-          stringsAsFactors = FALSE
-        )
-      }
-
-      colour_vals <- c("double"    = dynhr_colours$dark_blue,
-                       "Rmpfr"     = dynhr_colours$orange,
-                       "JuliaCall" = dynhr_colours$green)
-      # Keep only series that appear in the data
-      colour_vals <- colour_vals[names(colour_vals) %in% unique(sv_long$precision)]
-
-      p_svc <- ggplot2::ggplot(
-        sv_long, ggplot2::aes(x = index, y = value, colour = precision)
-      ) +
-        ggplot2::geom_point(size = 1.5) +
-        ggplot2::geom_line(linewidth = 0.3) +
-        ggplot2::geom_hline(yintercept = log10(tol_double),
-                           linetype = "dashed", colour = dynhr_colours$red,
-                           linewidth = 0.5) +
-        ggplot2::scale_colour_manual(values = colour_vals, name = "Precision") +
-        theme_dynhr_diagnostic() +
-        ggplot2::labs(
-          title = "D30: Singular value comparison -- double vs arbitrary precision",
-          subtitle = sprintf("Rank: double=%d / %d%s",
-                             rank_double, n_par,
-                             if (is.na(rank_high)) sprintf(
-                               "  [%s not installed -- install with: install.packages('Rmpfr')]",
-                               if (backend == "auto" || backend == "Rmpfr") "Rmpfr" else "high-prec backend")
-                             else sprintf(", %s=%d", backend_used, rank_high)),
-          x = "Singular value index", y = "log10(singular value)"
-        )
-      plots$sv_comparison <- .apply_meta(p_svc, meta)
-
-      if (length(borderline) > 0) {
-        bd_df <- sv_comparison[borderline, , drop = FALSE]
-        p_bsv <- ggplot2::ggplot(
-          bd_df, ggplot2::aes(x = index)
-        ) +
-          ggplot2::geom_point(ggplot2::aes(y = log10(pmax(double, 1e-300))),
-                             colour = dynhr_colours$dark_blue, size = 2) +
-          ggplot2::geom_point(ggplot2::aes(y = log10(pmax(high_prec, 1e-300))),
-                             colour = dynhr_colours$orange, size = 2, shape = 17) +
-          ggplot2::geom_hline(yintercept = log10(tol_double),
-                             linetype = "dashed", colour = dynhr_colours$red) +
-          theme_dynhr_diagnostic() +
-          ggplot2::labs(
-            title = "D30: Borderline singular values (near rank threshold)",
-            x = "Index", y = "log10(singular value)"
-          )
-        plots$borderline_sv <- .apply_meta(p_bsv, meta)
-      }
-    }
-
-    # ---- 6. Result ----
-    result <- list(
-      double_svd       = svd_double,
-      high_prec_svd    = high_prec_svd,
-      double_rank      = rank_double,
-      high_prec_rank   = rank_high,
-      rank_consistent  = rank_consistent,
-      sv_comparison    = sv_comparison,
-      backend_used     = backend_used,
-      param_names      = param_names,
-      prec_bits        = prec_bits,
-      borderline_idx   = borderline
-    )
-
-    # Build summary
-    if (is.na(rank_high)) {
-      summary_str <- sprintf(
-        "D30 Arbitrary-Precision Rank: double rank=%d/%d. Rmpfr not installed (run install.packages('Rmpfr') to enable high-precision verification).",
-        rank_double, n_par
-      )
-      llm_str <- sprintf(
-        "[INFO] D30 Arbitrary-Precision Rank double_rank=%d/%d backend=%s Rmpfr_not_installed=TRUE action: install.packages('Rmpfr') to enable high-precision SVD",
-        rank_double, n_par, backend_used
-      )
-      pass_val <- NA
-    } else {
-      pass_val <- rank_consistent
-      summary_str <- sprintf(
-        "D30 Arbitrary-Precision Rank: double rank=%d/%d vs %s rank=%d/%d. %s",
-        rank_double, n_par, backend_used, rank_high, n_par,
-        if (rank_consistent) "Rank consistent across precisions."
-        else "RANK DIFFERENCE DETECTED!"
-      )
-      llm_str <- sprintf(
-        "[%s] D30 Arbitrary-Precision Rank double_rank=%d high_prec_rank=%d backend=%s prec_bits=%d consistent=%d",
-        if (isTRUE(pass_val)) "PASS" else "FAIL",
-        rank_double, rank_high, backend_used, prec_bits, as.integer(rank_consistent)
-      )
-    }
-
-    .make_result(
-      result  = result,
-      pass    = pass_val,
-      plots   = plots,
-      summary = summary_str,
-      llm_summary = llm_str
-    )
+  .make_result(result = result, pass = pass_val, plots = plots,
+               summary = summary_str, llm_summary = llm_str)
 }
 
 
 # ==========================================================================
-# Backend implementations for D30
+# High-precision helpers
 # ==========================================================================
 
-#' Compute SVD at half precision using Rmpfr
+#' Rank of the identification Jacobian computed end-to-end in mpfr
 #'
-#' @description
-#' Computes the moment Jacobian in **double precision** (the model solver
-#' uses base R linear algebra and cannot handle mpfr types), then converts
-#' the Jacobian to mpfr to form \eqn{J'J} at the specified precision.
-#' The singular values are obtained from the eigen-decomposition of the
-#' high-precision cross-product matrix.
-#'
-#' **Caveat**: This is NOT a true arbitrary-precision SVD because the
-#' Jacobian itself is computed in double precision.  The only benefit is
-#' that forming \eqn{J'J} at high precision can reduce rounding errors
-#' from catastrophic cancellation in the inner products, yielding slightly
-#' more accurate singular values for ill-conditioned problems.
-#'
-#' Rmpfr does not provide a direct \code{svd()} method for \code{mpfrMatrix}
-#' objects, so we exploit the fact that singular values are the square
-#' roots of the eigenvalues of \eqn{J'J}.
-#'
-#' @param model_solve_fn  Function: theta -> moments
-#' @param theta           Parameter vector (double)
-#' @param prec_bits       MPFR precision in bits
-#' @param eps             Base step size for finite differences
-#' @return List with $d (singular values), $prec_bits, or NULL on failure
+#' @param hp_solve_fn mpfr-generic moment function.
+#' @param theta named double parameters; @param f0 double moments;
+#' @param J double Jacobian (only used by the precision probe).
+#' @return list(ok, status, rank, tol, fd_noise, singular_values, sv_class, V)
 #' @noRd
-.d30_svd_rmpfr <- function(model_solve_fn, theta, prec_bits, eps) {
-  n_par <- length(theta)
+.d30_hp_rank <- function(hp_solve_fn, theta, f0, J, prec_bits, weak_rel) {
+  n_par <- length(theta); n_mom <- length(f0)
+  fail <- function(msg) list(ok = FALSE, status = msg)
+  mp <- function(x) Rmpfr::mpfr(x, precBits = prec_bits)
+  th <- mp(unname(theta))
+  eval_hp <- function(x) {
+    out <- hp_solve_fn(x)
+    if (!methods::is(out, "mpfr") || length(out) != n_mom) return(NULL)
+    if (!all(is.finite(Rmpfr::asNumeric(out)))) return(NULL)
+    out
+  }
 
-  # NOTE: model_solve_fn cannot handle mpfr types, so the Jacobian is
-  # computed in double precision.  Only J'J is formed at high precision.
-  #
-  # Compute the Jacobian in double precision first
-  J_double <- .numerical_jacobian(model_solve_fn, theta, eps = eps)
+  g0 <- eval_hp(th)
+  if (is.null(g0)) return(fail(sprintf(
+    "hp_solve_fn did not return a finite mpfr vector of length %d", n_mom)))
+  g0d <- Rmpfr::asNumeric(g0)
+  if (max(abs(g0d - f0) / pmax(1, abs(f0))) > 1e-8)
+    return(fail("hp_solve_fn disagrees with model_solve_fn in double (> 1e-8 relative)"))
 
-  # Convert to mpfr for high-precision cross-product
-  J_mp <- Rmpfr::mpfr(J_double, precBits = prec_bits)
+  bump <- function(j, h) { x <- th; x[j] <- x[j] + h; x }
+  scale_j <- pmax(1, abs(unname(theta)))
+  h_rel <- mp(2)^(-(prec_bits %/% 3L))
+  cols1 <- vector("list", n_par); cols2 <- vector("list", n_par)
+  for (j in seq_len(n_par)) {
+    h <- h_rel * scale_j[j]
+    fp <- eval_hp(bump(j, h)); fm <- eval_hp(bump(j, -h))
+    fp2 <- eval_hp(bump(j, 2 * h)); fm2 <- eval_hp(bump(j, -2 * h))
+    if (is.null(fp) || is.null(fm) || is.null(fp2) || is.null(fm2))
+      return(fail(sprintf("hp_solve_fn failed near theta[%d]", j)))
+    cols1[[j]] <- (fp - fm) / (2 * h)
+    cols2[[j]] <- (fp2 - fm2) / (4 * h)
 
-  # Form J'J at mpfr precision
-  jtj_mp <- t(J_mp) %*% J_mp
+    # Precision probe: a step far below double epsilon must reproduce the
+    # column slope.  A function that routes through double returns 0 here.
+    d <- mp(2)^(-((3L * prec_bits) %/% 4L)) * scale_j[j]
+    fd <- eval_hp(bump(j, d))
+    if (is.null(fd)) return(fail(sprintf("hp_solve_fn failed near theta[%d]", j)))
+    slope <- Rmpfr::asNumeric((fd - g0) / d)
+    colj <- Rmpfr::asNumeric(cols1[[j]])
+    if (max(abs(colj)) > 0 && max(abs(slope - colj)) > 1e-6 * max(abs(colj)))
+      return(fail(sprintf(paste0(
+        "hp_solve_fn is not precise below double epsilon (probe on theta[%d]: ",
+        "slope %.3g vs Jacobian %.3g) -- it probably converts to double internally"),
+        j, max(abs(slope)), max(abs(colj)))))
+  }
 
-  # Convert back and check for valid results
-  jtj_d <- matrix(as.numeric(jtj_mp), nrow = n_par, ncol = n_par)
-  if (any(!is.finite(jtj_d))) jtj_d <- NULL
-
-    if (is.null(jtj_d) || any(!is.finite(jtj_d))) {
-      warning("Rmpfr J'J produced non-finite values -- falling back to double precision.")
-      sv_d <- svd(J_double)$d
-    } else {
-      # Eigen-decomposition (symmetric J'J)
-      eig <- eigen(jtj_d, symmetric = TRUE)
-
-      # Singular values = sqrt(eigenvalues)
-      sv_d <- sqrt(pmax(eig$values, 0))
-
-      # Restore expected order (decreasing, matching svd() convention)
-      sv_d <- sort(sv_d, decreasing = TRUE)
-    }
-
-    list(
-      d = sv_d,
-      u = NULL,
-      v = NULL,
-      prec_bits = prec_bits
-    )
+  # Equilibration identical to .ident_equilibrated_rank(), in mpfr.
+  row_scale <- abs(cols1[[1]]); row_noise <- abs(cols1[[1]] - cols2[[1]])
+  for (j in seq_len(n_par)[-1]) {
+    row_scale <- Rmpfr::pmax(row_scale, abs(cols1[[j]]))
+    row_noise <- Rmpfr::pmax(row_noise, abs(cols1[[j]] - cols2[[j]]))
+  }
+  keep <- as.logical(row_scale > 10 * row_noise & row_scale > 0)
+  if (!any(keep)) return(list(ok = TRUE, status = "ok", rank = 0L, tol = 0,
+                              fd_noise = NA_real_, singular_values = rep(0, n_par),
+                              sv_class = rep("Unidentified", n_par), V = diag(n_par)))
+  rs <- row_scale[keep]
+  e1 <- lapply(cols1, function(cl) cl[keep] / rs)
+  e2 <- lapply(cols2, function(cl) cl[keep] / rs)
+  for (j in seq_len(n_par)) {
+    cs <- sqrt(sum(e1[[j]]^2))
+    if (Rmpfr::asNumeric(cs) > 0) { e1[[j]] <- e1[[j]] / cs; e2[[j]] <- e2[[j]] / cs }
+  }
+  s1 <- .d30_jacobi_svd(e1, prec_bits)
+  noise <- .d30_jacobi_svd(Map(`-`, e1, e2), prec_bits)$d[1]
+  sv_max <- s1$d[1]
+  tol_machine <- max(sum(keep), n_par) * sv_max * 2^(-prec_bits)
+  tol <- max(tol_machine, 10 * noise)
+  weak_thr <- max(weak_rel * sv_max, tol)
+  sv_class <- ifelse(s1$d <= tol, "Unidentified",
+              ifelse(s1$d < weak_thr, "Weak", "Identified"))
+  list(ok = TRUE, status = sprintf("performed with Rmpfr at %d bits", prec_bits),
+       rank = sum(s1$d > tol), tol = tol, fd_noise = noise,
+       singular_values = s1$d, sv_class = sv_class,
+       V = matrix(s1$v, n_par, n_par, dimnames = list(names(theta), paste0("sv_", seq_len(n_par)))))
 }
 
 
-#' Compute SVD at arbitrary precision using Julia BigFloat
+#' One-sided (Hestenes) Jacobi SVD in mpfr
 #'
-#' Falls back to Julia via JuliaCall if Rmpfr is not available.
-#' Requires JuliaCall package and a working Julia installation.
-#'
-#' @param model_solve_fn  Function: theta -> moments
-#' @param theta           Parameter vector (double)
-#' @param prec_bits       Julia BigFloat precision in bits
-#' @param eps             Base step size for finite differences
-#' @return SVD result, or NULL on failure
+#' @param cols list of n mpfr column vectors (each length m).
+#' @return list(d = double singular values (length n, decreasing),
+#'   v = double n x n right singular vectors)
 #' @noRd
-.d30_svd_julia <- function(model_solve_fn, theta, prec_bits, eps) {
-  # Initialise Julia if needed
-  if (!JuliaCall::julia_setup(quiet = TRUE)) {
-    JuliaCall::julia_setup(quiet = TRUE)
-  }
-
-    # Set BigFloat precision
-    JuliaCall::julia_command(sprintf("set_bigfloat_precision(%d)", prec_bits),
-                             need_return = FALSE)
-
-    n_par <- length(theta)
-    f0 <- model_solve_fn(theta)
-    n_mom <- length(f0)
-
-    # Build Julia matrix as BigFloat array
-    theta_str <- paste(sprintf("BigFloat(\"%.16e\")", theta), collapse = ", ")
-    JuliaCall::julia_assign("theta_jl", theta)
-
-    # For each column, compute central difference in Julia BigFloat
-    # We'll compute the Jacobian in R double, transfer to Julia, then SVD
-    # at high precision — this is the most robust approach since Julia's
-    # automatic differentiation isn't available here.
-
-    # Compute Jacobian in double
-    J <- .numerical_jacobian(model_solve_fn, theta, eps = eps)
-    # Guard: ensure moment count matches Jacobian rows
-    if (nrow(J) != length(f0)) {
-      warning(sprintf(
-        "d30: moment count (%d) != Jacobian rows (%d). Using generic labels.",
-        length(f0), nrow(J)))
-      f0_names <- paste0("m_", seq_len(nrow(J)))
-    } else {
-      f0_names <- names(f0) %||% paste0("m_", seq_len(nrow(J)))
+.d30_jacobi_svd <- function(cols, prec_bits, max_sweeps = 60L) {
+  n <- length(cols)
+  one <- Rmpfr::mpfr(1, precBits = prec_bits)
+  zero <- Rmpfr::mpfr(0, precBits = prec_bits)
+  V <- lapply(seq_len(n), function(j) { v <- rep(zero, n); v[j] <- one; v })
+  tolj <- Rmpfr::mpfr(2, precBits = prec_bits)^(-(prec_bits - 8L))
+  norm2 <- lapply(cols, function(cl) sum(cl^2))
+  big <- norm2[[1]]
+  for (j in seq_len(n)[-1]) if (as.logical(norm2[[j]] > big)) big <- norm2[[j]]
+  tiny <- big * tolj^2
+  sweep_i <- 0L
+  rotated <- n > 1L
+  while (rotated && sweep_i < max_sweeps) {
+    rotated <- FALSE
+    sweep_i <- sweep_i + 1L
+    for (p in seq_len(n - 1L)) for (q in (p + 1L):n) {
+      alpha <- sum(cols[[p]]^2); beta <- sum(cols[[q]]^2)
+      gamma <- sum(cols[[p]] * cols[[q]])
+      # Columns at or below working precision relative to the largest one
+      # are numerically zero: rotating them only stirs rounding noise.
+      if (as.logical(alpha <= tiny | beta <= tiny)) next
+      if (!as.logical(abs(gamma) > tolj * sqrt(alpha * beta))) next
+      zeta <- (beta - alpha) / (2 * gamma)
+      sgn <- if (as.logical(zeta >= 0)) 1 else -1
+      t <- sgn / (abs(zeta) + sqrt(one + zeta^2))
+      cc <- one / sqrt(one + t^2); ss <- cc * t
+      ap <- cols[[p]]; aq <- cols[[q]]
+      cols[[p]] <- cc * ap - ss * aq; cols[[q]] <- ss * ap + cc * aq
+      vp <- V[[p]]; vq <- V[[q]]
+      V[[p]] <- cc * vp - ss * vq; V[[q]] <- ss * vp + cc * vq
+      rotated <- TRUE
     }
-    colnames(J) <- names(theta)
-    rownames(J) <- f0_names
-
-    # Convert to Julia BigFloat matrix
-    JuliaCall::julia_assign("J_mat", J)
-    JuliaCall::julia_command(
-      sprintf("J_bf = BigFloat.(J_mat); set_bigfloat_precision(%d)", prec_bits),
-      need_return = FALSE
-    )
-
-    # Compute SVD in Julia
-    JuliaCall::julia_command("svd_jl = svd(J_bf)", need_return = FALSE)
-
-    # Extract results
-    sv_d <- JuliaCall::julia_eval("Float64.(svd_jl.S)")
-    sv_u <- JuliaCall::julia_eval("Float64.(svd_jl.U)")
-    sv_v <- JuliaCall::julia_eval("Float64.(svd_jl.V)")
-
-    # Ensure correct dimensions
-    if (is.list(sv_u)) sv_u <- matrix(unlist(sv_u), nrow = n_mom, ncol = n_par)
-    if (is.list(sv_v)) sv_v <- matrix(unlist(sv_v), nrow = n_par, ncol = n_par)
-
-    list(
-      d = as.numeric(sv_d),
-      u = sv_u,
-      v = sv_v,
-      prec_bits = prec_bits
-    )
   }
+  if (rotated) .dynhr_warn("d30: Jacobi SVD did not converge; singular values may be inaccurate.")
+  d <- vapply(cols, function(cl) Rmpfr::asNumeric(sqrt(sum(cl^2))), numeric(1))
+  ord <- order(d, decreasing = TRUE)
+  v <- matrix(vapply(V, Rmpfr::asNumeric, numeric(n)), n, n)
+  list(d = d[ord], v = v[, ord, drop = FALSE])
+}
+
+
+#' D30 singular-value comparison plot
+#' @noRd
+.d30_plot <- function(svc, rk_d, hp, n_par, prec_bits, hp_status) {
+  floor_v <- 1e-300
+  hp_lab <- sprintf("%d-bit (Rmpfr)", prec_bits)
+  df <- data.frame(index = svc$index, value = pmax(svc$double, floor_v),
+                   precision = "double", stringsAsFactors = FALSE)
+  thr <- data.frame(y = rk_d$tol, precision = "double", stringsAsFactors = FALSE)
+  if (!is.null(hp)) {
+    df <- rbind(df, data.frame(index = svc$index, value = pmax(svc$high_prec, floor_v),
+                               precision = hp_lab, stringsAsFactors = FALSE))
+    thr <- rbind(thr, data.frame(y = max(hp$tol, floor_v), precision = hp_lab,
+                                 stringsAsFactors = FALSE))
+  }
+  lv <- c("double", hp_lab)
+  df$precision <- factor(df$precision, levels = lv)
+  thr$precision <- factor(thr$precision, levels = lv)
+  cols <- stats::setNames(unname(tol_vibrant[c("blue", "orange")]), lv)
+  subtitle <- if (is.null(hp)) {
+    sprintf("double rank %d / %d. High-precision check not performed: %s",
+            rk_d$rank, n_par, hp_status)
+  } else {
+    sprintf("rank: double %d / %d, %d-bit %d / %d. Dashed lines = rank tolerance of each precision",
+            rk_d$rank, n_par, prec_bits, hp$rank, n_par)
+  }
+  ggplot2::ggplot(df, ggplot2::aes(x = index, y = value, colour = precision)) +
+    ggplot2::geom_hline(data = thr, ggplot2::aes(yintercept = y, colour = precision),
+                        linetype = "dashed", linewidth = 0.6, show.legend = FALSE) +
+    ggplot2::geom_line(linewidth = 0.4) +
+    ggplot2::geom_point(ggplot2::aes(shape = precision), size = 2.5) +
+    ggplot2::scale_y_log10() +
+    ggplot2::scale_x_continuous(breaks = svc$index) +
+    ggplot2::scale_colour_manual(values = cols, name = "Precision", drop = TRUE) +
+    ggplot2::scale_shape_manual(values = c(16, 17), name = "Precision", drop = TRUE) +
+    theme_dynhr_diagnostic() +
+    ggplot2::labs(
+      title = "D30: identification singular values, double vs high precision",
+      subtitle = paste(strwrap(subtitle, 95), collapse = "\n"),
+      x = "Singular value index (equilibrated Jacobian)",
+      y = "Singular value (log scale)"
+    )
+}

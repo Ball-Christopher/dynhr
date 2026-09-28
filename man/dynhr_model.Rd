@@ -2,6 +2,10 @@
 % Please edit documentation in R/dynhr-model.R
 \name{dynhr_model}
 \alias{dynhr_model}
+\alias{$.dynhr_model}
+\alias{[[.dynhr_model}
+\alias{$<-.dynhr_model}
+\alias{[[<-.dynhr_model}
 \title{Bundle a DSGE model, its data and its estimation settings into one object}
 \usage{
 dynhr_model(
@@ -10,98 +14,133 @@ dynhr_model(
   obs_vars = NULL,
   compiled = NULL,
   prior_spec = NULL,
-  me_variance = 0,
+  me_variance = NULL,
   likelihood = "gaussian",
   params = NULL,
   max_order = 1L,
   verbose = FALSE,
+  mode = mode_spec(),
+  sampler = sampler_spec("rwmh"),
+  compute = compute_spec(verbose = verbose),
+  outputs = outputs_spec(),
+  options = NULL,
   ...
 )
+
+\method{$}{dynhr_model}(x, name)
+
+\method{[[}{dynhr_model}(x, i, ...)
+
+\method{$}{dynhr_model}(x, name) <- value
+
+\method{[[}{dynhr_model}(x, i) <- value
 }
 \arguments{
-\item{model}{A `dynhr_mod` object from \code{\link{parse_mod}}, or a
-path to a `.mod` file (parsed on the spot).}
+\item{model}{A \code{dynhr_mod} object from \code{\link{parse_mod}}, a
+path to a \code{.mod} file (parsed on the spot), or a
+\code{\link{dynhr_estimation_spec}} to hold as it is (then only
+\code{params}, \code{max_order} and \code{verbose} may be given).}
 
 \item{data}{Observation matrix (\eqn{T \times n_{\text{obs}}}) whose
-columns match `obs_vars` -- the same orientation contract as
-\code{\link{make_posterior}}.  Optional: a model object with no data
-still supports \code{\link{dm_solve}} and \code{\link{dm_irf}}.}
+columns match \code{obs_vars}.  Optional: a model object with no data
+still supports \code{\link{dm_solve}} and \code{\link{dm_irf}}; its spec
+is validated once data is added.}
 
 \item{obs_vars}{Character vector of observed variable names.  Defaults
-to the model's `varobs` declaration when it has one.}
+to the model's \code{varobs} declaration when it has one.}
 
-\item{compiled}{A `dynhr_compiled` from \code{\link{compile_model}}.
-When `NULL` (default) the constructor compiles the model itself.}
+\item{compiled}{A \code{dynhr_compiled} from \code{\link{compile_model}}.
+When \code{NULL} (default) the constructor compiles the model itself.}
 
 \item{prior_spec}{Prior spec data.frame from \code{\link{prior_spec}}.
-When `NULL` (default) it is extracted from the model's
-`estimated_params` block if there is one, and left empty otherwise.}
+When \code{NULL} (default) the model's \code{estimated_params} block is
+used (none: \code{dm$prior_spec} is \code{NULL}).}
 
-\item{me_variance}{Measurement-error variance added to the diagonal of the
-observation noise (default 0).}
+\item{me_variance}{Measurement-error variance
+(\code{likelihood$me_variance}). \code{NULL} (default) takes the field's
+default, the \code{me_variance} option (0 unless set).}
 
-\item{likelihood}{Likelihood type, as in \code{\link{make_posterior}}
-(default `"gaussian"`).}
+\item{likelihood}{The likelihood: a type name (default
+\code{"gaussian"}), a \code{\link{likelihood_spec}} or a named list of its
+fields.}
 
 \item{params}{Named numeric vector of parameter values used by
-\code{\link{dm_solve}} and \code{\link{dm_irf}}.  Defaults to the model's
-calibrated `param_values`.}
+\code{\link{dm_solve}} and \code{\link{dm_irf}} at \code{at = "params"}.
+Defaults to the model's calibrated \code{param_values}.}
 
 \item{max_order}{Perturbation order to compile derivatives for
-(default `1L`); ignored when `compiled` is supplied.}
+(default \code{1L}); ignored when \code{compiled} is supplied.}
 
-\item{verbose}{Print parse/compile progress (default `FALSE`).}
+\item{verbose}{Print parse/compile progress (default \code{FALSE}); also
+the default of the spec's \code{compute$verbose}.}
 
-\item{...}{Extra arguments for the likelihood, stored on the object
-and forwarded by \code{\link{dm_posterior}} to
-\code{\link{make_posterior}} (e.g. `order` for
-`likelihood = "cumulant"`).}
+\item{mode, sampler, compute, outputs}{The spec's \code{\link{mode_spec}},
+\code{\link{sampler_spec}} (\code{NULL}: none yet),
+\code{\link{compute_spec}} and \code{\link{outputs_spec}}, or named lists
+of their fields.}
+
+\item{options}{As in \code{\link{dynhr_estimation_spec}}: \code{NULL}
+snapshots the current package options.}
+
+\item{...}{Further likelihood arguments. A name that sets a typed
+likelihood field (e.g. \code{power}, the \code{power_posterior}
+field) is moved to that field; the rest are stored in
+\code{likelihood$extra} and forwarded to the log-posterior constructor
+(e.g. \code{order} for \code{likelihood = "cumulant"}).}
+
+\item{x}{A \code{dynhr_model}.}
+
+\item{name, i}{Field name.}
+
+\item{value}{Value to store in a result slot.}
 }
 \value{
-An object of class `dynhr_model`: a list with elements `model`,
-  `compiled`, `data`, `obs_vars`, `prior_spec`, `me_variance`,
-  `likelihood`, `lik_args`, `params`, and the initially-`NULL` result slots
-  `steady`, `solution`, `log_post`, `mode`, `chains`, `diagnostics`, `irf`
-  and `forecast`.
+An object of class \code{dynhr_model}: a list with \code{spec},
+  \code{params} and the initially-\code{NULL} result slots \code{steady},
+  \code{solution}, \code{order}, \code{solution_at},
+  \code{solution_params}, \code{log_post}, \code{mode}, \code{chains},
+  \code{fit}, \code{diagnostics}, \code{irf}, \code{irf_at},
+  \code{forecast} and \code{forecast_at}.
 }
 \description{
-`dynhr_model()` packages everything a dynhr estimation pipeline needs --
-the parsed model, its compiled derivatives, the observation matrix, the
-observed-variable names, the prior specification, and the likelihood
-settings -- into a single object.  The `dm_*()` verbs
-(\code{\link{dm_solve}}, \code{\link{dm_posterior}}, \code{\link{dm_mode}},
-\code{\link{dm_sample}}, \code{\link{dm_diagnostics}},
-\code{\link{dm_irf}}, \code{\link{dm_forecast}}) each take that object as
-their first argument and return a NEW object with the step's result stored
-in a slot, so a whole pipeline reads as one chain instead of six calls that
-re-thread the same arguments.
+\code{dynhr_model()} builds a pipeline object around a
+\code{\link{dynhr_estimation_spec}}: the parsed and compiled model, the
+data, the observables, the priors, the likelihood and the mode, sampler and
+compute settings. The \code{dm_*()} verbs (\code{\link{dm_solve}},
+\code{\link{dm_posterior}}, \code{\link{dm_mode}}, \code{\link{dm_sample}},
+\code{\link{dm_diagnostics}}, \code{\link{dm_irf}},
+\code{\link{dm_forecast}}) each take the object as their first argument
+and return a NEW object with the step's result stored in a slot, so a
+whole pipeline reads as one chain.
 }
-\details{
-The object is a convenience layer only: each verb forwards the stored
-fields to the corresponding exported function unchanged, and the raw result
-is stored as-is (a \code{DecisionRules*} from
-\code{\link{solve_perturbation}}, a closure from
-\code{\link{make_posterior}}, a \code{\link{dynhr_chains}} from
-\code{\link{mcmc}}, ...).  Results are therefore identical to the
-functional pipeline, bit for bit.
+\section{One source of truth}{
+
+The object is a list of the held spec (\code{dm$spec}), the parameter
+vector \code{dm$params} and the result slots. The fields \code{model},
+\code{compiled}, \code{data}, \code{obs_vars}, \code{prior_spec} (alias
+\code{priors}), \code{me_variance}, \code{likelihood} (the type) and
+\code{lik_args} (\code{likelihood$extra}) are read from the spec by
+\code{$} and \code{[[}; they cannot be assigned. Change them with
+\code{\link{update.dynhr_model}}, which edits the spec and clears every
+stored result that depends on what changed.
+
+The estimation verbs run through the spec runner: \code{\link{dm_posterior}}
+builds its closure with the builder \code{\link{run_estimation}} uses (so a
+\code{.mod} \code{heteroskedastic_shocks}, \code{filter_tunes},
+\code{stochastic_volatility} block or an OBC constraint is applied), and
+\code{\link{dm_mode}} / \code{\link{dm_sample}} run their stage with
+\code{run_estimation()} on the held spec, so their results equal
+\code{run_estimation(dynhr_estimation_spec(dm))}.
+\code{dynhr_estimation_spec(dm)} and \code{as_estimation_spec(dm)} return
+the held spec.
 }
+
 \section{Compilation}{
 
-Compilation is **eager**: unless `compiled` is supplied, the constructor
-calls \code{\link{compile_model}} immediately with `max_order`.  Set
-`max_order = 2L` (or higher) if you intend to call
-\code{dm_solve(order = 2L)} or a higher-order likelihood; the solvers fail
-loudly rather than silently consuming zero tensors when the compiled
-derivatives are too shallow.
-}
-
-\section{Prerequisites}{
-
-No verb runs another verb for you.  Calling \code{\link{dm_mode}} before
-\code{\link{dm_posterior}} is an error naming the missing step.  The one
-documented default is \code{\link{dm_sample}}'s starting point: with no
-`$mode` on the object it starts from the prior means rather than erroring
-(SMC and DIME need no starting point at all).
+Compilation is \emph{eager}: unless \code{compiled} is supplied, the constructor
+calls \code{\link{compile_model}} immediately with \code{max_order}.  Set
+\code{max_order = 2L} (or higher) if you intend to call
+\code{dm_solve(order = 2L)} or a higher-order likelihood.
 }
 
 \examples{
@@ -121,8 +160,9 @@ theta0 <- setNames(dm$prior_spec$mean, dm$prior_spec$name)
 dm$log_post(theta0)$logpost
 }
 \seealso{
-\code{\link{dm_solve}}, \code{\link{dm_posterior}},
-  \code{\link{dm_mode}}, \code{\link{dm_sample}},
-  \code{\link{dm_diagnostics}}, \code{\link{dm_irf}},
-  \code{\link{dm_forecast}}, \code{\link{make_posterior}}
+\code{\link{update.dynhr_model}}, \code{\link{dm_solve}},
+  \code{\link{dm_posterior}}, \code{\link{dm_mode}},
+  \code{\link{dm_sample}}, \code{\link{dm_diagnostics}},
+  \code{\link{dm_irf}}, \code{\link{dm_forecast}},
+  \code{\link{dynhr_estimation_spec}}, \code{\link{run_estimation}}
 }

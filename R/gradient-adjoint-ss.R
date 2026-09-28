@@ -12,7 +12,7 @@
 ## Forward pass:
 ##   - For t <= t_conv: store per-step {s, P, v, Fi, K, A, B} exactly as the
 ##     dense adjoint does.
-##   - Once ||P_new - P|| < ss_tol: lock {P_inf, Fi_inf, K_inf, A_inf, B_inf},
+##   - Once max|P_new - P| < ss_tol * max|P_new|: lock {P_inf, Fi_inf, K_inf, A_inf, B_inf},
 ##     and for t > t_conv store ONLY {s_{t-1}, v_t} (size n+q per step).
 ##
 ## Backward sweep:
@@ -23,7 +23,7 @@
 ##
 ## Storage: O(t_conv * n^2 + T * (n + q))  vs  O(T * n^2) for dense.
 ## Convergence detection mirrors kalman_standard_loop_cpp: t > 1 AND
-##   max(abs(P_new - P)) < ss_tol.
+##   max(abs(P_new - P)) < ss_tol * max(abs(P_new))  (relative).
 ##
 ## State-space convention: identical to gradient-adjoint-kf.R.
 ## --------------------------------------------------------------------------
@@ -38,7 +38,8 @@
 #' @param d_ss_list  list of length n_par; element j has (any of) dTT, dRR,
 #'                   dZZ, dDD, dd, dSigma_e.
 #' @param me_variance scalar measurement-error variance (parameter-independent).
-#' @param ss_tol    convergence threshold for max|P_new - P| (default 1e-12).
+#' @param ss_tol    relative convergence threshold: lock once
+#'   max|P_new - P| < ss_tol * max|P_new| (default 1e-12, the forward filter's).
 #'
 #' @return list(loglik, grad, t_conv, n_T) -- same loglik/grad contract as
 #'   .kf_loglik_adjoint, plus t_conv and n_T for diagnostics.
@@ -139,8 +140,13 @@
       if (me_variance != 0) P_raw <- P_raw + me_variance * tcrossprod(K)
       P_new <- .sym(P_raw)
 
-      ## Convergence check (require t > 1, mirror kalman_standard_loop_cpp)
-      if (t > 1 && max(abs(P_new - P)) < ss_tol) {
+      ## Convergence check: the forward filter's rule EXACTLY (kalman_filter's
+      ## R loop and kalman_standard_loop_cpp) -- t > 1 and the RELATIVE lock
+      ## max|P_{t+1} - P_t| < ss_tol * max|P_{t+1}|. An absolute ss_tol locked
+      ## a small-scale model (P ~1e-8) at t = 2, where the forward filter keeps
+      ## iterating: the gradient was then of a different (early-frozen)
+      ## likelihood than the objective (W76, 2026-09-26).
+      if (t > 1 && max(abs(P_new - P)) < ss_tol * max(abs(P_new))) {
         ss_reached <- TRUE
         t_conv  <- t
         P_inf   <- P_new

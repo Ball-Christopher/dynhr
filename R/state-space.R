@@ -116,6 +116,87 @@ new_dsge_ss <- function(T_mat, R_mat, Z_mat, D_mat, Sigma_e,
 }
 
 
+## ---- Deterministic observation trends (Dynare `observation_trends`) -------
+##
+## Dynare's measurement equation with an observation_trends block is
+##     y_t = ys + trend_coeff * (first_obs + t - 1) + Z s_{t-1} + D eps_t,
+## t = 1..T over the estimation sample (dsge_likelihood.m builds
+## `trend = constant + trend_coeff * (first_obs:first_obs+T-1)` and filters
+## Y - trend; compute_trend_coefficients.m evaluates each slope expression at
+## the current parameters). The trend is therefore a time-varying part of the
+## observation INTERCEPT: every filter/smoother here subtracts it from the data
+## exactly where it subtracts d = ys[obs], and nothing else changes.
+
+#' Observation-trend slopes at a parameter vector
+#'
+#' @param model  Parsed model; its `observation_trends` field (from
+#'   parse_mod) holds `trends` (observable -> slope expression text) and
+#'   `first_obs`.
+#' @param params Named parameter vector the slope expressions are evaluated
+#'   at (`NULL` = the model's calibration).
+#' @param obs_vars Observables, in data-column order.
+#' @return Named numeric slope per observable (0 where none), or NULL when no
+#'   observable in `obs_vars` carries a trend.
+#' @noRd
+.has_obs_trends <- function(model) {
+  ot <- model$observation_trends
+  !is.null(ot) && length(ot$trends) > 0L
+}
+
+#' Abort unless the caller's filter honours observation_trends.
+#'
+#' Only kalman_filter() / the Gaussian posterior and the Kalman smoother
+#' subtract the deterministic trend. Every other likelihood, gradient and
+#' diagnostic builds its own measurement intercept from `dr$ys`, so on a
+#' trended model it would silently score untrended data.
+#' @noRd
+.refuse_obs_trends <- function(model, what) {
+  if (.has_obs_trends(model))
+    .dynhr_abort(
+      what, " does not support observation_trends: only the Gaussian Kalman ",
+      "filter (kalman_filter(), make_log_posterior(likelihood = \"gaussian\")) ",
+      "and the Kalman smoother subtract the deterministic trend. Use the ",
+      "Gaussian likelihood, or detrend the data and drop the block.",
+      class = "dynhr_error_observation_trends_unsupported")
+  invisible(TRUE)
+}
+
+.obs_trend_slopes <- function(model, params, obs_vars) {
+  ot <- model$observation_trends
+  if (is.null(ot) || length(ot$trends) == 0L) return(NULL)
+  hit <- intersect(obs_vars, names(ot$trends))
+  if (length(hit) == 0L) return(NULL)
+  if (is.null(params)) params <- model$param_values
+  env <- .dynhr_param_eval_env(params)
+  slopes <- stats::setNames(numeric(length(obs_vars)), obs_vars)
+  for (nm in hit) {
+    v <- .dynhr_sandbox_eval(ot$trends[[nm]], env,
+                             context = "the observation_trends expression")
+    if (!is.numeric(v) || length(v) != 1L || !is.finite(v))
+      .dynhr_abort(
+        "observation_trends: the trend slope of ", nm, " (`", ot$trends[[nm]],
+        "`) does not evaluate to a finite number at the supplied parameters",
+        if (is.null(v)) " (a parameter it uses has no value)" else "", ".",
+        class = "dynhr_error_observation_trends")
+    slopes[[nm]] <- v
+  }
+  slopes
+}
+
+#' Observation-trend path, n_obs x n_T (column t is period first_obs + t - 1)
+#'
+#' @inheritParams .obs_trend_slopes
+#' @param n_T Number of sample periods (data rows).
+#' @return Numeric matrix, or NULL when there is no trend to subtract.
+#' @noRd
+.obs_trend_path <- function(model, params, obs_vars, n_T) {
+  slopes <- .obs_trend_slopes(model, params, obs_vars)
+  if (is.null(slopes)) return(NULL)
+  first_obs <- model$observation_trends$first_obs %||% 1L
+  outer(slopes, first_obs - 1 + seq_len(n_T))
+}
+
+
 #' Convert a state-space object from current-state to lagged-state timing
 #'
 #' Converts a \code{dsge_ss} object tagged \code{timing = "current"} to

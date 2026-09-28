@@ -92,14 +92,14 @@ ramsey_augment_mod <- function(model,
   }
   if (n_eq < n_endo) {
     if (verbose) {
-      cat(sprintf("  Note: %d equations for %d vars (%d instrument(s)).\n",
+      .dynhr_cat(sprintf("  Note: %d equations for %d vars (%d instrument(s)).\n",
                   n_eq, n_endo, n_endo - n_eq))
     }
   }
 
   if (verbose) {
-    cat(sprintf("[ramsey_augment_mod] Parsing objective: %s\n", obj_text))
-    cat(sprintf("  Endogenous vars: %d, Equations: %d\n", n_endo, n_eq))
+    .dynhr_cat(sprintf("[ramsey_augment_mod] Parsing objective: %s\n", obj_text))
+    .dynhr_cat(sprintf("  Endogenous vars: %d, Equations: %d\n", n_endo, n_eq))
   }
 
   # ---- 2. Parse planner objective ----
@@ -121,18 +121,30 @@ ramsey_augment_mod <- function(model,
   discount_ast     <- disc_info$ast       # AST for beta
   discount_inv_ast <- disc_info$inv_ast   # AST for 1/beta
   if (verbose) {
-    cat(sprintf("[ramsey_augment_mod] Discount: %s\n", disc_info$label))
+    .dynhr_cat(sprintf("[ramsey_augment_mod] Discount: %s\n", disc_info$label))
   }
 
   # ---- 3. Derive FOCs ----
   multiplier_names <- paste0(prefix, "_", seq_len(n_eq))
   foc_equations <- vector("list", n_endo)
 
+  # Substitute `#` model-locals BEFORE differentiating. A local is a
+  # `local_variable` AST leaf, which ast_differentiate() treats as a constant,
+  # so every derivative that passed through one was silently dropped (in the
+  # NK test the x FOC lost its MULT_1 * -kappa term when the Phillips curve
+  # used a local). The planner objective is substituted too, for the same
+  # reason.
+  local_vars <- model$local_variables
+  eq_residuals <- lapply(equations, function(eq)
+    ast_simplify(ast_substitute_locals(equation_to_residual(eq), local_vars)))
+  if (!is.null(obj_ast) && is.list(obj_ast) && !is.null(obj_ast$type))
+    obj_ast <- ast_substitute_locals(obj_ast, local_vars)
+
   for (i in seq_len(n_endo)) {
     var_name <- endo_names[i]
 
     if (verbose) {
-      cat(sprintf("  Deriving FOC for %s ...\n", var_name))
+      .dynhr_cat(sprintf("  Deriving FOC for %s ...\n", var_name))
     }
 
     # --- 3a. Derivative of planner objective w.r.t. y_i (current period) ---
@@ -164,10 +176,10 @@ ramsey_augment_mod <- function(model,
     contributions <- list()
 
     for (j in seq_len(n_eq)) {
-      eq <- equations[[j]]
-      # Get the residual: lhs - rhs (should be 0)
-      eq_residual <- equation_to_residual(eq)
       mult_name <- multiplier_names[j]
+      # Residual lhs - rhs with every `#` model-local substituted (computed
+      # once, before the loop over variables).
+      eq_residual <- eq_residuals[[j]]
 
       # Collect where y_i appears in this equation (check both lhs and rhs)
       # We differentiate the residual w.r.t. y_i at each lead/lag
@@ -249,7 +261,7 @@ ramsey_augment_mod <- function(model,
     foc_equations[[i]] <- foc_expr
 
     if (verbose && ast_is_zero(foc_expr)) {
-      cat(sprintf("    Warning: FOC for %s is identically zero.\n", var_name))
+      .dynhr_cat(sprintf("    Warning: FOC for %s is identically zero.\n", var_name))
     }
   }
 
@@ -341,7 +353,7 @@ ramsey_augment_mod <- function(model,
           label = sprintf("auto-detected value of '%s'", cand)))
       }
     }
-    warning("ramsey_augment_mod: no discount factor found (no 'beta'/'betta' ",
+    .dynhr_warn("ramsey_augment_mod: no discount factor found (no 'beta'/'betta' ",
             "parameter and none supplied via discount=). Using beta = 1 ",
             "(no discounting); commitment FOCs that depend on beta will be ",
             "wrong. Pass discount= explicitly.")
@@ -467,7 +479,7 @@ ramsey_augment_mod <- function(model,
     for (nm in names(param_vals)) {
       val <- param_vals[[nm]]
       if (is.finite(val)) {
-        val_str <- format(val, scientific = FALSE, trim = TRUE)
+        val_str <- .wm_num(val, paste0("parameter ", nm))
         lines <- c(lines, sprintf("%s = %s;", nm, val_str))
       }
     }
@@ -476,16 +488,17 @@ ramsey_augment_mod <- function(model,
     # analytically in steady_state_model rather than calibrated directly.
     ssm <- model$steady_state_model
     if (length(ssm) > 0) {
-      env <- new.env(parent = baseenv())
-      for (nm in names(param_vals)) assign(nm, param_vals[[nm]], envir = env)
+      ## A-SEC: allowlist-sandboxed env + the checked parse cache; an unsafe
+      ## statement aborts (re-raised past the NA fallback), never evaluates.
+      env <- .ssm_eval_env(param_vals)
       for (assignment in ssm) {
-        val <- tryCatch(eval(parse(text = assignment$text), envir = env),
-                        error = function(e) NA)
+        val <- tryCatch(eval(.cached_parse(assignment$text), envir = env),
+                        error = function(e) .dynhr_reraise_unsafe(e, NA))
         if (is.numeric(val) && length(val) == 1 && is.finite(val)) {
           assign(assignment$name, val, envir = env)
           # Emit calibration if not already present in param_vals
           if (!assignment$name %in% names(param_vals)) {
-            val_str <- format(val, scientific = FALSE, trim = TRUE)
+            val_str <- .wm_num(val, paste0("parameter ", assignment$name))
             lines <- c(lines, sprintf("%s = %s; // from steady_state_model",
                                       assignment$name, val_str))
           }
@@ -507,8 +520,8 @@ ramsey_augment_mod <- function(model,
     eq <- model$equations[[j]]
     lhs_ast <- ast_substitute_locals(eq$lhs, local_vars)
     rhs_ast <- ast_substitute_locals(eq$rhs, local_vars)
-    lhs_str <- ast_to_string(lhs_ast)
-    rhs_str <- ast_to_string(rhs_ast)
+    lhs_str <- .wm_expr(lhs_ast)
+    rhs_str <- .wm_expr(rhs_ast)
     # Preserve tags if any
     tag_str <- if (!is.na(eq$tag) && nzchar(eq$tag)) {
       sprintf(" [name='%s']", eq$tag)
@@ -529,7 +542,7 @@ ramsey_augment_mod <- function(model,
       next
     }
     foc <- ast_substitute_locals(foc, local_vars)
-    foc_str <- ast_to_string(foc)
+    foc_str <- .wm_expr(foc)
     lines <- c(lines, sprintf("  %s = 0; // FOC for %s", foc_str, endo_names[i]))
   }
 
@@ -548,7 +561,7 @@ ramsey_augment_mod <- function(model,
       val <- model$initval[[nm]]
       if (is.finite(val)) {
         lines <- c(lines, sprintf("  %s = %s;", nm,
-                                  format(val, scientific = FALSE, trim = TRUE)))
+                                  .wm_num(val, paste0("initval ", nm))))
       }
     }
     # Add initial guesses for multipliers (small positive)
@@ -564,23 +577,50 @@ ramsey_augment_mod <- function(model,
   has_shocks <- nrow(shocks$variances) > 0 || nrow(shocks$correlations) > 0
   if (has_shocks) {
     lines <- c(lines, "shocks;")
+    # Every number goes through the 17-digit round-trip formatter .wm_num()
+    # (format()'s default 7 significant digits silently rounded parameters,
+    # variances and equation constants). A shock is written in the form it
+    # was declared in -- `var e = v;` for a variance, `var e; stderr s;` for
+    # a standard deviation -- so the re-parsed value is bit-identical rather
+    # than a squared-then-rooted approximation.
     if (nrow(shocks$variances) > 0) {
       for (k in seq_len(nrow(shocks$variances))) {
         row <- shocks$variances[k, ]
-        if (!is.na(row$stderr) && is.finite(row$stderr)) {
+        by_variance <- is.null(row$stderr_expr) || is.na(row$stderr_expr)
+        by_variance <- by_variance && !is.null(row$variance_expr) &&
+          !is.na(row$variance_expr)
+        if (by_variance && !is.na(row$variance) && is.finite(row$variance)) {
           lines <- c(lines, sprintf("  var %s = %s;", row$name,
-                                    format(row$stderr^2, scientific = FALSE, trim = TRUE)))
+                                    .wm_num(row$variance, paste0("var ", row$name))))
+        } else if (!is.na(row$stderr) && is.finite(row$stderr)) {
+          lines <- c(lines, sprintf("  var %s; stderr %s;", row$name,
+                                    .wm_num(row$stderr, paste0("stderr ", row$name))))
         } else if (!is.na(row$variance) && is.finite(row$variance)) {
           lines <- c(lines, sprintf("  var %s = %s;", row$name,
-                                    format(row$variance, scientific = FALSE, trim = TRUE)))
+                                    .wm_num(row$variance, paste0("var ", row$name))))
+        }
+        if (!is.null(row$skew) && !is.na(row$skew) && row$skew != 0) {
+          lines <- c(lines, sprintf("  skew %s = %s;", row$name,
+                                    .wm_num(row$skew, paste0("skew ", row$name))))
         }
       }
     }
     if (nrow(shocks$correlations) > 0) {
+      # A covariance statement (`var u, v = c;`) is stored with corr = NA and
+      # the value in `cov`; writing it as `corr u, v = NA;` dropped it.
       for (k in seq_len(nrow(shocks$correlations))) {
         row <- shocks$correlations[k, ]
-        lines <- c(lines, sprintf("  corr %s, %s = %s;", row$var1, row$var2,
-                                  format(row$corr, scientific = FALSE, trim = TRUE)))
+        lbl <- paste0("(", row$var1, ", ", row$var2, ")")
+        if (!is.na(row$corr)) {
+          lines <- c(lines, sprintf("  corr %s, %s = %s;", row$var1, row$var2,
+                                    .wm_num(row$corr, paste0("corr ", lbl))))
+        } else if (!is.null(row$cov) && !is.na(row$cov)) {
+          lines <- c(lines, sprintf("  var %s, %s = %s;", row$var1, row$var2,
+                                    .wm_num(row$cov, paste0("covariance ", lbl))))
+        } else {
+          stop("ramsey_augment_mod: shock pair ", lbl, " has neither a ",
+               "correlation nor a covariance value to write.", call. = FALSE)
+        }
       }
     }
     lines <- c(lines, "end;")

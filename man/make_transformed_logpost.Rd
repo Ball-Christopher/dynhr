@@ -12,15 +12,17 @@ list(logpost = ..., loglik = ..., logprior = ..., ...)}
 
 \item{tr}{A "dynhr_param_transform" (from build_param_transform())}
 
-\item{include_jacobian}{Logical; if TRUE (default) add `tr$log_jacobian(eta)`
+\item{include_jacobian}{Logical; if TRUE (default) add \code{tr$log_jacobian(eta)}
 to the returned logpost (the change-of-variables correction needed when
 sampling eta with a target proportional to p(theta) * |d theta/d eta|).}
 }
 \value{
 function(eta) -> same shape as log_post_fn's return value (scalar
-  or list), with `logpost` (and the bare scalar) adjusted by the Jacobian.
+  or list), with \code{logpost} (and the bare scalar) adjusted by the Jacobian.
   If the underlying logpost is -Inf, -Inf is returned unchanged (no
-  Jacobian added).
+  Jacobian added). \code{eta} is read by name in any order; an unnamed
+  \code{eta} is taken in \code{tr$par_names} order, and a wrong-length or
+  mis-named one is an error of class \code{dynhr_error_theta_names}.
 }
 \description{
 Wrap a theta-space log-posterior as an eta-space (unconstrained) function

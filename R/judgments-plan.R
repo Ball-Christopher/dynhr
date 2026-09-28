@@ -157,7 +157,7 @@ plan_condition <- function(var, horizons, values,
   ## Warn when type = "anticipated" is combined with method = "soft"
   ## (type is ignored by .soft_forecast; L5 landmine)
   if (method == "soft" && type == "anticipated")
-    warning(
+    .dynhr_warn(
       "plan_condition: type = \"anticipated\" is ignored when method = \"soft\". ",
       "The soft-conditioning engine (.soft_forecast) always uses a forward-KF ",
       "unanticipated path regardless of type.",
@@ -554,7 +554,7 @@ plan_to_filter_tunes <- function(plan, sample_start = NULL) {
                         function(s) .date_to_period(s, sample_start),
                         integer(1L))
     }
-    tune(e$var, periods, e$values, stderr = e$stderr)
+    filter_tune(e$var, periods, e$values, stderr = e$stderr)
   })
 
   do.call(filter_tunes, entries)

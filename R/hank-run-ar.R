@@ -286,7 +286,7 @@ hank_ar_target <- function(data, obs_vars, model = NULL, model_fn = NULL,
       hank_loglik_ar(data, Theta_list, rho = p$rho, sigma = p$sigma,
                      me_variance = me_variance, q = q, check_boundary = FALSE,
                      cache = ar_cache),
-      error = function(e) -Inf)
+      error = function(e) .dynhr_reraise_bug(e, -Inf))
     if (!is.finite(loglik))
       return(list(logpost = -Inf, loglik = loglik, logprior = logprior))
     list(logpost = loglik + logprior, loglik = loglik, logprior = logprior)
@@ -328,7 +328,7 @@ hank_ar_target <- function(data, obs_vars, model = NULL, model_fn = NULL,
                           check_boundary = FALSE,
                           cache = ar_cache, wrt = wrt, theta_fn = theta_fn,
                           rho_method = rho_method, dtheta_fn = dtheta_rho),
-      error = function(e) NULL)
+      error = function(e) .dynhr_reraise_bug(e, NULL))
     if (is.null(sc) || !is.finite(sc$loglik))
       return(list(logpost = -Inf,
                   loglik = if (is.null(sc)) NA_real_ else sc$loglik,
@@ -501,7 +501,7 @@ hank_run_estimation <- function(mode_result, method = c("RWMH", "NUTS"),
   if (!inherits(mode_result, "hank_ar_mode"))
     stop("hank_run_estimation: `mode_result` must come from ",
          "hank_run_mode_finding().")
-  if (!is.null(seed)) set.seed(seed)
+  .local_seed(seed)  # caller's RNG stream restored on exit (C1)
   target <- mode_result$target
   theta0 <- mode_result$theta_mode
   transform <- if (isTRUE(transform_params))

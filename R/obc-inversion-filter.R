@@ -13,8 +13,12 @@
 
 #' Cuba-Borda et al. (2019) inversion-filter log-likelihood for OBC models
 #'
-#' Given a regime path (from the existing OccBin guess-and-verify machinery),
-#' inverts the observation equation each period to recover the shock:
+#' Given a regime path (e.g. from obc_guess_verify()), inverts the
+#' observation equation each period to recover the shock, with the
+#' piecewise-linear rule of period t (the PKF's time-varying rules when
+#' \code{regime_cache} holds them for this path, otherwise the rules of
+#' perfect foresight of the path; before 0.9.3.93 the one-period policy of
+#' each regime):
 #'
 #'   eps_t = DD_{r_t}^{-1} (y_t - ZZ_{r_t} s_{t-1} - d_{r_t})
 #'
@@ -34,8 +38,8 @@
 #'
 #' @param Y             n_obs x T observation matrix (n_obs must equal n_exo)
 #' @param dr_slack      Slack-regime DecisionRules (from solve_perturbation)
-#' @param regime_cache  R environment of per-regime policies built by
-#'                      obc_ensure_policy() / obc_guess_verify()
+#' @param regime_cache  R environment seeded by obc_ensure_policy() (as
+#'                      returned by obc_guess_verify())
 #' @param model         dynhr_mod
 #' @param params        Named numeric parameter vector
 #' @param obs_vars      Character vector of observed variable names
@@ -88,8 +92,14 @@ kalman_filter_obc_inversion <- function(Y, dr_slack, regime_cache,
   ## Observable steady-state means
   d <- dr_slack$ys[obs_vars]
 
-  ## Pre-fetch slack policy (regime 0)
-  pol_s <- get("0", envir = regime_cache, inherits = FALSE)  # noqa: unused var kept for clarity
+  ## Per-period rules along the regime path (W49, 0.9.3.93): the PKF's
+  ## time-varying rules when regime_cache holds those of a
+  ## kalman_filter_obc_pkf() run with this path, otherwise the rules of
+  ## perfect foresight of the path (R/obc-filter.R .obc_path_rules()).
+  ## Before W49 every binding period used the one-period policy of
+  ## obc_ensure_policy() (next period slack).
+  rules <- .obc_path_rules(regime_cache, regime_path)
+  pk    <- .obc_pkf_prep(NULL, dr_slack, obs_idx, Sigma_e, 0, 1L)
 
   ## ---- Main loop -----------------------------------------------------------
   s        <- numeric(n_state)   # initial state = zero (deviation form)
@@ -98,17 +108,14 @@ kalman_filter_obc_inversion <- function(Y, dr_slack, regime_cache,
   shocks   <- matrix(0, n_exo, n_T)
 
   for (t in seq_len(n_T)) {
-    regime_idx <- regime_path[t]
-    key        <- as.character(regime_idx)
-
-    pol <- get(key, envir = regime_cache, inherits = FALSE)
+    pol <- .obc_pkf_mats(pk, rules[[t]])
 
     ZZ      <- pol$ZZ      # n_obs x n_state
     DD      <- pol$DD      # n_obs x n_exo  (must be square)
     TT      <- pol$TT      # n_state x n_state
     RR      <- pol$RR      # n_state x n_exo
-    c_state <- pol$c_state # n_state constant
-    d_eff   <- d + pol$c_obs
+    c_state <- pol$cs      # n_state constant
+    d_eff   <- d + pol$co
 
     ## Invert: eps_t = DD^{-1} (y_t - ZZ s_{t-1} - d_eff)
     rhs <- Y[, t] - drop(ZZ %*% s) - d_eff

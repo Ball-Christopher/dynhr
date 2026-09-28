@@ -64,12 +64,14 @@ format_executive_summary <- function(suite,
          disp_id      = m$disp_id,
          group        = m$group,
          importance   = m$importance,
-         action       = m$action,
+         ## An ERROR item never ran, so its FAIL-fixing action does not apply.
+         action       = .diag_action_for(nm, badge),
          short_summary = .diag_truncate(r$summary %||% "", 120L))
   })
 
   # ---- Global counts -------------------------------------------------------
   n_pass <- sum(vapply(items, function(x) x$badge == "PASS",  logical(1)))
+  n_warn <- sum(vapply(items, function(x) x$badge == "WARN",  logical(1)))
   n_fail <- sum(vapply(items, function(x) x$badge == "FAIL",  logical(1)))
   n_err  <- sum(vapply(items, function(x) x$badge == "ERROR", logical(1)))
   n_info <- sum(vapply(items, function(x) x$badge == "INFO",  logical(1)))
@@ -82,57 +84,56 @@ format_executive_summary <- function(suite,
   sc <- lapply(names(group_labels), function(g) {
     gi <- Filter(function(x) x$group == g, items)
     gp <- sum(vapply(gi, function(x) x$badge == "PASS",              logical(1)))
+    gw <- sum(vapply(gi, function(x) x$badge == "WARN",              logical(1)))
     gf <- sum(vapply(gi, function(x) x$badge %in% c("FAIL", "ERROR"), logical(1)))
     list(g        = g,
          label    = group_labels[[g]],
          pass     = gp,
-         testable = gp + gf,
+         testable = gp + gw + gf,
+         n_warn   = gw,
          n_fail   = gf)
   })
   names(sc) <- names(group_labels)
 
-  # ---- Verdict: FAIL if A/B fail, WARN if C/D fail, else PASS --------------
+  # ---- Verdict: FAIL if A/B fail, WARN if anything soft-fails, else PASS ---
+  # A WARN never escalates to the FAIL verdict, in any group: the level exists
+  # precisely to say "look at this" without blocking a pipeline.
   ab_fails <- sum(vapply(
     Filter(function(x) x$group %in% c("A", "B"), items),
     function(x) x$badge %in% c("FAIL", "ERROR"), logical(1)))
-  verdict <- if (ab_fails > 0L || n_err > 0L) "FAIL"
-             else if (n_fail > 0L)             "WARN"
+  verdict <- if (ab_fails > 0L || n_err > 0L)  "FAIL"
+             else if (n_fail > 0L || n_warn > 0L) "WARN"
              else                              "PASS"
 
-  # ---- Sort fails by group order then importance ---------------------------
-  group_rank <- c(A = 1L, B = 2L, C = 3L, D = 4L, "?" = 5L)
-  fails <- Filter(function(x) x$badge %in% c("FAIL", "ERROR"), items)
-  if (length(fails) > 0L) {
-    ord <- order(
-      vapply(fails, function(x) group_rank[[x$group]] %||% 5L, integer(1)),
-      vapply(fails, function(x) x$importance,                   integer(1))
-    )
-    fails <- fails[ord]
+  # ---- Report order: severity, then group, then importance, then name ------
+  # One rule for the whole report (.diag_order() in R/diag-result.R); this is
+  # the same key applied to the already-badged `items` records, so the front
+  # page and the rendered detail sections cannot disagree about what matters.
+  .sort_items <- function(v) {
+    if (length(v) == 0L) return(v)
+    br <- unname(.BADGE_RANK[vapply(v, function(x) x$badge, character(1))])
+    br[is.na(br)] <- 6L
+    v[order(br,
+            vapply(v, function(x) .group_rank(x$group),   integer(1)),
+            vapply(v, function(x) as.integer(x$importance), integer(1)),
+            vapply(v, function(x) x$nm,                    character(1)))]
   }
+
+  fails <- .sort_items(Filter(function(x) x$badge %in% c("FAIL", "ERROR"), items))
 
   critical        <- head(fails, n_critical)
   remaining_fails <- if (length(fails) > n_critical) tail(fails, length(fails) - n_critical) else list()
 
-  # INFO items at high importance (rank <= 4 within group)
-  infos <- Filter(function(x) x$badge == "INFO" && x$importance <= 4L, items)
-  # Sort infos by group then importance too
-  if (length(infos) > 0L) {
-    io <- order(
-      vapply(infos, function(x) group_rank[[x$group]] %||% 5L, integer(1)),
-      vapply(infos, function(x) x$importance,                   integer(1))
-    )
-    infos <- infos[io]
-  }
+  # WARN items: every one of them is a watch-list item (that is what the level
+  # means), ahead of the high-importance INFOs.
+  warns <- .sort_items(Filter(function(x) x$badge == "WARN", items))
 
-  watch  <- head(c(remaining_fails, infos), n_watch)
-  passes <- Filter(function(x) x$badge == "PASS", items)
-  if (length(passes) > 0L) {
-    po <- order(
-      vapply(passes, function(x) group_rank[[x$group]] %||% 5L, integer(1)),
-      vapply(passes, function(x) x$importance,                   integer(1))
-    )
-    passes <- passes[po]
-  }
+  # INFO items at high importance (rank <= 4 within group)
+  infos <- .sort_items(
+    Filter(function(x) x$badge == "INFO" && x$importance <= 4L, items))
+
+  watch  <- head(c(remaining_fails, warns, infos), n_watch)
+  passes <- .sort_items(Filter(function(x) x$badge == "PASS", items))
 
   # ---- Assemble lines ------------------------------------------------------
   lines <- character(0L)
@@ -153,15 +154,15 @@ format_executive_summary <- function(suite,
     WARN = "!! WARN !!",
     PASS = "   PASS   ")
   add(sprintf("OVERALL VERDICT: %s", verdict_line))
-  add(sprintf("  %d PASS  |  %d FAIL  |  %d ERROR  |  %d INFO  (%d diagnostics total)",
-              n_pass, n_fail, n_err, n_info, length(items)))
+  add(sprintf("  %d PASS  |  %d WARN  |  %d FAIL  |  %d ERROR  |  %d INFO  (%d diagnostics total)",
+              n_pass, n_warn, n_fail, n_err, n_info, length(items)))
   add("")
 
-  add("GROUP SCORECARD   (PASS / testable; INFO excluded from denominator)")
+  add("GROUP SCORECARD   (PASS / testable; INFO excluded, WARN in denominator)")
   add("")
   for (s in sc) {
     status_label <- if (s$n_fail > 0L) "[FAIL]"
-                    else if (s$pass < s$testable) "[WARNING]"
+                    else if (s$pass < s$testable) "[WARN]"
                     else "[PASS]"
     add(sprintf("  %s  %-36s  %d / %d  %s",
                 s$g, s$label, s$pass, s$testable, status_label))
@@ -170,11 +171,27 @@ format_executive_summary <- function(suite,
   # One-line verdict rationale
   add("")
   if (verdict == "FAIL") {
-    worst_g <- if (sc[["A"]]$n_fail > 0L) "A" else "B"
-    add(sprintf("  Verdict rule: FAIL because Group %s has %d failure(s) (pipeline blocker).",
-                worst_g, sc[[worst_g]]$n_fail))
+    ## The FAIL verdict has TWO causes (see the `verdict <-` branch above):
+    ## a group-A/B failure, OR an error anywhere in the suite. Hard-coding
+    ## "Group A else Group B" reported "Group B has 0 failure(s)" whenever the
+    ## blocker was an ERROR in group C or D -- naming a group with no failures
+    ## as the blocker.
+    if (ab_fails > 0L) {
+      worst_g <- if (sc[["A"]]$n_fail > 0L) "A" else "B"
+      add(sprintf(paste0("  Verdict rule: FAIL because Group %s has %d ",
+                         "failure(s) (pipeline blocker)."),
+                  worst_g, sc[[worst_g]]$n_fail))
+    } else {
+      err_nms <- vapply(Filter(function(x) x$badge == "ERROR", items),
+                        function(x) x$nm, character(1))
+      add(sprintf(paste0("  Verdict rule: FAIL because %d diagnostic(s) ",
+                         "errored (%s); no Group A/B failures."),
+                  n_err, paste(err_nms, collapse = ", ")))
+    }
   } else if (verdict == "WARN") {
-    add("  Verdict rule: WARN because C/D diagnostics have failures (no group-A/B blockers).")
+    add(sprintf(paste0("  Verdict rule: WARN because %d C/D failure(s) and %d ",
+                       "soft failure(s) were found (no group-A/B blockers)."),
+                n_fail, n_warn))
   } else {
     add("  Verdict rule: PASS -- no failures in any group.")
   }
@@ -203,7 +220,7 @@ format_executive_summary <- function(suite,
   }
 
   sep()
-  add("WATCH LIST   (remaining FAILs + high-importance INFOs)")
+  add("WATCH LIST   (remaining FAILs + WARNs + high-importance INFOs)")
   sep()
   add("")
   if (length(watch) == 0L) {
@@ -298,6 +315,6 @@ write_executive_summary <- function(suite,
                                      unicode    = FALSE,
                                      ...)
   writeLines(lines, file)
-  message("[dynhr] Executive summary written to ", file)
+  .dynhr_inform("[dynhr] Executive summary written to ", file)
   invisible(file)
 }

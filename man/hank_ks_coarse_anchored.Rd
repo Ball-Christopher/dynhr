@@ -37,7 +37,7 @@ When a posterior draw moves HOUSEHOLD parameters (not just \code{rho_z},
 coarse GE directly at the wedged discount factor -- i.e.
 \code{hank_ks_steady(a_grid_coarse, ..., beta = beta_draw * exp(lx_ref))}
 -- and feed that to \code{\link{hank_reiter_linearize}}. Verified
-2026-07-08 (\code{.claude/orchestration/truncation/m5_reanchor.R}, 3x3
+2026-07-08 (3x3
 grid, beta +-0.005 x EIS +-25\%, n_a = 24 vs fine n_a = 500): \code{lx} is
 essentially INVARIANT in beta (drift < 1e-6 over +-0.005, so the frozen
 wedge is SS-exact in the beta direction) and mildly linear in EIS

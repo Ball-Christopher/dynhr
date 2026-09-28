@@ -1,236 +1,399 @@
 ## R/diag-pre-d39-stability-map.R
 ## --------------------------------------------------------------------------
-## D39: BK-feasibility / determinacy stability mapping (Ratto 2008 GSA;
-##      Monte-Carlo filtering).
+## D39: Blanchard-Kahn stability mapping.
 ##
-## Diagnosis for models where only a fraction of the prior space satisfies
-## Blanchard-Kahn conditions, by mapping which parameters drive infeasibility.
+##   * prior mode (default): Ratto (2008) Monte-Carlo filtering -- classify
+##     prior draws and rank parameters by the KS distance between the
+##     determinate and non-determinate draws.
+##   * grid mode (`grid = list(px = ..., py = ...)`): classify every point of a
+##     2-D parameter grid (all other parameters held at `params`) and draw a
+##     tile map of the stability regions with the calibration point marked.
+##
+## Every point is RE-SOLVED (steady state + system matrices + QZ) at its own
+## parameter vector and assigned exactly one of the classes in
+## .d39_classes(); solver failure, missing steady state, indeterminacy and
+## explosiveness are never merged.
+##
+## Standalone by design: run_all_diagnostics() does not call D39 (it needs
+## only a model + parameter vector; see ?run_diagnostics "Coverage").
 ## --------------------------------------------------------------------------
 
-#' D39. BK-feasibility stability mapping (Ratto 2008 / Monte-Carlo filtering)
+#' D39. Blanchard-Kahn stability map (Ratto 2008 / Monte-Carlo filtering)
 #'
-#' Samples \code{n_draws} parameter vectors from the joint prior and
-#' classifies each as BK-feasible or infeasible by attempting to solve
-#' the model's steady state and first-order perturbation. A two-sample
-#' Kolmogorov-Smirnov test (comparing each parameter's marginal distribution
-#' across feasible vs infeasible draws) ranks parameters by how strongly they
-#' drive infeasibility.
+#' Classifies parameter vectors by the Blanchard-Kahn (BK) properties of the
+#' first-order solution, re-solving the steady state and the linearised system
+#' at every point. Each point gets exactly one status:
+#' \describe{
+#'   \item{\code{determinate}}{unique stable solution (BK satisfied).}
+#'   \item{\code{indeterminate}}{fewer explosive roots than forward-looking
+#'     variables (multiple stable solutions).}
+#'   \item{\code{explosive}}{more explosive roots than forward-looking
+#'     variables (no stable solution).}
+#'   \item{\code{unit_root}}{a finite generalised eigenvalue lies on the unit
+#'     circle, \eqn{||\lambda| - 1| \le} \code{unit_tol}: the point is on
+#'     (numerically) the determinacy boundary, where the root count is
+#'     ambiguous. Models with a structural unit root are \code{unit_root}
+#'     everywhere.}
+#'   \item{\code{invalid_rule}}{the root count matches, but the solver's
+#'     decision rule is not a valid unique solution: either its realised state
+#'     transition is explosive (the solver's post-solve guard rejected it), or
+#'     the QZ block \eqn{Z_{11}} is singular -- the BK \emph{rank} condition
+#'     fails (e.g. an explosive root belongs to a predetermined variable while
+#'     a jump variable has a stable root), which since 0.9.4
+#'     \code{solve_perturbation()} reports as \code{bk_satisfied = FALSE}
+#'     with \code{bk_rank_deficient = TRUE} (it used to report
+#'     \code{bk_satisfied = TRUE}).}
+#'   \item{\code{no_steady_state}}{the steady-state solver did not converge.}
+#'   \item{\code{solver_error}}{the steady-state or perturbation solver
+#'     raised an error (message kept in \code{$errors}).}
+#' }
+#' Forward-looking variables are counted as in \code{solve_perturbation()}:
+#' forward-only plus mixed variables, less mixed variables declared
+#' predetermined.
 #'
-#' This is the Ratto (2008) Monte-Carlo filtering / GSA approach applied to
-#' the Blanchard-Kahn determinacy condition. A large KS statistic for a
-#' parameter means its value strongly separates the feasible and infeasible
-#' regions: the prior for that parameter is poorly positioned relative to the
-#' determinacy boundary.
+#' \strong{Prior mode} (\code{grid = NULL}): samples \code{n_draws} vectors from
+#' the prior (the same sampler SMC uses, so draws match the density
+#' \code{log_prior} scores) and ranks parameters by the two-sample
+#' Kolmogorov-Smirnov statistic between determinate and all other draws
+#' (\code{$drivers}), and between determinate draws and each failing class
+#' separately (\code{$drivers_by_class}). A large KS statistic means the
+#' parameter's value strongly separates the regions (Ratto 2008).
+#'
+#' \strong{Grid mode} (\code{grid} a named list of two numeric vectors):
+#' classifies the Cartesian grid, the FIRST element on the x axis and the
+#' SECOND on the y axis, with every other parameter at \code{params}. Returns
+#' the grid table and a tile map (\code{$plots$map}) with the calibration point
+#' (\code{params} at the two grid parameters) marked.
 #'
 #' @param model      Parsed model object (from \code{parse_mod()}).
 #' @param compiled   Compiled model (from \code{compile_model()}). If
 #'                   \code{NULL}, compiled internally.
-#' @param prior_spec \code{data.frame} with columns \code{name},
-#'                   \code{distribution}, \code{p1}, \code{p2},
-#'                   \code{lower}, \code{upper} (as returned by
-#'                   \code{extract_prior_spec()}). If \code{NULL}, extracted
+#' @param prior_spec Prior-mode only: \code{data.frame} as returned by
+#'                   \code{extract_prior_spec()}. If \code{NULL}, extracted
 #'                   from \code{model}.
-#' @param n_draws    Number of prior draws (default \code{2000L}).
+#' @param n_draws    Prior-mode only: number of prior draws (default
+#'                   \code{2000L}).
+#' @param grid       \code{NULL} (prior mode) or a named list of two finite
+#'                   numeric vectors, \code{list(x_param = ..., y_param = ...)}.
+#' @param params     Named base parameter vector (default
+#'                   \code{model$param_values}); parameters not being varied
+#'                   are held here, and in grid mode it is the calibration
+#'                   point marked on the map.
+#' @param unit_tol   Unit-circle tolerance for the \code{unit_root} class
+#'                   (default \code{1e-6}, the solver's QZ threshold).
 #' @param seed       Optional integer random seed.
-#' @param verbose    Logical; print progress (default \code{FALSE}).
+#' @param verbose    Logical; report progress (default \code{FALSE}).
 #' @param ...        Passed to \code{compile_model()} if compiling internally.
 #'
-#' @return A list with elements:
+#' @return A \code{dynhr_stability_map} list with elements:
 #' \describe{
-#'   \item{\code{feasible_fraction}}{Scalar in \eqn{[0,1]}: fraction of draws
-#'     that are BK-feasible.}
-#'   \item{\code{drivers}}{data.frame sorted by \code{ks_stat} (descending):
-#'     \code{param}, \code{ks_stat}, \code{p_value}, \code{feasible_lo},
-#'     \code{feasible_hi}.}
-#'   \item{\code{n_feasible}}{Integer count of feasible draws.}
-#'   \item{\code{n_total}}{Integer count of attempted draws (= \code{n_draws}).}
+#'   \item{\code{mode}}{\code{"prior"} or \code{"grid"}.}
+#'   \item{\code{status}}{factor (levels as above), one per draw / grid point.}
+#'   \item{\code{class_counts}}{named integer counts of every class.}
+#'   \item{\code{feasible_fraction}}{fraction of points that are
+#'     \code{determinate}.}
+#'   \item{\code{n_feasible}, \code{n_total}}{determinate / total counts.}
+#'   \item{\code{errors}}{character vector of solver-error messages
+#'     (one per \code{solver_error} point).}
+#'   \item{\code{drivers}}{prior mode: data.frame sorted by \code{ks_stat}
+#'     (descending): \code{param}, \code{ks_stat}, \code{p_value},
+#'     \code{feasible_lo}, \code{feasible_hi}; \code{NULL} in grid mode.}
+#'   \item{\code{drivers_by_class}}{prior mode: named list of such tables,
+#'     determinate vs each failing class with >= 2 draws.}
+#'   \item{\code{draws}}{prior mode: \code{n_draws x n_par} matrix of draws.}
+#'   \item{\code{grid}}{grid mode: data.frame with \code{x}, \code{y},
+#'     \code{status}, \code{n_unstable}, \code{n_forward}.}
+#'   \item{\code{axes}}{grid mode: \code{c(x = , y = )} parameter names.}
+#'   \item{\code{calibration}}{grid mode: the marked point (named, x then y).}
+#'   \item{\code{plots}}{grid mode: \code{list(map = <ggplot>)}; else empty.}
 #' }
 #'
 #' @references
 #'   Ratto, M. (2008). Analysing DSGE models with global sensitivity analysis.
 #'   \emph{Computational Economics}, 31(2), 115--139.
 #'
-#'   Saltelli, A., Ratto, M., Andres, T., Campolongo, F., Cariboni, J.,
-#'   Gatelli, D., Saisana, M., & Tarantola, S. (2008).
-#'   \emph{Global Sensitivity Analysis: The Primer}. John Wiley & Sons.
+#'   Blanchard, O. J. and Kahn, C. M. (1980). The solution of linear difference
+#'   models under rational expectations. \emph{Econometrica}, 48(5),
+#'   1305--1311.
 #'
 #' @export
 diag_stability_map <- function(model,
                                compiled   = NULL,
                                prior_spec = NULL,
                                n_draws    = 2000L,
+                               grid       = NULL,
+                               params     = NULL,
+                               unit_tol   = 1e-6,
                                seed       = NULL,
                                verbose    = FALSE,
                                ...) {
 
   if (!is.null(seed)) set.seed(seed)
 
-  ## -- Prior spec ----------------------------------------------------------
+  base_params <- if (is.null(params)) model$param_values else params
+  if (is.null(base_params)) base_params <- numeric(0)
+  if (length(base_params) > 0L && is.null(names(base_params)))
+    .dynhr_abort("diag_stability_map: `params` must be a named numeric vector.")
+
+  if (!is.null(grid)) .d39_check_grid(grid)
+
+  if (is.null(compiled)) {
+    if (verbose) .dynhr_inform("diag_stability_map: compiling model ...")
+    compiled <- compile_model(model, verbose = FALSE, max_order = 1L, ...)
+  }
+  n_fwd <- .d39_n_forward(model)
+
+  if (!is.null(grid)) {
+    return(.d39_run_grid(model, compiled, grid, base_params, n_fwd,
+                         unit_tol, verbose))
+  }
+
+  ## ---------------------------- prior mode --------------------------------
   if (is.null(prior_spec)) {
     prior_spec <- extract_prior_spec(model, verbose = FALSE)
   }
   if (is.null(prior_spec) || nrow(prior_spec) == 0L) {
-    stop("diag_stability_map: no prior_spec available. ",
-         "Supply prior_spec= or ensure model has an estimated_params block.")
+    .dynhr_abort("diag_stability_map: no prior_spec available. ",
+                 "Supply prior_spec= or ensure model has an estimated_params block.")
   }
   param_names <- prior_spec$name
   n_par       <- length(param_names)
+  n_draws     <- as.integer(n_draws)
+  if (length(n_draws) != 1L || is.na(n_draws) || n_draws < 1L)
+    .dynhr_abort("diag_stability_map: `n_draws` must be a positive integer.")
 
-  ## -- Compiled model ------------------------------------------------------
-  if (is.null(compiled)) {
-    if (verbose) message("diag_stability_map: compiling model ...")
-    compiled <- compile_model(model, verbose = FALSE, max_order = 1L, ...)
-  }
+  ## Shared SMC prior sampler: uniform support via .uniform_ab() (Dynare mean/sd or p3/p4 bounds);
+  ## draws inv_gamma as IG1, i.e. the distribution log_prior() scores.
+  prior_draw_fn <- .smc_make_prior_sampler(prior_spec)
 
-  ## -- Base parameter vector (calibrated values) ---------------------------
-  base_params <- model$param_values
-  if (is.null(base_params)) base_params <- numeric(0)
+  draw_mat <- matrix(NA_real_, nrow = n_draws, ncol = n_par,
+                     dimnames = list(NULL, param_names))
+  status   <- character(n_draws)
+  errors   <- character(0)
 
-  ## -- Build prior sampler -------------------------------------------------
-  ## Build one sampler closure per parameter, using p1/p2 directly so that
-  ## the distribution-specific semantics are respected regardless of whether
-  ## `mean`/`std` helper columns are present (they can shadow p1/p2 in
-  ## .smc_make_prior_sampler() for uniform distributions).
-  prior_draw_fn <- .d39_make_prior_sampler(prior_spec)
-
-  ## -- Storage for draws and feasibility labels ----------------------------
-  draw_mat  <- matrix(NA_real_, nrow = n_draws, ncol = n_par,
-                      dimnames = list(NULL, param_names))
-  feasible  <- logical(n_draws)
-
-  n_feasible <- 0L
-
-  if (verbose) message(sprintf("diag_stability_map: sampling %d draws ...", n_draws))
+  if (verbose) .dynhr_inform(sprintf("diag_stability_map: classifying %d prior draws ...", n_draws))
 
   for (i in seq_len(n_draws)) {
-    ## Draw from prior: returns a named numeric vector of length n_par
-    theta_i <- prior_draw_fn()
-    ## Align to param_names order (prior_draw_fn may not match order)
-    theta_i <- theta_i[param_names]
+    theta_i <- prior_draw_fn()[param_names]
     draw_mat[i, ] <- theta_i
-
-    ## Build full parameter vector: start from calibrated values, override
-    ## estimated parameters with the draw.
     params_i <- base_params
-    for (nm in param_names) {
-      if (nm %in% names(params_i)) {
-        params_i[nm] <- theta_i[nm]
-      } else {
-        params_i <- c(params_i, stats::setNames(theta_i[nm], nm))
-      }
-    }
-
-    ## Try to solve SS + perturbation; classify BK feasibility.
-    ## NOTE: solve_perturbation() issues a *warning* (not an error) for BK
-    ## violations and returns a DR with bk_satisfied=FALSE.  We must NOT
-    ## intercept warnings with tryCatch's warning= handler, because that would
-    ## abort before the return value is produced. Use withCallingHandlers to
-    ## suppress the BK warning but let execution continue, then read $bk_satisfied.
-    ok <- tryCatch({
-      ss_i <- solve_steady(compiled, params_i, verbose = FALSE)
-      if (is.null(ss_i) || !isTRUE(ss_i$converged)) FALSE
-      else {
-        dr_i <- withCallingHandlers(
-          solve_perturbation(model, compiled, ss_i$values, params_i,
-                             verbose = FALSE),
-          warning = function(w) invokeRestart("muffleWarning")
-        )
-        isTRUE(dr_i$bk_satisfied)
-      }
-    }, error = function(e) FALSE)
-
-    feasible[i] <- ok
-    if (ok) n_feasible <- n_feasible + 1L
+    params_i[param_names] <- theta_i
+    cl <- .d39_classify_point(model, compiled, params_i, n_fwd, unit_tol)
+    status[i] <- cl$status
+    if (!is.null(cl$error)) errors <- c(errors, cl$error)
   }
 
-  feasible_fraction <- n_feasible / n_draws
+  status <- factor(status, levels = .d39_classes())
+  counts <- table(status)
+  n_feasible <- as.integer(counts[["determinate"]])
 
   if (verbose) {
-    message(sprintf("diag_stability_map: feasible fraction = %.3f  (%d / %d)",
-                    feasible_fraction, n_feasible, n_draws))
+    .dynhr_inform(sprintf("diag_stability_map: determinate fraction = %.3f  (%d / %d)",
+                          n_feasible / n_draws, n_feasible, n_draws))
   }
 
-  ## -- KS test: rank parameters by separation power -----------------------
-  feas_idx   <- which(feasible)
-  infeas_idx <- which(!feasible)
-
-  drivers <- .d39_ks_ranking(draw_mat, feas_idx, infeas_idx, param_names)
+  feas_idx <- which(status == "determinate")
+  drivers  <- .d39_ks_ranking(draw_mat, feas_idx,
+                              which(status != "determinate"), param_names)
+  by_class <- list()
+  for (cls in setdiff(.d39_classes(), "determinate")) {
+    idx <- which(status == cls)
+    if (length(idx) >= 2L)
+      by_class[[cls]] <- .d39_ks_ranking(draw_mat, feas_idx, idx, param_names)
+  }
 
   structure(
     list(
-      feasible_fraction = feasible_fraction,
-      drivers           = drivers,
+      mode              = "prior",
+      status            = status,
+      class_counts      = stats::setNames(as.integer(counts), names(counts)),
+      feasible_fraction = n_feasible / n_draws,
       n_feasible        = n_feasible,
-      n_total           = n_draws
+      n_total           = n_draws,
+      errors            = errors,
+      drivers           = drivers,
+      drivers_by_class  = by_class,
+      draws             = draw_mat,
+      plots             = list()
     ),
     class = c("dynhr_stability_map", "list")
   )
 }
 
 
-## --------------------------------------------------------------------------
-## .d39_make_prior_sampler: returns function() -> named numeric
-##
-## Builds samplers from p1/p2 directly to avoid the mean/std column
-## shadowing issue in .smc_make_prior_sampler for uniform distributions.
-## --------------------------------------------------------------------------
+## Ordered set of point classes (factor levels, legend order).
+.d39_classes <- function() {
+  c("determinate", "indeterminate", "explosive", "unit_root",
+    "invalid_rule", "no_steady_state", "solver_error")
+}
 
-.d39_make_prior_sampler <- function(prior_spec) {
-  samplers <- vector("list", nrow(prior_spec))
-  names(samplers) <- prior_spec$name
+## Tol light fills per class (fixed mapping so a class keeps its colour
+## whichever subset of classes a map shows).
+.d39_class_fills <- function() {
+  c(determinate     = unname(tol_light["light_blue"]),
+    indeterminate   = unname(tol_light["light_yellow"]),
+    explosive       = unname(tol_light["orange"]),
+    unit_root       = unname(tol_light["mint"]),
+    invalid_rule    = unname(tol_light["pink"]),
+    no_steady_state = unname(tol_light["pear"]),
+    solver_error    = unname(tol_light["pale_grey"]))
+}
 
-  for (i in seq_len(nrow(prior_spec))) {
-    nm   <- prior_spec$name[i]
-    dist <- tolower(prior_spec$distribution[i])
-    p1   <- prior_spec$p1[i]
-    p2   <- prior_spec$p2[i]
-    lo   <- prior_spec$lower[i]
-    hi   <- prior_spec$upper[i]
-    if (is.na(lo))  lo  <- -Inf
-    if (is.na(hi))  hi  <- Inf
+## Number of forward-looking (jump) variables, counted as solve_perturbation()
+## does for its BK comparison (n_plus_bk_model).
+.d39_n_forward <- function(model) {
+  n_fwd <- model$n_forward %||% 0L
+  n_mix <- model$n_mixed %||% 0L
+  n_pred_mix <- sum(model$variable_classification$mixed %in%
+                    (model$predetermined_vars %||% character(0)))
+  as.integer(n_fwd + n_mix - n_pred_mix)
+}
 
-    samplers[[nm]] <- local({
-      d <- dist; a <- p1; b <- p2; lb <- lo; ub <- hi
-      switch(d,
-        "uniform" =, "unif" = {
-          ## p1=lower, p2=upper for uniform
-          function() runif(1, a, b)
-        },
-        "beta" = {
-          ## p1=mean, p2=sd (Dynare convention on [lb, ub])
-          lo2 <- if (is.finite(lb)) lb else 0
-          hi2 <- if (is.finite(ub)) ub else 1
-          m01 <- (a - lo2) / (hi2 - lo2)
-          s01 <- b / (hi2 - lo2)
-          v   <- m01 * (1 - m01) / s01^2 - 1
-          v   <- max(v, 2)
-          sh1 <- m01 * v; sh2 <- (1 - m01) * v
-          function() lo2 + (hi2 - lo2) * rbeta(1, sh1, sh2)
-        },
-        "gamma" =, "gamm" = {
-          shape <- (a / b)^2; rate <- a / b^2
-          lo2   <- if (is.finite(lb)) lb else 0
-          function() max(lo2, rgamma(1, shape = shape, rate = rate))
-        },
-        "inv_gamma" =, "invg" =, "inv_gamma1" =, "inv_gamma2" = {
-          alpha  <- (a / b)^2 + 2
-          beta_p <- a * (alpha - 1)
-          lo2    <- if (is.finite(lb)) lb else 0
-          function() max(lo2, 1 / rgamma(1, shape = alpha, rate = beta_p))
-        },
-        ## Default: normal
-        {
-          function() max(lb, min(ub, rnorm(1, a, b)))
-        }
-      )
-    })
+
+## Classify one parameter vector. Re-solves the steady state and the
+## first-order system at `params` (nothing is reused across points).
+## Returns list(status, n_unstable, error).
+.d39_classify_point <- function(model, compiled, params, n_fwd, unit_tol) {
+  ## One sweep point may make a solver throw (singular Jacobian, non-finite
+  ## residual at an extreme draw). That is an OUTCOME to record as
+  ## `solver_error`, not a reason to abort the whole map, so the error is
+  ## caught here and kept (message returned) -- never folded into another class.
+  err <- NULL
+  out <- tryCatch({
+    ss <- solve_steady(compiled, params, verbose = FALSE)
+    if (is.null(ss) || !isTRUE(ss$converged) || !all(is.finite(ss$values))) {
+      list(status = "no_steady_state", n_unstable = NA_integer_)
+    } else {
+      ## BK violations are reported by a warning AND in the return value; the
+      ## return value is what we classify on, so muffle the per-point
+      ## warnings. Since 0.9.4 a singular QZ block Z11 (the BK RANK condition,
+      ## i.e. the unstable roots are not attached to the jump variables) sets
+      ## `bk_satisfied = FALSE` and flags `bk_rank_deficient` in the returned
+      ## rule, so this no longer has to match warning TEXT.
+      dr <- suppressWarnings(
+        solve_perturbation(model, compiled, ss$values, params,
+                           order = 1L, verbose = FALSE))
+      list(status = .d39_status_from_dr(dr, n_fwd, unit_tol,
+                                        isTRUE(dr$bk_rank_deficient)),
+           n_unstable = as.integer(dr$n_unstable %||% NA_integer_))
+    }
+  }, error = function(e) {
+    list(status = "solver_error", n_unstable = NA_integer_,
+         error = conditionMessage(e))
+  })
+  out
+}
+
+.d39_status_from_dr <- function(dr, n_fwd, unit_tol, rank_fail = FALSE) {
+  ev  <- dr$eigenvalues
+  mod <- Mod(ev)
+  mod <- mod[is.finite(mod)]
+  if (length(mod) > 0L && any(abs(mod - 1) <= unit_tol)) return("unit_root")
+  if (isTRUE(dr$bk_satisfied)) return(if (rank_fail) "invalid_rule" else "determinate")
+  nu <- dr$n_unstable
+  if (is.null(nu) || !is.finite(nu)) return("solver_error")
+  if (nu < n_fwd) return("indeterminate")
+  if (nu > n_fwd) return("explosive")
+  "invalid_rule"
+}
+
+
+.d39_check_grid <- function(grid) {
+  ok <- is.list(grid) && length(grid) == 2L && !is.null(names(grid)) &&
+    all(nzchar(names(grid))) && !anyDuplicated(names(grid))
+  if (!ok)
+    .dynhr_abort("diag_stability_map: `grid` must be a named list of two ",
+                 "numeric vectors, e.g. list(phi_pi = ..., phi_y = ...).")
+  for (nm in names(grid)) {
+    v <- grid[[nm]]
+    if (!is.numeric(v) || length(v) < 1L || !all(is.finite(v)))
+      .dynhr_abort(sprintf("diag_stability_map: grid$%s must be a finite numeric vector.", nm))
   }
+  invisible(TRUE)
+}
 
-  ## Return a single function that draws ALL params at once.
-  function() {
-    theta <- vapply(names(samplers), function(nm) samplers[[nm]](), numeric(1))
-    stats::setNames(theta, names(samplers))
+
+.d39_run_grid <- function(model, compiled, grid, base_params, n_fwd,
+                          unit_tol, verbose) {
+  axes <- names(grid)
+  missing_p <- setdiff(axes, names(base_params))
+  if (length(missing_p) > 0L)
+    .dynhr_abort("diag_stability_map: grid parameter(s) not in the model ",
+                 "parameters: ", paste(missing_p, collapse = ", "))
+  xs <- sort(unique(as.numeric(grid[[1L]])))
+  ys <- sort(unique(as.numeric(grid[[2L]])))
+  tab <- expand.grid(x = xs, y = ys, KEEP.OUT.ATTRS = FALSE)
+  n <- nrow(tab)
+  status <- character(n)
+  n_unst <- integer(n)
+  errors <- character(0)
+  if (verbose)
+    .dynhr_inform(sprintf("diag_stability_map: classifying %d x %d grid (%s, %s) ...",
+                          length(xs), length(ys), axes[1L], axes[2L]))
+  for (k in seq_len(n)) {
+    p <- base_params
+    p[[axes[1L]]] <- tab$x[k]
+    p[[axes[2L]]] <- tab$y[k]
+    cl <- .d39_classify_point(model, compiled, p, n_fwd, unit_tol)
+    status[k] <- cl$status
+    n_unst[k] <- cl$n_unstable
+    if (!is.null(cl$error)) errors <- c(errors, cl$error)
   }
+  tab$status     <- factor(status, levels = .d39_classes())
+  tab$n_unstable <- n_unst
+  tab$n_forward  <- n_fwd
+  counts <- table(tab$status)
+  n_feasible <- as.integer(counts[["determinate"]])
+  calib <- stats::setNames(as.numeric(base_params[axes]), axes)
+
+  res <- structure(
+    list(
+      mode              = "grid",
+      status            = tab$status,
+      class_counts      = stats::setNames(as.integer(counts), names(counts)),
+      feasible_fraction = n_feasible / n,
+      n_feasible        = n_feasible,
+      n_total           = n,
+      errors            = errors,
+      drivers           = NULL,
+      drivers_by_class  = list(),
+      grid              = tab,
+      axes              = c(x = axes[1L], y = axes[2L]),
+      calibration       = calib,
+      plots             = list()
+    ),
+    class = c("dynhr_stability_map", "list")
+  )
+  if (requireNamespace("ggplot2", quietly = TRUE))
+    res$plots$map <- .d39_plot_map(res)
+  res
+}
+
+
+.d39_plot_map <- function(x) {
+  gg  <- .ensure_ggplot2()
+  tab <- x$grid
+  present <- levels(droplevels(tab$status))
+  fills <- .d39_class_fills()[present]
+  cal <- data.frame(x = x$calibration[[1L]], y = x$calibration[[2L]])
+  counts <- x$class_counts[x$class_counts > 0L]
+  sub <- paste0(x$n_total, " grid points: ",
+                paste(sprintf("%s %d", names(counts), counts), collapse = ", "),
+                ".  Cross = calibration point.")
+  gg$ggplot(tab, gg$aes(x = .data$x, y = .data$y, fill = .data$status)) +
+    gg$geom_tile(colour = NA) +
+    gg$geom_point(data = cal, gg$aes(x = .data$x, y = .data$y),
+                  inherit.aes = FALSE, shape = 4, size = 4, stroke = 1.6,
+                  colour = "black") +
+    gg$scale_fill_manual(values = fills, breaks = present, drop = TRUE,
+                         name = "BK class") +
+    gg$scale_x_continuous(expand = c(0, 0)) +
+    gg$scale_y_continuous(expand = c(0, 0)) +
+    gg$labs(x = x$axes[["x"]], y = x$axes[["y"]],
+            title = sprintf("D39 stability map: %s (x) vs %s (y)",
+                            x$axes[["x"]], x$axes[["y"]]),
+            subtitle = sub) +
+    theme_dynhr()
 }
 
 
@@ -242,9 +405,7 @@ diag_stability_map <- function(model,
 
   n_par <- length(param_names)
 
-  ## Guard: need at least 1 obs in each group to run KS.
   if (length(feas_idx) == 0L || length(infeas_idx) == 0L) {
-    ## Return a zero-stat table
     return(data.frame(
       param        = param_names,
       ks_stat      = rep(NA_real_, n_par),
@@ -258,8 +419,6 @@ diag_stability_map <- function(model,
   rows <- lapply(param_names, function(nm) {
     x_feas   <- draw_mat[feas_idx,   nm]
     x_infeas <- draw_mat[infeas_idx, nm]
-
-    ## Remove non-finite values (failed draws may have left NA)
     x_feas   <- x_feas[is.finite(x_feas)]
     x_infeas <- x_infeas[is.finite(x_infeas)]
 
@@ -269,6 +428,8 @@ diag_stability_map <- function(model,
                         stringsAsFactors = FALSE))
     }
 
+    ## ks.test warns about ties (point masses at clamped prior bounds); the
+    ## statistic itself is still exact.
     kt <- suppressWarnings(stats::ks.test(x_feas, x_infeas))
     data.frame(
       param        = nm,
@@ -293,16 +454,32 @@ diag_stability_map <- function(model,
 
 #' @export
 print.dynhr_stability_map <- function(x, n_top = 10L, ...) {
+  what <- if (identical(x$mode, "grid")) {
+    sprintf("%s x %s grid", x$axes[["x"]], x$axes[["y"]])
+  } else "prior draws"
   cat(sprintf(
-    "D39 BK-feasibility stability map\n  feasible: %d / %d (%.1f%%)\n",
-    x$n_feasible, x$n_total, 100 * x$feasible_fraction
+    "D39 BK stability map (%s)\n  determinate: %d / %d (%.1f%%)\n",
+    what, x$n_feasible, x$n_total, 100 * x$feasible_fraction
   ))
+  cc <- x$class_counts
+  if (length(cc) > 0L) {
+    cc <- cc[cc > 0L]
+    cat("  classes: ", paste(sprintf("%s=%d", names(cc), cc), collapse = ", "),
+        "\n", sep = "")
+  }
+  if (length(x$errors) > 0L)
+    cat(sprintf("  first solver error: %s\n", x$errors[1L]))
+  if (identical(x$mode, "grid")) {
+    cat(sprintf("  calibration: %s = %.4g, %s = %.4g\n",
+                names(x$calibration)[1L], x$calibration[[1L]],
+                names(x$calibration)[2L], x$calibration[[2L]]))
+  }
   if (!is.null(x$drivers) && nrow(x$drivers) > 0L) {
-    cat(sprintf("  top drivers (by KS statistic, showing up to %d):\n", n_top))
-    top <- head(x$drivers, n_top)
+    cat(sprintf("  top drivers, determinate vs rest (KS statistic, up to %d):\n", n_top))
+    top <- utils::head(x$drivers, n_top)
     for (i in seq_len(nrow(top))) {
       r <- top[i, ]
-      cat(sprintf("    %-20s  KS=%.3f  p=%.3g  feasible=[%.4g, %.4g]\n",
+      cat(sprintf("    %-20s  KS=%.3f  p=%.3g  determinate range=[%.4g, %.4g]\n",
                   r$param, r$ks_stat, r$p_value, r$feasible_lo, r$feasible_hi))
     }
   }

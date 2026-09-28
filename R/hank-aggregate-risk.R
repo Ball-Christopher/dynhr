@@ -703,14 +703,7 @@ hank_ks_aggregate_risk <- function(ks, Z_grid, Pi_Z = NULL, K_grid = NULL,
   }
 
   ## --- aggregate shock path (fixed across outer iterations) --------------
-  if (!is.null(seed)) {
-    if (!exists(".Random.seed", envir = globalenv(), inherits = FALSE)) {
-      stats::runif(1)
-    }
-    old_seed <- get(".Random.seed", envir = globalenv(), inherits = FALSE)
-    on.exit(assign(".Random.seed", old_seed, envir = globalenv()), add = TRUE)
-    set.seed(as.integer(seed))
-  }
+  if (!is.null(seed)) .local_seed(as.integer(seed))  # caller's RNG stream restored on exit (C1)
   z0 <- if (n_z == 1L) 1L else as.integer(ceiling(n_z / 2))
   z_path <- .hank_agg_draw_z(Pi_Z, T_sim, z0)
 
@@ -730,7 +723,7 @@ hank_ks_aggregate_risk <- function(ks, Z_grid, Pi_Z = NULL, K_grid = NULL,
                               amin = amin, Va_init = Va_warm,
                               tol = egm_tol, maxit = egm_maxit)
     if (!sol$converged)
-      warning("hank_ks_aggregate_risk(): the backward EGM sweep did not ",
+      .dynhr_warn("hank_ks_aggregate_risk(): the backward EGM sweep did not ",
               "converge at outer iteration ", it, " (gap = ",
               format(sol$gap), " vs egm_tol = ", format(egm_tol), ").",
               call. = FALSE)
@@ -747,7 +740,7 @@ hank_ks_aggregate_risk <- function(ks, Z_grid, Pi_Z = NULL, K_grid = NULL,
     rule_a <- (1 - damp) * rule_a + damp * a_new
     rule_b <- (1 - damp) * rule_b + damp * b_new
     if (verbose)
-      message(sprintf("[hank_ks_aggregate_risk] iter %d  rule gap %.3e  R2 %s",
+      .dynhr_inform(sprintf("[hank_ks_aggregate_risk] iter %d  rule gap %.3e  R2 %s",
                       it, rule_gap,
                       paste(sprintf("%.5f", fit$R2), collapse = " ")))
     if (rule_gap < tol) { converged <- TRUE; break }
@@ -918,13 +911,7 @@ simulate.hank_ks_agg_risk <- function(object, nsim = 1, seed = NULL,
     stop("simulate.hank_ks_agg_risk(): 'z_path' fixes the aggregate path, so ",
          "'nsim' must be 1 (repeating the same path nsim times would return ",
          "nsim identical draws).")
-  if (!is.null(seed)) {
-    if (!exists(".Random.seed", envir = globalenv(), inherits = FALSE))
-      stats::runif(1)
-    old_seed <- get(".Random.seed", envir = globalenv(), inherits = FALSE)
-    on.exit(assign(".Random.seed", old_seed, envir = globalenv()), add = TRUE)
-    set.seed(as.integer(seed))
-  }
+  if (!is.null(seed)) .local_seed(as.integer(seed))  # caller's RNG stream restored on exit (C1)
   ks <- object$ks; blk <- ks$block
   n_z <- object$dims[["n_z"]]
   if (is.null(D0)) D0 <- object$ergodic$D_mean
@@ -1084,13 +1071,7 @@ hank_ks_risk_irf <- function(obj, horizon = 40L, n_draws = 200L,
   if (horizon < 1L || n_draws < 1L)
     stop("hank_ks_risk_irf(): 'horizon' and 'n_draws' must be >= 1.")
 
-  if (!is.null(seed)) {
-    if (!exists(".Random.seed", envir = globalenv(), inherits = FALSE))
-      stats::runif(1)
-    old_seed <- get(".Random.seed", envir = globalenv(), inherits = FALSE)
-    on.exit(assign(".Random.seed", old_seed, envir = globalenv()), add = TRUE)
-    set.seed(as.integer(seed))
-  }
+  if (!is.null(seed)) .local_seed(as.integer(seed))  # caller's RNG stream restored on exit (C1)
 
   ks <- obj$ks; blk <- ks$block
   sol <- list(a_pol = obj$policy$a_pol, c_pol = obj$policy$c_pol)
@@ -1513,13 +1494,13 @@ hank_ks_ergodic_mean <- function(obj, n_fine = 101L, K_fine = NULL,
     P <- Pn; M <- Mn; S <- Sn; S2 <- S2n; SL <- SLn; SL2 <- SL2n
     mom <- mom_new; K_mean <- mom_new[1L]
     if (verbose && (it %% 100L == 0L))
-      message(sprintf(paste0("[hank_ks_ergodic_mean] iter %d  gap %.3e  ",
+      .dynhr_inform(sprintf(paste0("[hank_ks_ergodic_mean] iter %d  gap %.3e  ",
                              "dist_gap %.3e  E[K] %.10f"),
                       it, gap, dist_gap, K_mean))
     if (gap < tol) { converged <- TRUE; break }
   }
   if (!converged)
-    warning("hank_ks_ergodic_mean(): the ergodic moments did not converge in ",
+    .dynhr_warn("hank_ks_ergodic_mean(): the ergodic moments did not converge in ",
             maxit, " iterations (gap = ", format(gap), " vs tol = ",
             format(tol), ").", call. = FALSE)
 

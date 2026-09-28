@@ -378,7 +378,7 @@ welfare_ce_diff <- function(result_a, result_b,
   }
 
   if (is.null(cons_var)) {
-    warning("Could not identify consumption variable. ",
+    .dynhr_warn("Could not identify consumption variable. ",
             "Specify 'consumption_variable' explicitly. ",
             "Using default CRRA approximation.")
     cons_ss <- 1.0
@@ -401,14 +401,14 @@ welfare_ce_diff <- function(result_a, result_b,
   ce_pct <- ce_raw * 100
 
   if (verbose) {
-    cat(sprintf("CE welfare difference:\n"))
-    cat(sprintf("  Welfare A:          %.6f\n", welfare_a))
-    cat(sprintf("  Welfare B:          %.6f\n", welfare_b))
-    cat(sprintf("  Welfare gap:        %.6f\n", welfare_gap))
-    cat(sprintf("  Discount:           %.4f\n", discount))
-    cat(sprintf("  MU (dU/dC):         %.6f\n", mu))
-    cat(sprintf("  C_ss:               %.6f\n", cons_ss))
-    cat(sprintf("  CE (%% of C_ss):    %.4f%%\n", ce_pct))
+    .dynhr_cat(sprintf("CE welfare difference:\n"))
+    .dynhr_cat(sprintf("  Welfare A:          %.6f\n", welfare_a))
+    .dynhr_cat(sprintf("  Welfare B:          %.6f\n", welfare_b))
+    .dynhr_cat(sprintf("  Welfare gap:        %.6f\n", welfare_gap))
+    .dynhr_cat(sprintf("  Discount:           %.4f\n", discount))
+    .dynhr_cat(sprintf("  MU (dU/dC):         %.6f\n", mu))
+    .dynhr_cat(sprintf("  C_ss:               %.6f\n", cons_ss))
+    .dynhr_cat(sprintf("  CE (%% of C_ss):    %.4f%%\n", ce_pct))
   }
 
   result <- list(
@@ -679,12 +679,12 @@ welfare_decompose <- function(result,
   }
 
   if (verbose) {
-    cat("Welfare Decomposition:\n")
-    cat(sprintf("  Total welfare:      %10.6f\n", welfare_total))
-    cat(sprintf("  Steady state:       %10.6f\n", welfare_ss))
-    cat(sprintf("  Level effect:       %10.6f\n", level_effect))
-    cat(sprintf("  Volatility effect:  %10.6f\n", volatility_effect))
-    cat(sprintf("  DR order:           %d\n", dr_order))
+    .dynhr_cat("Welfare Decomposition:\n")
+    .dynhr_cat(sprintf("  Total welfare:      %10.6f\n", welfare_total))
+    .dynhr_cat(sprintf("  Steady state:       %10.6f\n", welfare_ss))
+    .dynhr_cat(sprintf("  Level effect:       %10.6f\n", level_effect))
+    .dynhr_cat(sprintf("  Volatility effect:  %10.6f\n", volatility_effect))
+    .dynhr_cat(sprintf("  DR order:           %d\n", dr_order))
   }
 
   result <- list(
@@ -855,9 +855,9 @@ welfare_decompose <- function(result,
                                           obj_ast, init_dev_vec, n_periods) {
   endo <- dr$endo_names; exo <- dr$exo_names; sidx <- dr$state_idx
   if (is.null(sidx) || length(sidx) == 0L || is.null(obj_ast)) return(NULL)
-  Sigma_e <- tryCatch(.get_shock_cov(model, exo, params), error = function(e) NULL)
+  Sigma_e <- tryCatch(.get_shock_cov(model, exo, params), error = function(e) .dynhr_reraise_bug(e, NULL))
   if (is.null(Sigma_e)) return(NULL)
-  sys <- tryCatch(.order2_aug_system(dr, Sigma_e), error = function(e) NULL)
+  sys <- tryCatch(.order2_aug_system(dr, Sigma_e), error = function(e) .dynhr_reraise_bug(e, NULL))
   if (is.null(sys)) return(NULL)
   state_nm <- endo[sidx]
   s0 <- setNames(numeric(length(sidx)), state_nm)
@@ -1092,7 +1092,7 @@ conditional_welfare <- function(result,
       length(dr$state_idx %||% integer(0)) > 0L) {
     lq <- tryCatch(
       .conditional_welfare_lq(dr, obj_ast, ss, params, discount, init_dev_vec),
-      error = function(e) NULL)
+      error = function(e) .dynhr_reraise_bug(e, NULL))
     if (!is.null(lq) && is.finite(lq$gap)) {
       gap          <- lq$gap
       cond_welfare <- welfare_ss + gap
@@ -1115,7 +1115,7 @@ conditional_welfare <- function(result,
     an <- tryCatch(
       .conditional_welfare_analytic(dr, model, params, ss, discount,
                                     obj_ast, init_dev_vec, n_periods),
-      error = function(e) NULL)
+      error = function(e) .dynhr_reraise_bug(e, NULL))
     if (!is.null(an) && is.finite(an$gap)) {
       gap          <- an$gap
       cond_welfare <- welfare_ss + gap
@@ -1139,16 +1139,7 @@ conditional_welfare <- function(result,
                     !is.null(obj_ast)
   if (!is.finite(cond_welfare) && use_stochastic) {
     mc_seed <- if (!is.null(seed)) as.integer(seed) else 42L
-    old_rng <- if (exists(".Random.seed", envir = .GlobalEnv))
-      get(".Random.seed", envir = .GlobalEnv) else NULL
-    set.seed(mc_seed)
-    on.exit({
-      if (!is.null(old_rng)) {
-        assign(".Random.seed", old_rng, envir = .GlobalEnv)
-      } else if (exists(".Random.seed", envir = .GlobalEnv)) {
-        rm(".Random.seed", envir = .GlobalEnv)
-      }
-    }, add = TRUE)
+    .local_seed(mc_seed)
 
     nd     <- as.integer(n_mc_draws)
     np     <- as.integer(n_periods)
@@ -1286,7 +1277,7 @@ welfare_compute <- function(dr, model, params,
 
   ## Deprecation alias: n_sim= was the old name; forward to n_periods= with warning.
   if (!is.null(n_sim)) {
-    warning("welfare_compute(): 'n_sim' is deprecated; use 'n_periods' instead.",
+    .dynhr_warn("welfare_compute(): 'n_sim' is deprecated; use 'n_periods' instead.",
             call. = FALSE)
     n_periods <- n_sim
   }
@@ -1354,14 +1345,9 @@ welfare_compute <- function(dr, model, params,
     ## optimiser loss, where the welfare objective must be a reproducible
     ## function of the policy coefficients). Restore the caller's RNG state so
     ## the surrounding optimiser's own randomness is untouched.
-    if (!is.null(seed)) {
-      old_seed <- if (exists(".Random.seed", envir = .GlobalEnv))
-        get(".Random.seed", envir = .GlobalEnv) else NULL
-      set.seed(seed)
-      on.exit({
-        if (!is.null(old_seed)) assign(".Random.seed", old_seed, envir = .GlobalEnv)
-      }, add = TRUE)
-    }
+    ## (.local_seed also removes a .Random.seed the call created, which the
+    ## old inline restore left behind.)
+    .local_seed(seed)
     ## Simulate at the rule's native order (order-2 -> pruned second-order
     ## recursion, capturing the ghss/ghuu/ghxx volatility correction).
     sim <- .simulate_dr_any_order(dr, n_periods = n_periods, model = model,
@@ -1379,8 +1365,8 @@ welfare_compute <- function(dr, model, params,
       }
 
       if (verbose) {
-        cat(sprintf("  Welfare computed via simulation (%d periods)\n", n_periods))
-        cat(sprintf("    Uncond: %.6f, Steady: %.6f\n", welfare_uncond, welfare_ss))
+        .dynhr_cat(sprintf("  Welfare computed via simulation (%d periods)\n", n_periods))
+        .dynhr_cat(sprintf("    Uncond: %.6f, Steady: %.6f\n", welfare_uncond, welfare_ss))
       }
     }
   }
@@ -1388,7 +1374,7 @@ welfare_compute <- function(dr, model, params,
   # Last resort fallback
   if (!is.finite(welfare_uncond)) {
     welfare_uncond <- welfare_ss
-    if (verbose) cat("  Welfare: using steady-state approximation.\n")
+    if (verbose) .dynhr_cat("  Welfare: using steady-state approximation.\n")
   }
 
   result <- list(

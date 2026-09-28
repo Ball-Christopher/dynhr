@@ -20,10 +20,14 @@
 ##   The Gaussian filter produces innovation v_t ~ N(0, F_t) where F_t is the
 ##   k_t × k_t innovation covariance.  Under the Student-t observation model:
 ##
-##   1. Scale the t-distribution so that its covariance equals F_t when nu > 2:
-##        Sigma_t = (nu - 2) / nu * F_t
-##      (for nu <= 2 this is a location-scale t with infinite variance, still
-##       a valid density and valid likelihood).
+##   1. Scale the t-distribution so that its covariance equals F_t:
+##        Sigma_t = c_nu * F_t,   c_nu = (nu - 2) / nu
+##      (variance matching). This REQUIRES nu > 2: the t covariance is
+##      nu/(nu-2) * Sigma_t and is infinite for nu <= 2, so no scale matches
+##      F_t there and c_nu -> 0 as nu -> 2+. The filter therefore aborts with
+##      class `dynhr_error_student_df` for nu <= 2 instead of switching to an
+##      arbitrary scale (the former c_nu = 1 fallback made the likelihood jump
+##      discontinuously at nu = 2).
 ##
 ##   2. Log-density of multivariate-t with location 0, scale Sigma_t, df nu:
 ##        loglik_t = lgamma((nu + k_t) / 2)
@@ -32,14 +36,16 @@
 ##                 - 0.5 * log|Sigma_t|
 ##                 - (nu + k_t) / 2 * log(1 + (1/nu) * v_t' Sigma_t^{-1} v_t)
 ##
-##   Substituting Sigma_t = c_nu * F_t with c_nu = (nu - 2) / nu:
+##   Substituting Sigma_t = c_nu * F_t:
 ##        log|Sigma_t| = k_t * log(c_nu) + log|F_t|
 ##        v_t' Sigma_t^{-1} v_t = (1/c_nu) * v_t' F_t^{-1} v_t
 ##
-##   For nu > 2 this is exact; for nu <= 2 the scale convention still defines a
-##   valid distribution (heavier-tailed, infinite variance).  The Gaussian limit
-##   (nu -> Inf) recovers the standard KF loglik exactly (the lgamma ratio and
-##   log(1 + Q/nu) both converge to their Gaussian counterparts).
+##   The Gaussian limit (nu -> Inf) recovers the standard KF loglik exactly.
+##   The lgamma difference is evaluated as lgamma(k/2) - lbeta(nu/2, k/2)
+##   (R's lbeta is cancellation-free for a large argument) and log(c_nu) as
+##   log1p(-2/nu), so a large nu (e.g. 1e9) reproduces kalman_filter() to
+##   ~1e-9 per period instead of losing ~1e-6 per period to lgamma(5e8)
+##   cancellation.
 ##
 ## UPGRADE NOTE: this version keeps the GAUSSIAN Kalman recursions and only
 ## changes the per-period log-likelihood.  The natural upgrade is a robust
@@ -50,9 +56,44 @@
 ## version is the defensible first step: a consistent likelihood under the
 ## t-observation model, commonly used in the DSGE literature.
 ##
+## The per-period covariance update is the shared .kf_step_core() of
+## R/kf-step.R (brief 23 D1): me_variance is TRUE i.i.d. measurement error, so
+## it enters F_t AND the Joseph term K me K' -- matching kalman_filter()
+## (brief 23 A2: the former hand-rolled update dropped K me K').
+##
 ## Missing observations: the same NA-reduction as kalman_filter() is used.
 ## --------------------------------------------------------------------------
 
+
+#' Validate a Student-t likelihood request (shared by the filter and by
+#' make_log_posterior(), which must fail at closure build rather than map
+#' every draw's abort to -Inf).
+#' @noRd
+.student_t_validate <- function(nu, model, me_extra = NULL, shock_scale = NULL,
+                                known_shocks = NULL, caller) {
+  if (!is.numeric(nu) || length(nu) != 1L || !is.finite(nu) || nu <= 2)
+    .dynhr_abort(caller, ": student_df must be a finite ",
+                 "scalar > 2 (got ", format(nu), "). The t scale is matched ",
+                 "to the innovation covariance, Sigma_t = (nu - 2)/nu * F_t, ",
+                 "which needs a finite t variance (nu > 2).",
+                 class = "dynhr_error_student_df")
+
+  ## Unsupported per-period inputs: abort instead of silently ignoring them.
+  .refuse_obs_trends(model, caller)
+  unsupported <- c(
+    me_extra     = !is.null(me_extra),
+    shock_scale  = !is.null(shock_scale),
+    known_shocks = !is.null(known_shocks),
+    filter_tunes = .student_t_has_filter_tunes(model),
+    heteroskedastic_shocks = .student_t_has_het_shocks(model))
+  if (any(unsupported))
+    .dynhr_abort(caller, ": ",
+                 paste(names(unsupported)[unsupported], collapse = ", "),
+                 " not supported by the Student-t likelihood (it would be ",
+                 "silently ignored). Use likelihood = \"gaussian\".",
+                 class = "dynhr_error_student_t_unsupported")
+  invisible(TRUE)
+}
 
 ## ---------------------------------------------------------------------------
 ## kalman_filter_student_t()
@@ -72,14 +113,24 @@
 ##   model       compiled model object.
 ##   params      named numeric vector of parameter values.
 ##   obs_vars    character vector of observed variable names.
-##   student_df  degrees of freedom nu (must be > 0; nu >= 3 ensures finite
-##               kurtosis; nu = 1e7 is numerically indistinguishable from
-##               Gaussian).
-##   me_variance scalar measurement-error variance (default 0).
+##   student_df  degrees of freedom nu; must be a finite scalar > 2 (the
+##               variance-matching scale needs a finite t variance; nu >= 5
+##               also gives a finite kurtosis). A large nu (1e9) is
+##               numerically the Gaussian filter.
+##   me_variance scalar measurement-error variance (default 0), true i.i.d.
+##               noise as in kalman_filter().
 ##   lik_init    P0 initialization: "auto", "stationary", "kappa"
 ##               ("diffuse" is not supported here -- use the Gaussian
 ##                kalman_filter() for the exact diffuse phase, then switch
 ##                to Student-t for the post-diffuse tail if needed).
+##   me_extra, shock_scale, known_shocks
+##               NOT supported: the per-period ME / heteroskedastic-shock /
+##               known-shock paths of kalman_filter() are not implemented
+##               here. Supplying any of them non-NULL -- or a model carrying
+##               filter_tunes or heteroskedastic_shocks, which the Gaussian
+##               path turns into me_extra / shock_scale -- aborts with class
+##               `dynhr_error_student_t_unsupported` rather than being
+##               silently ignored.
 ##
 ## Returns a list with:
 ##   loglik     scalar total log-likelihood
@@ -92,12 +143,14 @@
 #' @noRd
 kalman_filter_student_t <- function(Y, dr, model, params, obs_vars,
                                     student_df,
-                                    me_variance = 0,
-                                    lik_init    = "auto") {
+                                    me_variance  = 0,
+                                    lik_init     = "auto",
+                                    me_extra     = NULL,
+                                    shock_scale  = NULL,
+                                    known_shocks = NULL) {
   nu <- student_df
-  if (!is.numeric(nu) || length(nu) != 1L || !is.finite(nu) || nu <= 0)
-    stop("kalman_filter_student_t: student_df must be a positive finite scalar.",
-         call. = FALSE)
+  .student_t_validate(nu, model, me_extra, shock_scale, known_shocks,
+                      caller = "kalman_filter_student_t")
 
   ## -- Extract state-space matrices (same as kalman_filter()) ---------------
   state_idx <- dr$state_idx
@@ -121,9 +174,6 @@ kalman_filter_student_t <- function(Y, dr, model, params, obs_vars,
 
   Sigma_e <- .get_shock_cov(model, exo, params)
   QQ      <- tcrossprod(RR %*% Sigma_e, RR)
-  HH      <- tcrossprod(DD %*% Sigma_e, DD)
-  SS      <- RR %*% Sigma_e %*% t(DD)
-  me_diag <- me_variance * diag(n_obs)
 
   if (is.null(dim(Y))) Y <- matrix(Y, nrow = n_obs)
   if (nrow(Y) != n_obs) Y <- t(Y)
@@ -133,19 +183,17 @@ kalman_filter_student_t <- function(Y, dr, model, params, obs_vars,
   Y_minus_d <- Y - d
 
   ## -- Scale factor for the t-distribution scale matrix --------------------
-  ## Sigma_t = c_nu * F_t  with  c_nu = (nu - 2) / nu  (for nu > 2).
-  ## For nu <= 2 we use c_nu = 1 (equal scale to F_t): this is a
-  ## convention choice for near-degenerate nu.  The density is still valid.
-  c_nu <- if (nu > 2) (nu - 2) / nu else 1
+  ## Sigma_t = c_nu * F_t with c_nu = (nu - 2) / nu  (nu > 2, checked above).
+  ## log(c_nu) via log1p for large-nu accuracy.
+  log_c_nu <- log1p(-2 / nu)
+  c_nu     <- (nu - 2) / nu
 
   ## -- Initialization -------------------------------------------------------
   if (lik_init == "auto") {
     tt_evals <- eigen(TT, only.values = TRUE)$values
     if (any(Mod(tt_evals) > 1 - 1e-6)) {
       P0_try <- tryCatch(solve_lyapunov(TT, QQ), error = function(e) NULL)
-      ok_stat <- !is.null(P0_try) && all(is.finite(P0_try)) &&
-        min(Re(eigen((P0_try + t(P0_try)) / 2, symmetric = TRUE,
-                     only.values = TRUE)$values)) > -1e-8
+      ok_stat <- .kf_stationary_P0_ok(P0_try)   # relative rule (W77)
       lik_init <- if (ok_stat) "stationary" else "kappa"
       P0 <- if (ok_stat) P0_try else .build_P0(TT, QQ)
     } else {
@@ -169,55 +217,41 @@ kalman_filter_student_t <- function(Y, dr, model, params, obs_vars,
   s      <- numeric(n_state)
   P      <- P0
   loglik <- 0
-  tZZ    <- t(ZZ)
 
   for (t in seq_len(n_T)) {
     v <- Y_minus_d[, t] - as.numeric(ZZ %*% s)
 
     ## -- Handle missing observations (same NA-reduction as kalman_filter) --
-    if (anyNA(v)) {
-      obs_ok  <- which(!is.na(v))
-      k_t     <- length(obs_ok)
-      if (k_t == 0L) {
-        ## Fully missing: pure prediction step, no likelihood contribution
-        s <- drop(TT %*% s)
-        P <- tcrossprod(TT %*% P, TT) + QQ
-        P <- (P + t(P)) * 0.5
-        next
-      }
-      ZZ_t  <- ZZ[obs_ok, , drop = FALSE]
-      DD_t  <- DD[obs_ok, , drop = FALSE]
-      HH_t  <- tcrossprod(DD_t %*% Sigma_e, DD_t)
-      SS_t  <- RR %*% Sigma_e %*% t(DD_t)
-      me_t  <- me_variance * diag(k_t)
-      v_t   <- v[obs_ok]
-      Ft    <- ZZ_t %*% P %*% t(ZZ_t) + HH_t + me_t
-      Ft    <- (Ft + t(Ft)) * 0.5
-    } else {
-      k_t   <- n_obs
-      ZZ_t  <- ZZ; DD_t <- DD; SS_t <- SS
-      v_t   <- v
-      Ft    <- ZZ_t %*% P %*% t(ZZ_t) + HH + me_diag
-      Ft    <- (Ft + t(Ft)) * 0.5
+    obs_ok <- which(!is.na(v))
+    k_t    <- length(obs_ok)
+    if (k_t == 0L) {
+      ## Fully missing: pure prediction step, no likelihood contribution
+      s <- drop(TT %*% s)
+      P <- tcrossprod(TT %*% P, TT) + QQ
+      P <- (P + t(P)) * 0.5
+      next
     }
 
-    ## -- Innovation covariance Cholesky (needed for KF update + t-density) --
-    Fc <- tryCatch(chol(Ft), error = function(e) NULL)
-    if (is.null(Fc)) {
+    ## Shared measurement/prediction update (R/kf-step.R): F_t, its log-det
+    ## and Mahalanobis form, and the Joseph P-update including K me K'.
+    st <- .kf_step_core(s, P, v[obs_ok], TT,
+                        ZZ[obs_ok, , drop = FALSE], RR,
+                        DD[obs_ok, , drop = FALSE], Sigma_e,
+                        me_vec = rep(me_variance, k_t))
+    if (is.null(st)) {
       loglik <- -Inf; break
     }
-    Fi <- chol2inv(Fc)
 
     ## -- Student-t scale matrix Sigma_t = c_nu * F_t ----------------------
     ## log|Sigma_t| = k_t*log(c_nu) + log|F_t|
-    log_det_Ft    <- 2 * sum(log(diag(Fc)))
-    log_det_Sigma <- k_t * log(c_nu) + log_det_Ft
+    log_det_Sigma <- k_t * log_c_nu + st$logdet_F
 
     ## Mahalanobis^2 under Sigma_t: v' Sigma_t^{-1} v = (1/c_nu) * v' F_t^{-1} v
-    Q_t <- drop(crossprod(v_t, Fi %*% v_t)) / c_nu
+    Q_t <- st$maha / c_nu
 
-    ## Multivariate-t log-density
-    ll_t <- lgamma((nu + k_t) / 2) - lgamma(nu / 2) -
+    ## Multivariate-t log-density. lgamma((nu+k)/2) - lgamma(nu/2) is
+    ## lgamma(k/2) - lbeta(nu/2, k/2), free of the lgamma(nu/2) cancellation.
+    ll_t <- lgamma(k_t / 2) - lbeta(nu / 2, k_t / 2) -
       (k_t / 2) * log(nu * pi) -
       0.5 * log_det_Sigma -
       (nu + k_t) / 2 * log1p(Q_t / nu)
@@ -228,13 +262,8 @@ kalman_filter_student_t <- function(Y, dr, model, params, obs_vars,
     loglik <- loglik + ll_t
 
     ## -- Gaussian KF update step (state mean + covariance unchanged) -------
-    K <- (TT %*% P %*% t(ZZ_t) + SS_t) %*% Fi
-    s <- drop(TT %*% s) + drop(K %*% v_t)
-
-    TmKZ <- TT - K %*% ZZ_t
-    RmKD <- RR - K %*% DD_t
-    P <- tcrossprod(TmKZ %*% P, TmKZ) + tcrossprod(RmKD %*% Sigma_e, RmKD)
-    P <- (P + t(P)) * 0.5
+    s <- st$s
+    P <- st$P
   }
 
   list(loglik     = loglik,
@@ -243,4 +272,24 @@ kalman_filter_student_t <- function(Y, dr, model, params, obs_vars,
        method     = "student_t",
        student_df = nu,
        lik_init   = lik_init)
+}
+
+
+## TRUE iff the model carries filter_tunes rows (a bare data.frame of tunes or
+## a spec list whose rows live in $tunes -- same test as the tpf guard in
+## make_log_posterior; NB a data.frame IS a list, so test is.data.frame first).
+.student_t_has_filter_tunes <- function(model) {
+  ft <- model$filter_tunes
+  if (is.null(ft)) return(FALSE)
+  n <- if (is.data.frame(ft)) nrow(ft) else NROW(ft$tunes)
+  isTRUE(n > 0L)
+}
+
+## TRUE iff the model's heteroskedastic_shocks spec has scale rows (the
+## condition under which .build_shock_scale_matrix() returns a non-NULL
+## shock_scale on the Gaussian path; parse_mod() attaches an EMPTY spec).
+.student_t_has_het_shocks <- function(model) {
+  spec <- model$heteroskedastic_shocks
+  if (is.null(spec) || is.null(spec$scales)) return(FALSE)
+  isTRUE(NROW(spec$scales) > 0L)
 }

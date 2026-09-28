@@ -251,7 +251,7 @@ hank_het3_jacobian_checkpoint <- function(block, T_h, dir, inputs = NULL,
         all(outputs %in% names(cached$columns))
       if (ok) {
         piece <- cached$columns
-        if (verbose) message("hank_het3_jacobian_checkpoint: reusing '", i, "'")
+        if (verbose) .dynhr_inform("hank_het3_jacobian_checkpoint: reusing '", i, "'")
       } else if (!identical(cached$fingerprint, fp) ||
                  !identical(as.integer(cached$T_h), as.integer(T_h))) {
         ## Refuse rather than overwrite: a mismatch means this directory is
@@ -266,7 +266,7 @@ hank_het3_jacobian_checkpoint <- function(block, T_h, dir, inputs = NULL,
       }
     }
     if (is.null(piece)) {
-      if (verbose) message("hank_het3_jacobian_checkpoint: computing '", i, "'")
+      if (verbose) .dynhr_inform("hank_het3_jacobian_checkpoint: computing '", i, "'")
       one <- hank_het3_jacobian(block, T_h, inputs = i, outputs = outputs, ...)
       piece <- setNames(lapply(outputs, function(o) one[[o]][[i]]), outputs)
       ## Write to a temporary name and rename: a kill between "file exists"

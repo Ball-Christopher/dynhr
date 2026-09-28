@@ -227,6 +227,30 @@
 #' @param me_variance measurement-error variance forwarded to make_log_posterior.
 #' @param me_extra n_obs x T matrix of per-period extra ME variances (filter_tunes).
 #' @param shock_scale n_exo x T matrix of per-period shock std scale factors.
+#' Re-raise a worker version-skew abort from a collected everywhere() result
+#'
+#' `mirai::everywhere(...)[]` does NOT re-throw a daemon-side error: each one
+#' comes back as a `miraiError` value in the result list, and the pool-init
+#' code then carried on with daemons whose `.worker_lp` was never built. The
+#' `dynhr_error_worker_version_skew` abort raised by `.dynhr_daemon_apply()`
+#' (see R/options.R) must reach the caller, so scan the collected values, tear
+#' the (unusable) pool down and re-signal it on the host with the same class.
+#' Other daemon errors keep their existing handling.
+#'
+#' @param res the collected `everywhere()` result (a list).
+#' @return `res`, invisibly, when no daemon reported skew.
+#' @noRd
+.dynhr_raise_worker_skew <- function(res) {
+  for (x in res) {
+    if (inherits(x, "errorValue") &&
+        "dynhr_error_worker_version_skew" %in% attr(x, "condition.class")) {
+      mirai::daemons(NULL)
+      .dynhr_abort(attr(x, "message"), class = "dynhr_error_worker_version_skew")
+    }
+  }
+  invisible(res)
+}
+
 #' Pin single-threaded BLAS for daemons spawned by the next mirai::daemons()
 #'
 #' Daemons inherit the parent's environment at launch, so we cap the BLAS thread
@@ -280,7 +304,7 @@
   sh  <- mori::share(Y)
   key <- mori::shared_name(sh)
 
-  mirai::everywhere(
+  .dynhr_raise_worker_skew(mirai::everywhere(
     {
       suppressMessages(library(dynhr))
       ## Replay the host's dynhr option state FIRST: `.dynhr_opts` is a
@@ -288,7 +312,10 @@
       ## me_variance=, debug_kf_errors=, ...)` does not survive into a fresh
       ## daemon process on its own. It must land before `.worker_lp` is built,
       ## because the factories resolve their options once at FACTORY time.
-      utils::getFromNamespace(".dynhr_daemon_apply", "dynhr")(.dynhr_state)
+      ## `.dynhr_apply` is the HOST's function object (body from the host,
+      ## names resolved in this daemon's dynhr), so its worker-version check
+      ## runs even when the installed dynhr predates it; it aborts on skew.
+      .dynhr_apply(.dynhr_state)
       ## make_log_posterior is internal (non-exported); the `:::` operator does
       ## not resolve it reliably in the installed build, so reach it (and the
       ## compiler) via getFromNamespace, which does.
@@ -322,6 +349,11 @@
       .worker_model <<- parsed_model
       .worker_cm    <<- .worker_cm
       .worker_Y     <<- .worker_Y
+      ## The P0 initialisation .worker_lp was built with: a gradient closure
+      ## built on this daemon must differentiate the SAME likelihood, so the
+      ## chain / mode tasks pass it to make_posterior_grad(lik_init =).
+      ## (An explicit global-env assign: the tasks read it with get0().)
+      assign(".worker_lik_init", lik_init, envir = globalenv())
     },
     .args = list(parsed_model = parsed_model, key = key,
                  prior_spec = prior_spec, obs_names = obs_names,
@@ -330,8 +362,9 @@
                  system_priors = system_priors,
                  lik_init = lik_init,
                  tpf_options = tpf_options,
-                 .dynhr_state = .dynhr_daemon_state())
-  )[]
+                 .dynhr_state = .dynhr_daemon_state(),
+                 .dynhr_apply = .dynhr_daemon_apply)
+  )[])
   ## ^ COLLECT (block) the everywhere() init. It recompiles the model on every
   ## daemon (seconds of work); leaving it uncollected returns while daemons are
   ## still initialising, and the in-flight init tasks' NNG contexts dangle if a
@@ -364,13 +397,13 @@
                                     me_extra = NULL, shock_scale = NULL,
                                     system_priors = NULL, lik_init = "auto",
                                     tpf_options = list()) {
-  mirai::everywhere(
+  .dynhr_raise_worker_skew(mirai::everywhere(
     {
       ## Re-apply the host option state before rebuilding the closure: the
       ## caller may have changed dynhr_set_options() between stages, and the
       ## factories resolve their options once at factory time (see
-      ## .dynhr_daemon_state).
-      utils::getFromNamespace(".dynhr_daemon_apply", "dynhr")(.dynhr_state)
+      ## .dynhr_daemon_state). Host function object: see .mirai_pool_init.
+      .dynhr_apply(.dynhr_state)
       .mk_lp <- utils::getFromNamespace("make_log_posterior", "dynhr")
       ## Reuse the already-compiled model + mapped Y from the daemon globals;
       ## only the lik_init (and thus the filter setup) changes. `<<-` for the
@@ -381,14 +414,63 @@
                me_extra = me_extra, shock_scale = shock_scale,
                system_priors = system_priors, lik_init = lik_init),
           tpf_options))
+      ## Kept in step with .worker_lp (see .mirai_pool_init).
+      assign(".worker_lik_init", lik_init, envir = globalenv())
     },
     .args = list(prior_spec = prior_spec, obs_names = obs_names,
                  me_variance = me_variance, me_extra = me_extra,
                  shock_scale = shock_scale, system_priors = system_priors,
                  lik_init = lik_init, tpf_options = tpf_options,
-                 .dynhr_state = .dynhr_daemon_state())
-  )[]
+                 .dynhr_state = .dynhr_daemon_state(),
+                 .dynhr_apply = .dynhr_daemon_apply)
+  )[])
   invisible(NULL)
+}
+
+
+#' Bind the exact log-posterior gradient on every daemon of a live pool
+#'
+#' For the parallel Step-6 Hessian from the gradient (W88,
+#' \code{grad_hessian_mirai()}): builds \code{.worker_grad} on each daemon
+#' with \code{make_posterior_grad()} from the daemon globals
+#' \code{.mirai_pool_init} set (\code{.worker_model}, \code{.worker_cm},
+#' \code{.worker_Y}) and the P0 initialisation \code{.worker_lp} is bound
+#' with (\code{.worker_lik_init}), so it is the gradient of the SAME
+#' posterior the daemon evaluates. Pass the target arguments
+#' \code{.worker_lp} was (re-)bound with. The binding is cleared first: a
+#' daemon whose build fails is left with none (its gradient tasks then return
+#' NA) rather than with a stale one from an earlier stage.
+#'
+#' @return The resolved \code{grad_method} of the gradient (one daemon's),
+#'   or \code{NA_character_} when none could be built.
+#' @noRd
+.mirai_bind_worker_grad <- function(prior_spec, obs_names, me_variance = 0,
+                                    me_extra = NULL, shock_scale = NULL,
+                                    system_priors = NULL) {
+  mirai::everywhere(
+    {
+      assign(".worker_grad", NULL, envir = globalenv())
+      .mkg <- utils::getFromNamespace("make_posterior_grad", "dynhr")
+      .li  <- get0(".worker_lik_init", envir = globalenv(), inherits = FALSE)
+      if (is.null(.li)) .li <- "auto"
+      assign(".worker_grad",
+             .mkg(get0(".worker_model", envir = globalenv(), inherits = FALSE),
+                  get0(".worker_Y", envir = globalenv(), inherits = FALSE),
+                  prior_spec, obs_names,
+                  get0(".worker_cm", envir = globalenv(), inherits = FALSE),
+                  me_variance = me_variance, me_extra = me_extra,
+                  shock_scale = shock_scale, system_priors = system_priors,
+                  lik_init = .li),
+             envir = globalenv())
+    },
+    .args = list(prior_spec = prior_spec, obs_names = obs_names,
+                 me_variance = me_variance, me_extra = me_extra,
+                 shock_scale = shock_scale, system_priors = system_priors)
+  )[]
+  gm <- mirai::mirai(
+    attr(get0(".worker_grad", envir = globalenv(), inherits = FALSE),
+         "grad_method"))[]
+  if (is.character(gm) && length(gm) == 1L) gm else NA_character_
 }
 
 
@@ -413,7 +495,8 @@
 #' @param mh_scale initial RWMH scale.
 #' @param target_accept target acceptance rate.
 #' @param adapt_every adapt scale every N draws.
-#' @param seed_base base RNG seed (chain k uses seed_base + k).
+#' @param seed_base base RNG seed (chain k uses seed_base + k); NULL (the
+#'   default) = the \code{seed_base} option (42L unless set).
 #' @param n_cores worker count (NULL = auto, capped at n_chains).
 #' @param me_variance measurement-error variance.
 #' @param me_extra n_obs x T matrix of per-period extra ME variances (filter_tunes).
@@ -455,7 +538,7 @@ run_mcmc_mirai <- function(
     mh_scale      = 1.50,
     target_accept = 0.25,
     adapt_every   = 200L,
-    seed_base     = 42L,
+    seed_base     = NULL,
     n_cores       = NULL,
     me_variance   = 0,
     me_extra      = NULL,
@@ -482,10 +565,13 @@ run_mcmc_mirai <- function(
     tpf_options     <- ctx$tpf_options     %||% list()
     gradient_policy <- ctx$gradient_policy %||% "auto"
   }
+  ## NULL: the seed_base option (registry default 42L), so options(seed_base)
+  ## and a spec's compute$seed (the stage option store) reach every chain.
+  seed_base <- .dynhr_opt("seed_base", seed_base)
   n_cores <- .mirai_n_cores(n_cores, n_chains)
-  cat(sprintf("  Parallel MCMC (mirai): %d chains on %d daemons\n",
+  .dynhr_cat(sprintf("  Parallel MCMC (mirai): %d chains on %d daemons\n",
               n_chains, n_cores))
-  cat(sprintf("  Per chain: %gk draws + %gk burn-in\n",
+  .dynhr_cat(sprintf("  Per chain: %gk draws + %gk burn-in\n",
               n_draws / 1000, n_burn / 1000))
 
   t_init <- proc.time()
@@ -501,7 +587,7 @@ run_mcmc_mirai <- function(
                            tpf_options = tpf_options)
   }
   on.exit({ mirai::daemons(NULL); if (!is.null(sh)) rm(sh) }, add = TRUE)
-  cat(sprintf("  Daemon init: %.1f sec (load + compile + lp_fn)\n",
+  .dynhr_cat(sprintf("  Daemon init: %.1f sec (load + compile + lp_fn)\n",
               (proc.time() - t_init)[["elapsed"]]))
 
   ## Live progress back-channel (host pull socket); daemons dial `prog_url`.
@@ -630,7 +716,7 @@ run_mcmc_mirai <- function(
   else m_handle[]
 
   wall_min <- as.numeric(difftime(Sys.time(), t_global, units = "mins"))
-  cat(sprintf("  All chains complete. Wall time: %.1f min\n", wall_min))
+  .dynhr_cat(sprintf("  All chains complete. Wall time: %.1f min\n", wall_min))
 
   chains <- vector("list", n_chains)
   chain_stats <- data.frame(
@@ -640,7 +726,7 @@ run_mcmc_mirai <- function(
   )
   for (r in raw) {
     if (inherits(r, "miraiError") || inherits(r, "errorValue")) {
-      cat(sprintf("  A chain FAILED: %s\n", as.character(r)))
+      .dynhr_cat(sprintf("  A chain FAILED: %s\n", as.character(r)))
       next
     }
     ch <- r$chain_id
@@ -670,8 +756,13 @@ run_mcmc_mirai <- function(
 #' models). Chain 1 starts at \code{theta_mode}; chains 2..N at dispersed
 #' starts (\code{0.5 * chol(Sigma_prop) \%*\% z}, clamped to the prior box).
 #' Every chain is preconditioned with a diagonal mass matrix
-#' \code{1/diag(Sigma_prop)}, so \code{Sigma_prop} should approximate the
-#' posterior covariance (e.g. the inverse-Hessian \code{V_mode}).
+#' \code{1/diag(Sigma_prop)}, so \code{Sigma_prop} should be shaped like the
+#' posterior covariance. \code{run_posterior_estimation()} passes the same
+#' matrix the serial NUTS path builds its mass from: the sampler's own
+#' \code{Sigma_prop}, else \code{mode_result$Sigma_prop_eta} at a bound mode,
+#' else the mode's \code{Sigma_prop} (the inverse Hessian scaled by
+#' \eqn{2.38^2 / n_{par}}; eta-space by the delta method under
+#' \code{transform_params}).
 #'
 #' @param parsed_model parsed dynare model.
 #' @param Y observation matrix.
@@ -684,7 +775,8 @@ run_mcmc_mirai <- function(
 #' @param n_warmup warmup iterations per chain (step-size + mass adaptation).
 #' @param max_treedepth maximum NUTS tree depth.
 #' @param target_accept dual-averaging target acceptance rate.
-#' @param seed_base base RNG seed (chain k uses seed_base + k).
+#' @param seed_base base RNG seed (chain k uses seed_base + k); NULL (the
+#'   default) = the \code{seed_base} option (42L unless set).
 #' @param n_cores worker count (NULL = auto, capped at n_chains).
 #' @param me_variance measurement-error variance.
 #' @param me_extra n_obs x T matrix of per-period extra ME variances (filter_tunes).
@@ -715,10 +807,13 @@ run_mcmc_mirai <- function(
 #'   compiled model), each chain task builds an analytic/implicit gradient
 #'   closure via \code{\link{make_posterior_grad}} from the daemon globals
 #'   bound by \code{.mirai_pool_init} (\code{.worker_model}, \code{.worker_Y},
-#'   \code{.worker_cm}), once per chain task, and passes it as \code{grad_fn}
-#'   to \code{\link{dynhr_nuts}}. When \code{transform} is non-NULL, the
-#'   gradient is composed with \code{\link{make_transformed_grad}} (chain-rule
-#'   + log-Jacobian term), matching the serial path. Has no effect (silently
+#'   \code{.worker_cm}, and \code{.worker_lik_init}: the \code{lik_init} the
+#'   daemon log-posterior was built with, so the gradient is of the same
+#'   likelihood), once per chain task, and passes it as \code{grad_fn}
+#'   to \code{\link{dynhr_nuts}}. The closure is the THETA-space gradient:
+#'   when \code{transform} is non-NULL, \code{dynhr_nuts} composes it with
+#'   \code{make_transformed_grad} (chain rule + log-Jacobian term) itself,
+#'   matching the serial path. Has no effect (silently
 #'   ignored) when \code{log_post_fn} is supplied -- OBC/PKF and cumulant
 #'   models have no analytic gradient.
 #'
@@ -735,9 +830,26 @@ run_mcmc_mirai <- function(
 #'   would only help when \code{n_chains > n_cores} (multiple chains per
 #'   daemon) and is left as a future optimisation if profiling shows it
 #'   matters.
-#' @param grad_method \code{"hybrid"} (default) or \code{"implicit"}; forwarded
+#' @param grad_method \code{"auto"} (default), \code{"hybrid"}, \code{"implicit"},
+#'   \code{"adjoint"} or \code{"adjoint_solution"} (see \code{\link{make_posterior_grad}}); forwarded
 #'   to \code{\link{make_posterior_grad}} when \code{analytic_grad = TRUE}.
 #' @param progress show the live progress bar.
+#' @param adapt Warmup adaptation across chains. \code{"independent"}
+#'   (default, unchanged): every chain adapts its own step size and metric.
+#'   \code{"pooled"} (opt-in; Lao 2026, arXiv:2607.23788): the chains are
+#'   warmed up in lockstep as ONE daemon task -- one shared step size (dual
+#'   averaging on the chains' mean acceptance statistic) and ONE common metric
+#'   estimated at each window endpoint of Lao's dimension-derived schedule from
+#'   all chains' pooled, per-chain-centred warmup draws (and scores for
+#'   \code{"lowrank"}/\code{"fisher_diag"}); see
+#'   \code{.nuts_pooled_warmup()} (R/sampler-nuts-pooled.R). Step size and
+#'   metric are then frozen and shared, and the chains sample in parallel (one
+#'   task each) from the same starts and RNG streams as the independent path.
+#'   Warmup wall time is serial over chains. \code{metric} must be
+#'   \code{"diagonal"}, \code{"fisher_diag"} or \code{"lowrank"} (the
+#'   controller's diagonal -> low-rank promotion); \code{checkpoint} is not
+#'   supported. The return value gains \code{$adaptation} (frozen step size,
+#'   inverse mass, per-window evidence, advice).
 #' @return list(chains, chain_stats, wall_time, n_cores) -- matches
 #'   run_mcmc_mirai (chain_stats also carries n_divergent, mean_treedepth).
 #' @noRd
@@ -749,7 +861,7 @@ run_nuts_mirai <- function(
     n_warmup      = 1000L,
     max_treedepth = 8L,
     target_accept = 0.80,
-    seed_base     = 42L,
+    seed_base     = NULL,
     n_cores       = NULL,
     me_variance   = 0,
     me_extra      = NULL,
@@ -757,16 +869,31 @@ run_nuts_mirai <- function(
     log_post_fn   = NULL,
     transform     = NULL,
     analytic_grad = FALSE,
-    grad_method   = c("hybrid", "implicit", "adjoint"),
+    grad_method   = c("auto", "hybrid", "implicit", "adjoint", "adjoint_solution"),
     system_priors = NULL,
     lik_init      = "auto",
     tpf_options   = list(),
     gradient_policy = "auto",
     ctx           = NULL,
     checkpoint    = NULL,
-    progress      = interactive()
+    progress      = interactive(),
+    ## Adapted metric forwarded to every chain's dynhr_nuts(): "diagonal"
+    ## (default), "warmup_dense", "fisher_diag" or "lowrank". A fixed dense
+    ## metric (M_inv) is not shipped on this path.
+    metric        = c("diagonal", "warmup_dense", "fisher_diag", "lowrank"),
+    adapt         = c("independent", "pooled")
 ) {
   grad_method <- match.arg(grad_method)
+  metric      <- match.arg(metric)
+  adapt       <- match.arg(adapt)
+  pooled      <- identical(adapt, "pooled")
+  if (pooled && identical(metric, "warmup_dense"))
+    .dynhr_abort("adapt = \"pooled\" supports metric = \"diagonal\", \"fisher_diag\" ",
+                 "or \"lowrank\", not \"warmup_dense\".",
+                 class = "dynhr_error_invalid_argument")
+  if (pooled && !is.null(checkpoint))
+    .dynhr_abort("adapt = \"pooled\" does not support `checkpoint`.",
+                 class = "dynhr_error_invalid_argument")
   ## Unpack ctx fields when provided (ctx wins over individual args).
   likelihood  <- "gaussian"
   freq_band   <- c(0, pi)
@@ -790,17 +917,20 @@ run_nuts_mirai <- function(
       likelihood  = likelihood
     )
     if (!.ctx_allows_analytic_gradient(.tmp_ctx_nuts)) {
-      warning("run_nuts_mirai: analytic_grad ignored (likelihood/me_extra/shock_scale ",
+      .dynhr_warn("run_nuts_mirai: analytic_grad ignored (likelihood/me_extra/shock_scale ",
               "combination is not supported by the analytic gradient path). Using the ",
               "numerical gradient.", call. = FALSE)
       analytic_grad <- FALSE
     }
     rm(.tmp_ctx_nuts)
   }
+  ## NULL: the seed_base option (registry default 42L), so options(seed_base)
+  ## and a spec's compute$seed (the stage option store) reach every chain.
+  seed_base <- .dynhr_opt("seed_base", seed_base)
   n_cores <- .mirai_n_cores(n_cores, n_chains)
-  cat(sprintf("  Parallel NUTS (mirai): %d chains on %d daemons\n",
+  .dynhr_cat(sprintf("  Parallel NUTS (mirai): %d chains on %d daemons\n",
               n_chains, n_cores))
-  cat(sprintf("  Per chain: %d draws + %d warmup (max_treedepth=%d)\n",
+  .dynhr_cat(sprintf("  Per chain: %d draws + %d warmup (max_treedepth=%d)\n",
               n_draws, n_warmup, max_treedepth))
 
   ## NOTE: when `transform` is non-NULL, Sigma_prop is the ETA-SPACE
@@ -822,7 +952,7 @@ run_nuts_mirai <- function(
                            tpf_options = tpf_options)
   }
   on.exit({ mirai::daemons(NULL); if (!is.null(sh)) rm(sh) }, add = TRUE)
-  cat(sprintf("  Daemon init: %.1f sec (load + compile + lp_fn)\n",
+  .dynhr_cat(sprintf("  Daemon init: %.1f sec (load + compile + lp_fn)\n",
               (proc.time() - t_init)[["elapsed"]]))
 
   prog_url <- NULL
@@ -879,17 +1009,27 @@ run_nuts_mirai <- function(
       .worker_Y     <- get0(".worker_Y",     envir = globalenv(), inherits = FALSE)
       if (!is.null(.worker_model) && !is.null(.worker_cm) && !is.null(.worker_Y)) {
         .mk_grad <- utils::getFromNamespace("make_posterior_grad", "dynhr")
+        ## lik_init: the init .worker_lp was built with (.mirai_pool_init).
         base_grad_fn <- .mk_grad(.worker_model, .worker_Y, prior_spec, obs_names,
                                  .worker_cm, me_variance = me_variance,
                                  me_extra    = me_extra,
                                  shock_scale = shock_scale,
                                  grad_method = grad_method,
                                  likelihood  = likelihood,
-                                 freq_band   = freq_band)
-        grad_fn <- if (!is.null(transform)) {
-          .mk_tgrad <- utils::getFromNamespace("make_transformed_grad", "dynhr")
-          .mk_tgrad(base_grad_fn, transform)
-        } else base_grad_fn
+                                 freq_band   = freq_band,
+                                 lik_init    = get0(".worker_lik_init",
+                                                    envir = globalenv(),
+                                                    inherits = FALSE) %||% "auto",
+                                 system_priors = system_priors)
+        ## THETA-space gradient: dynhr_nuts(transform = transform) applies
+        ## the eta chain rule itself (make_transformed_grad). W86: this used
+        ## to pre-wrap it too -- the chain rule fired TWICE and the eta-space
+        ## closure was fed theta (the mode_task bug class, 2026-06).
+        ## W94: with the context's system prior -- the one .worker_lp carries
+        ## (.mirai_pool_init) -- this is the gradient, and its fused
+        ## log-posterior (W92) the value, of the sampled target. (W92 dropped
+        ## the fused value there instead; the gradient omitted the prior.)
+        grad_fn <- base_grad_fn
       }
     }
 
@@ -918,7 +1058,8 @@ run_nuts_mirai <- function(
                     chain_id      = ch,
                     transform     = transform,
                     grad_fn       = grad_fn,
-                    checkpoint    = checkpoint)
+                    checkpoint    = checkpoint,
+                    metric        = metric)
     list(chain_id = ch, result = res,
          elapsed_min = (proc.time()[["elapsed"]] - t0) / 60)
   }
@@ -933,9 +1074,25 @@ run_nuts_mirai <- function(
     ckpt_daemon <- c(checkpoint, list(write_meta = FALSE))
   }
 
+  ## adapt = "pooled": pooled lockstep warmup on one daemon, then the frozen
+  ## chains in parallel (R/sampler-nuts-pooled.R). No live progress bar.
+  pooled_out <- if (pooled) {
+    .dynhr_cat("  Pooled warmup (Lao 2026): one shared step size and metric\n")
+    .nuts_pooled_mirai(
+      n_chains = n_chains, n_draws = n_draws, n_warmup = n_warmup,
+      metric = metric, theta_mode = theta_mode, Sigma_prop = Sigma_prop,
+      prior_spec = prior_spec, obs_names = obs_names, transform = transform,
+      seed_base = seed_base, mass_diag = mass_diag,
+      max_treedepth = max_treedepth, target_accept = target_accept,
+      analytic_grad = analytic_grad, grad_method = grad_method,
+      me_variance = me_variance, me_extra = me_extra,
+      shock_scale = shock_scale, likelihood = likelihood,
+      freq_band = freq_band, system_priors = system_priors)
+  } else NULL
+
   ## `transform` (when non-NULL) is a plain S3 list of closures over local
   ## data and serializes to the daemons like any other free variable here.
-  m_handle <- mirai::mirai_map(
+  m_handle <- if (pooled) NULL else mirai::mirai_map(
     seq_len(n_chains), chain_task,
     seed_base = seed_base, theta_mode = theta_mode, Sigma_prop = Sigma_prop,
     prior_spec = prior_spec, obs_names = obs_names, mass_diag = mass_diag,
@@ -943,15 +1100,17 @@ run_nuts_mirai <- function(
     target_accept = target_accept, prog_url = prog_url, transform = transform,
     analytic_grad = analytic_grad, grad_method = grad_method,
     me_variance = me_variance, me_extra = me_extra, shock_scale = shock_scale,
-    checkpoint = ckpt_daemon
+    checkpoint = ckpt_daemon, metric = metric,
+    system_priors = system_priors
   )
 
-  raw <- if (isTRUE(progress))
+  raw <- if (pooled) pooled_out$raw
+  else if (isTRUE(progress))
     .render_mcmc_progress(m_handle, prog_sock, n_chains, total_draws)
   else m_handle[]
 
   wall_min <- as.numeric(difftime(Sys.time(), t_global, units = "mins"))
-  cat(sprintf("  All chains complete. Wall time: %.1f min\n", wall_min))
+  .dynhr_cat(sprintf("  All chains complete. Wall time: %.1f min\n", wall_min))
 
   chains <- vector("list", n_chains)
   chain_stats <- data.frame(
@@ -960,11 +1119,14 @@ run_nuts_mirai <- function(
     elapsed_min = numeric(), stringsAsFactors = FALSE)
   for (r in raw) {
     if (inherits(r, "miraiError") || inherits(r, "errorValue")) {
-      cat(sprintf("  A NUTS chain FAILED: %s\n", as.character(r)))
+      .dynhr_cat(sprintf("  A NUTS chain FAILED: %s\n", as.character(r)))
       next
     }
     ch <- r$chain_id
     chains[[ch]] <- r$result
+    ## accept_rate: the chain's mean NUTS acceptance statistic
+    ## (dynhr_nuts()$acceptance_rate == $accept_stat since 0.9.3.127; it was
+    ## 1 - mean(treedepth == 0), identically 1, before)
     chain_stats <- rbind(chain_stats, data.frame(
       chain          = ch,
       accept_rate    = r$result$acceptance_rate %||% NA_real_,
@@ -974,8 +1136,10 @@ run_nuts_mirai <- function(
       elapsed_min    = r$elapsed_min, stringsAsFactors = FALSE))
   }
 
-  list(chains = chains, chain_stats = chain_stats,
-       wall_time = wall_min, n_cores = n_cores)
+  out <- list(chains = chains, chain_stats = chain_stats,
+              wall_time = wall_min, n_cores = n_cores)
+  if (pooled) out$adaptation <- pooled_out$adaptation
+  out
 }
 
 
@@ -998,7 +1162,8 @@ run_nuts_mirai <- function(
 #' @param nm_maxit mode-finding iteration budget per chain.
 #' @param method optimizer name forwarded to .run_mode_finding().
 #' @param perturb_scale perturbation as a fraction of prior std.
-#' @param seed_base base RNG seed.
+#' @param seed_base base RNG seed; NULL (the default) = the
+#'   \code{seed_base} option (42L unless set).
 #' @param n_cores worker count (NULL = auto).
 #' @param me_variance measurement-error variance.
 #' @param me_extra n_obs x T matrix of per-period extra ME variances (filter_tunes).
@@ -1032,7 +1197,7 @@ run_mode_mirai <- function(
     nm_maxit       = 5000L,
     method         = "cmaes_nmkb",
     perturb_scale  = 0.5,
-    seed_base      = 42L,
+    seed_base      = NULL,
     n_cores        = NULL,
     me_variance    = 0,
     me_extra       = NULL,
@@ -1041,7 +1206,7 @@ run_mode_mirai <- function(
     transform      = NULL,
     system_priors  = NULL,
     analytic_grad  = TRUE,
-    grad_method    = "hybrid",
+    grad_method    = "auto",
     likelihood     = "gaussian",
     freq_band      = NULL,
     newrat_H0_seed = NULL,
@@ -1053,6 +1218,9 @@ run_mode_mirai <- function(
   ## /.worker_cm), which only exist on the .mirai_pool_init path. A bare
   ## log_post_fn closure (.mirai_pool_closure) cannot build it, so disable.
   if (!is.null(log_post_fn)) analytic_grad <- FALSE
+  ## NULL: the seed_base option (registry default 42L), so options(seed_base)
+  ## and a spec's compute$seed (the stage option store) reach every chain.
+  seed_base <- .dynhr_opt("seed_base", seed_base)
   n_cores <- .mirai_n_cores(n_cores, n_chains)
   if (is.null(n_chains)) n_chains <- n_cores
   n_cores <- min(n_cores, n_chains)
@@ -1084,7 +1252,7 @@ run_mode_mirai <- function(
                       prior_var = (prior_sds[par_names])^2)
       v <- diag(Sig)
       if (all(is.finite(v)) && all(v > 0)) setNames(sqrt(v), par_names) else NULL
-    }, error = function(e) NULL)
+    }, error = function(e) .dynhr_reraise_bug(e, NULL))
     if (!is.null(post_sd))
       jitter_sds <- pmin(post_sd, prior_sds[par_names], na.rm = TRUE)
   }
@@ -1102,13 +1270,16 @@ run_mode_mirai <- function(
   eta_jitter_sds <- jitter_sds
   if (!is.null(transform)) {
     J <- tryCatch(abs(as.numeric(transform$dtheta_deta(eta_init))),
-                  error = function(e) NULL)
+                  error = function(e) .dynhr_reraise_bug(e, NULL))
     if (!is.null(J) && length(J) == length(par_names)) {
       names(J) <- par_names
       J[!is.finite(J) | J <= 0] <- 1
       eta_jitter_sds <- jitter_sds[par_names] / J
     }
   }
+  ## The dispersion draws below run on the HOST; restore the caller's RNG
+  ## stream when run_mode_mirai() exits (C1).
+  .local_seed(seed_base)
   for (ch in seq_len(n_chains)[-1L]) {
     set.seed(seed_base + ch)
     if (!is.null(transform)) {
@@ -1183,7 +1354,7 @@ run_mode_mirai <- function(
     )
   })
 
-  cat(sprintf("  Parallel mode (mirai): %d chains on %d daemons | methods: %s | maxit: newrat=%d global=%d\n",
+  .dynhr_cat(sprintf("  Parallel mode (mirai): %d chains on %d daemons | methods: %s | maxit: newrat=%d global=%d\n",
               n_chains, n_cores,
               paste(sprintf("C%d=%s", seq_len(n_chains), chain_methods), collapse = " "),
               nm_maxit, global_maxit))
@@ -1197,7 +1368,7 @@ run_mode_mirai <- function(
     .mirai_rebind_worker_lp(prior_spec, obs_names, me_variance = me_variance,
                             me_extra = me_extra, shock_scale = shock_scale,
                             system_priors = system_priors, lik_init = lik_init)
-    cat(sprintf("  Daemon pool reused (lik_init = %s): %.1f sec\n",
+    .dynhr_cat(sprintf("  Daemon pool reused (lik_init = %s): %.1f sec\n",
                 lik_init, (proc.time() - t_init)[["elapsed"]]))
   } else {
     if (!is.null(log_post_fn)) {
@@ -1209,7 +1380,7 @@ run_mode_mirai <- function(
                              system_priors = system_priors, lik_init = lik_init)
     }
     on.exit({ mirai::daemons(NULL); if (!is.null(sh)) rm(sh) }, add = TRUE)
-    cat(sprintf("  Daemon init: %.1f sec\n", (proc.time() - t_init)[["elapsed"]]))
+    .dynhr_cat(sprintf("  Daemon init: %.1f sec\n", (proc.time() - t_init)[["elapsed"]]))
   }
 
   ## Live progress back-channel (host pull socket); daemons dial `prog_url`.
@@ -1291,11 +1462,17 @@ run_mode_mirai <- function(
           ## "stuck" bug -- NOT a host/daemon or stale-install issue. The host
           ## full-API path (run-mode-finding.R) likewise passes the untransformed
           ## make_posterior_grad result; mirror it exactly.
+          ## lik_init: the init this stage's .worker_lp was (re-)bound with
+          ## (.mirai_pool_init / .mirai_rebind_worker_lp), so the gradient is
+          ## of the objective the chain optimises.
           .mkg(.wm, .wY, prior_spec, obs_names, .wcm,
                me_variance = me_variance, me_extra = me_extra,
                shock_scale = shock_scale, grad_method = grad_method,
-               likelihood = likelihood, freq_band = freq_band)
-        }, error = function(e) NULL)
+               likelihood = likelihood, freq_band = freq_band,
+               system_priors = system_priors,
+               lik_init = get0(".worker_lik_init", envir = globalenv(),
+                               inherits = FALSE) %||% "auto")
+        }, error = function(e) .dynhr_reraise_bug(e, NULL))
       }
     }
 
@@ -1354,7 +1531,8 @@ run_mode_mirai <- function(
                 grad_method = grad_method, obs_names = obs_names,
                 me_variance = me_variance, me_extra = me_extra,
                 shock_scale = shock_scale, likelihood = likelihood,
-                freq_band = freq_band, newrat_H0_seed = newrat_H0_seed),
+                freq_band = freq_band, newrat_H0_seed = newrat_H0_seed,
+                system_priors = system_priors),
            envir = .mt_env)
   environment(mode_task) <- .mt_env
   m_handle <- mirai::mirai_map(configs, mode_task)
@@ -1363,7 +1541,7 @@ run_mode_mirai <- function(
   else m_handle[]
 
   wall_min <- as.numeric(difftime(Sys.time(), t_global, units = "mins"))
-  cat(sprintf("  All chains complete. Wall time: %.1f min\n", wall_min))
+  .dynhr_cat(sprintf("  All chains complete. Wall time: %.1f min\n", wall_min))
 
   ## Surface failed chains instead of silently collapsing them to -Inf (a
   ## swallowed error here propagates as an empty theta_mode -> 0x0 Sigma_prop
@@ -1372,9 +1550,9 @@ run_mode_mirai <- function(
   for (i in seq_along(raw)) {
     r <- raw[[i]]
     if (.failed(r))
-      cat(sprintf("  Mode chain %d FAILED: %s\n", i, as.character(r)))
+      .dynhr_cat(sprintf("  Mode chain %d FAILED: %s\n", i, as.character(r)))
     else if (!is.null(r$result$error))
-      cat(sprintf("  Mode chain %d recovered from error: %s\n", i, r$result$error))
+      .dynhr_cat(sprintf("  Mode chain %d recovered from error: %s\n", i, r$result$error))
   }
 
   logposts <- vapply(raw, function(r) {
@@ -1386,14 +1564,14 @@ run_mode_mirai <- function(
 
   best_res <- if (.failed(raw[[best_idx]])) NULL else raw[[best_idx]]$result
   if (is.null(best_res) || is.null(best_res$theta_mode)) {
-    warning("run_mode_mirai: all chains failed or returned no mode; ",
+    .dynhr_warn("run_mode_mirai: all chains failed or returned no mode; ",
             "falling back to theta_init. See the per-chain errors above.",
             call. = FALSE)
     best_res <- list(theta_mode = theta_init, logpost = logposts[best_idx],
                      convergence = 1L, iterations = 0L,
                      error = "all mode chains failed")
   }
-  cat(sprintf("  Best: chain %d  logpost=%.4f\n", best_idx, logposts[best_idx]))
+  .dynhr_cat(sprintf("  Best: chain %d  logpost=%.4f\n", best_idx, logposts[best_idx]))
 
   ## Per-chain diagnostics: method, wall time, objective-eval count, iterations,
   ## final quality. n_eval counts log-posterior (objective) calls only; for the
@@ -1445,22 +1623,24 @@ run_mode_mirai <- function(
   .restore_blas <- .mirai_pin_blas_threads()
   on.exit(.restore_blas(), add = TRUE)
   mirai::daemons(n_cores)
-  mirai::everywhere(
+  .dynhr_raise_worker_skew(mirai::everywhere(
     {
       suppressMessages(library(dynhr))
       ## Replay the host's dynhr option state (see .dynhr_daemon_state). The
       ## shipped closure already resolved its own factory-time options on the
       ## host, but anything it reads per-evaluation (e.g. debug_kf_errors) and
       ## any downstream dynhr call made on the daemon still needs them.
-      utils::getFromNamespace(".dynhr_daemon_apply", "dynhr")(.dynhr_state)
+      ## Host function object + worker-version check: see .mirai_pool_init.
+      .dynhr_apply(.dynhr_state)
       ## `<<-` so the bindings reach the daemon globalenv (see the note in
       ## .mirai_pool_init); tasks retrieve them via get0(envir = globalenv()).
       .worker_lp <<- log_post_fn
       .worker_ps <<- prior_sampler
     },
     .args = list(log_post_fn = log_post_fn, prior_sampler = prior_sampler,
-                 .dynhr_state = .dynhr_daemon_state())
-  )[]  # collect: block until every daemon has the closure (see .mirai_pool_init)
+                 .dynhr_state = .dynhr_daemon_state(),
+                 .dynhr_apply = .dynhr_daemon_apply)
+  )[])  # collect: block until every daemon has the closure (see .mirai_pool_init)
   invisible(NULL)
 }
 
@@ -1490,13 +1670,15 @@ run_mode_mirai <- function(
   ## Load dynhr and replay the host's option state on every daemon (the SMC
   ## task closures reach into the dynhr namespace, so they see `.dynhr_opts`
   ## on the DAEMON, not the host's -- see .dynhr_daemon_state).
-  mirai::everywhere(
+  .dynhr_raise_worker_skew(mirai::everywhere(
     {
       suppressMessages(library(dynhr))
-      utils::getFromNamespace(".dynhr_daemon_apply", "dynhr")(.dynhr_state)
+      ## Host function object + worker-version check: see .mirai_pool_init.
+      .dynhr_apply(.dynhr_state)
     },
-    .args = list(.dynhr_state = .dynhr_daemon_state())
-  )[]  # collect: see .mirai_pool_init
+    .args = list(.dynhr_state = .dynhr_daemon_state(),
+                 .dynhr_apply = .dynhr_daemon_apply)
+  )[])  # collect: see .mirai_pool_init
   invisible(NULL)
 }
 

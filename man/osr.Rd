@@ -8,8 +8,8 @@ osr(
   model,
   compiled = NULL,
   params = NULL,
-  free_params,
-  loss_vars,
+  free_params = NULL,
+  loss_vars = NULL,
   loss_weights = NULL,
   lower = NULL,
   upper = NULL,
@@ -22,6 +22,7 @@ osr(
   welfare_n_periods = 10000L,
   welfare_burn_in = 1000L,
   welfare_seed = 1L,
+  discount = NULL,
   verbose = FALSE,
   ...
 )
@@ -36,19 +37,29 @@ each iteration if \code{recompile = TRUE}).}
 \code{model$param_values}.}
 
 \item{free_params}{Named numeric vector of initial values for the
-policy-rule coefficients to optimise. Each name must be a parameter
-name in the model.}
+policy-rule coefficients to optimise (each name must be a model
+parameter), or a character vector of parameter names (started at their
+values in \code{params}). \code{NULL} (default) takes the \code{.mod}'s
+\code{osr_params}.}
 
 \item{loss_vars}{Character vector of endogenous variable names
-that enter the loss function.}
+that enter the loss function. \code{NULL} (default) takes the names of
+\code{loss_weights}, or the variables of the \code{.mod}'s
+\code{optim_weights} block when \code{loss_weights} is also \code{NULL}.}
 
-\item{loss_weights}{Named numeric vector of weights for each loss
-variable. Names must match entries in \code{loss_vars}. If \code{NULL},
-all weights are set to 1.}
+\item{loss_weights}{Either a numeric vector of variance weights (named
+by variable, or positional along \code{loss_vars}; a diagonal weight
+matrix), or a square weight matrix whose row and column names are the
+loss variables (cross terms allowed; it is symmetrised, which leaves the
+loss unchanged). If both \code{loss_vars} and \code{loss_weights} are
+\code{NULL} the \code{.mod}'s \code{optim_weights} are used; if only
+\code{loss_weights} is \code{NULL}, all variance weights are 1.}
 
-\item{lower, upper}{Lower/upper bounds for the free parameters.
-Recycled to length of \code{free_params}. Default \code{lower = 0.1},
-\code{upper = 10}.}
+\item{lower, upper}{Lower/upper bounds for the free parameters: a
+scalar (recycled), a vector along \code{free_params}, or a named vector
+(overriding only the named parameters). Parameters not bounded here take
+the \code{.mod}'s \code{osr_params_bounds}, and are otherwise unbounded
+(\code{-Inf}, \code{Inf}), as in Dynare.}
 
 \item{recompile}{If \code{TRUE} (default), recompiles the model
 at each candidate vector. Set to \code{FALSE} if the free parameters
@@ -77,6 +88,11 @@ welfare objective (used only when \code{planner_objective} is supplied).}
 deterministic function of the policy coefficients (so CMA-ES optimises a
 reproducible objective); the caller's RNG state is restored.}
 
+\item{discount}{Planner discount factor for the
+\code{planner_objective}-only loss (see the section above); \code{NULL}
+(default) takes the \code{.mod}'s \code{osr(planner_discount = ...)}.
+Ignored otherwise.}
+
 \item{verbose}{Print progress messages.}
 
 \item{...}{Additional arguments passed to
@@ -88,11 +104,19 @@ An object of class \code{dynhr_osr_result} with components:
     \item{optimal_par}{Named numeric: optimal parameter values.}
     \item{optimal_loss}{Numeric: loss at the optimum.}
     \item{optimal_welfare}{Numeric: unconditional welfare at the optimum
-      (\code{NA} unless \code{planner_objective} is supplied).}
+      (\code{NA} for the variance loss).}
     \item{order}{Perturbation order used.}
-    \item{objective}{\code{"welfare"} or \code{"variance"}.}
+    \item{objective}{\code{"welfare"} (simulated, \code{planner_objective}
+      argument), \code{"planner_objective"} (the \code{.mod}'s objective, LQ
+      welfare) or \code{"variance"}.}
+    \item{discount}{Planner discount of the \code{"planner_objective"} loss
+      (\code{NA} otherwise).}
     \item{free_params}{Character: names of optimised parameters.}
-    \item{loss_vars, loss_weights}{Input specification.}
+    \item{loss_vars}{Loss variables.}
+    \item{loss_weights}{The symmetric weight matrix \eqn{W} over
+      \code{loss_vars} (the loss is \code{sum(W * V)}).}
+    \item{loss_offset}{Constant added to \code{sum(W * V)} (nonzero only
+      for the \code{"planner_objective"} loss: \eqn{-U/(1-\beta)}).}
     \item{dr}{DecisionRules object at the optimum.}
     \item{moments}{Unconditional moments at the optimum (from
       \code{compute_moments()}).}
@@ -101,17 +125,62 @@ An object of class \code{dynhr_osr_result} with components:
 
     \item{ramsey_comparison}{If \code{ramsey_result} provided, a list with
       Ramsey loss, OSR loss, and welfare gap.}
-    \item{optimiser_trace}{Data frame of iteration history (if
-      \code{verbose = TRUE}).}
+    \item{meta}{List with the bounds used (\code{lower}, \code{upper}),
+      \code{max_iter}, the optimal \code{params} and a timestamp.}
   }
 }
 \description{
 Minimises a quadratic loss function over policy-rule parameters using
 CMA-ES. For each candidate parameter vector, the model is solved at
-first order, unconditional variances are computed via the Lyapunov
-equation, and the loss \eqn{L = \sum_i w_i \cdot \mathrm{var}(y_i)} is
-evaluated.
+first order, the unconditional covariance matrix \eqn{V} is computed via
+the Lyapunov equation, and the loss
+\deqn{L = \sum_{i,j} W_{ij} \, \mathrm{Cov}(y_i, y_j)}{L = sum_ij W_ij Cov(y_i, y_j)}
+is evaluated (Dynare's OSR objective). With a diagonal \eqn{W} this is
+\eqn{\sum_i w_i \mathrm{var}(y_i)}.
 }
+\section{Driving osr() from a .mod file}{
+
+When the model was parsed from a \code{.mod} file carrying Dynare's OSR
+statements (stored in \code{model$osr} by \code{\link{parse_mod}}), the
+arguments can be omitted and \code{osr()} runs the problem Dynare's
+\code{osr;} command runs:
+\itemize{
+  \item \code{osr_params a b;} supplies \code{free_params} (started at their
+    values in \code{params});
+  \item \code{optim_weights} supplies \code{loss_vars} and the weight
+    matrix. A variance entry \code{y w;} sets \eqn{W_{yy} = w}; a
+    covariance entry \code{y, pie w;} adds \eqn{w \, \mathrm{Cov}(y, pie)}
+    to the loss once, exactly as Dynare 7.1 does (it writes \code{w} into
+    the single cell (y, pie) of \code{M_.osr.variable_weights}); the
+    symmetric matrix used here carries \eqn{w/2} in each off-diagonal cell,
+    which gives the same loss;
+  \item \code{osr_params_bounds; a, lo, hi; end;} supplies the bounds.
+    A free parameter without an entry is unbounded, as in Dynare.
+}
+Weights and bounds may be parameter expressions; they are evaluated at
+\code{params}. Explicit arguments override the parsed specification.
+}
+
+\section{planner_objective without optim_weights (Dynare 7)}{
+
+A \code{.mod} with a \code{planner_objective} and no \code{optim_weights}
+block (and no explicit \code{loss_vars} / \code{loss_weights} /
+\code{planner_objective} argument) runs Dynare 7's welfare-based OSR: the
+loss is \eqn{-E[W]}, the unconditional welfare of the second-order (LQ)
+approximation,
+\deqn{E[W] = \frac{U + \tfrac12 \sum_{ij} U_{ij} \mathrm{Cov}(y_i, y_j)}{1 - \beta},}{E[W] = (U + 0.5 sum_ij U_ij Cov(y_i, y_j)) / (1 - beta),}
+where \eqn{U} and \eqn{U_{ij}} are the objective and its Hessian at the
+steady state (taken at the initial rule coefficients) and \eqn{\beta} is
+\code{discount}, by default the \code{planner_discount} option of the
+\code{.mod}'s \code{osr} command (required: Dynare's default of 1 makes the
+objective infinite). \code{optimal_loss} is then Dynare's
+\code{oo_.osr.objective_function}. This is exact for a linear model, and for
+any model whose objective has a zero gradient at the steady state; for a
+nonlinear model with a nonzero gradient a warning of class
+\code{dynhr_warning_osr_lq_approx} says that the gradient terms of the
+second-order welfare are omitted.
+}
+
 \references{
 Söderlind, P. (1999). Solution and estimation of RE macromodels with
     optimal policy. \emph{European Economic Review}, 43(4-6), 813-823.

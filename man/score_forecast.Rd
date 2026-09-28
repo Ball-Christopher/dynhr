@@ -159,6 +159,6 @@ forecasts with applications to financial risk management.
 \emph{International Economic Review}, 39(4), 863--883.
 }
 \seealso{
-\code{\link{dm_test}} to compare two score series,
+\code{\link{diebold_mariano_test}} to compare two score series,
   \code{\link{forecast_backtest}} for the recursive expanding-window driver.
 }

@@ -127,8 +127,7 @@ two model rebuilds AND two \emph{cold} likelihood evaluations per parameter
 pays one adjoint pass for the whole gradient plus two rebuilds per
 parameter -- and the rebuilds are themselves much cheaper than they look,
 because the block-Jacobian cache skips the fake-news Jacobian for any
-parameter that cannot touch the household. Measured scale and the full
-rationale: \code{briefs/21-structural-score-api-scope.md}.
+parameter that cannot touch the household.
 }
 \section{Supplying derivatives, and why nothing is required}{
  with

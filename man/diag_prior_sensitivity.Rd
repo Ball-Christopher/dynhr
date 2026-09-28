@@ -37,8 +37,8 @@ a rough comparison.}
 
 \item{verbose}{Print progress messages.}
 
-\item{meta}{Optional [diag_meta()] list applied to the plots
-(model name, sample size); `NULL` derives a default from the model.}
+\item{meta}{Optional \code{\link{diag_meta}()} list applied to the plots
+(model name, sample size); \code{NULL} derives a default from the model.}
 }
 \value{
 A \code{dynhr_diagnostic} list.
@@ -46,6 +46,26 @@ A \code{dynhr_diagnostic} list.
 \description{
 Re-runs mode-finding with uniform priors over the same support as the
 original informative priors, then compares the two mode vectors.
-Parameters whose relative shift exceeds `threshold` are flagged as
+Parameters whose relative shift exceeds \code{threshold} are flagged as
 "prior-driven."
+}
+\details{
+The flat-prior model is built in memory from the parsed
+\code{model$estimated_params} rows -- no .mod file is rewritten and the model is
+not re-solved (priors affect neither the compiled model nor the steady
+state). Each parameter's uniform support is its informative prior's
+\code{[lower, upper]} when both are finite, and otherwise that prior's 0.5\% /
+99.5\% quantiles intersected with whichever bound is finite; the rule used is
+reported in \code{result$support}.
+
+The flat-prior search STARTS AT THE INFORMATIVE MODE (passed through
+\code{run_mode_finding(theta_init = )}), not at the prior means -- which for
+a uniform prior are the midpoint of its support. The question asked here is
+local ("does the mode move when the prior is flattened?"), so a far-away
+start turns it into a global-optimisation problem and reports the
+optimiser's failure to converge as evidence about the priors. The flat
+log-posterior at that start is recorded as \code{result$logpost_flat_at_inf};
+when the flat search does not beat it (\code{result$improved} is
+\code{FALSE}) the diagnostic returns INCONCLUSIVE (\code{pass = NA},
+\code{errored = FALSE}) rather than a mode comparison.
 }

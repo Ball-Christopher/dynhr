@@ -151,7 +151,7 @@ mode_trust_region <- function(fn, x0, gr = NULL, he = NULL,
       x <- x + p; fx <- fx_new; g <- grad_fn(x)
     }
     if (ctrl$verbose)
-      cat(sprintf("  it %d: f=%.8g |g|=%.3e delta=%.3e rho=%.3f\n",
+      .dynhr_cat(sprintf("  it %d: f=%.8g |g|=%.3e delta=%.3e rho=%.3f\n",
                   it, fx, sqrt(sum(g^2)), delta, rho))
     if (np < ctrl$tol_step && rho > ctrl$eta) {
       converged <- TRUE; msg <- "step tolerance"; break

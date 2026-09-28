@@ -32,7 +32,13 @@ period. Column names must match \code{model$varexo_names}.}
 \item{obc_specs}{List of OBC specs as returned by
 \code{\link{obc_parse_tags}} or \code{obc_collect_specs}.  Each spec must
 have \code{$eq_idx}, \code{$var_idx}, \code{$var_name}, \code{$op}, \code{$bound}.
-If NULL, tries to parse MCP tags from the model.}
+If NULL, the specs come from the model: its MCP tags / complementarity
+conditions (\code{\link{obc_parse_tags}}) and its
+\code{ramsey_constraints} block.  A \code{ramsey_constraints} bound on
+\code{x} (in levels) is complementary to the Ramsey first-order
+condition with respect to \code{x}, as in Dynare 7's
+\code{perfect_foresight_solver(lmmcp)}: in a binding period the FOC is
+replaced by \code{x = bound}.}
 
 \item{params}{Named numeric parameter vector. Defaults to
 \code{model$param_values}.}
@@ -44,7 +50,13 @@ path (default 40).}
 
 \item{max_iter}{Maximum Newton iterations per regime (default 50).}
 
-\item{tol}{Newton convergence tolerance on max|R| (default 1e-8).}
+\item{tol}{Tolerance (default 1e-8) passed to
+\code{\link{pf_newton_solve}}: its Newton stop (every stacked
+equation's residual within \code{tol} times the magnitude of its terms,
+and \eqn{\max|R| <} \code{tol}) and the relative round-off band of its
+regime decisions (bound violations relative to \eqn{|x| + |b|}, the
+release test relative to the relaxed equation's term magnitudes), so the
+regimes do not depend on the units of the model.}
 
 \item{max_regime_iter}{Maximum regime switches in active-set iteration (default 30).}
 

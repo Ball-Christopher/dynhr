@@ -147,8 +147,7 @@ likelihood itself builds -- a sigma-only move recomputes zero new slabs),
 the measurement-error block is a trivial closed form, and the rho block is
 semi-analytic (central-differences the per-shock slab only, keeping the
 expensive stacked-covariance algebra -- one Cholesky, shared across every
-parameter -- fully analytic). See the file header for the derivation and
-\code{briefs/20-seqspace-gradient-scope.md} for the validation history.
+parameter -- fully analytic). See the file header for the derivation.
 }
 \seealso{
 \code{\link{hank_loglik_ar}}, \code{\link{make_posterior_grad_hank_ar}}

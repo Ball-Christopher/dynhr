@@ -14,7 +14,7 @@ ms_kim_smoother(
   me_variance = 0,
   lik_init = c("auto", "stationary", "kappa"),
   regime_pass = c("joint", "kim"),
-  collapse = c("gpb2", "gpb3")
+  collapse = c("gpb2", "gpb3", "imm")
 )
 }
 \arguments{
@@ -51,7 +51,16 @@ this is NOT the \eqn{F}-only regulariser convention of the multivariate
 with it the backward recursion.  \code{"gpb2"} (the default) is Kim's:
 the backward core carries one Durbin-Koopman adjoint and one filtered
 pair per REGIME and collapses them with the \eqn{h \times h} smoothed
-joint.  \code{"gpb3"} runs the forward pass at
+joint.  \code{"imm"} runs the interacting-multiple-model forward pass
+(\code{\link{ms_kim_filter}(collapse = "imm")}, \eqn{h} Kalman steps per
+period) and smooths it with the switching smoother of Hashimzade,
+Kirsanov, Kirsanova and Maih (JBES 2026): per-regime Durbin-Koopman
+adjoints built from each destination regime's mixed-prior update, with
+the smoothed (not the prior) transition probabilities weighting the
+future regimes, and Kim's regime pass (under \code{"imm"} the two
+\code{regime_pass} values coincide, because IMM's own posterior joint
+is Kim's conditional).  The output has the gpb2 shape.
+\code{"gpb3"} runs the forward pass at
 \code{collapse = "gpb3"} --- \eqn{h^2} components indexed by the PAIR
 \eqn{(s_{t-1}, s_t)} --- and smooths it with the matching PAIR-INDEXED
 backward pass: one adjoint per pair, collapsed with the
@@ -133,9 +142,9 @@ Both passes build the smoothed joint as
 differ only in the information set of the conditional.  Kim (1994, eq. 10)
 conditions on \eqn{y_{1:t}}, which requires
 \eqn{y_{t+1:T} \perp s_t \mid s_{t+1}, y_{1:t}}.  Under this package's lag-1
-observation timing \eqn{y_{t+1} = d_i + Z_i s_t + D_j \varepsilon_{t+1}}
-loads the regime \eqn{i = s_t} DIRECTLY, so that assumption throws away a
-first-order-informative signal: a brute-force enumeration oracle (all regime
+observation timing \eqn{y_{t+1} = d + Z s_t + D \varepsilon_{t+1}} loads the
+state that regime \eqn{s_t} has just generated, so that assumption throws
+away a first-order-informative signal: a brute-force enumeration oracle (all regime
 paths, exact joint-Gaussian projection per path) puts the Kim pass up to
 0.31 away from the exact smoothed regime probability under genuine
 switching.  \code{regime_pass = "joint"} instead conditions on

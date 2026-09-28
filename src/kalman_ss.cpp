@@ -126,23 +126,32 @@ List kalman_standard_loop_cpp(const arma::mat& Y_minus_d,
       Ft += HH_full;
       Ft = 0.5 * (Ft + Ft.t());
       if (!arma::chol(Rc, Ft)) { ok = false; break; }   // upper: Ft = Rc'Rc
-      // ...and a successful chol() is NOT a sufficient test: on a
-      // stochastically singular system it can succeed with a pivot at
-      // round-off and return a finite, badly wrong likelihood (measured
-      // +292.7 against a correct -26.8). The squared diagonal of the factor
-      // IS each component's conditional variance -- the same quantity the
-      // univariate filter skips on. Mirrors .kf_F_singular() in
-      // R/kalman-filter.R; keep the two in step.
-      {
-        const arma::vec piv = arma::square(Rc.diag());
-        const double cut = std::max(kalman_tol,
-          static_cast<double>(Ft.n_rows) * arma::abs(Ft.diag()).max() *
-          std::numeric_limits<double>::epsilon());
-        if (!piv.is_finite() || piv.min() <= cut) { ok = false; break; }
-      }
       // Non-throwing form: chol() success does not imply inv_sympd() success
       // (see kalman_adjoint.cpp) -- degrade gracefully instead of throwing.
       if (!arma::inv_sympd(Fi, Ft)) { ok = false; break; }
+      // ...and a successful chol() is NOT a sufficient test: on a
+      // stochastically singular system it can succeed with a pivot at
+      // round-off and return a finite, badly wrong likelihood (measured
+      // +292.7 against a correct -26.8). Dynare 7.1's rule
+      // (kalman_filter.m, badly_conditioned_F): univariate only if
+      //   rcond(F) < tol && (any(diag F < tol) || rcond(corr F) < tol),
+      // rcond = exact reciprocal 1-norm condition from F and its inverse.
+      // Mirrors .kf_F_singular() in R/kalman-filter.R; keep the two in step.
+      {
+        const arma::vec piv = Rc.diag();
+        const arma::vec dF  = Ft.diag();
+        if (!piv.is_finite() || piv.min() <= 0.0 || !dF.is_finite() ||
+            dF.min() <= 0.0 || !Fi.is_finite()) { ok = false; break; }
+        const double rc = 1.0 / (arma::norm(Ft, 1) * arma::norm(Fi, 1));
+        if (rc < kalman_tol) {
+          if (dF.min() < kalman_tol) { ok = false; break; }
+          const arma::vec sg = arma::sqrt(dF);
+          const arma::mat SG = sg * sg.t();
+          const double rcc = 1.0 / (arma::norm(Ft / SG, 1) *
+                                    arma::norm(Fi % SG, 1));
+          if (rcc < kalman_tol) { ok = false; break; }
+        }
+      }
       double ldf = 2.0 * arma::sum(arma::log(Rc.diag()));
       Fiv = Fi * v;
       double ll = ll_const - 0.5 * (ldf + arma::dot(v, Fiv));
@@ -168,7 +177,9 @@ List kalman_standard_loop_cpp(const arma::mat& Y_minus_d,
       if (has_me) P_n += (K * arma::diagmat(me_diag_vec)) * K.t();
       P_n = 0.5 * (P_n + P_n.t());
       s = s_n;
-      if (t > 0 && arma::abs(P_n - P).max() < ss_tol) {
+      // RELATIVE lock, as in the R loop (kalman_filter): an absolute ss_tol
+      // froze the gain at t = 2 on a model whose P is ~1e-15.
+      if (t > 0 && arma::abs(P_n - P).max() < ss_tol * arma::abs(P_n).max()) {
         ss_reached  = true;
         K_ss        = K;
         F_inv_ss    = Fi;

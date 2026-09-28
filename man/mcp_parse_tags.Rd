@@ -34,6 +34,14 @@ and scientific notation in numeric bound values.  When the bound RHS is
 an expression (e.g. \code{i+1/beta-1}), it is parsed into an AST and
 stored in the \code{bound_ast} field; \code{bound} is \code{NA_real_}.
 
+Dynare 7 complementarity conditions written after the equation
+(\code{mu = 0 _|_ 0 < i < 1+2*alpha;}, or with the \code{U+27C2}
+perpendicular symbol) are read from the parsed equations as well: each
+bound becomes one spec (lower first), with the bound text in
+\code{bound_expr}; a bound that is a function of parameters is evaluated
+at the model's calibration and re-evaluated by the solvers at the
+parameter vector they are called with.
+
 If no MCP tags are found, attempts to fall back to OccBin bind/relax
 tags (via \code{mcp_specs_from_occbin()}) for backward compatibility
 with existing nonlinear model annotations.

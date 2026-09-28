@@ -82,11 +82,19 @@ hank_simple_block <- function(name, inputs, outputs, fn, jac = NULL,
 #'   and separation rates are produced by an upstream matching block;
 #'   outputs a subset of \code{c("A","C")}). Validated here so a bad wiring
 #'   fails at spec time, not inside the Jacobian dispatch.
+#' @param expectations \code{NULL} (FIRE, default) or a behavioural
+#'   expectations spec \code{list(theta =, gamma =, type =)} as documented in
+#'   \code{\link{hank_het_jacobian}} (Lenney and Rosso 2026); \code{theta} and
+#'   \code{gamma} may be named by input. The block's FIRE Jacobian is
+#'   replaced by its behavioural counterpart before GE assembly in
+#'   \code{\link{hank_model}}, so other blocks and the GE solve are
+#'   unchanged. Linear path only: \code{\link{hank_model_nonlinear_irf}} and
+#'   \code{\link{hank_model_dist_irf}} refuse a model with a behavioural block.
 #'
 #' @return An object of class \code{hank_block} (kind \code{"het"}).
 #' @export
 hank_het_block_spec <- function(name, block, inputs = c("r", "w"),
-                                outputs = c("A", "C")) {
+                                outputs = c("A", "C"), expectations = NULL) {
   ## A two-asset block would otherwise slip through: the only validation below
   ## is on input NAMES, and a het2 block's defaults happen to satisfy it -- so
   ## it would be tagged kind = "het" and its n_e x n_b x n_a policies fed to
@@ -99,9 +107,12 @@ hank_het_block_spec <- function(name, block, inputs = c("r", "w"),
   if (!inherits(block, "hank_het_block"))
     stop("hank_het_block_spec(): 'block' must be a hank_het_block.")
   .hank_het_check_inputs(block, inputs)
-  structure(list(name = name, kind = "het", inputs = inputs,
-                 outputs = outputs, block = block),
-            class = "hank_block")
+  .ssj_expectations_resolve(expectations, inputs, "hank_het_block_spec()")
+  .hank_spec_set_expectations(
+    structure(list(name = name, kind = "het", inputs = inputs,
+                   outputs = outputs, block = block),
+              class = "hank_block"),
+    expectations)
 }
 
 
@@ -141,6 +152,9 @@ hank_het_block_spec <- function(name, block, inputs = c("r", "w"),
 #' @param inputs,outputs Character vectors; must be supported by
 #'   \code{\link{hank_mixture_jacobian}} (inputs a subset of
 #'   \code{c("r","w")}, outputs a subset of \code{c("A","C")}).
+#' @param expectations \code{NULL} (FIRE, default) or a behavioural
+#'   expectations spec, applied to the mixture block's Jacobian; see
+#'   \code{\link{hank_het_block_spec}} and \code{\link{hank_het_jacobian}}.
 #'
 #' @return An object of class \code{hank_block} (kind \code{"het_mixture"}),
 #'   with an additional logical field \code{same_income}: \code{TRUE} iff
@@ -150,7 +164,8 @@ hank_het_block_spec <- function(name, block, inputs = c("r", "w"),
 #'   functions then return per-type representations instead).
 #' @export
 hank_mixture_block_spec <- function(name, blocks, omega, inputs = c("r", "w"),
-                                    outputs = c("A", "C")) {
+                                    outputs = c("A", "C"),
+                                    expectations = NULL) {
   if (!is.list(blocks) || length(blocks) < 1L ||
       !all(vapply(blocks, inherits, logical(1), what = "hank_het_block")))
     stop("hank_mixture_block_spec(): 'blocks' must be a non-empty list of ",
@@ -167,10 +182,13 @@ hank_mixture_block_spec <- function(name, blocks, omega, inputs = c("r", "w"),
     logical(1))
   same_income <- length(blocks) <= 1L || all(income_match)
   .hank_mixture_check_omega(blocks, omega)
-  structure(list(name = name, kind = "het_mixture", inputs = inputs,
-                 outputs = outputs, blocks = blocks, omega = omega,
-                 same_income = same_income),
-            class = "hank_block")
+  .ssj_expectations_resolve(expectations, inputs, "hank_mixture_block_spec()")
+  .hank_spec_set_expectations(
+    structure(list(name = name, kind = "het_mixture", inputs = inputs,
+                   outputs = outputs, blocks = blocks, omega = omega,
+                   same_income = same_income),
+              class = "hank_block"),
+    expectations)
 }
 
 
@@ -305,6 +323,45 @@ hank_block_jac_cache_reset <- function() {
 #' Block Jacobian dispatch, uncached (the reference path)
 #' @keywords internal
 .hank_block_jacobian_uncached <- function(blk, ss, T_h) {
+  J <- .hank_block_jacobian_fire(blk, ss, T_h)
+  ## Behavioural expectations (Lenney-Rosso 2026): block-local swap of the
+  ## FIRE Jacobian for its behavioural counterpart; GE assembly is unchanged.
+  ## `expectations` is part of `blk`, hence of the cache key.
+  if (is.null(blk$expectations)) return(J)
+  .ssj_apply_expectations(J, blk$expectations, blk$inputs,
+                          paste0("block '", blk$name, "'"))
+}
+
+
+#' Attach a behavioural expectations spec to a block spec (only when non-NULL,
+#' so FIRE specs keep their exact pre-existing structure)
+#' @noRd
+.hank_spec_set_expectations <- function(spec, expectations) {
+  if (!is.null(expectations)) spec$expectations <- expectations
+  spec
+}
+
+
+#' Refuse a model with a behavioural block on a perfect-foresight-only path
+#' @noRd
+.hank_reject_behavioural <- function(model, where) {
+  beh <- vapply(model$blocks, .ssj_block_is_behavioural, logical(1))
+  if (any(beh))
+    .dynhr_abort(where, ": block(s) ",
+                 paste0("'", vapply(model$blocks[beh], `[[`, "", "name"), "'",
+                        collapse = ", "),
+                 " carry behavioural (non-FIRE) expectations, which are ",
+                 "implemented for the linear sequence-space Jacobian path only ",
+                 "(hank_model() / hank_model_irf()); this path would silently ",
+                 "use perfect foresight.",
+                 class = "dynhr_error_behavioural_expectations")
+  invisible(TRUE)
+}
+
+
+#' FIRE block Jacobian dispatch (by block kind)
+#' @noRd
+.hank_block_jacobian_fire <- function(blk, ss, T_h) {
   if (blk$kind == "het")
     return(hank_het_jacobian(blk$block, T_h, inputs = blk$inputs,
                              outputs = blk$outputs))
@@ -461,6 +518,7 @@ hank_model <- function(blocks, unknowns, targets, exogenous, ss, T_h) {
 #' \code{\link{hank_td_nonlinear}}).
 #' @keywords internal
 .hank_model_eval <- function(model, src_paths) {
+  .hank_reject_behavioural(model, "nonlinear model evaluation")
   T_h <- model$T_h; ss <- model$ss
   vals <- src_paths                       # sources (unknowns + exogenous)
   for (b in model$block_order) {
@@ -782,7 +840,7 @@ hank_model_nonlinear_irf <- function(model, Z_paths, tol = 1e-9, maxit = 50L) {
   fac <- .hank_ge_factor(model$H_U)
   rc  <- fac$rcond
   if (!is.finite(rc) || rc < 1e-10)
-    warning(sprintf(paste0("hank_model_irf(): H_U is ill-conditioned ",
+    .dynhr_warn(sprintf(paste0("hank_model_irf(): H_U is ill-conditioned ",
                            "(rcond = %.2e); the GE solution may be unreliable ",
                            "(near-singular / indeterminate). See hank_determinacy()."),
                     rc))
@@ -901,6 +959,7 @@ hank_model_irf <- function(model, dZ) {
 #'     callers can confirm the two functions solved the identical GE system.}
 #' @export
 hank_model_dist_irf <- function(model, dZ, ...) {
+  .hank_reject_behavioural(model, "hank_model_dist_irf")
   T_h <- model$T_h
   dsrc <- .hank_irf_dsrc(model, dZ)
 

@@ -27,7 +27,21 @@
   "shocks", "det_shocks", "shock_groups_blocks", "filter_tunes",
   "heteroskedastic_shocks",
   "stochastic_volatility", "estimated_params", "estimated_params_init",
-  "commands", "occbin_constraints", "planner_objective", "varobs"
+  "commands", "occbin_constraints", "planner_objective", "varobs",
+  ## present only when the .mod uses the construct
+  "observation_trends", "log_vars", "deterministic_trends",
+  ## trend_var / var(deflator=) declarations: rendered as the DETRENDED model
+  ## they produced, and not re-declared (that would detrend a second time);
+  ## like predetermined_vars, the field is absent after the round trip
+  "nonstationary",
+  ## osr_params / optim_weights / osr_params_bounds (present only when used)
+  "osr",
+  ## ramsey_constraints block (present only when used)
+  "ramsey_constraints",
+  ## marks det_shocks / endval as coming from a Dynare 7 shock_paths block
+  "shock_paths",
+  ## Dynare 7 perfect_foresight_controlled_paths / shock_paths exogenize
+  "controlled_paths"
 )
 
 .WM_DERIVED_FIELDS <- c(
@@ -96,7 +110,7 @@
   ## Genuinely not expressible: write the closest text and say so.  Never
   ## silently drop the last bits.
   s <- format(x, digits = 17, scientific = sci)
-  warning(sprintf(paste0(
+  .dynhr_warn(sprintf(paste0(
     "write_mod(): %s = %.17g cannot be written as .mod text that R reads ",
     "back bit-identically (R's as.numeric() is not correctly rounded beyond ",
     "~15 significant digits). Wrote '%s', which reads back as %.17g ",
@@ -303,31 +317,165 @@
   model
 }
 
+## ---- var(log) un-expansion ------------------------------------------------
+## parse_mod() rewrites every `x` of a `var(log) x;` variable into
+## `exp(LOG_x)`, declares LOG_x after the declared variables and appends
+## `x = exp(LOG_x);`. Like the exogenous chains above, that rewrite is not
+## idempotent (a second pass would find no `x` to rewrite but would append the
+## definition again), so write_mod() folds it back: `exp(LOG_x(t))` -> `x(t)`,
+## the definitional equation is dropped, LOG_x leaves the plain `var` line and
+## `x` is declared under `var(log)`. parse_mod() rebuilds all of it, in the
+## same order.
+
+.wm_sub_log <- function(node, inv) {
+  if (is.null(node)) return(node)
+  switch(node$type,
+         "funcall" = {
+           if (identical(node$name, "exp") && length(node$args) == 1L &&
+               identical(node$args[[1L]]$type, "variable") &&
+               node$args[[1L]]$name %in% names(inv))
+             return(ast_variable(inv[[node$args[[1L]]$name]],
+                                 node$args[[1L]]$lead_lag))
+           node$args <- lapply(node$args, .wm_sub_log, inv = inv)
+           node
+         },
+         "binop" = {
+           node$left  <- .wm_sub_log(node$left,  inv)
+           node$right <- .wm_sub_log(node$right, inv)
+           node
+         },
+         "unaryop" = {
+           node$operand <- .wm_sub_log(node$operand, inv)
+           node
+         },
+         node)
+}
+
+## Variable names an AST still references (to catch a LOG_x the fold missed).
+.wm_ast_var_names <- function(node) {
+  if (is.null(node)) return(character(0))
+  switch(node$type,
+         "variable" = node$name,
+         "binop"    = c(.wm_ast_var_names(node$left),
+                        .wm_ast_var_names(node$right)),
+         "unaryop"  = .wm_ast_var_names(node$operand),
+         "funcall"  = unlist(lapply(node$args, .wm_ast_var_names),
+                             use.names = FALSE),
+         character(0))
+}
+
+.wm_unexpand_log_vars <- function(model) {
+  lm <- model$log_vars
+  if (is.null(lm) || length(lm) == 0L) return(model)
+  inv <- stats::setNames(names(lm), unname(lm))      # LOG_x -> x
+  n_v <- length(model$var_names)
+  ## parse_mod appends the LOG_ variables and their definitional equations
+  ## right after the declared ones; anything it appends LATER (EXPECTATION or
+  ## |lead/lag| > 1 AUX variables) is written out explicitly and would then
+  ## land BEFORE the regenerated LOG_ block on the next parse.
+  if (!identical(utils::tail(model$var_names, length(lm)), unname(lm)))
+    stop("write_mod(): the var(log) variables (", paste(lm, collapse = ", "),
+         ") are followed by auxiliary variables in the parsed model, so the ",
+         "model cannot be written back with var(log) in the same variable ",
+         "order.", call. = FALSE)
+
+  keep <- vapply(model$equations, function(eq) {
+    if (!identical(eq$lhs$type, "variable") ||
+        !(eq$lhs$name %in% names(lm)) || !.wm_na(eq$tag_raw %||% NA))
+      return(TRUE)
+    !identical(.wm_sub_log(eq$lhs, inv), .wm_sub_log(eq$rhs, inv))
+  }, logical(1))
+  dropped <- vapply(model$equations[!keep], function(eq) eq$lhs$name,
+                    character(1))
+  if (!setequal(dropped, names(lm)) || length(dropped) != length(lm))
+    stop("write_mod(): could not find the definitional equation ",
+         "`x = exp(LOG_x)` of every var(log) variable.", call. = FALSE)
+  model$equations <- lapply(model$equations[keep], function(eq) {
+    eq$lhs <- .wm_sub_log(eq$lhs, inv)
+    eq$rhs <- .wm_sub_log(eq$rhs, inv)
+    eq
+  })
+  model$local_variables <- lapply(model$local_variables, .wm_sub_log,
+                                  inv = inv)
+  left <- intersect(unique(c(
+    unlist(lapply(model$equations, function(eq)
+      c(.wm_ast_var_names(eq$lhs), .wm_ast_var_names(eq$rhs))),
+      use.names = FALSE),
+    unlist(lapply(model$local_variables, .wm_ast_var_names),
+           use.names = FALSE))), names(inv))
+  if (length(left) > 0L)
+    stop("write_mod(): the var(log) variable(s) ", paste(left, collapse = ", "),
+         " are referenced outside exp(...) after parsing (e.g. through an ",
+         "auxiliary lead/lag chain), which cannot be written back as ",
+         "var(log).", call. = FALSE)
+  model$var_names <- model$var_names[seq_len(n_v - length(lm))]
+  model
+}
+
+## `var` declaration lines, with the var(log) variables under `var(log)`.
+## Consecutive runs keep the declaration order, which is what parse_mod()
+## rebuilds var_names from.
+.wm_var_lines <- function(var_names, log_names, annotations) {
+  if (length(var_names) == 0L) return(character(0))
+  is_log <- var_names %in% log_names
+  if (!any(is_log)) return(.wm_decl_line("var", var_names, annotations))
+  runs <- rle(is_log)
+  ends <- cumsum(runs$lengths)
+  out <- character(0)
+  for (k in seq_along(ends)) {
+    idx <- (ends[k] - runs$lengths[k] + 1L):ends[k]
+    out <- c(out, .wm_decl_line(if (runs$values[k]) "var(log)" else "var",
+                                var_names[idx], annotations))
+  }
+  out
+}
+
+## observation_trends block: `name (expression);` per observable.  Entries
+## that parse_mod() took from the deterministic_trends block `dt` (a variable
+## may not be in both) are written back there instead.
+.wm_obs_trends_block <- function(ot, dt = NULL) {
+  out <- character(0)
+  tr <- if (is.null(ot)) character(0) else ot$trends
+  tr <- tr[!(names(tr) %in% names(dt))]
+  if (length(tr) > 0L)
+    out <- c(out, "observation_trends;",
+             paste0(names(tr), " (", unname(tr), ");"), "end;", "")
+  if (length(dt) > 0L)
+    out <- c(out, "deterministic_trends;",
+             paste0(names(dt), " (", unname(dt), ");"), "end;", "")
+  out
+}
+
 ## Render one `key = value` / bare-flag option list back to the text that
-## parse_command_options() consumes.  Values that themselves open a paren
-## (an artefact of the parser's `\\(([^)]*)\\)` option capture, e.g.
-## `instruments=(i` or `optim=('MaxIter'`) are emitted verbatim and the
-## unbalanced parentheses are closed at the end, which reproduces the exact
-## same options_str on re-parse.
+## parse_command_options() consumes.  A list value (attribute "dynare_list",
+## e.g. `instruments=(i,tau)` or `bandpass_filter=[6 32]`) is re-emitted in
+## its own bracket form, so a one-element list stays `instruments=(i)`.
 .wm_options_str <- function(opts) {
   if (is.null(opts) || length(opts) == 0L) return("")
   parts <- character(0)
   for (k in names(opts)) {
     v <- opts[[k]]
+    br <- attr(v, "dynare_list")
+    if (!is.null(br)) {
+      closer <- if (identical(br, "[")) "]" else ")"
+      els <- if (is.numeric(v)) vapply(as.numeric(v), .wm_num, "", what = k)
+             else as.character(v)
+      sepr <- if (identical(br, "[")) " " else ", "
+      parts <- c(parts, paste0(k, "=", br, paste(els, collapse = sepr), closer))
+      next
+    }
     if (isTRUE(v)) { parts <- c(parts, k); next }
     if (isFALSE(v)) { parts <- c(parts, paste0(k, "=false")); next }
-    if (is.numeric(v)) { parts <- c(parts, paste0(k, "=", .wm_num(v, k))); next }
+    if (is.numeric(v) && length(v) == 1L) {
+      parts <- c(parts, paste0(k, "=", .wm_num(v, k))); next
+    }
     if (is.character(v) && length(v) == 1L) {
       parts <- c(parts, paste0(k, "=", v)); next
     }
     stop("write_mod(): cannot render command option '", k,
          "' of class ", class(v)[1], ".", call. = FALSE)
   }
-  s <- paste(parts, collapse = ", ")
-  n_open  <- lengths(regmatches(s, gregexpr("(", s, fixed = TRUE)))
-  n_close <- lengths(regmatches(s, gregexpr(")", s, fixed = TRUE)))
-  if (n_open > n_close) s <- paste0(s, strrep(")", n_open - n_close))
-  s
+  paste(parts, collapse = ", ")
 }
 
 
@@ -410,9 +558,28 @@
            "be rendered as a .mod equation tag.", call. = FALSE)
     prefix <- if (.wm_na(tag)) "" else paste0("[", tag, "] ")
     out <- c(out, paste0(prefix, .wm_expr(eq$lhs), " = ",
-                         .wm_expr(eq$rhs), ";"))
+                         .wm_expr(eq$rhs), .wm_complementarity(eq), ";"))
   }
   c(out, "end;", "")
+}
+
+
+## A Dynare 7 complementarity condition (eq$complementarity, see
+## .mod_extract_complementarity()) as ` _|_ L < x < U` (ASCII separator, so
+## the written file does not depend on the reader's encoding).  The bounds
+## are the text the parser stored.
+.wm_complementarity <- function(eq) {
+  cc <- eq$complementarity
+  if (is.null(cc)) return("")
+  lo <- cc$lower
+  up <- cc$upper
+  body <- if (!.wm_na(lo) && !.wm_na(up))
+    paste0(lo, " < ", cc$variable, " < ", up)
+  else if (!.wm_na(lo)) paste0(cc$variable, " > ", lo)
+  else if (!.wm_na(up)) paste0(cc$variable, " < ", up)
+  else stop("write_mod(): the complementarity condition on variable '",
+            cc$variable, "' has no bound.", call. = FALSE)
+  paste0(" _|_ ", body)
 }
 
 
@@ -595,6 +762,67 @@
 }
 
 
+## Dynare 7 `shock_paths` block from det_shocks (explicit periods) and the
+## terminal values in endval (period `end`).  Values are the resolved numbers,
+## so the block re-parses to the same det_shocks / endval whatever
+## expressions, `self.` / `initval.` scopes or `a:end` ranges produced them.
+.wm_shock_paths_block <- function(model) {
+  if (is.null(model$shock_paths)) return(character(0))
+  dt <- model$det_shocks
+  tv <- model$endval
+  nms <- unique(c(if (.wm_nonempty_df(dt)) dt$name, names(tv)))
+  ctl <- .wm_controlled_stanzas(model$controlled_paths)
+  if (length(nms) == 0L && length(ctl) == 0L) return(character(0))
+  body <- character(0)
+  for (nm in nms) {
+    sub <- if (.wm_nonempty_df(dt)) dt[dt$name == nm, , drop = FALSE] else dt
+    per <- as.character(as.integer(sub$period))
+    val <- vapply(sub$value, .wm_num, character(1),
+                  what = paste0("shock_paths ", nm))
+    if (nm %in% names(tv)) {
+      per <- c(per, "end")
+      val <- c(val, .wm_num(unname(tv[[nm]]), paste0("shock_paths ", nm)))
+    }
+    body <- c(body, paste0("var ", nm, ";"),
+              paste0("periods ", paste(per, collapse = ", "), ";"),
+              paste0("values ", paste(val, collapse = ", "), ";"))
+  }
+  c("shock_paths;", body, ctl, "end;", "")
+}
+
+
+## Controlled-paths stanzas (`exogenize Y; periods ...; values ...;
+## endogenize E;`), one per (exogenize, endogenize) pair with explicit
+## periods and the resolved values, so the table re-parses identically.
+.wm_controlled_stanzas <- function(cp) {
+  if (!.wm_nonempty_df(cp)) return(character(0))
+  key <- paste(cp$exogenize, cp$endogenize, sep = "\r")
+  body <- character(0)
+  for (k in unique(key)) {
+    sub <- cp[key == k, , drop = FALSE]
+    val <- vapply(sub$value, function(v) {
+      s <- .wm_num(v, paste0("controlled path ", sub$exogenize[1L]))
+      if (v < 0) paste0("(", s, ")") else s
+    }, character(1))
+    body <- c(body, paste0("exogenize ", sub$exogenize[1L], ";"),
+              paste0("periods ", paste(as.integer(sub$period),
+                                       collapse = ", "), ";"),
+              paste0("values ", paste(val, collapse = ", "), ";"),
+              paste0("endogenize ", sub$endogenize[1L], ";"))
+  }
+  body
+}
+
+## A standalone Dynare 7 perfect_foresight_controlled_paths block (a model
+## with a shock_paths block carries its controlled stanzas there instead).
+.wm_controlled_paths_block <- function(model) {
+  if (!is.null(model$shock_paths)) return(character(0))
+  body <- .wm_controlled_stanzas(model$controlled_paths)
+  if (length(body) == 0L) return(character(0))
+  c("perfect_foresight_controlled_paths;", body, "end;", "")
+}
+
+
 ## One `estimated_params` / `estimated_params_init` row -> a .mod statement.
 .wm_ep_row <- function(r, i) {
   nm <- switch(as.character(r$type),
@@ -674,9 +902,11 @@
   if (!.wm_nonempty_df(df)) return(character(0))
   body <- character(0)
   for (i in seq_len(nrow(df))) {
+    pr <- df$periods[[i]]
     body <- c(body, paste0("var ", df$var[i], ";"),
               paste0("periods ",
-                     paste(as.integer(df$periods[[i]]), collapse = ", "), ";"),
+                     paste(if (is.character(pr)) pr else as.integer(pr),
+                           collapse = ", "), ";"),
               paste0(value_kw, " ",
                      paste(vapply(df[[value_kw]][[i]], .wm_num, character(1),
                                   what = paste0(keyword, " ", value_kw)),
@@ -691,6 +921,28 @@
     }
   }
   c(paste0(keyword, ";"), body, "end;", "")
+}
+
+
+## heteroskedastic_shocks periods are stored as SAMPLE periods (1 = first data
+## row); in the .mod they index the original dataset (integer p = sample
+## period + first_obs - 1) or are dates when estimation(first_obs=) is a date
+## (see parse_heteroskedastic_shocks_block()).  Map them back so the written
+## file re-parses to the same sample periods.
+.wm_hs_source_periods <- function(model) {
+  df <- model$heteroskedastic_shocks$scales
+  if (!.wm_nonempty_df(df)) return(df)
+  fo <- NULL
+  for (cmd in model$commands)
+    if (identical(cmd$name, "estimation") && !is.null(cmd$options$first_obs))
+      fo <- cmd$options$first_obs
+  if (is.null(fo)) return(df)
+  if (is.numeric(fo)) {
+    df$periods <- lapply(df$periods, function(p) as.integer(p) + as.integer(fo) - 1L)
+  } else {
+    df$periods <- lapply(df$periods, .period_to_date, sample_start = as.character(fo))
+  }
+  df
 }
 
 
@@ -729,6 +981,39 @@
       body <- c(body, "equations;", s$bind_eqs, "end;")
   }
   c("occbin_constraints;", body, "end;", "")
+}
+
+
+## OSR inputs: `optim_weights` (variance `y w;` / covariance `y, pie w;`),
+## `osr_params` and `osr_params_bounds` (`param, lower, upper;`). Weights and
+## bounds are expression text, written back verbatim.
+.wm_osr_block <- function(spec) {
+  if (is.null(spec)) return(character(0))
+  out <- character(0)
+  w <- spec$weights
+  if (.wm_nonempty_df(w)) {
+    body <- ifelse(w$var1 == w$var2,
+                   sprintf("%s %s;", w$var1, w$expr),
+                   sprintf("%s, %s %s;", w$var1, w$var2, w$expr))
+    out <- c(out, "optim_weights;", body, "end;", "")
+  }
+  if (length(spec$params) > 0L)
+    out <- c(out, paste0("osr_params ", paste(spec$params, collapse = " "), ";"),
+             "")
+  b <- spec$bounds
+  if (.wm_nonempty_df(b))
+    out <- c(out, "osr_params_bounds;",
+             sprintf("%s, %s, %s;", b$name, b$lower, b$upper), "end;", "")
+  out
+}
+
+
+## ramsey_constraints block: `VARIABLE > BOUND;` / `VARIABLE < BOUND;`, the
+## bound written back verbatim.
+.wm_ramsey_constraints_block <- function(rc) {
+  if (!.wm_nonempty_df(rc)) return(character(0))
+  c("ramsey_constraints;", sprintf("%s %s %s;", rc$var, rc$op, rc$bound),
+    "end;", "")
 }
 
 
@@ -787,7 +1072,9 @@
 #' \code{endval} / \code{histval} / \code{steady_state_model}, \code{shocks},
 #' \code{estimated_params}, \code{filter_tunes},
 #' \code{heteroskedastic_shocks}, \code{stochastic_volatility},
-#' \code{occbin_constraints}, and the command lines.
+#' \code{occbin_constraints}, \code{observation_trends},
+#' \code{deterministic_trends}, the OSR inputs (\code{optim_weights},
+#' \code{osr_params}, \code{osr_params_bounds}), and the command lines.
 #'
 #' @details
 #' \strong{What round-trips.} The exporter is faithful to the \emph{parsed
@@ -814,12 +1101,28 @@
 #'     the emitted model states the shifted timing explicitly and does
 #'     \strong{not} re-emit the \code{predetermined_variables} line (which
 #'     would shift a second time).
+#'   \item \emph{Nonstationary models.}  A model declared with
+#'     \code{trend_var} / \code{log_trend_var} and \code{var(deflator=...)} /
+#'     \code{var(log_deflator=...)} has already been detrended by the parser;
+#'     the emitted model is the stationary (detrended) one, the trend
+#'     declarations are \strong{not} re-emitted (which would detrend a second
+#'     time) and \code{model$nonstationary} is absent after the round trip.
+#'     A \code{deterministic_trends} block is written back as such.
 #'   \item \emph{Exogenous auxiliary chains.}  A non-zero timing on an
 #'     exogenous variable is rewritten by the parser into an
 #'     \code{AUX_EXO_LEAD_*}/\code{AUX_EXO_LAG_*} chain, and that rewrite is
 #'     not idempotent, so \code{write_mod()} folds the chain back to a plain
 #'     \code{x(+k)} / \code{x(-k)} reference and lets \code{parse_mod()}
 #'     rebuild it.  The rebuilt chain is identical, in the same order.
+#'   \item \emph{var(log).}  The parser rewrites every \code{x} of a
+#'     \code{var(log) x;} variable into \code{exp(LOG_x)} and appends
+#'     \code{x = exp(LOG_x);}; \code{write_mod()} folds that back and
+#'     re-declares \code{x} under \code{var(log)}.  The \code{LOG_x = log(x)}
+#'     line the parser adds to a \code{steady_state_model} (and the
+#'     \code{LOG_x} starting values it adds to \code{initval}) are written
+#'     explicitly and read back unchanged.  A \code{var(log)} variable that
+#'     ends up inside an auxiliary lead/lag chain cannot be folded back and is
+#'     an error.
 #'   \item \emph{Multiple shocks blocks.}  Several \code{shocks} blocks are
 #'     merged by the parser into one \code{model$shocks}; that merged block is
 #'     what gets written, so the per-block \code{model$shocks_blocks}
@@ -840,9 +1143,9 @@
 #' \code{.mod} syntax.  A silently lossy exporter is worse than none.
 #'
 #' \strong{Not stored by the parser} (and hence not emitted):
-#' \code{estimated_params_bounds},
-#' \code{observation_trends} and the other blocks that
-#' \code{parse_mod()} strips without parsing.  \code{estimation(...)} options
+#' \code{estimated_params_bounds} and the other blocks that
+#' \code{parse_mod()} strips without parsing (\code{observation_trends} IS
+#' stored and written back).  \code{estimation(...)} options
 #' that contain a parenthesis (e.g. \code{optim=('MaxIter',200)}) are captured
 #' only partially by the parser; \code{write_mod()} reproduces exactly what
 #' was captured, so the round trip is stable but the emitted command line can
@@ -880,6 +1183,7 @@ write_mod <- function(model, file = NULL, header = TRUE) {
          ". Refusing to write a silently lossy .mod file.", call. = FALSE)
 
   model <- .wm_unexpand_exo_aux(model)
+  model <- .wm_unexpand_log_vars(model)
 
   L <- character(0)
 
@@ -894,6 +1198,13 @@ write_mod <- function(model, file = NULL, header = TRUE) {
                     paste(model$predetermined_vars, collapse = " "),
                     ") were re-timed by -1 into the equations below and are",
                     " NOT re-declared."),
+           if (!is.null(model$nonstationary))
+             paste0("// The model is written DETRENDED: the trend_var / ",
+                    "log_trend_var (",
+                    paste(model$nonstationary$trend_vars$name, collapse = " "),
+                    ") and var(deflator=) / var(log_deflator=) (",
+                    paste(model$nonstationary$deflated$name, collapse = " "),
+                    ") declarations are NOT re-emitted."),
            "")
   }
 
@@ -901,7 +1212,7 @@ write_mod <- function(model, file = NULL, header = TRUE) {
 
   ann <- model$metadata$annotations %||% list()
   L <- c(L,
-         .wm_decl_line("var",        model$var_names,        ann),
+         .wm_var_lines(model$var_names, names(model$log_vars), ann),
          .wm_decl_line("varexo",     model$varexo_names,     ann),
          .wm_decl_line("varexo_det", model$varexo_det_names, ann),
          .wm_decl_line("parameters", model$param_names,      ann),
@@ -920,22 +1231,39 @@ write_mod <- function(model, file = NULL, header = TRUE) {
     L <- c(L, "")
   }
 
+  ## A shock_paths model keeps its scenario in det_shocks + endval (see
+  ## parse_shock_paths_blocks()); it is written back as a shock_paths block
+  ## with explicit periods, and neither as shocks periods nor as endval.
+  sp_model <- model
+  if (!is.null(model$shock_paths)) {
+    sp_model$det_shocks <- model$det_shocks[0L, , drop = FALSE]
+    sp_model$endval     <- numeric(0)
+  }
+
   L <- c(L, .wm_model_block(model))
   L <- c(L, .wm_value_block("initval", model$initval))
-  L <- c(L, .wm_value_block("endval",  model$endval))
+  L <- c(L, .wm_value_block("endval",  sp_model$endval))
   L <- c(L, .wm_histval_block(model$histval))
   L <- c(L, .wm_ssm_block(model$steady_state_model))
-  L <- c(L, .wm_shocks_block(model))
+  L <- c(L, .wm_shocks_block(sp_model))
+  L <- c(L, .wm_shock_paths_block(model))
+  L <- c(L, .wm_controlled_paths_block(model))
   L <- c(L, .wm_shock_groups_block(model$shock_groups_blocks))
   L <- c(L, .wm_ep_block(model$estimated_params, "estimated_params"))
   L <- c(L, .wm_ep_block(model$estimated_params_init, "estimated_params_init"))
   L <- c(L, .wm_pv_block(model$filter_tunes$tunes, "filter_tunes",
                          "values", extra_kw = "stderr"))
-  L <- c(L, .wm_pv_block(model$heteroskedastic_shocks$scales,
+  L <- c(L, .wm_pv_block(.wm_hs_source_periods(model),
                          "heteroskedastic_shocks", "scales"))
   L <- c(L, .wm_sv_block(model$stochastic_volatility))
   L <- c(L, .wm_occbin_block(model$occbin_constraints))
+  L <- c(L, .wm_obs_trends_block(model$observation_trends,
+                                 model$deterministic_trends))
+  L <- c(L, .wm_osr_block(model$osr))
   L <- c(L, .wm_commands(model))
+  ## after the commands: Dynare reads the block as part of the Ramsey
+  ## problem that ramsey_model / ramsey_policy declares
+  L <- c(L, .wm_ramsey_constraints_block(model$ramsey_constraints))
 
   txt <- paste0(paste(L, collapse = "\n"), "\n")
   attr(txt, "macro_expanded") <- TRUE

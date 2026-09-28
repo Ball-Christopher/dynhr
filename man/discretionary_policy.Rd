@@ -8,8 +8,8 @@ discretionary_policy(
   model,
   compiled = NULL,
   params = NULL,
-  policy_instrument,
-  loss_vars,
+  policy_instrument = NULL,
+  loss_vars = NULL,
   loss_weights = NULL,
   control_penalty = NULL,
   discount = NULL,
@@ -27,12 +27,21 @@ discretionary_policy(
 \item{params}{Named parameter vector. Defaults to
 \code{model$param_values}.}
 
-\item{policy_instrument}{Character: name of the policy instrument
-variable (e.g., \code{"i"}).}
+\item{policy_instrument}{Character vector: name(s) of the policy
+instrument variable(s) (e.g., \code{"i"}, or \code{c("i", "tau")} for a
+planner with two instruments -- Dynare's
+\code{discretionary_policy(instruments = (i, tau))}). Each instrument is
+either free (the model has one equation fewer per instrument) or pinned by
+its own policy equation, which is dropped before solving. \code{NULL}
+(default) takes the \code{instruments} option of the \code{.mod}'s
+\code{discretionary_policy} command.}
 
 \item{loss_vars}{Character vector of variable names whose
 variances enter the loss function (typically a subset of endogenous
-variables, possibly including the instrument).}
+variables, possibly including the instrument). Used only when the model
+has no \code{planner_objective} (which, when present, defines the loss).
+\code{NULL} (default) is allowed only when a \code{planner_objective}
+exists.}
 
 \item{loss_weights}{Named numeric vector of weights for each loss
 variable. Names must match \code{loss_vars}. If \code{NULL}, equal
@@ -45,8 +54,12 @@ regularises the instrument block through the value function, and adding
 a penalty biases the rule away from the true optimum. Set a small
 positive value only to regularise a genuinely singular instrument block.}
 
-\item{discount}{Discount factor. Defaults to \code{beta}
-parameter in the model, or 0.99.}
+\item{discount}{Discount factor. Defaults to the
+\code{planner_discount} option of the \code{.mod}'s
+\code{discretionary_policy} command (a number or a parameter expression),
+else to the \code{beta} parameter in the model; when neither exists it
+must be supplied (an error of class \code{dynhr_error_discount_missing}
+is raised otherwise).}
 
 \item{max_iter}{Maximum fixed-point iterations.}
 
@@ -60,11 +73,13 @@ welfare comparison against Ramsey-optimal commitment.}
 \value{
 An object of class \code{dynhr_discretionary_result} with:
   \describe{
-    \item{F}{Policy rule matrix: u_t = -F s_t.}
+    \item{F}{Policy rule \eqn{u_t = -F s_{t-1}}: a named vector over the state
+      variables for one instrument, an (instruments x states) matrix for
+      several.}
     \item{P}{Value function matrix: V(s) = s' P s.}
     \item{A, B}{State-space matrices of the uncontrolled system.}
-    \item{Q, R}{Loss matrices.}
-    \item{policy_instrument}{Name of the policy instrument.}
+    \item{Q, R}{Loss matrices (\code{R} is the instrument block).}
+    \item{policy_instrument}{Name(s) of the policy instrument(s).}
     \item{state_vars}{Character vector of state variable names.}
     \item{discount}{Discount factor used.}
     \item{converged}{Logical: did the fixed-point iteration converge?}

@@ -67,7 +67,7 @@ cmaes_optimize <- function(fn, par, lower = -Inf, upper = Inf,
   }
 
   if (verbose)
-    cat(sprintf("  CMA-ES (pkg): n=%d  lambda=%d  mu=%d  sigma0=%.3g  maxit=%d\n",
+    .dynhr_cat(sprintf("  CMA-ES (pkg): n=%d  lambda=%d  mu=%d  sigma0=%.3g  maxit=%d\n",
                 n, lambda, mu, sigma0, as.integer(max_iter)))
 
   ## NB: the 'cmaes' package reads `maxit` (generations) and `stop.tolx`. The
@@ -105,7 +105,7 @@ cmaes_optimize <- function(fn, par, lower = -Inf, upper = Inf,
   n_evals  <- res$counts[["function"]] %||% NA_integer_
 
   if (verbose)
-    cat(sprintf("  CMA-ES done: logpost=%.4f  evals=%d\n", -best_val, n_evals))
+    .dynhr_cat(sprintf("  CMA-ES done: logpost=%.4f  evals=%d\n", -best_val, n_evals))
 
   list(par        = best_par,
        value      = best_val,

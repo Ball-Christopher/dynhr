@@ -252,10 +252,14 @@ ast_collect_variables <- function(node, local_vars = list()) {
 #'   - value: the matched text
 #'   - pos:   character position in input (for error messages)
 #'
+#' An unrecognised character aborts with class `dynhr_error_mod_syntax`.
+#'
 #' @param text Character string of a mathematical expression.
+#' @param context Optional description of where the expression came from,
+#'   used in error messages (e.g. "model equation 3 (`y = x`)").
 #' @return List of token lists.
 #' @noRd
-tokenize_expr <- function(text) {
+tokenize_expr <- function(text, context = NULL) {
   tokens <- list()
   i <- 1L
   n <- nchar(text)
@@ -342,11 +346,31 @@ tokenize_expr <- function(text) {
       next
     }
 
-    # Skip unrecognised characters (e.g. $ from LaTeX names)
-    i <- i + 1L
+    # An unrecognised character is a syntax error, never skipped: skipping it
+    # turned `y != x` into `y = x` and let a stray `$` vanish (review
+    # 2026-09-25 A8).  LaTeX names (`$y$`) live in declarations, which never
+    # reach this tokenizer.
+    hint <- if (ch == "!" && i + 1L <= n && substr(text, i + 1L, i + 1L) == "=")
+      " (the `!=` operator is not supported)" else ""
+    .dynhr_abort(sprintf(
+      "parse_mod: unrecognised character '%s' at position %d of `%s` in %s%s.",
+      ch, pos, text, .expr_context_label(context, text), hint),
+      class = "dynhr_error_mod_syntax")
   }
 
   tokens
+}
+
+
+#' Describe where an expression came from, for syntax-error messages
+#'
+#' @param context NULL or a short description ("model equation 3 (`...`)").
+#' @param text    The expression text itself.
+#' @return Character(1).
+#' @noRd
+.expr_context_label <- function(context, text) {
+  if (!is.null(context) && nzchar(context)) return(context)
+  paste0("expression `", text, "`")
 }
 
 
@@ -361,17 +385,29 @@ tokenize_expr <- function(text) {
 #' @param param_names  Character vector of declared parameter names.
 #' @param local_names  Character vector of model-local variable names
 #'                     (defined with #).
+#' @param context      Optional description of the expression's origin for
+#'                     error messages (see tokenize_expr()).
+#' @param text         Optional source text, for error messages.
 #' @return An environment with $parse_expression() method.
 #' @noRd
 new_expr_parser <- function(tokens, var_names = character(0),
                             param_names = character(0),
-                            local_names = character(0)) {
+                            local_names = character(0),
+                            context = NULL, text = "") {
   env <- new.env(parent = emptyenv())
   env$tokens <- tokens
   env$pos    <- 1L
   env$var_names   <- var_names
   env$param_names <- param_names
   env$local_names <- local_names
+
+  # Syntax errors are classed (`dynhr_error_mod_syntax`) and name where the
+  # expression came from, so a bad equation is identifiable in a large .mod.
+  env$syntax_error <- function(...) {
+    .dynhr_abort("parse_mod: syntax error in ",
+                 .expr_context_label(context, text), ": ", ...,
+                 class = "dynhr_error_mod_syntax")
+  }
 
   # -- Helper functions --------------------------------------------------
 
@@ -389,13 +425,13 @@ new_expr_parser <- function(tokens, var_names = character(0),
   env$expect <- function(type, value = NULL) {
     tok <- env$peek()
     if (is.null(tok))
-      stop("Unexpected end of expression; expected ", type,
-           if (!is.null(value)) paste0(" '", value, "'"))
+      env$syntax_error("Unexpected end of expression; expected ", type,
+                       if (!is.null(value)) paste0(" '", value, "'"))
     if (tok$type != type || (!is.null(value) && tok$value != value))
-      stop("Expected ", type,
-           if (!is.null(value)) paste0(" '", value, "'"),
-           " but got ", tok$type, " '", tok$value,
-           "' at position ", tok$pos)
+      env$syntax_error("Expected ", type,
+                       if (!is.null(value)) paste0(" '", value, "'"),
+                       " but got ", tok$type, " '", tok$value,
+                       "' at position ", tok$pos)
     env$advance()
   }
 
@@ -503,7 +539,7 @@ new_expr_parser <- function(tokens, var_names = character(0),
   env$parse_primary <- function() {
     tok <- env$peek()
     if (is.null(tok))
-      stop("Unexpected end of expression in primary")
+      env$syntax_error("Unexpected end of expression in primary")
 
     # Number literal
     if (tok$type == "NUMBER") {
@@ -551,19 +587,18 @@ new_expr_parser <- function(tokens, var_names = character(0),
         # Function call (or STEADY_STATE/EXPECTATION)
         env$expect("LPAREN")
 
-        # EXPECTATION(k)(expr) has two pairs of parens
+        # EXPECTATION(k)(expr) in a model block is replaced by an auxiliary
+        # variable BEFORE parsing (.substitute_expectation_text(), parse_mod
+        # step 4), so it never reaches this parser from there.  Anywhere else
+        # (e.g. planner_objective) it has no implementation: it used to become
+        # an EXPECTATION funcall with a zero derivative and then an "unknown
+        # function" error downstream (review 2026-09-25 B15).
         if (name == "EXPECTATION") {
-          k_tok <- env$peek()
-          k_val <- 0L
-          if (!is.null(k_tok) && k_tok$type == "NUMBER") {
-            k_val <- as.integer(env$advance()$value)
-          }
-          env$expect("RPAREN")
-          env$expect("LPAREN")
-          arg <- env$parse_expression()
-          env$expect("RPAREN")
-          return(ast_funcall("EXPECTATION",
-                             list(ast_number(k_val), arg)))
+          .dynhr_abort(
+            "parse_mod: the EXPECTATION operator is only implemented inside ",
+            "the model block; found in ",
+            .expr_context_label(context, text), ".",
+            class = c("dynhr_error_mod_expectation", "dynhr_error_mod_syntax"))
         }
 
         # Regular function call with comma-separated arguments
@@ -601,8 +636,8 @@ new_expr_parser <- function(tokens, var_names = character(0),
       return(expr)
     }
 
-    stop("Unexpected token '", tok$value, "' (", tok$type,
-         ") at position ", tok$pos)
+    env$syntax_error("Unexpected token '", tok$value, "' (", tok$type,
+                     ") at position ", tok$pos)
   }
 
   env
@@ -617,15 +652,35 @@ new_expr_parser <- function(tokens, var_names = character(0),
 #' @param var_names   Declared variable names.
 #' @param param_names Declared parameter names.
 #' @param local_names Model-local variable names.
+#' @param context     Optional description of the expression's origin, used
+#'                    in syntax-error messages.
 #' @return AST node.
+#'
+#' The WHOLE text must be consumed: tokens left over after a complete
+#' expression (`2*z) + 5*z(-1)`, `a < b < c`, `x = = y`) abort with class
+#' `dynhr_error_mod_syntax` instead of being silently dropped (review
+#' 2026-09-25 A8). A single trailing `;` is tolerated.
 #' @noRd
 parse_expression <- function(text, var_names = character(0),
                              param_names = character(0),
-                             local_names = character(0)) {
-  tokens <- tokenize_expr(trimws(text))
+                             local_names = character(0),
+                             context = NULL) {
+  text <- trimws(text)
+  tokens <- tokenize_expr(text, context = context)
+  while (length(tokens) > 0L &&
+         tokens[[length(tokens)]]$type == "SEMICOLON")
+    tokens <- tokens[-length(tokens)]
   if (length(tokens) == 0) return(ast_number(0))
-  parser <- new_expr_parser(tokens, var_names, param_names, local_names)
+  parser <- new_expr_parser(tokens, var_names, param_names, local_names,
+                            context = context, text = text)
   result <- parser$parse_expression()
+  if (!parser$at_end()) {
+    tok <- parser$peek()
+    parser$syntax_error(
+      "unexpected '", tok$value, "' at position ", tok$pos, " of `", text,
+      "` after a complete expression; the rest (`",
+      substr(text, tok$pos, nchar(text)), "`) would otherwise be ignored")
+  }
   result
 }
 
@@ -683,23 +738,48 @@ parse_model_block <- function(body, var_names, param_names) {
     # Check for model-local variable definition: # local_name = expr
     if (grepl("^\\s*#", stmt)) {
       stmt <- sub("^\\s*#\\s*", "", stmt)
-      if (grepl("=", stmt)) {
-        parts <- strsplit(stmt, "\\s*=\\s*", perl = TRUE)[[1]]
-        lname <- trimws(parts[1])
-        lexpr_text <- trimws(paste(parts[-1], collapse = "="))
-        local_names <- c(local_names, lname)
-        local_vars[[lname]] <- parse_expression(
-          lexpr_text, var_names, param_names, local_names
-        )
+      loc_context <- sprintf("model-local definition `#%s`",
+                             gsub("\\s+", " ", stmt))
+      # `# NAME = EXPR` exactly. Anything else (a `#` used as a comment, a
+      # missing `=`) used to be skipped or swallowed silently -- together with
+      # the equation that followed it up to the next `;`.
+      m_loc <- regmatches(
+        stmt, regexec("(?s)^([A-Za-z_][A-Za-z0-9_]*)\\s*=(?!=)(.*)$", stmt,
+                      perl = TRUE))[[1]]
+      # A bare `#NAME;` (no definition; e.g. `#usmodel_stst;` in the shipped
+      # sw2007.mod) defines nothing and cannot hide an equation: skip it, but
+      # say so.
+      if (length(m_loc) != 3L &&
+          grepl("^[A-Za-z_][A-Za-z0-9_]*$", trimws(stmt))) {
+        .dynhr_warn("parse_mod: ignoring ", loc_context,
+                    ", which has no `= EXPRESSION` and defines nothing.",
+                    class = "dynhr_warning_mod_syntax")
+        next
       }
+      if (length(m_loc) != 3L)
+        .dynhr_abort(
+          "parse_mod: malformed ", loc_context, ": a `#` line in the model ",
+          "block must have the form `# NAME = EXPRESSION;` (Dynare has no `#` ",
+          "comments; use `//` or `%`).",
+          class = "dynhr_error_mod_syntax")
+      lname <- m_loc[2]
+      lexpr_text <- trimws(m_loc[3])
+      local_names <- c(local_names, lname)
+      local_vars[[lname]] <- parse_expression(
+        lexpr_text, var_names, param_names, local_names,
+        context = loc_context
+      )
       next
     }
 
     original_text <- stmt
+    eq_context <- sprintf("model equation %d (`%s`)", length(equations) + 1L,
+                          gsub("\\s+", " ", stmt))
 
-    # Split on '=' to separate LHS and RHS
-    if (grepl("=", stmt)) {
-      eq_pos <- regexpr("=", stmt)
+    # Split on the equation's '=' -- NOT the '=' inside '<=', '>=', '==' or
+    # '!=' (those are operators; splitting on them mangled the equation).
+    eq_pos <- regexpr("(?<![<>!=])=(?!=)", stmt, perl = TRUE)
+    if (eq_pos > 0L) {
       lhs_text <- trimws(substr(stmt, 1, eq_pos - 1))
       rhs_text <- trimws(substr(stmt, eq_pos + 1, nchar(stmt)))
     } else {
@@ -708,9 +788,9 @@ parse_model_block <- function(body, var_names, param_names) {
     }
 
     lhs_ast <- parse_expression(lhs_text, var_names, param_names,
-                                local_names)
+                                local_names, context = eq_context)
     rhs_ast <- parse_expression(rhs_text, var_names, param_names,
-                                local_names)
+                                local_names, context = eq_context)
 
     equations <- c(equations, list(list(
       lhs     = lhs_ast,

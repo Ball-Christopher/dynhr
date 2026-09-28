@@ -315,7 +315,7 @@ extract_system_matrices <- function(compiled, ss, params, center = NULL) {
           J[!is.finite(J[, bc]), bc] <- 0
         }
       }
-      warning(sprintf(
+      .dynhr_warn(sprintf(
         paste0("Non-finite values in symbolic Jacobian at steady state. ",
                "Affected columns: %s. ",
                "Repaired %d/%d columns via numerical finite differences."),
@@ -341,7 +341,7 @@ extract_system_matrices <- function(compiled, ss, params, center = NULL) {
     } else {
       # Isolated non-finite (e.g. a single 0/0 L'Hopital cell) with no
       # fallback: zero it and warn, as before.
-      warning(sprintf(
+      .dynhr_warn(sprintf(
         paste0("Non-finite values in dynamic Jacobian at steady state. ",
                "Affected columns: %s. ",
                "No residual function available for numerical fallback. ",

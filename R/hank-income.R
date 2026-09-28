@@ -554,7 +554,7 @@ hank_employment_income3 <- function(f_ue, s_eu, p_un, p_nu, f_ne = 0, s_en = 0,
   if (!is.finite(t_df) || t_df <= 2)
     stop("t_df must be > 2 (Student-t variance is undefined/infinite otherwise)")
   if (t_df <= 4)
-    warning("t_df <= 4: Student-t excess kurtosis is infinite/undefined")
+    .dynhr_warn("t_df <= 4: Student-t excess kurtosis is infinite/undefined")
 
   scale   <- sigma_eps / sqrt(t_df / (t_df - 2))
   ex_kurt <- if (t_df > 4) 6 / (t_df - 4) else Inf

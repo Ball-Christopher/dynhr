@@ -7,22 +7,32 @@
 dm_mode(dm, theta_init = NULL, ...)
 }
 \arguments{
-\item{dm}{A \code{\link{dynhr_model}} whose `$log_post` is set
-(see \code{\link{dm_posterior}})}
+\item{dm}{A \code{\link{dynhr_model}} carrying \code{data} and a
+prior spec}
 
-\item{theta_init}{Named numeric starting vector.  Defaults to the prior
-means from `$prior_spec`.}
+\item{theta_init}{Named numeric starting vector (the \code{mode$theta_init}
+field); \code{NULL} keeps the spec's.}
 
-\item{...}{Further arguments for \code{\link{find_mode}}
-(`n_iter`, `method`, `verbose`).}
+\item{...}{Fields of \code{\link{mode_spec}} (e.g. \code{n_iter},
+\code{method}, \code{transform_params}, \code{options}) or of
+\code{\link{compute_spec}} (e.g. \code{seed}, \code{verbose}), recorded
+in the returned object's spec.}
 }
 \value{
-The updated `dynhr_model`, with `$mode` set to the list returned
-  by \code{\link{find_mode}} (`theta_mode`, `logpost`, `convergence`, ...).
+The updated \code{dynhr_model}, with \code{$mode} set.
 }
 \description{
-Calls \code{\link{find_mode}} on the object's `$log_post` closure and
-stores the result in `$mode`.
+Runs the mode stage of \code{\link{run_estimation}} on the held spec
+(\code{outputs$form = "mode"}, no sampler) and stores the
+\code{dynhr_mode_result} in \code{$mode}: \code{theta_mode}, the optimiser
+result in \code{$mode$mode} (\code{logpost}, \code{convergence}, ...), the
+proposal covariance \code{Sigma_prop} a later \code{\link{dm_sample}}
+uses, and the run record. The mode-stage settings are the spec's
+\code{mode} component (\code{method}, \code{n_iter},
+\code{transform_params}, \code{theta_init} -- INITVAL / prior means when
+\code{NULL} --, ...); the seed and progress output its \code{compute}
+component. The log-posterior is built as \code{\link{dm_posterior}}
+builds it; \code{$log_post} is filled when empty.
 }
 \examples{
 \donttest{
@@ -31,10 +41,11 @@ Y <- as.matrix(read.csv(system.file("extdata/models/nk_demo_data.csv",
                                     package = "dynhr"))[, obs_vars])
 dm <- dynhr_model(system.file("extdata/models/nk_demo.mod", package = "dynhr"),
                   data = Y, obs_vars = obs_vars)
-dm <- dm_mode(dm_posterior(dm), n_iter = 50L, verbose = FALSE)
-dm$mode$logpost
+dm <- dm_mode(dm, n_iter = 50L)
+dm$mode$theta_mode
 }
 }
 \seealso{
-\code{\link{dynhr_model}}, \code{\link{find_mode}}
+\code{\link{dynhr_model}}, \code{\link{run_estimation}},
+  \code{\link{mode_spec}}
 }

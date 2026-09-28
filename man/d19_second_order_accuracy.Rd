@@ -4,34 +4,63 @@
 \alias{d19_second_order_accuracy}
 \title{D19: Second-order solution quality diagnostic}
 \usage{
-d19_second_order_accuracy(dr2, model = NULL, ss = NULL, params = NULL)
+d19_second_order_accuracy(
+  dr2,
+  model = NULL,
+  ss = NULL,
+  params = NULL,
+  threshold = 0.1,
+  meta = NULL
+)
 }
 \arguments{
 \item{dr2}{DecisionRules2 object from solve_perturbation_order2()}
 
-\item{model}{dynhr_mod (for variable labels, optional)}
+\item{model}{dynhr_mod (only used when \code{dr2$Sigma_e} is absent)}
 
-\item{ss}{Named numeric steady state (for magnitude scaling)}
+\item{ss}{Named numeric steady state (default \code{dr2$ys})}
 
-\item{params}{Named numeric parameter vector (for shock variances)}
+\item{params}{Named numeric parameter vector (only used with \code{model})}
+
+\item{threshold}{Nonlinearity-ratio threshold above which second-order
+effects are reported as material (default 0.1)}
+
+\item{meta}{Optional metadata list attached to the plot}
 }
 \value{
-A dynhr_diagnostic object
+A dynhr_diagnostic object (informational: \code{pass = NA}) whose
+  \code{result$by_variable} holds the per-variable table and whose
+  \code{plots$nonlinearity} shows it.
 }
 \description{
-Evaluates the quality and plausibility of the second-order perturbation
-solution. Reports relative magnitudes of second-order terms, the
-uncertainty correction, and recommends pruning when appropriate.
+Evaluates how much the second-order perturbation solution departs from the
+first-order one, per endogenous variable, on the scale of the model's own
+shocks.
 }
 \details{
-Pruning is recommended when max(|ghxx|) * typical_state > 0.1,
-i.e. when the quadratic correction is more than 10% of the linear term.
+Write the decision rule as \eqn{y - y^* = G z + z' A z + \tfrac12 g_{\sigma\sigma}}
+with \eqn{z = (x_{t-1}, u_t)}, \eqn{G = [g_x, g_u]} and \eqn{A} built from
+\code{ghxx}, \code{ghxu}, \code{ghuu}. With \eqn{z \sim N(0, S)},
+\eqn{S = \mathrm{diag}(\Sigma_x, \Sigma_e)} and \eqn{\Sigma_x} the
+unconditional first-order state covariance:
+\itemize{
+  \item \code{nl_ratio} = \eqn{\sqrt{2\,\mathrm{tr}(ASAS)} / \sqrt{G S G'}},
+    the standard deviation of the quadratic term relative to that of the
+    linear term. Values above \code{threshold} flag a variable whose
+    second-order dynamics are material (first-order IRFs/moments are then a
+    poor guide; simulate with the pruned second-order system).
+  \item \code{risk_corr} = \eqn{\tfrac12 g_{\sigma\sigma}}, the constant
+    uncertainty correction, reported relative to the unconditional
+    first-order sd (\code{risk_rel_sd}) and to \eqn{|y^*|}
+    (\code{risk_rel_ss}, \code{NA} where the steady state is zero).
+}
+If the first-order state transition has a unit root, \eqn{\Sigma_x} does not
+exist; the state block is then set to zero (impact-period moments only) and
+the summary says so.
 
-\strong{Note on variances:} the reported \code{var1} is the
-\emph{impact-period} variance \code{diag(ghu \%*\% Sigma_e \%*\% t(ghu))},
-not the unconditional (Lyapunov) variance.  These are equal only when
-\code{ghx = 0}; in general the unconditional variance is larger.  The
-uncertainty-correction ratio \code{unc_rel} is therefore relative to the
-impact-period standard deviation, not the unconditional standard deviation.
+The shock covariance is \code{dr2$Sigma_e} (the covariance \code{ghss} was
+solved with); only when that is absent is it rebuilt from \code{model} and
+\code{params}. There is no identity-covariance fallback: without either,
+the diagnostic returns a FAIL result.
 }
 \keyword{internal}

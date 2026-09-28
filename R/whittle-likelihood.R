@@ -140,6 +140,20 @@
 }
 
 
+## Per-ordinate weights of the positive-half Whittle sum (shared by the
+## likelihood and its gradient so the two cannot drift apart).
+##   omega in (0, pi): weight 1   (the ordinate stands for the conjugate pair
+##                                 +/- omega_j: 2*n_obs real dimensions)
+##   omega == pi     : weight 1/2 (Nyquist, T even: its own mirror, n_obs
+##                                 real dimensions)
+## 2*pi*(T/2)/T need not be bit-identical to pi, hence the tolerance.
+.whittle_freq_weights <- function(omega) {
+  w <- rep(1, length(omega))
+  w[abs(omega - pi) < 1e-9] <- 0.5
+  w
+}
+
+
 ## --------------------------------------------------------------------------
 ## 2.  MODEL-IMPLIED SPECTRAL DENSITY
 ## --------------------------------------------------------------------------
@@ -421,21 +435,33 @@
 ## Evaluate the Whittle log-likelihood given:
 ##   pdgm   -- periodogram list from .whittle_periodogram()
 ##   S_fn   -- function(omega) -> n_obs x n_obs complex Hermitian spectral
-##             density matrix (can include me_variance on the diagonal)
+##             density matrix f(omega) (can include me_variance/(2*pi) on the
+##             diagonal). f MUST be on the periodogram's scale, i.e.
+##             E[I(omega)] ~ f(omega) with I = w w^H / (2*pi*T): that is
+##             .whittle_spectral_density(...) / (2*pi), because the transfer-
+##             function kernel returns H Sigma_e H^* = 2*pi*f.
 ##   freq_band -- numeric(2): [lo, hi] in radians; only sum over omega in band
 ##
 ## Returns a scalar (the Whittle log-likelihood, a real number).
 ##
 ## Formula (per Whittle 1953; multivariate form from Dunsmuir & Hannan 1976):
-##   ll = sum_j [ -log det S(omega_j) - tr(S(omega_j)^{-1} I(omega_j)) ]
-##          - J * n_obs * log(2*pi)   (normalising constant)
+##   ll = sum_j w_j [ -log det f(omega_j) - tr(f(omega_j)^{-1} I(omega_j))
+##                    - 2 * n_obs * log(2*pi) ]
 ##
-## where J = number of included frequencies, and we use the REAL part of the
-## trace (the imaginary part is zero for consistent spectral density estimates).
+## The sum runs over the POSITIVE Fourier frequencies j = 1..floor(T/2) only.
+## Each ordinate 0 < omega_j < pi stands for the conjugate pair (omega_j,
+## -omega_j) -- 2*n_obs real Gaussian dimensions -- so it carries weight
+## w_j = 1. The Nyquist ordinate omega = pi (present iff T is even) is its own
+## mirror (n_obs real dimensions) and carries w_j = 1/2. The constant
+## -2*n_obs*log(2*pi) = -n_obs*log(2*pi) - log det(2*pi*I) per pair makes the
+## level exact for white noise: sum_j w_j = (T-1)/2 and the likelihood equals
+## the exact Gaussian density of the demeaned sample (frequency 0 is dropped).
+## We use the REAL part of the trace (the imaginary part is zero for
+## consistent spectral density estimates).
 
 ## debias:  logical — if TRUE and EI_list is provided, substitute EI_list[[j]]
-##          for S_fn(omega[j]).  When FALSE, behaviour is BIT-IDENTICAL to the
-##          original code (S_fn path; EI_list is ignored).
+##          for S_fn(omega[j]).  When FALSE, the S_fn path is used and
+##          EI_list is ignored.
 ## EI_list: optional precomputed expected periodogram (list of J real symmetric
 ##          matrices from .whittle_compute_EI).  Ignored when debias=FALSE.
 .whittle_loglik <- function(pdgm, S_fn, freq_band = c(0, pi),
@@ -457,8 +483,9 @@
     stop("whittle_loglik: no Fourier frequencies fall inside freq_band = [",
          lo, ", ", hi, "]. Widen the band or increase T.")
 
-  ll      <- 0
-  ll_const <- -0.5 * n_obs * log(2 * pi)   # per frequency
+  ll       <- 0
+  ll_const <- -2 * n_obs * log(2 * pi)   # per conjugate pair (weight 1)
+  w_freq   <- .whittle_freq_weights(omega)
 
   for (j in in_band) {
     ## Spectral density matrix at this frequency:
@@ -490,7 +517,7 @@
     I_j   <- I_list[[j]]                   # n_obs x n_obs Hermitian periodogram
     tr_SI <- Re(sum(diag(S_inv %*% I_j)))  # Im part is O(eps) by Hermitian product
 
-    ll_j  <- ll_const - 0.5 * log_det_S - 0.5 * tr_SI
+    ll_j  <- w_freq[j] * (ll_const - log_det_S - tr_SI)
     if (!is.finite(ll_j)) return(-Inf)
     ll <- ll + ll_j
   }
@@ -622,10 +649,14 @@ make_log_posterior_whittle <- function(model, data, prior_spec, obs_vars,
       TT <- ss_mats$T_mat; RR <- ss_mats$R_mat
       ZZ <- ss_mats$Z_mat; DD <- ss_mats$D_mat
 
-      ## Build spectral-density function for this parameter draw
+      ## Build spectral-density function for this parameter draw. The kernel
+      ## returns H Sigma_e H^* + me*I = 2*pi*f(omega); the periodogram
+      ## I = w w^H / (2*pi*T) estimates f itself, so divide by 2*pi (the
+      ## debiased E[I] below is already on the f scale via its 1/(2*pi)).
       me_var <- me_variance    # capture in closure
       S_fn   <- function(omega)
-        .whittle_spectral_density(omega, TT, RR, ZZ, DD, Sigma_e, me_var)
+        .whittle_spectral_density(omega, TT, RR, ZZ, DD, Sigma_e, me_var) /
+          (2 * pi)
 
       ## Debiased Whittle: precompute E[I(omega_j)] for all J frequencies.
       ## Re-computed every draw because TT, ZZ, Sigma_e (and hence P0) vary
@@ -635,7 +666,7 @@ make_log_posterior_whittle <- function(model, data, prior_spec, obs_vars,
         tryCatch({
           c_arr <- .whittle_compute_ctau(TT, RR, ZZ, DD, Sigma_e, T_len, me_var)
           .whittle_compute_EI(c_arr, pdgm$omega, T_len)
-        }, error = function(e) NULL)
+        }, error = function(e) .dynhr_reraise_bug(e, NULL))  # bug -> loud, not plain Whittle
       } else {
         NULL
       }
@@ -649,7 +680,7 @@ make_log_posterior_whittle <- function(model, data, prior_spec, obs_vars,
           ## swallow numerical errors from the spectral density evaluation.
           if (grepl("no Fourier frequencies", conditionMessage(e), fixed = TRUE))
             stop(e)
-          -Inf
+          .dynhr_reraise_bug(e, -Inf)
         }
       )
       if (!is.finite(ll)) return(NULL)
@@ -684,16 +715,19 @@ make_log_posterior_whittle <- function(model, data, prior_spec, obs_vars,
 ##
 ## Inner loop: per-frequency precompute (z, A, B = z*A^{-1}*RR, G=ZZ*B,
 ## H, S, eigen(S), S^{-1}) then per-parameter accumulate via
-##   d ll / d theta_j = sum_{k in band} Re[ -0.5 tr(Si dS) + 0.5 tr(Si dS Si I) ]
-## where dS = dH Sigma_e H^H + H dSigma_e H^H + H Sigma_e dH^H.
+##   d ll / d theta_j = sum_{k in band} w_k Re[ -tr(Si dS) + tr(Si dS Si I) ]
+## where dS = [dH Sigma_e H^H + H dSigma_e H^H + H Sigma_e dH^H] / (2*pi) and
+## S = [H Sigma_e H^H + me*I] / (2*pi) is the spectral density on the
+## periodogram's scale, and w_k = .whittle_freq_weights() (1, or 1/2 at
+## Nyquist) -- exactly the derivative of .whittle_loglik().
 ## Si is the full complex inverse of the Hermitian spectral density matrix;
 ## I_j is the full complex Hermitian periodogram. Re() applied only at the
 ## final scalar — the imaginary part of tr(Si dS Si I) is O(eps) by Hermitian
 ## structure and serves as a numerical guard only.
 ##
 ## z-factor convention: z = exp(-i*omega), A = I - TT*z (matches loglik).
-## freq_band edge semantics: omega > lo & omega <= hi (matches loglik line 151).
-## debias:  logical (default FALSE for bit-identical to historical behaviour).
+## freq_band edge semantics: omega > lo & omega <= hi (matches .whittle_loglik).
+## debias:  logical (default FALSE: standard spectral-density path).
 ##          When TRUE, EI_list and dEI_list must be provided; the gradient is
 ##          then computed as d ll_debias / d theta_k using EI_j / dEI_j instead
 ##          of S_j / dS_j.  The formula is structurally identical (pass-through
@@ -749,6 +783,7 @@ make_log_posterior_whittle <- function(model, data, prior_spec, obs_vars,
   dSe_arr <- lapply(d_ss_list, function(d) if (!is.null(d)) d$dSigma_e %||% zero_Se else NULL)
 
   n_skipped <- 0L
+  w_freq    <- .whittle_freq_weights(omega)   # same weights as .whittle_loglik
 
   ## -----------------------------------------------------------------------
   ## DEBIASED PATH: use precomputed EI_list and dEI_per_param
@@ -767,18 +802,18 @@ make_log_posterior_whittle <- function(model, data, prior_spec, obs_vars,
       EIi_j <- V_j %*% diag(1 / ev_clamped_j, nrow = length(ev_clamped_j)) %*% t(V_j)
       ## Note: EI is real symmetric so t(V) not Conj(t(V))
 
-      ## Per-parameter: grad += Re[-0.5 tr(EIi dEI) + 0.5 tr(EIi dEI EIi I)]
+      ## Per-parameter: grad += w_j Re[-tr(EIi dEI) + tr(EIi dEI EIi I)]
       for (k in active) {
-        dEI_k_j <- dEI_per_param[[k]][[j]]   ## real symmetric n_obs x n_obs
+        dEI_k_j <- dEI_per_param[[nm_all[k]]][[j]]   ## by NAME; real symmetric n_obs x n_obs
         EIi_dEI <- EIi_j %*% dEI_k_j
-        grad[k]  <- grad[k] +
-          Re(-0.5 * sum(diag(EIi_dEI)) +
-              0.5 * sum(diag(EIi_dEI %*% (EIi_j %*% I_j))))
+        grad[k]  <- grad[k] + w_freq[j] *
+          Re(-sum(diag(EIi_dEI)) +
+              sum(diag(EIi_dEI %*% (EIi_j %*% I_j))))
       }
     }
 
     if (n_skipped > 0L)
-      warning(sprintf(
+      .dynhr_warn(sprintf(
         ".whittle_loglik_grad: skipped %d near-singular-EI frequency(ies).",
         n_skipped), call. = FALSE)
 
@@ -786,8 +821,9 @@ make_log_posterior_whittle <- function(model, data, prior_spec, obs_vars,
   }
 
   ## -----------------------------------------------------------------------
-  ## STANDARD PATH (debias=FALSE): BIT-IDENTICAL to historical behaviour
+  ## STANDARD PATH (debias=FALSE)
   ## -----------------------------------------------------------------------
+  inv2pi <- 1 / (2 * pi)   # kernel H Se H^* = 2*pi*f; I estimates f
   for (j in in_band) {
     om_j <- omega[j]
     z_j  <- exp(-1i * om_j)
@@ -810,9 +846,11 @@ make_log_posterior_whittle <- function(model, data, prior_spec, obs_vars,
     G_j <- ZZ %*% B_j
     H_j <- G_j + DD
 
-    ## S_j = H_j Sigma_e H_j^H [+ me_variance * I]
+    ## S_j = [H_j Sigma_e H_j^H (+ me_variance * I)] / (2*pi)  (= f(omega_j),
+    ## the same scale .whittle_loglik's S_fn uses)
     S_j <- H_j %*% Sigma_e %*% Conj(t(H_j))
     if (me_variance > 0) S_j <- S_j + me_variance * diag(n_obs)
+    S_j <- S_j * inv2pi
 
     ## Exact complex Hermitian path — consistent with .whittle_loglik.
     ## Clamp near-zero eigenvalues (same rule as in .whittle_loglik) so that
@@ -843,27 +881,27 @@ make_log_posterior_whittle <- function(model, data, prior_spec, obs_vars,
       dG_k    <- dZZ_k %*% B_j + ZZ %*% (z_j * solve(A_j, inner_k))
       dH_k    <- dG_k + dDD_k
 
-      ## dS_k = dH Sigma_e H^H + H dSigma_e H^H + H Sigma_e dH^H
-      dS_k <- dH_k %*% Sigma_e  %*% Conj(t(H_j)) +
-              H_j  %*% dSe_k    %*% Conj(t(H_j)) +
-              H_j  %*% Sigma_e  %*% Conj(t(dH_k))
+      ## dS_k = [dH Sigma_e H^H + H dSigma_e H^H + H Sigma_e dH^H] / (2*pi)
+      dS_k <- (dH_k %*% Sigma_e  %*% Conj(t(H_j)) +
+               H_j  %*% dSe_k    %*% Conj(t(H_j)) +
+               H_j  %*% Sigma_e  %*% Conj(t(dH_k))) * inv2pi
 
-      ## Exact gradient formula (from ll = -0.5 log det S - 0.5 tr(S^{-1} I)):
-      ##   d ll / d theta_k = Re[ -0.5 tr(S^{-1} dS_k) + 0.5 tr(S^{-1} dS_k S^{-1} I_j) ]
+      ## Exact gradient formula (from ll_j = w_j [-log det S - tr(S^{-1} I)]):
+      ##   d ll / d theta_k = w_j Re[ -tr(S^{-1} dS_k) + tr(S^{-1} dS_k S^{-1} I_j) ]
       ## Si_j is complex (from solve(S_j)); dS_k is complex; I_j is full complex.
       ## Re() applied only at the final scalar — the imaginary part of the trace
       ## is O(eps) for Hermitian-structured matrices, so Re() is a numerical guard.
       SidS    <- Si_j %*% dS_k          # complex n x n
-      grad[k] <- grad[k] +
-        Re(-0.5 * sum(diag(SidS)) +
-            0.5 * sum(diag(SidS %*% (Si_j %*% I_j))))
+      grad[k] <- grad[k] + w_freq[j] *
+        Re(-sum(diag(SidS)) +
+            sum(diag(SidS %*% (Si_j %*% I_j))))
     }
   }
 
   if (n_skipped > 0L)
-    warning(sprintf(
+    .dynhr_warn(sprintf(paste0(
       ".whittle_loglik_grad: skipped %d near-singular-A frequency(ies); ",
-      "gradient contribution set to zero for those frequencies.",
+      "gradient contribution set to zero for those frequencies."),
       n_skipped), call. = FALSE)
 
   grad

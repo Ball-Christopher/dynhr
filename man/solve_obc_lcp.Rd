@@ -32,9 +32,19 @@ NULL → all endo indices}
 \item{method}{Character: \code{"lemke"} (default) or \code{"newton"}}
 
 \item{max_iter}{Maximum pivot steps (lemke) or Newton iterations
-(newton); NULL → solver-specific defaults}
+(newton) per re-solve; NULL → solver-specific
+defaults}
 
-\item{tol}{Complementarity tolerance (default 1e-8)}
+\item{tol}{Relative complementarity tolerance (default 1e-8):
+the Lemke pivots and multiplier classification
+are relative to max|q| and max|M| of the stacked
+LCP, and a regime path is an equilibrium when every
+bound holds up to \code{tol} times \eqn{|x| + |b|}
+and every multiplier has the right sign up to
+\code{tol} times its equation's term magnitudes
+(\code{max(tol, 1e-6)} for the \code{converged}
+flag), so the solution does not depend on the
+units of the model (absolute before W79)}
 
 \item{regime_path_init}{Integer vector (length T) for warm-starting the
 Newton solver; ignored for method = "lemke"}
@@ -48,29 +58,36 @@ Named list with:
   $paths       -- n_endo x T matrix of simulated endogenous variable paths
   $fb_norm     -- scalar: complementarity mismatch norm at the returned path
   $converged   -- logical
-  $n_iter      -- integer: pivot steps (lemke) or Newton iterations (newton)
+  $n_iter      -- integer: pivot steps (lemke) or Newton iterations (newton),
+                  the largest over the re-solves
 }
 \description{
-Finds the binding/slack regime path for a given deterministic shock sequence
-using one of two methods selected by the \code{method} argument.
+Finds the binding/slack regime path and the piecewise-linear path for a
+deterministic shock sequence using one of two methods selected by the
+\code{method} argument.  Both return the same equilibrium as
+\code{\link{boehl_solve_regime_path}}: time-varying OccBin rules along the
+regime path, every slack period inside every bound and every binding
+period with a multiplier of the right sign.  Shocks are surprises: at
+period 1 and at every period with a non-zero shock the expected regime
+path is re-solved from the current state.
 }
 \details{
-\strong{method = "lemke"} (default): Lemke's complementarity pivoting.
-  Builds the stacked T*n_spec LCP(q, M) from an all-slack simulation baseline
-  and solves it with the Lemke principal-pivot algorithm.  For the OccBin
-  piecewise-linear model M is block-lower-triangular (causal structure), so
-  Lemke terminates in exactly T*n_spec pivots (one forward substitution pass)
-  with provable monotone guarantees.
+\strong{method = "lemke"} (default): Lemke's complementarity pivoting on
+  the stacked LCP(q, M) of \code{lcp_build_system()} -- every tagged
+  equation carries a non-negative multiplier known from the start
+  (Holden 2016), which keeps the model linear in the multipliers.
 
 \strong{method = "newton"}: Newton iteration on the stacked complementarity
   mismatch residual.  At each step the T*n_spec × T*n_spec finite-difference
-  Jacobian is assembled (T*n_spec re-simulations), and a QR Newton step
-  gives a regime update.  Useful as a fallback when Lemke does not converge.
+  Jacobian of regime flips is assembled (T*n_spec re-simulations), and a QR
+  Newton step gives a regime update.
 }
 \references{
 Boehl, G. (2020). Efficient solution and computation of models with
     occasionally binding constraints. \emph{Deutsche Bundesbank Discussion
     Paper}, 38/2020.
+  Holden, T. D. (2016). Computation of solutions to dynamic models with
+    occasionally binding constraints. \emph{EconStor Preprints}, 130142.
   Cottle, R. W., Pang, J.-S., & Stone, R. E. (2009).
     \emph{The Linear Complementarity Problem}. SIAM.
 }

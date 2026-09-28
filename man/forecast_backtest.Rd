@@ -48,7 +48,7 @@ like. Must not contain \code{NA}.}
 
 \item{estimator}{\code{"mode"} (posterior mode via
 \code{\link{run_mode_finding}}), \code{"posterior"} (mode, then
-\code{\link{mcmc}}, integrating the predictive over parameter draws), or
+\code{\link{dynhr_mcmc}}, integrating the predictive over parameter draws), or
 \code{"fixed"} (no estimation -- use the parameters already in
 \code{model}, or \code{theta}).}
 
@@ -142,7 +142,7 @@ Passing \code{model = "rw"} (random walk), \code{"ar1"} (per-variable OLS
 AR(1) with intercept) or \code{"mean"} (unconditional sample moments) runs
 the same driver on a naive reduced-form benchmark.  Score the structural
 model and the benchmark over the same origins and hand the two score series
-to \code{\link{dm_test}}.
+to \code{\link{diebold_mariano_test}}.
 }
 
 \examples{
@@ -154,6 +154,6 @@ bt <- forecast_backtest("rw", Y, obs_vars = "y",
 summary(bt)
 }
 \seealso{
-\code{\link{score_forecast}}, \code{\link{dm_test}},
+\code{\link{score_forecast}}, \code{\link{diebold_mariano_test}},
   \code{\link{conditional_forecast}}
 }

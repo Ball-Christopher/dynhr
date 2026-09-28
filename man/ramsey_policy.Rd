@@ -10,7 +10,7 @@ ramsey_policy(
   params = NULL,
   planner_objective = NULL,
   order = 1L,
-  n_periods = 400L,
+  n_periods = 2000L,
   burn_in = 100L,
   discount = NULL,
   planner_discount = NULL,
@@ -29,12 +29,20 @@ parsed \code{planner_objective(...);} from the model when available.}
 
 \item{order}{Perturbation order for policy solution (1 or 2)}
 
-\item{n_periods}{Simulation length used for welfare evaluation}
+\item{n_periods}{Simulation length used for welfare evaluation.  Default
+raised from 400 to 2000 in 0.9.4: the unconditional welfare is a
+Monte-Carlo mean over a persistent path and 400 periods left it visibly
+noisy.  Its batch-means standard error is reported as
+\code{$welfare$welfare_se}; check it before reading a welfare gap.}
 
 \item{burn_in}{Burn-in discarded before welfare evaluation}
 
-\item{discount}{Optional discount factor; defaults to parameter \code{beta}
-when present, else 0.99}
+\item{discount}{Optional discount factor.  When \code{NULL} it is taken from
+the \code{.mod}'s \code{ramsey_policy(planner_discount = ...)} or
+\code{ramsey_model(planner_discount = ...)} option, else from the
+parameter \code{beta} or \code{betta} (Dynare's spelling); if none exists
+the call ERRORS (class \code{dynhr_error_no_discount}) rather than
+silently assuming 0.99, as it did before 0.9.4.}
 
 \item{planner_discount}{Dynare-compatible alias for \code{discount}; used when
 \code{discount} is \code{NULL} (NEW-W1).}

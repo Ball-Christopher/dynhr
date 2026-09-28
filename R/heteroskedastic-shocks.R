@@ -239,7 +239,7 @@ shock_scale_entry <- function(var, periods, scales) {
     ## Clamp periods to [1, n_T] with a warning on out-of-range.
     bad <- pr < 1L | pr > n_T
     if (any(bad))
-      warning(sprintf(
+      .dynhr_warn(sprintf(
         ".build_shock_scale_matrix: shock '%s' has periods outside [1, %d]: %s (ignored).",
         v, n_T, paste(pr[bad], collapse = ", ")), call. = FALSE)
     ok_pr <- pr[!bad]; ok_sc <- sc[!bad]

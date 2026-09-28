@@ -116,6 +116,7 @@ List kf_score_sigma_cpp(const arma::mat& Yd,        // n_obs x T (already Y - d)
     arma::mat RmKD = RR - Kg * DD;
 
     std::vector<arma::mat> dF_t(K), dK_t(K);
+    // Largest per-parameter RELATIVE drift of dP_k (see the lock below).
     double dP_drift = 0.0;
     for (arma::uword k = 0; k < K; ++k) {
       arma::vec dv  = -(ZZ * ds[k]);
@@ -143,7 +144,13 @@ List kf_score_sigma_cpp(const arma::mat& Yd,        // n_obs x T (already Y - d)
       if (has_me_true)
         dPn += dKg * me_diag * Kg.t() + Kg * me_diag * dKg.t();
       dPn = 0.5 * (dPn + dPn.t());
-      dP_drift = std::max(dP_drift, arma::abs(dPn - dP[k]).max());
+      {
+        const double dk = arma::abs(dPn - dP[k]).max();
+        const double sk = arma::abs(dPn).max();
+        // dP_k identically zero (a parameter that does not move P): converged.
+        const double rk = (sk > 0.0) ? dk / sk : (dk > 0.0 ? R_PosInf : 0.0);
+        dP_drift = std::max(dP_drift, rk);
+      }
       dP[k]  = dPn;
       dF_t[k] = dF; dK_t[k] = dKg;
     }
@@ -153,11 +160,23 @@ List kf_score_sigma_cpp(const arma::mat& Yd,        // n_obs x T (already Y - d)
     // TRUE measurement-noise law (F3-D): P' += K me K'.
     if (has_me_true) Pn += Kg * me_diag * Kg.t();
     Pn = 0.5 * (Pn + Pn.t());
-    double P_drift = arma::abs(Pn - P).max();
+    const double P_drift = arma::abs(Pn - P).max();
+    const double P_scale = arma::abs(Pn).max();
     P = Pn;
 
-    // Lock once both P and all dP_k have converged (after >=2 steps).
-    if (t >= 2 && P_drift < ss_tol && dP_drift < ss_tol) {
+    // Lock once both P and all dP_k have converged. The P test is the forward
+    // filter's rule (kalman_filter's R loop, kalman_standard_loop_cpp):
+    // RELATIVE, max|P_{t+1} - P_t| < ss_tol * max|P_{t+1}|, first eligible
+    // at the second period (t >= 1 here, 0-based). It used to be ABSOLUTE
+    // (and one period later): on a small-scale model (P ~1e-8) it froze the
+    // gain while P was still moving at ~1e-4 relative, long before the
+    // forward filter locks, so the score make_posterior_grad's hybrid used
+    // was not the objective's (7.6e-7 relative off at state variances ~1e-8,
+    // 1.4e-5 at ~1e-12), and a large enough loglik gap would have made hybrid
+    // drop it for FD (W76, 2026-09-26). Each dP_k is held to the same
+    // relative rule against its own scale, so the lock can only come at or
+    // after the forward's.
+    if (t >= 1 && P_drift < ss_tol * P_scale && dP_drift < ss_tol) {
       ss = true;
       K_ss = Kg; Fi_ss = Fi; logdetF_ss = logdetF;
       for (arma::uword k = 0; k < K; ++k) {

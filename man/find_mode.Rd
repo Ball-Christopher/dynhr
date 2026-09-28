@@ -40,9 +40,11 @@ Named list: \code{theta_mode}, \code{logpost}, \code{convergence},
 }
 \description{
 Runs a multi-stage optimizer to locate \eqn{\arg\max_\theta \log p(\theta|Y)}.
-The returned mode is the natural starting point for \code{\link{mcmc}} or
-\code{\link{nuts}}, and the inverse Hessian at the mode provides the
-initial proposal covariance for RWMH.
+The returned mode is the natural starting point for \code{\link{dynhr_mcmc}} or
+\code{\link{nuts}}. \code{find_mode()} returns the mode only; for the RWMH
+proposal covariance (the scaled inverse Hessian at the mode) and the exact
+gradient, use \code{\link{run_mode_finding}}, whose result carries
+\code{$Sigma_prop}.
 }
 \examples{
 model    <- parse_mod(system.file("extdata/models/nk_demo.mod",
@@ -67,6 +69,6 @@ Hansen, N. (2016). The CMA evolution strategy: A tutorial.
     minimization. \emph{The Computer Journal}, 7(4), 308-313.
 }
 \seealso{
-\code{\link{mcmc}}, \code{\link{nuts}}, \code{\link{make_posterior}},
+\code{\link{dynhr_mcmc}}, \code{\link{nuts}}, \code{\link{make_posterior}},
   \code{\link{dm_mode}} (the pipeline-object equivalent)
 }

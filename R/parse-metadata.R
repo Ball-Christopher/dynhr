@@ -7,10 +7,35 @@
 ## Phase-1 split from parser-monolith.R (no logic changes).
 ## --------------------------------------------------------------------------
 
+#' Resolve a .mod argument that may be a PATH or already a vector of LINES
+#'
+#' A13b: `extract_mod_metadata()` has always documented both forms, but
+#' `.extract_narratives()` called `readLines()` on the raw argument, so the
+#' lines form died with "invalid 'description' argument" -- and the caller in
+#' `parse_mod()` swallowed that error, silently returning EMPTY metadata (not
+#' just empty narratives). One resolver, used by both.
+#' @noRd
+.mod_lines <- function(mod_file_or_lines) {
+  if (!is.character(mod_file_or_lines))
+    .dynhr_abort("extract_mod_metadata(): expected a .mod file path or a ",
+                 "character vector of .mod lines, got ",
+                 class(mod_file_or_lines)[1], ".",
+                 class = "dynhr_error_bad_mod_input")
+  if (length(mod_file_or_lines) == 1L && !is.na(mod_file_or_lines) &&
+      !grepl("\n", mod_file_or_lines, fixed = TRUE) &&
+      file.exists(mod_file_or_lines))
+    return(readLines(mod_file_or_lines, warn = FALSE))
+  ## A single string holding the whole file (embedded newlines) is the third
+  ## shape callers use; split it so every path below sees LINES.
+  if (length(mod_file_or_lines) == 1L &&
+      grepl("\n", mod_file_or_lines, fixed = TRUE))
+    return(strsplit(mod_file_or_lines, "\n", fixed = TRUE)[[1]])
+  mod_file_or_lines
+}
+
 #' @export
 extract_mod_metadata <- function(mod_file_or_lines) {
-  txt <- if (length(mod_file_or_lines) == 1 && file.exists(mod_file_or_lines))
-    readLines(mod_file_or_lines) else mod_file_or_lines
+  txt <- .mod_lines(mod_file_or_lines)
 
   # -- Parse %(key='value', ...) annotations from var/varexo lines --
   pct_pattern <- "([a-zA-Z_][a-zA-Z0-9_]*)\\s+%\\((.+?)\\)"
@@ -101,7 +126,7 @@ extract_mod_metadata <- function(mod_file_or_lines) {
       .bm_known_keys <- c("variable", "shock", "sign", "min", "max", "type",
                           "peak_horizon", "peak_magnitude", "description")
       if (length(bm) == 0 || !any(names(bm) %in% .bm_known_keys)) {
-        warning(sprintf("@dynhr:benchmarks: could not parse '%s' as key=value fields; skipped.", bname),
+        .dynhr_warn(sprintf("@dynhr:benchmarks: could not parse '%s' as key=value fields; skipped.", bname),
                 call. = FALSE)
         next
       }
@@ -141,7 +166,7 @@ extract_mod_metadata <- function(mod_file_or_lines) {
       shock_to_category = shock_to_category,
       benchmarks        = benchmarks,
       var_labels        = var_labels,
-      narratives        = .extract_narratives(mod_file_or_lines),
+      narratives        = .extract_narratives(txt),
       expectations      = expectations,
       deep              = deep
     ),
@@ -157,12 +182,15 @@ extract_mod_metadata <- function(mod_file_or_lines) {
 #'   name: date_range=START:END, shock=SHOCK_OR_CATEGORY, variable=VAR,
 #'         sign=SIGN, min_sd=N, description="TEXT"
 #'
-#' @param mod_file  Path to .mod file
+#' @param mod_file  Path to a .mod file, a character vector of .mod lines, or a
+#'   single string holding the whole file. A13b: all three are accepted -- this
+#'   used to be `readLines()` on the raw argument, which ERRORED on the lines
+#'   form that `extract_mod_metadata()` documents and accepts.
 #' @return list of narrative episode specs
 #' @noRd
 # ---------------------------------------------------------------------------
 .extract_narratives <- function(mod_file) {
-  lines <- readLines(mod_file, warn = FALSE)
+  lines <- .mod_lines(mod_file)
   in_block <- FALSE
   raw <- character()
 
@@ -298,7 +326,7 @@ extract_mod_metadata <- function(mod_file_or_lines) {
 
     # L21: warn and skip if type is missing or no key=value pairs were parsed
     if (length(kv) == 0 || is.null(kv$type)) {
-      warning(sprintf("@dynhr:expectations: could not parse '%s' (missing type= or no key=value fields); skipped.",
+      .dynhr_warn(sprintf("@dynhr:expectations: could not parse '%s' (missing type= or no key=value fields); skipped.",
                       check_name), call. = FALSE)
       return(NULL)
     }

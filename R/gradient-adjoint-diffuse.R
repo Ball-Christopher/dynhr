@@ -106,7 +106,7 @@
     caution  <- 100 * ur_tol
     nrb      <- is.finite(mem) && mem < caution
     if (nrb)
-      warning(sprintf(paste0(
+      .dynhr_warn(sprintf(paste0(
         ".kf_loglik_adjoint_diffuse: a stable eigenvalue is within %.1e of the ",
         "unit circle (margin %.2e, nunit = %d). The exact-diffuse gradient is ",
         "non-smooth across a unit-root regime change; a small parameter ",
@@ -237,9 +237,8 @@
     if (in_diffuse) {
       F_inf  <- .sym(ZZ %*% P_inf  %*% tZZ)
       F_star <- .sym(ZZ %*% P_star %*% tZZ + HHme)
-      scale_star <- max(1, max(abs(F_star)))
-
-      if (max(abs(F_inf)) < diffuse_tol * scale_star) {
+      ## F_inf / P_inf are unit-free: the forward filter's rule (W77).
+      if (max(abs(F_inf)) < diffuse_tol) {
         ## -- Case A -----------------------------------------------------------
         step <- .do_stat_step(s, P_star, v)
         if (is.null(step)) return(fail)
@@ -287,11 +286,11 @@
         P_star <- P_star_new
       }
 
-      if (max(abs(P_inf)) < conv_tol * max(1, max(abs(P_star)))) {
+      if (max(abs(P_inf)) < conv_tol) {
         d_diffuse  <- t
         in_diffuse <- FALSE
       } else if (t >= cap) {
-        warning(".kf_loglik_adjoint_diffuse: P_inf did not converge within ",
+        .dynhr_warn(".kf_loglik_adjoint_diffuse: P_inf did not converge within ",
                 cap, " periods.")
         return(fail)
       }
@@ -637,7 +636,7 @@
       E <- matrix(0, n, n)
       for (a in seq_len(n)) for (b in seq_len(n)) {
         E[a, b] <- 1
-        fd <- tryCatch(fwd(E, NULL), error = function(e) NULL)
+        fd <- tryCatch(fwd(E, NULL), error = function(e) .dynhr_reraise_bug(e, NULL))
         if (is.null(fd)) { stage2_ok <- FALSE; break }
         bar_TT_init[a, b] <- sum(bar_P_inf_0 * fd$dP_inf) +
                              sum(bar_P_star_0 * fd$dP_star)
@@ -667,7 +666,7 @@
     has_dTT <- any(vapply(d_ss_list, function(p)
       !is.null(p) && !is.null(p[["dTT"]]), logical(1)))
     if (has_dTT)
-      warning(".kf_loglik_adjoint_diffuse: diffuse init adjoint (Sylvester/",
+      .dynhr_warn(".kf_loglik_adjoint_diffuse: diffuse init adjoint (Sylvester/",
               "Lyapunov) failed; TT gradient omits the init sensitivity.")
   }
   ## ============================================================

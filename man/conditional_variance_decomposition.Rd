@@ -50,8 +50,14 @@ where \eqn{A = \code{ghx[state\_idx, ]}}, \eqn{B = \code{ghu[state\_idx, ]}},
 The h-step forecast-error covariance is:
 \deqn{V(h) = \sum_{j=0}^{h-1} \Psi_j \Sigma_e \Psi_j'}
 with \eqn{\Psi_0 = D} and \eqn{\Psi_j = C A^{j-1} B} for \eqn{j \ge 1}.
-The contribution of shock \eqn{k} to variable \eqn{i} at horizon \eqn{h} is
-\eqn{\sum_{j=0}^{h-1} (\Psi_j)_{ik}^2 \Sigma_e[k,k]}.
+Writing \eqn{\Sigma_e = L L'} for the lower Cholesky factor in the DECLARED
+shock order (Dynare's convention), the contribution of shock \eqn{k} to
+variable \eqn{i} at horizon \eqn{h} is
+\eqn{\sum_{j=0}^{h-1} (\Psi_j L)_{ik}^2}, so the shares sum exactly to
+\eqn{V(h)_{ii}} even with correlated shocks. With a diagonal \eqn{\Sigma_e}
+this is \eqn{\sum_j (\Psi_j)_{ik}^2 \Sigma_e[k,k]}, as before. As with any
+Cholesky orthogonalisation the split of the shared variance between
+correlated shocks depends on the \code{varexo} declaration order.
 
 For \code{horizon = Inf}, the per-shock Lyapunov solution is used (same
 machinery as \code{\link{compute_moments}}), which equals the limit of the

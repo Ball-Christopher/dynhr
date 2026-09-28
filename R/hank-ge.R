@@ -400,12 +400,17 @@ hank_mixture_ks_assemble <- function(a_grid, types, omega, r, w,
 #'
 #' @param ks A \code{\link{hank_ks_steady}} steady state.
 #' @param T_h Integer horizon.
+#' @param expectations \code{NULL} (FIRE, default) or a household behavioural
+#'   expectations spec (Lenney and Rosso 2026) over the inputs
+#'   \code{c("r", "w")}, passed to \code{\link{hank_het_jacobian}}: the
+#'   household Jacobians are replaced by their behavioural counterparts before
+#'   the chain rule, the firm block is unchanged.
 #'
 #' @return A list with \code{H_K}, \code{H_Z} (\code{T x T}), the household
-#'   Jacobians \code{J} (from \code{\link{hank_het_jacobian}}), and the firm
-#'   Jacobian blocks \code{Jr_K, Jr_Z, Jw_K, Jw_Z}.
+#'   Jacobians \code{J} (from \code{\link{hank_het_jacobian}}), the firm
+#'   Jacobian blocks \code{Jr_K, Jr_Z, Jw_K, Jw_Z}, and \code{expectations}.
 #' @export
-hank_ks_ge_jacobian <- function(ks, T_h) {
+hank_ks_ge_jacobian <- function(ks, T_h, expectations = NULL) {
   alpha <- ks$alpha; delta <- ks$delta; Z <- ks$Z; K <- ks$K
   ## Firm simple-block Jacobians (K_{t-1} predetermined -> lag = subdiagonal).
   dr_dKlag <- alpha * (alpha - 1) * Z * K^(alpha - 2)
@@ -420,15 +425,21 @@ hank_ks_ge_jacobian <- function(ks, T_h) {
   Jw_Z <- dw_dZ * I
 
   J <- hank_het_jacobian(ks$block, T_h, inputs = c("r", "w"),
-                         outputs = c("A", "C"))
+                         outputs = c("A", "C"), expectations = expectations)
   J_Ar <- J[["A"]][["r"]]; J_Aw <- J[["A"]][["w"]]
 
   ## Chain rule through the DAG:  A depends on (r,w); (r,w) depend on (K,Z).
   H_K <- J_Ar %*% Jr_K + J_Aw %*% Jw_K - I
   H_Z <- J_Ar %*% Jr_Z + J_Aw %*% Jw_Z
-  list(H_K = H_K, H_Z = H_Z, J = J,
-       Jr_K = Jr_K, Jr_Z = Jr_Z, Jw_K = Jw_K, Jw_Z = Jw_Z,
-       alpha = alpha, Z = Z, K = K)
+  out <- list(H_K = H_K, H_Z = H_Z, J = J,
+              Jr_K = Jr_K, Jr_Z = Jr_Z, Jw_K = Jw_K, Jw_Z = Jw_Z,
+              alpha = alpha, Z = Z, K = K)
+  ## Record a non-FIRE spec (resolved per input) so the perfect-foresight
+  ## nonlinear solver can refuse it; FIRE objects keep their old structure.
+  ex <- .ssj_expectations_resolve(expectations, c("r", "w"),
+                                  "hank_ks_ge_jacobian")
+  if (!is.null(ex)) out$expectations <- ex
+  out
 }
 
 
@@ -439,13 +450,23 @@ hank_ks_ge_jacobian <- function(ks, T_h) {
 #' @param ks A \code{\link{hank_ks_steady}} steady state.
 #' @param dZ Numeric length-\code{T} TFP shock path (deviations from \code{Z}).
 #' @param ge Optional precomputed \code{\link{hank_ks_ge_jacobian}} result.
+#' @param expectations \code{NULL} (FIRE, default) or a household behavioural
+#'   expectations spec, forwarded to \code{\link{hank_ks_ge_jacobian}} when
+#'   \code{ge} is \code{NULL}. With a precomputed \code{ge}, build it with the
+#'   spec instead (passing both is an error).
 #'
 #' @return A list of deviation paths \code{dK, dr, dw, dA} and the linear
 #'   asset-market residual \code{mkt_resid} (should be ~0 by construction).
 #' @export
-hank_ks_linear_irf <- function(ks, dZ, ge = NULL) {
+hank_ks_linear_irf <- function(ks, dZ, ge = NULL, expectations = NULL) {
   T_h <- length(dZ)
-  if (is.null(ge)) ge <- hank_ks_ge_jacobian(ks, T_h)
+  if (!is.null(ge) && !is.null(expectations))
+    .dynhr_abort("hank_ks_linear_irf: pass `expectations` to ",
+                 "hank_ks_ge_jacobian() when supplying a precomputed `ge`; ",
+                 "a precomputed `ge` already fixes the expectations.",
+                 class = "dynhr_error_behavioural_expectations")
+  if (is.null(ge)) ge <- hank_ks_ge_jacobian(ks, T_h,
+                                             expectations = expectations)
   dK <- as.numeric(-solve(ge$H_K, ge$H_Z %*% dZ))
   dr <- as.numeric(ge$Jr_K %*% dK + ge$Jr_Z %*% dZ)
   dw <- as.numeric(ge$Jw_K %*% dK + ge$Jw_Z %*% dZ)
@@ -479,6 +500,12 @@ hank_ks_nonlinear_irf <- function(ks, Z_path, ge = NULL, tol = 1e-9,
                                   maxit = 50L) {
   T_h <- length(Z_path)
   if (is.null(ge)) ge <- hank_ks_ge_jacobian(ks, T_h)
+  if (!is.null(ge$expectations))
+    .dynhr_abort("hank_ks_nonlinear_irf: `ge` was built with behavioural ",
+                 "(non-FIRE) expectations, which are implemented for the ",
+                 "linear path only (hank_ks_linear_irf); this perfect-",
+                 "foresight solve would ignore them.",
+                 class = "dynhr_error_behavioural_expectations")
   alpha <- ks$alpha; delta <- ks$delta; Kss <- ks$K
   H_K_lu <- ge$H_K
 
@@ -501,4 +528,156 @@ hank_ks_nonlinear_irf <- function(ks, Z_path, ge = NULL, tol = 1e-9,
   td <- hank_td_nonlinear(ks$block, r_path = r_path, w_path = w_path, T_h = T_h)
   list(K = Kpath, r = r_path, w = w_path, A = td$A,
        converged = converged, iterations = it, max_resid = max_resid)
+}
+
+
+#' Scan for multiple steady states of a one-asset (Aiyagari / Krusell-Smith) economy
+#'
+#' \code{\link{hank_ks_steady}} returns ONE root of the asset-market clearing
+#' condition, whichever \code{uniroot} converges to. Aiyagari economies need not
+#' have a unique steady state: Walsh (2026, "Proof of steady-state multiplicity
+#' in Aiyagari", arXiv:2609.03730) constructs a canonical calibration with at
+#' least three, because stationary household capital supply \eqn{A(r)} is not
+#' monotone in \eqn{r} when the net return on saving is negative. This function
+#' evaluates the market-clearing residual on a grid of the equilibrium interest
+#' rate, reports every sign change, refines each bracketed root with
+#' \code{uniroot}, and WARNS when more than one exists. It does not change
+#' which steady state \code{hank_ks_steady()} (or any other solver) picks.
+#'
+#' The scanned residual is the same as \code{hank_ks_steady()}'s:
+#' \deqn{f(r) = A(r, w(r)) - K(r),\quad K(r) = ((r + \delta)/(\alpha Z))^{1/(\alpha - 1)},
+#'   \quad w(r) = (1 - \alpha) Z K(r)^\alpha,}
+#' i.e. household asset SUPPLY minus firm capital DEMAND (the sign convention
+#' of \code{hank_ks$mkt_residual}), with \eqn{r} the NET return (Walsh's
+#' rental rate is \eqn{r + \delta}). Alternatively pass any scalar residual
+#' \code{excess_fn(r)} (another one-asset block, a mixture household, ...) and
+#' a finite \code{r_range}.
+#'
+#' A grid scan detects roots through sign changes, so two roots closer together
+#' than the grid spacing (or a tangency) can be missed; increase \code{n_grid}
+#' or narrow \code{r_range} around a suspicious region of \code{$excess}.
+#'
+#' @param a_grid,Pi,e,beta,eis,alpha,delta,Z Krusell-Smith calibration, as in
+#'   \code{\link{hank_ks_steady}}. Ignored when \code{excess_fn} is supplied.
+#' @param r_range Length-2 scan interval for the net interest rate. Defaults
+#'   to \code{hank_ks_steady()}'s bracket
+#'   \code{c(-delta + 1e-4, 1/beta - 1 - 1e-4)}; required with
+#'   \code{excess_fn}.
+#' @param n_grid Number of equally spaced grid points (default 60, at least 3).
+#' @param excess_fn Optional \code{function(r)} returning the scalar
+#'   market-clearing residual; replaces the Krusell-Smith closure.
+#' @param tol \code{uniroot} tolerance for refining each bracketed root.
+#' @param warn If \code{TRUE} (default), signal a warning of class
+#'   \code{dynhr_warning_hank_multiple_steady_states} when more than one root
+#'   is found.
+#'
+#' @return A list of class \code{hank_ss_scan}: \code{r} (grid), \code{excess}
+#'   (residual on the grid), \code{roots} (refined roots, increasing),
+#'   \code{n_roots}, \code{multiple} (\code{n_roots > 1}), \code{brackets}
+#'   (two-column matrix of the grid intervals that bracket each root, NA for
+#'   a root hit exactly at a grid point), \code{root_residual} (residual at
+#'   each root), \code{r_range}, \code{source} (\code{"ks"} or
+#'   \code{"excess_fn"}) and, for the Krusell-Smith closure, \code{K} and
+#'   \code{w} at each root.
+#' @seealso \code{\link{hank_ks_steady}}, \code{\link{hank_het_block}}
+#' @examples
+#' inc    <- hank_income_rouwenhorst(rho = 0.95, sigma = 0.5, n = 3)
+#' a_grid <- hank_asset_grid(amax = 50, n = 100, amin = 0)
+#' sc <- hank_steady_state_scan(a_grid, inc$Pi, inc$e, beta = 0.98, eis = 1,
+#'                              alpha = 0.36, delta = 0.025, n_grid = 30)
+#' sc$roots   # a single steady state on this standard calibration
+#'
+#' ## A residual with three roots triggers the classed warning
+#' sc3 <- suppressWarnings(hank_steady_state_scan(
+#'   excess_fn = function(r) (r - 0.01) * (r - 0.02) * (r - 0.04),
+#'   r_range = c(0, 0.05)))
+#' sc3$roots
+#' @export
+hank_steady_state_scan <- function(a_grid = NULL, Pi = NULL, e = NULL,
+                                   beta = NULL, eis = NULL, alpha = NULL,
+                                   delta = NULL, Z = 1, r_range = NULL,
+                                   n_grid = 60L, excess_fn = NULL,
+                                   tol = 1e-10, warn = TRUE) {
+  if (!is.numeric(n_grid) || length(n_grid) != 1L || !is.finite(n_grid) ||
+      n_grid < 3)
+    .dynhr_abort("hank_steady_state_scan(): 'n_grid' must be a single number >= 3.",
+                 class = "dynhr_error_input")
+  n_grid <- as.integer(n_grid)
+  ks_mode <- is.null(excess_fn)
+  if (ks_mode) {
+    missing_args <- c("a_grid", "Pi", "e", "beta", "eis", "alpha", "delta")[
+      vapply(list(a_grid, Pi, e, beta, eis, alpha, delta), is.null, TRUE)]
+    if (length(missing_args))
+      .dynhr_abort("hank_steady_state_scan(): supply either the Krusell-Smith ",
+                   "calibration or 'excess_fn'; missing: ",
+                   paste(missing_args, collapse = ", "), ".",
+                   class = "dynhr_error_input")
+    K_of_r <- function(r) ((r + delta) / (alpha * Z))^(1 / (alpha - 1))
+    w_of_r <- function(r) (1 - alpha) * Z * K_of_r(r)^alpha
+    excess_fn <- function(r)
+      hank_het_block(a_grid, Pi, e, beta = beta, eis = eis,
+                     r = r, w = w_of_r(r))$A - K_of_r(r)
+    if (is.null(r_range)) r_range <- c(-delta + 1e-4, 1 / beta - 1 - 1e-4)
+  } else if (!is.function(excess_fn)) {
+    .dynhr_abort("hank_steady_state_scan(): 'excess_fn' must be a function of r.",
+                 class = "dynhr_error_input")
+  }
+  if (!is.numeric(r_range) || length(r_range) != 2L ||
+      !all(is.finite(r_range)) || !(r_range[1] < r_range[2]))
+    .dynhr_abort("hank_steady_state_scan(): 'r_range' must be a finite, ",
+                 "increasing length-2 numeric vector",
+                 if (ks_mode) "." else " (required with 'excess_fn').",
+                 class = "dynhr_error_input")
+
+  r_grid <- seq(r_range[1], r_range[2], length.out = n_grid)
+  f_grid <- vapply(r_grid, function(r) as.numeric(excess_fn(r))[1], 0)
+
+  ## Sign changes between consecutive FINITE grid values; exact zeros count
+  ## once, as a root at the grid point.
+  ok <- which(is.finite(f_grid))
+  roots <- numeric(0)
+  brackets <- matrix(numeric(0), 0L, 2L)
+  for (i in ok[f_grid[ok] == 0]) {
+    roots <- c(roots, r_grid[i])
+    brackets <- rbind(brackets, c(NA_real_, NA_real_))
+  }
+  for (j in seq_len(max(length(ok) - 1L, 0L))) {
+    i1 <- ok[j]; i2 <- ok[j + 1L]
+    f1 <- f_grid[i1]; f2 <- f_grid[i2]
+    if (f1 == 0 || f2 == 0 || sign(f1) == sign(f2)) next
+    sol <- stats::uniroot(excess_fn, lower = r_grid[i1], upper = r_grid[i2],
+                          f.lower = f1, f.upper = f2, tol = tol)
+    roots <- c(roots, sol$root)
+    brackets <- rbind(brackets, r_grid[c(i1, i2)])
+  }
+  ord <- order(roots)
+  roots <- roots[ord]
+  brackets <- brackets[ord, , drop = FALSE]
+  colnames(brackets) <- c("lower", "upper")
+  root_residual <- vapply(roots, function(r) as.numeric(excess_fn(r))[1], 0)
+  n_roots <- length(roots)
+
+  out <- list(r = r_grid, excess = f_grid, roots = roots, n_roots = n_roots,
+              multiple = n_roots > 1L, brackets = brackets,
+              root_residual = root_residual, r_range = r_range,
+              source = if (ks_mode) "ks" else "excess_fn")
+  if (ks_mode) {
+    out$K <- K_of_r(roots)
+    out$w <- w_of_r(roots)
+  }
+  if (isTRUE(warn) && n_roots > 1L)
+    .dynhr_warn("hank_steady_state_scan(): ", n_roots, " steady states ",
+                "(sign changes of the asset-market residual) at r = ",
+                paste(signif(roots, 6), collapse = ", "), ". ",
+                "hank_ks_steady() returns only the one its root finder ",
+                "converges to; check which steady state your analysis uses ",
+                "(Walsh 2026, arXiv:2609.03730).",
+                class = "dynhr_warning_hank_multiple_steady_states")
+  if (n_roots == 0L && isTRUE(warn))
+    .dynhr_warn("hank_steady_state_scan(): no sign change of the asset-market ",
+                "residual on [", signif(r_range[1], 6), ", ",
+                signif(r_range[2], 6), "] (", n_grid, " grid points); widen ",
+                "'r_range' or refine 'n_grid'.",
+                class = "dynhr_warning_hank_no_steady_state")
+  structure(out, class = "hank_ss_scan")
 }

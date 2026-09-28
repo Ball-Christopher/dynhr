@@ -2,14 +2,14 @@
 % Please edit documentation in R/hank-mixture-emulator.R
 \name{.hank_emu_mk_ss}
 \alias{.hank_emu_mk_ss}
-\title{Rebuild a `dsge_ss` state space from an interpolated `Theta` (`q x n_obs`)}
+\title{Rebuild a \code{dsge_ss} state space from an interpolated \code{Theta} (\code{q x n_obs})}
 \usage{
 .hank_emu_mk_ss(emu, Theta_mat)
 }
 \description{
-Reproduces `hank_state_space`'s single-shock ("Z"), lagged-timing,
+Reproduces \code{hank_state_space}'s single-shock ("Z"), lagged-timing,
 block-shift-register construction EXACTLY, copied from the research
-scratch's `mk_ss` (`wave3_lib.R`) -- the interpolated `Theta` plays the role
-the direct GE solve's `Theta_list[["Z"]]` would.
+scratch's \code{mk_ss} (\code{wave3_lib.R}) -- the interpolated \code{Theta} plays the role
+the direct GE solve's \code{Theta_list[["Z"]]} would.
 }
 \keyword{internal}

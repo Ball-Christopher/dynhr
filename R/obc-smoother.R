@@ -6,7 +6,11 @@
 ##   pkf_smoother_obc() -- DK smoother using kf_store from kalman_filter_obc_pkf
 ##
 ## Uses per-period quantities {v, F_inv, L=TT-K*ZZ, P_in, s_in, RR, ZZ, DD}
-## stored by kalman_filter_obc_pkf(..., return_store = TRUE).
+## stored by kalman_filter_obc_pkf(..., return_store = TRUE).  Since W49
+## (0.9.3.93) these are the matrices of the TIME-VARYING piecewise-linear
+## rule the filter accepted in each period (kf_store$rules), so the smoother
+## is the exact linear smoother conditional on the filtered regime
+## sequences; it does not re-solve regimes (Dynare's OccBin smoother does).
 ##
 ## kf_store invariant: v[[t]] is NULL (not missing) for no-obs periods.
 ## The smoother uses is.null(v) to distinguish obs vs no-obs periods.
@@ -17,7 +21,11 @@
 #'
 #' Implements the Durbin-Koopman (2003) backward recursion for the lag-1
 #' observation state-space used by dynhr, using the per-period quantities
-#' stored by kalman_filter_obc_pkf(..., return_store = TRUE).
+#' stored by kalman_filter_obc_pkf(..., return_store = TRUE): the matrices of
+#' the time-varying piecewise-linear rule the filter accepted in each period
+#' and the plain Kalman recursion along those rules.  The result is the
+#' smoother conditional on the filtered regime sequences (the regimes are not
+#' re-solved on the smoothed path).
 #'
 #' For each period t = T, T-1, ..., 1 the recursion is:
 #' \preformatted{
@@ -51,7 +59,7 @@
 #' \eqn{s_{t|T} - (TT_t s_{t-1|T} + RR_t \epsilon_{t|T} + c_t)} was ~4e-4 on a
 #' 1e-2-scale state, and is ~1e-18 with the cross-term restored.  This is the
 #' same \eqn{eps_{t|T} = Q (R' r_t + D' u_t)}, \eqn{u_t = F^{-1} v_t - K_t' r_t}
-#' form used by \code{\link{kalman_smoother}} (Durbin & Koopman 2012 §4.5).
+#' form used by \code{\link{kalman_smoother}} (Durbin & Koopman 2012, Sec. 4.5).
 #' \eqn{K_t} is not stored by the filter, so it is recomputed in step 0 from
 #' the stored \eqn{TT, P_{in}, ZZ, RR, DD, F^{-1}} -- exactly the expression the
 #' filter used.

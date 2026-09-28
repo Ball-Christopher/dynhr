@@ -2,7 +2,7 @@
 % Please edit documentation in R/obc-posterior.R
 \name{make_log_posterior_obc_pkf}
 \alias{make_log_posterior_obc_pkf}
-\title{Create a PKF-based log-posterior evaluator (Pfeiffer-Ratto inversion filter)}
+\title{Create a PKF-based log-posterior evaluator (OccBin piecewise-linear KF)}
 \usage{
 make_log_posterior_obc_pkf(
   model,
@@ -34,7 +34,8 @@ make_log_posterior_obc_pkf(
 innovation covariance via \code{getOption("dynhr.me_floor_check", TRUE)};
 see \code{.obc_warn_me_floor_lock()} in R/obc-regime.R.}
 
-\item{max_inner}{Max inner iterations per period (default 10)}
+\item{max_inner}{Maximum re-updates per period of the PKF (default 10,
+Dynare's \code{likelihood.max_number_of_iterations})}
 
 \item{power}{Power-posterior (generalised-Bayes) tempering exponent
 \eqn{\zeta}: \code{$logpost} becomes
@@ -46,14 +47,11 @@ keeps the RAW (untempered) value. \code{NULL} (default) resolves the
 Function(theta) -> list(logpost, loglik, logprior, regime_path)
 }
 \description{
-Drop-in replacement for make_log_posterior_obc() that calls
-kalman_filter_obc_pkf() directly.  Unlike the outer obc_guess_verify()
-approach, the per-period inner loop discovers the OBC regime from the
-extracted shock and backward-smoothed state, so no separate pre-pass is
-needed.
-}
-\details{
-Warm-starting: the returned closure optionally accepts a $regime_hint
-attribute on the theta vector (integer vector length T) to initialise the
-inner loop from a previous MCMC draw's accepted regime path.
+Log-posterior whose likelihood is \code{kalman_filter_obc_pkf()}: Dynare's
+OccBin piecewise-linear Kalman filter (Giovannini, Pfeiffer and Ratto
+2021), with the time-varying rule of the regime sequence expected in each
+period.  The closure returns the filtered regime path as
+\code{$regime_path}.  (Before 0.9.3.93 an attribute \code{regime_hint}
+on theta warm-started the regime search from a previous draw; it is
+ignored now, as a warm start made the likelihood path-dependent.)
 }

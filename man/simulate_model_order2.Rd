@@ -25,7 +25,13 @@ simulate_model_order2(
 
 \item{burn_in}{Burn-in periods to discard}
 
-\item{pruning}{Use pruned state-space (default TRUE)}
+\item{pruning}{Use the AFVRR (2018) pruned state space (default
+\code{TRUE}).  \code{FALSE} runs the genuine \strong{unpruned} order-2
+recursion on a single full state -- the quadratic terms are evaluated at
+the full state rather than at its first-order component.  That recursion
+has no stationary distribution in general and can explode on long
+simulations; it is provided for comparison, not for estimation.  (Before
+0.9.4 this argument silently returned an order-ONE state path.)}
 
 \item{init_state}{Optional named numeric vector of initial state deviations
 loaded into the pruned first-order component; pair with \code{burn_in = 0}.

@@ -1,11 +1,12 @@
 ## R/chain-diagnostics.R
 ## --------------------------------------------------------------------------
-## Standalone MCMC chain diagnostics: effective sample size (Geyer initial
-## monotone sequence, multi-chain autocovariance) + split-Rhat + Monte-Carlo
-## standard error, callable on an arbitrary draws object. Provided so callers
-## (and the paper family -- P2/P6 hand-roll a Geyer ESS + Rhat stack across
-## many scripts) do not each re-implement it. Formulas follow Vehtari, Gelman,
-## Simpson, Carpenter & Buerkner (2021) / BDA3 ch.11.
+## Standalone MCMC chain diagnostics: rank-normalised split-Rhat, bulk/tail
+## effective sample size and Monte-Carlo standard error, callable on an
+## arbitrary draws object. Provided so callers (and the paper family -- P2/P6
+## hand-roll a Geyer ESS + Rhat stack across many scripts) do not each
+## re-implement it. Formulas follow Vehtari, Gelman, Simpson, Carpenter &
+## Buerkner (2021); the estimators themselves are the package's single set in
+## R/diag-helpers.R (.d5_*), shared with D5 and the estimation runners.
 ## --------------------------------------------------------------------------
 
 
@@ -33,24 +34,21 @@
         dimnames = list(NULL, NULL, colnames(m)))
 }
 
-#' Autocovariance (lags 0..n-1) of a single chain via FFT (biased 1/n estimator,
-#' the convention used by the Geyer/Vehtari ESS).
-#' @noRd
-.cd_autocov <- function(x) {
-  n <- length(x)
-  xc <- x - mean(x)
-  nfft <- stats::nextn(2L * n)
-  f <- stats::fft(c(xc, rep(0, nfft - n)))
-  ac <- Re(stats::fft(f * Conj(f), inverse = TRUE)) / nfft
-  ac[seq_len(n)] / n
-}
-
 #' MCMC diagnostics: effective sample size, split-Rhat, MCSE
 #'
-#' Computes, per parameter, the effective sample size (ESS) via Geyer's initial
-#' monotone positive sequence on the multi-chain-combined autocorrelation, the
-#' split-Rhat potential-scale-reduction factor, the posterior mean/sd, and the
-#' Monte-Carlo standard error (\code{sd / sqrt(ESS)}).
+#' Computes, per parameter, the rank-normalised split-\eqn{\hat R}, the bulk
+#' and tail effective sample sizes of Vehtari, Gelman, Simpson, Carpenter &
+#' Buerkner (2021), the ESS of the posterior mean, the posterior mean/sd, and
+#' the Monte-Carlo standard error of the mean (\code{sd / sqrt(ess)}).
+#'
+#' Every ESS is the multi-chain estimator of Vehtari et al. (2021, eqs 10-11):
+#' the between-chain-aware autocorrelation
+#' \eqn{\hat\rho_t = 1 - (W - \bar\gamma_t) / \widehat{var}^+}, truncated by
+#' Geyer's initial positive sequence on the pairs
+#' \eqn{(\hat\rho_0 + \hat\rho_1), (\hat\rho_2 + \hat\rho_3), \ldots} and made
+#' monotone by Geyer's initial monotone sequence. It is NOT capped at the draw
+#' count: antithetic chains (negative lag-1 autocorrelation, common for NUTS)
+#' legitimately have ESS > N, bounded as in Stan by \eqn{N \log_{10} N}.
 #'
 #' @param draws One of: a numeric vector (one chain, one parameter); a matrix
 #'   (iterations x parameters, one chain); a 3-D array \code{[iterations,
@@ -60,7 +58,17 @@
 #'   split in half before the Rhat/ESS computation (split-Rhat, which also
 #'   detects within-chain non-stationarity a plain Rhat misses).
 #' @return A \code{data.frame}, one row per parameter, with columns
-#'   \code{param}, \code{mean}, \code{sd}, \code{ess}, \code{rhat}, \code{mcse}.
+#'   \code{param}, \code{mean}, \code{sd}, \code{ess} (ESS of the mean: the
+#'   estimator above on the raw draws, the one \code{mcse} uses),
+#'   \code{ess_bulk} (the same on rank-normalised draws), \code{ess_tail}
+#'   (minimum ESS of the 5\% and 95\% quantile indicators), \code{rhat}
+#'   (maximum of the rank-normalised split-\eqn{\hat R} of the draws and of
+#'   the draws folded about their median; \code{NA} for a single unsplit
+#'   chain) and \code{mcse}. Constant draws give \code{NA} ESS and R-hat.
+#' @references Vehtari, A., Gelman, A., Simpson, D., Carpenter, B. and
+#'   Buerkner, P.-C. (2021). Rank-normalization, folding, and localization: an
+#'   improved \eqn{\hat R} for assessing convergence of MCMC. \emph{Bayesian
+#'   Analysis} 16(2), 667-718.
 #' @examples
 #' set.seed(1)
 #' draws <- matrix(rnorm(4000), ncol = 2, dimnames = list(NULL, c("a", "b")))
@@ -74,67 +82,45 @@ chain_diagnostics <- function(draws, split = TRUE) {
   if (is.null(pnames)) pnames <- paste0("p", seq_len(np))
   if (ni < 4L) stop("chain_diagnostics: need at least 4 iterations per chain.")
 
-  ## Split each chain in half (split-Rhat): 2*nc half-chains of length m.
-  if (split && ni >= 4L) {
-    m <- ni %/% 2L
-    B <- array(0, dim = c(m, 2L * nc, np))
-    for (c in seq_len(nc)) {
-      B[, 2L * c - 1L, ] <- A[seq_len(m), c, ]
-      B[, 2L * c,       ] <- A[m + seq_len(m), c, ]
-    }
-    A <- B; ni <- m; nc <- 2L * nc
-  }
+  ## One estimator set for the whole package (R/diag-helpers.R, verified there
+  ## against the `posterior` package). This function used to carry its own
+  ## copy, which paired autocorrelations as (rho1+rho2), (rho3+rho4) instead of
+  ## Geyer's (rho0+rho1), (rho2+rho3), clamped ESS at the draw count (wrong for
+  ## antithetic chains) and had neither rank normalisation nor the folded
+  ## R-hat (brief 23 C7).
+  sp <- if (split) .d5_split else identity
 
   out <- data.frame(param = pnames, mean = NA_real_, sd = NA_real_,
-                    ess = NA_real_, rhat = NA_real_, mcse = NA_real_,
+                    ess = NA_real_, ess_bulk = NA_real_, ess_tail = NA_real_,
+                    rhat = NA_real_, mcse = NA_real_,
                     stringsAsFactors = FALSE)
 
   for (p in seq_len(np)) {
-    X <- matrix(A[, , p], nrow = ni, ncol = nc)      # iterations x chains
-    chain_means <- colMeans(X)
-    chain_vars  <- apply(X, 2L, stats::var)
-    W <- mean(chain_vars)                             # within-chain variance
-    grand_mean <- mean(chain_means)
-
-    if (nc > 1L) {
-      B <- ni * stats::var(chain_means)               # between-chain variance
-      var_plus <- ((ni - 1) / ni) * W + B / ni
-      rhat <- if (W > 0) sqrt(var_plus / W) else NA_real_
-    } else {
-      var_plus <- W
-      rhat <- NA_real_                                # Rhat undefined for 1 chain
-    }
-
-    ## Multi-chain-combined autocorrelation: rho_t = 1 - (W - mean_m gamma_{t,m})/var_plus.
-    if (W <= 0 || var_plus <= 0) {
-      ess <- as.numeric(ni * nc)                      # constant -> treat as iid
-    } else {
-      acov <- vapply(seq_len(nc), function(c) .cd_autocov(X[, c]), numeric(ni))
-      mean_acov <- rowMeans(acov)                     # length ni, lags 0..ni-1
-      rho <- 1 - (W - mean_acov) / var_plus           # rho[1] = lag 0 = 1
-      ## Geyer initial monotone positive sequence on paired sums.
-      max_pairs <- (ni - 1L) %/% 2L
-      tau <- 1                                        # = rho_0 (lag-0 sum term)
-      if (max_pairs >= 1L) {
-        P <- vapply(seq_len(max_pairs), function(k) rho[2L * k] + rho[2L * k + 1L], 0)
-        ## truncate at the first non-positive pair sum
-        first_neg <- which(P <= 0)
-        kmax <- if (length(first_neg)) first_neg[1L] - 1L else length(P)
-        if (kmax >= 1L) {
-          Pk <- P[seq_len(kmax)]
-          Pk <- cummin(Pk)                            # Geyer monotone: non-increasing pair sums
-          tau <- tau + 2 * sum(Pk)                    # tau = 1 + 2*sum_{t>=1} rho_t
-        }
-      }
-      ess <- if (tau > 0) (ni * nc) / tau else as.numeric(ni * nc)
-      ess <- min(ess, ni * nc)                        # ESS cannot exceed the draw count
-    }
-
-    out$mean[p] <- grand_mean
+    X  <- matrix(A[, , p], nrow = ni, ncol = nc)      # iterations x chains
+    Xs <- sp(X)
+    n  <- nrow(Xs)
+    W  <- mean(apply(Xs, 2L, stats::var))             # within-chain variance
+    var_plus <- ((n - 1) / n) * W +
+      (if (ncol(Xs) > 1L) stats::var(colMeans(Xs)) else 0)
+    out$mean[p] <- mean(X)
     out$sd[p]   <- sqrt(var_plus)
-    out$ess[p]  <- ess
-    out$rhat[p] <- rhat
-    out$mcse[p] <- if (is.finite(ess) && ess > 0) sqrt(var_plus) / sqrt(ess) else NA_real_
+
+    ## Constant (or non-finite) draws carry no autocorrelation information.
+    if (.d5_degenerate(Xs)) next
+
+    ess_mean <- .d5_ess_basic(Xs)
+    out$ess[p]      <- ess_mean
+    out$ess_bulk[p] <- .d5_ess_basic(.d5_zscale(Xs))
+    out$ess_tail[p] <- min(vapply(c(0.05, 0.95), function(q) {
+      qv <- stats::quantile(X, q, names = FALSE)
+      .d5_ess_basic(sp(X <= qv) + 0)
+    }, numeric(1)))
+    if (ncol(Xs) > 1L)
+      out$rhat[p] <- max(.d5_rhat_basic(.d5_zscale(Xs)),
+                         .d5_rhat_basic(.d5_zscale(
+                           sp(abs(X - stats::median(X))))))
+    out$mcse[p] <- if (is.finite(ess_mean) && ess_mean > 0)
+      sqrt(var_plus) / sqrt(ess_mean) else NA_real_
   }
   out
 }

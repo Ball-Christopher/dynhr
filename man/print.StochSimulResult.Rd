@@ -7,12 +7,12 @@
 \method{print}{StochSimulResult}(x, ...)
 }
 \arguments{
-\item{x}{A `StochSimulResult` object from [stoch_simul()], [compute_irfs()] or [compute_moments()].}
+\item{x}{A \code{StochSimulResult} object from [stoch_simul()], [compute_irfs()] or [compute_moments()].}
 
 \item{...}{Ignored.}
 }
 \value{
-`x`, invisibly.
+\code{x}, invisibly.
 }
 \description{
 Print a stoch_simul result

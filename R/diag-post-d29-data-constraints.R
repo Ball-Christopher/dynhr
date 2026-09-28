@@ -1,94 +1,141 @@
 ## R/diag-post-d29-data-constraints.R
 ## --------------------------------------------------------------------------
-## Phase H: D29 — Data-Driven Constraints (Lanne & Luoto 2017)
+## Phase H: D29 — Data constraints (Stock-Wright S test at theta)
 ##
-## Implements the Lanne & Luoto (2017) approach for testing identification
-## using data moments.  Rather than relying solely on model-implied
-## moments, this diagnostic checks whether the observed data actually
-## contain enough information to identify the structural parameters.
+## What D29 measures, for the var / autocovariance moments m of the observed
+## series (m-hat from the data, m(theta) from the model): the Stock-Wright
+## (2000) S statistic
+##      S(theta) = (m-hat - m(theta))' V^{-1} (m-hat - m(theta)),
+## asymptotically chi-square(n_moments) at the true theta WHATEVER the
+## identification strength (it involves no estimate of theta), i.e. a
+## weak-identification-robust test that the data are consistent with the
+## model at theta. Reported, never gated: the diagnostic is INFO.
 ##
-## Algorithm:
-##   1. Compute empirical moments from the data (variances, autocovariances,
-##      possibly higher-order moments).
-##   2. Compute model-implied moments at the calibrated/estimated parameter
-##      vector.
-##   3. For each parameter direction, compute the "data-identified strength"
-##      as the sensitivity of the data moments to that parameter, scaled by
-##      the sampling uncertainty of the data moments.
-##   4. Flag parameters whose data-identified strength is below threshold.
-##   5. Compare data-identified vs model-implied identification (D1/D19) to
-##      see which parameters rely on model structure vs. data information.
+## V = Var(m-hat) is by preference MODEL-IMPLIED at theta: the Gaussian
+## (Bartlett/Hannan) long-run covariance of the sample autocovariances built
+## from the model's own autocovariance function, divided by T -- the
+## Christiano-Eichenbaum-Trabandt convention of taking the moment estimator's
+## covariance from the model at theta instead of from the sample. A sample
+## HAC V is used only when no model autocovariance function is supplied, and
+## the result says which was used.
+##
+## 0.9.4 changes: V switched from sample HAC to model-implied (the HAC S test
+## over-rejected badly -- ~13-37% at a nominal 5% for T ~ 200-400 in the
+## ledger's simulations, vs ~7% with the model-implied V); D29's own
+## identification-strength table was DROPPED in favour of D20 with
+## weighting = "sampling" (two divergent strength computations with
+## inconsistent thresholds, 2 here vs 1 there); the badge became INFO.
+##
+## Until 0.9.4: V was the long-run covariance NOT divided by T (every
+## strength was sqrt(T) too small); the orchestrator's moment function reused
+## the fixed decision rule AND dr$Sigma_e, so the whole Jacobian was zero and
+## D29 flagged every parameter; sd/acf1 moments were weighted by the
+## covariance of var/acv moments (no delta method); equal-length named
+## moment vectors were never aligned by name; and a near-singular V was
+## silently replaced by its diagonal.
 ##
 ## References:
-##   Lanne, M., & Luoto, J. (2017). Data-driven identification of
-##     DSGE models. Economics Letters, 158, 35-39.
-##   Iskrev, N. (2010). Local identification in DSGE models.
-##   Komunjer, I., & Ng, S. (2011). Dynamic identification of DSGE models.
+##   Stock, J. H., & Wright, J. H. (2000). GMM with weak identification.
+##     Econometrica, 68(5), 1055-1096.
+##   Christiano, L. J., Eichenbaum, M. S., & Trabandt, M. (2016).
+##     Unemployment and business cycles. Econometrica, 84(4), 1523-1569.
+##     (Moment-estimator covariance taken from the model at theta.)
+##   Ruge-Murcia, F. J. (2007). Methods to estimate DSGE models. JEDC, 31(8),
+##     2599-2636. (The sample Newey-West/Bartlett V this replaces.)
+##   Hannan, E. J. (1970). Multiple Time Series. Wiley, ch. IV (the Gaussian
+##     long-run covariance of sample autocovariances, "Bartlett's formula").
+##   Andrews, D. W. K. (1991). Heteroskedasticity and autocorrelation
+##     consistent covariance matrix estimation. Econometrica, 59(3), 817-858.
 ## --------------------------------------------------------------------------
 
-#' D29. Data-Driven Constraints Diagnostic (Lanne & Luoto 2017)
+#' D29. Data Constraints Diagnostic
 #'
-#' Assesses parameter identification using actual data moments rather than
-#' purely model-implied quantities.  This diagnostic computes the
-#' sensitivity of empirical data moments to each parameter, scaled by the
-#' sampling uncertainty of those moments, to determine which parameters
-#' are "data-identified."
+#' Tests whether the data are consistent with the model at \code{theta} with
+#' the identification-robust Stock-Wright S statistic, and reports the
+#' standardised gap between each data moment and its model counterpart.
 #'
-#' Parameters may be well-identified by the model structure (as in D1/D19)
-#' but poorly identified by the data if the data contain little information
-#' about them, or vice versa if the model imposes strong cross-equation
-#' restrictions that the data help sharpen.
+#' \strong{The badge is always INFO.} Stock & Wright (2000) derive the
+#' asymptotic \eqn{\chi^2} null of S under a \emph{known or consistently
+#' estimated} weight and make no finite-sample size claim; the statistic is
+#' well documented to over-reject in short, persistent samples -- in this
+#' package's own simulations (0.9.4 ledger) the sample-HAC version rejected
+#' 13-37\% of the time at a nominal 5\% for \eqn{T \approx 200}-400, and the
+#' model-implied weight below brings that to roughly 7\%. Even at 7\% a
+#' rejection is not strong enough evidence to gate a badge on, so S is
+#' reported and never gated.
 #'
-#' @param data            T x n_obs data matrix (observable variables).
+#' \strong{Weight matrix.} \eqn{V = Var(\hat m)} is model-implied whenever
+#' \code{model_acov_fn} is supplied: the Gaussian (Bartlett/Hannan) long-run
+#' covariance of the sample autocovariances evaluated at the \emph{model's}
+#' autocovariance function at \code{theta}, divided by \eqn{T}. This is the
+#' Christiano-Eichenbaum-Trabandt (2016) SMM convention -- take the moment
+#' estimator's covariance from the model at \code{theta}, not from the sample
+#' -- and it removes the estimation noise in \eqn{\hat\Omega} that drives the
+#' over-rejection. Without \code{model_acov_fn} the sample Bartlett HAC
+#' (Andrews 1991 plug-in bandwidth) is used instead and
+#' \code{result$moment_cov_source} records which.
+#'
+#' \strong{Identification strength moved to D20.} Until 0.9.4 D29 also
+#' reported its own sampling-weighted \eqn{|\theta_i|/SE_i} table with a
+#' \code{strength_threshold = 2} gate, duplicating (with an inconsistent
+#' threshold) D20's \code{weighting = "sampling"} path. That table is gone:
+#' call \code{d20_fisher_identification_strength(..., weighting = "sampling",
+#' moment_cov = <this result's moment_cov>)} for data-weighted strengths.
+#'
+#' @param data            T x n_obs data matrix (observable variables, named
+#'   columns).
 #' @param model_solve_fn  Function: theta -> named numeric vector of
-#'   model-implied moments.  Should return moments matching those computed
-#'   from \code{data}.
-#' @param theta           Named numeric vector of parameter values at the
-#'   calibration/estimation point.
-#' @param param_names     Character vector of parameter names.  If NULL,
-#'   derived from \code{theta}.
-#' @param moment_names    Character vector of moment names.  If NULL,
-#'   derived from the model_solve_fn output.
-#' @param max_lag         Maximum autocovariance lag for moment computation
-#'   (default 4).
-#' @param use_hac         Logical: use HAC (Newey-West) estimator for the
-#'   data moment covariance matrix (default TRUE).
-#' @param eps             Step size for finite-difference Jacobian (default 1e-5).
-#' @param strength_threshold Threshold for data-identified |t|-ratio below
-#'   which a parameter is flagged as weakly data-identified (default 2.0).
+#'   model-implied POPULATION moments. Names must follow
+#'   \code{.compute_data_moments} (\code{var_<obs>}, \code{acvK_<obs>}) or
+#'   the \code{sd.<obs>}/\code{sd_<obs>} + \code{acf1.<obs>}/\code{acf1_<obs>}
+#'   convention. Moments are aligned by name; an unnamed vector is taken in
+#'   \code{.compute_data_moments} order. It must re-solve the model at theta
+#'   (a fixed decision rule makes structural parameters look unidentified).
+#' @param theta           Named numeric vector of parameter values.
+#' @param param_names     Character vector of parameter names (default
+#'   \code{names(theta)}).
+#' @param moment_names    Ignored when moments are named; otherwise labels.
+#' @param max_lag         Maximum autocovariance lag (default 4).
+#' @param model_acov_fn   Optional function \code{function(K)} returning the
+#'   model-implied autocovariances of the data columns at \code{theta} as an
+#'   \code{n_obs x n_obs x (K+1)} array with
+#'   \code{g[a, b, k + 1] = Cov(y[a, t + k], y[b, t])} and dimnames matching
+#'   \code{colnames(data)}. When supplied, \eqn{Var(\hat m)} is built from it
+#'   (preferred; see Details). \code{NULL} falls back to the sample estimator.
+#' @param acov_trunc      Truncation \eqn{K} of the Bartlett sum over the
+#'   model autocovariance function (default 200). The autocovariances decay
+#'   geometrically, so the truncation error is negligible unless the model is
+#'   very close to a unit root; \code{result$acov_tail} reports the size of
+#'   the retained tail relative to the variance as a check. 200 is a package
+#'   choice, not a literature-specified number.
+#' @param use_hac         Logical: when \code{model_acov_fn} is NULL, use the
+#'   sample Bartlett HAC with the Andrews (1991) plug-in bandwidth (default
+#'   TRUE); FALSE uses the i.i.d. estimator. Ignored when
+#'   \code{model_acov_fn} is supplied.
+#' @param s_level         Size of the reported S test (default 0.05).
 #' @param verbose         Print progress messages.
+#' @param meta            Plot caption metadata.
 #'
-#' @return A \code{dynhr_diagnostic} list with:
-#'   \item{result}{List containing:
-#'     \itemize{
-#'       \item \code{data_moments} — named numeric vector of empirical moments.
-#'       \item \code{model_moments} — model-implied moments at \code{theta}.
-#'       \item \code{moment_jacobian} — Jacobian of moments w.r.t. parameters.
-#'       \item \code{data_jacobian} — data-scaled Jacobian: J_moment
-#'         pre-multiplied by Omega^{-1/2}, the upper-triangular inverse Cholesky
-#'         factor of the moment covariance matrix
-#'         (\code{t(backsolve(chol(Omega), I))}), with diagonal scaling fallback
-#'         when Omega is near-singular.
-#'       \item \code{data_ident_strength} — data-identified |t|-ratios.
-#'       \item \code{model_ident_strength} — model-implied |t|-ratios
-#'         (comparable to D20).
-#'       \item \code{moment_cov} — covariance matrix of data moments.
-#'       \item \code{weak_data_params} — parameters below threshold.
-#'       \item \code{model_vs_data} — comparison table.
-#'     }}
-#'   \item{pass}{Logical — all parameters have data-identified strength
-#'     above threshold.}
-#'   \item{plots}{List of ggplot2 objects.}
-#'   \item{summary}{Human-readable summary.}
+#' @return A \code{dynhr_diagnostic} with \code{pass = NA} (always INFO);
+#'   \code{result} holds \code{data_moments}, \code{model_moments},
+#'   \code{moment_cov} (= Var(m-hat)), \code{moment_cov_source}
+#'   (\code{"model-implied"} or \code{"sample-HAC"}/\code{"sample-iid"}),
+#'   \code{acov_tail}, \code{S_stat}, \code{S_df}, \code{S_pvalue},
+#'   \code{S_reject}, \code{moment_z} (per-moment (m-hat - m)/sd),
+#'   \code{bandwidth}, \code{T_obs} and \code{n_moments}.
 #'
 #' @references
-#'   Lanne, M., & Luoto, J. (2021). GMM estimation of non-Gaussian structural
-#'     vector autoregression. \emph{Journal of Econometrics}, 226(1), 248-270.
-#'     (Earlier working paper: 2017.)
-#'   Iskrev, N. (2010). Local identification in DSGE models.
-#'     \emph{Journal of Monetary Economics}, 57(2), 189-202.
-#'   Komunjer, I., & Ng, S. (2011). Dynamic identification of DSGE models.
-#'     \emph{Econometrica}, 79(6), 1995-2032.
+#'   Stock, J. H., & Wright, J. H. (2000). GMM with weak identification.
+#'     \emph{Econometrica}, 68(5), 1055-1096.
+#'   Christiano, L. J., Eichenbaum, M. S., & Trabandt, M. (2016).
+#'     Unemployment and business cycles. \emph{Econometrica}, 84(4),
+#'     1523-1569.
+#'   Ruge-Murcia, F. J. (2007). Methods to estimate dynamic stochastic general
+#'     equilibrium models. \emph{Journal of Economic Dynamics and Control},
+#'     31(8), 2599-2636.
+#'   Andrews, D. W. K. (1991). Heteroskedasticity and autocorrelation
+#'     consistent covariance matrix estimation. \emph{Econometrica}, 59(3),
+#'     817-858.
 #'
 #' @noRd
 d29_data_driven_constraints <- function(data,
@@ -97,387 +144,177 @@ d29_data_driven_constraints <- function(data,
                                          param_names = NULL,
                                          moment_names = NULL,
                                          max_lag = 4L,
+                                         model_acov_fn = NULL,
+                                         acov_trunc = 200L,
                                          use_hac = TRUE,
-                                         eps = 1e-5,
-                                         strength_threshold = 2.0,
+                                         s_level = 0.05,
                                          verbose = FALSE,
                                          meta = NULL) {
-  # ---- 1. Validate ----
-  if (is.null(data) || is.null(model_solve_fn) || is.null(theta)) {
-    return(.make_result(
-      pass    = NA,
-      summary = "D29 Data-Driven Constraints: data, model_solve_fn, and theta are required."
-    ))
-  }
+  na_result <- function(msg, result = NULL, errored = FALSE)
+    .make_result(result = result, pass = NA,
+                 summary = paste0("D29 Data constraints: ", msg), errored = errored)
 
+  # ---- 1. Validate ----
+  if (is.null(data) || is.null(model_solve_fn) || is.null(theta))
+    return(na_result("data, model_solve_fn, and theta are required."))
+  if (!is.function(model_solve_fn))
+    return(na_result("model_solve_fn must be a function.", errored = TRUE))
+  data <- as.matrix(data)
+  if (!is.numeric(data) || anyNA(data))
+    return(na_result("data must be a numeric matrix without missing values.", errored = TRUE))
   if (is.null(param_names)) param_names <- names(theta) %||% paste0("theta_", seq_along(theta))
-  n_par <- length(param_names)
+  if (length(param_names) != length(theta))
+    return(na_result(sprintf("param_names has %d entries but theta has %d.",
+                             length(param_names), length(theta)), errored = TRUE))
+  names(theta) <- param_names
+  n_par <- length(theta)
   T_obs <- nrow(data)
   n_obs <- ncol(data)
+  if (is.null(colnames(data))) colnames(data) <- as.character(seq_len(n_obs))
+  max_lag <- as.integer(max_lag)
+  if (T_obs <= max_lag + 1L)
+    return(na_result(sprintf("T=%d is too short for max_lag=%d.", T_obs, max_lag)))
 
-  # ---- 2. Compute empirical data moments ----
-  data_moments <- .compute_data_moments(data, max_lag = max_lag)
-  if (is.null(data_moments) || length(data_moments) == 0) {
-    return(.make_result(
-      pass    = NA,
-      summary = "D29 Data-Driven Constraints: Failed to compute data moments."
-    ))
-  }
-  n_mom <- length(data_moments)
-  if (is.null(moment_names)) moment_names <- names(data_moments)
-
-  if (verbose) cat(sprintf("[d29] Computed %d moments from %d obs x %d variables.\n",
-                           n_mom, T_obs, n_obs))
-
-  # ---- 2b. Quick peek at model moments to detect format mismatch early ----
-  # The model_solve_fn may return SDs and ACF1s, while data moments are
-  # variances and autocovariances. If so, we'll align them later.
-  model_moments_preview <- model_solve_fn(theta)
-  model_uses_sd_format <- !is.null(model_moments_preview) &&
-    (any(grepl("^sd\\.", names(model_moments_preview))) ||
-     any(grepl("^sd_", names(model_moments_preview))))
-  model_uses_acf1_format <- !is.null(model_moments_preview) &&
-    (any(grepl("^acf1\\.", names(model_moments_preview))) ||
-     any(grepl("^acf1_", names(model_moments_preview))))
-
-  # ---- 3. Compute model-implied moments at theta ----
-  model_moments <- model_solve_fn(theta)
-  if (is.null(model_moments)) {
-    return(.make_result(
-      pass    = NA,
-      summary = "D29 Data-Driven Constraints: model_solve_fn returned NULL at theta."
-    ))
-  }
-
-  # Ensure same length
-  if (length(model_moments) != n_mom) {
-    # Try to subset or align by name
-    model_named <- !is.null(names(model_moments))
-    data_named  <- !is.null(names(data_moments))
-    if (model_named && data_named) {
-      common <- intersect(names(model_moments), names(data_moments))
-      if (length(common) > 0) {
-        model_moments <- model_moments[common]
-        data_moments <- data_moments[common]
-        n_mom <- length(common)
-        moment_names <- common
-      } else if (model_uses_sd_format && model_uses_acf1_format) {
-        # Model uses sd/acf1 format; convert data moments to match
-        n_vars <- ncol(data)
-        # Data moments are: var_*, acv1_*, acv2_*, acv3_*, acv4_*
-        # Model moments are: sd.* (or sd_), acf1.* (or acf1_)
-        # Convert: sd = sqrt(var), acf1 = acv1 / var
-        data_var <- data_moments[grep("^var_", names(data_moments))]
-        data_acv1 <- data_moments[grep("^acv1_", names(data_moments))]
-        if (length(data_var) == n_vars && length(data_acv1) == n_vars) {
-          data_sd <- sqrt(pmax(data_var, 0))
-          data_acf1 <- data_acv1 / pmax(data_var, 1e-16)
-          # Rename to match model moment names
-          obs_names_data <- sub("^var_", "", names(data_var))
-          names(data_sd) <- paste0("sd.", obs_names_data)
-          names(data_acf1) <- paste0("acf1.", obs_names_data)
-          # Build model-format data moments
-          data_moments_converted <- c(data_sd, data_acf1)
-          # Align model moments to match
-          common <- intersect(names(model_moments), names(data_moments_converted))
-          if (length(common) > 0) {
-            model_moments <- model_moments[common]
-            data_moments <- data_moments_converted[common]
-            n_mom <- length(common)
-            moment_names <- common
-            if (verbose) cat(sprintf("[d29] Converted data moments to sd/acf1 format: %d common moments.\n", n_mom))
-          } else {
-            # Try name format with underscore instead of dot
-            names(data_sd) <- paste0("sd_", obs_names_data)
-            names(data_acf1) <- paste0("acf1_", obs_names_data)
-            data_moments_converted <- c(data_sd, data_acf1)
-            common <- intersect(names(model_moments), names(data_moments_converted))
-            if (length(common) > 0) {
-              model_moments <- model_moments[common]
-              data_moments <- data_moments_converted[common]
-              n_mom <- length(common)
-              moment_names <- common
-              if (verbose) cat(sprintf("[d29] Converted data moments to sd_/acf1_ format: %d common moments.\n", n_mom))
-            } else {
-              return(.make_result(
-                pass = NA,
-                summary = sprintf(
-                  "D29 Data-Driven Constraints: Moment mismatch. model returns %d moments but data has %d. Could not align sd/acf1 format with data moment names. Model names: %s. Data names: %s.",
-                  length(model_moments), n_mom,
-                  paste(head(names(model_moments), 4), collapse = ", "),
-                  paste(head(names(data_moments), 4), collapse = ", ")
-                ),
-                errored = TRUE
-              ))
-            }
-          }
-        } else {
-          return(.make_result(
-            pass = NA,
-            summary = sprintf(
-              "D29 Data-Driven Constraints: Moment mismatch. model returns %d moments but data has %d. Expected %d variance and %d acv1 entries for sd/acf1 conversion.",
-              length(model_moments), n_mom, n_vars, n_vars
-            ),
-            errored = TRUE
-          ))
-        }
-      } else {
-        return(.make_result(
-          pass = NA,
-          summary = sprintf(
-            "D29 Data-Driven Constraints: Moment mismatch. model returns %d moments but data has %d. No common moment names. Ensure model_solve_fn returns moments matching the data moment structure (variances + autocovariances at lags 1..%d).",
-            length(model_moments), n_mom, max_lag
-          ),
-          errored = TRUE
-        ))
-      }
-    } else if (!model_named && data_named) {
-      # Model moments are unnamed: assign data moment names up to model length
-      n_common <- min(length(model_moments), length(data_moments))
-      warning(sprintf(
-        "d29: model moments are unnamed. Using first %d data moment names as moment_names.",
-        n_common))
-      model_moments <- model_moments[seq_len(n_common)]
-      data_moments  <- data_moments[seq_len(n_common)]
-      n_mom <- n_common
-      moment_names <- names(data_moments)
-      names(model_moments) <- moment_names
+  # ---- 2. Data moments m-hat and their sampling covariance V = Var(m-hat) ----
+  # Preferred: MODEL-IMPLIED V at theta (Bartlett/Hannan long-run covariance
+  # of the sample autocovariances, evaluated at the model's own
+  # autocovariance function). Falls back to the sample estimator only when no
+  # model autocovariance function is available; the result records which.
+  m_raw <- .compute_data_moments(data, max_lag = max_lag)
+  acov_tail <- NA_real_
+  V_raw <- NULL
+  cov_source <- NULL
+  cov_note <- NULL
+  bandwidth <- NA_integer_
+  if (is.function(model_acov_fn)) {
+    gam <- model_acov_fn(as.integer(acov_trunc))
+    if (is.null(gam) || !all(is.finite(gam))) {
+      cov_note <- paste0(
+        "the model autocovariance function is NULL or non-finite at theta ",
+        "(the model does not solve / is not stationary); fell back to the ",
+        "sample moment covariance")
     } else {
-      # Neither has names: align by position
-      n_common <- min(length(model_moments), length(data_moments))
-      warning(sprintf(
-        "d29: moments are unnamed. Using first %d moments by position.",
-        n_common))
-      model_moments <- model_moments[seq_len(n_common)]
-      data_moments  <- data_moments[seq_len(n_common)]
-      n_mom <- n_common
-      moment_names <- paste0("m_", seq_len(n_mom))
-      names(model_moments) <- moment_names
-      names(data_moments)  <- moment_names
+      mv <- .d29_model_moment_cov(gam, T_obs = T_obs, max_lag = max_lag,
+                                  obs_names = colnames(data))
+      V_raw <- mv$V
+      acov_tail <- mv$tail
+      cov_source <- "model-implied"
+    }
+  }
+  if (is.null(V_raw)) {
+    if (isTRUE(use_hac)) {
+      V_raw <- .d20_moment_sampling_cov(data, max_lag = max_lag)
+      bandwidth <- attr(V_raw, "bandwidth")
+      attr(V_raw, "bandwidth") <- NULL
+      cov_source <- "sample-HAC"
+    } else {
+      V_raw <- .compute_moment_covariance(data, max_lag = max_lag, use_hac = FALSE) / T_obs
+      dimnames(V_raw) <- list(names(m_raw), names(m_raw))
+      cov_source <- "sample-iid"
     }
   }
 
-  # ---- 4. Numerical Jacobian of moments w.r.t. parameters ----
-  J_moment <- .numerical_jacobian(model_solve_fn, theta, eps = eps)
-  if (is.null(J_moment)) {
-    return(.make_result(
-      pass    = NA,
-      summary = "D29 Data-Driven Constraints: Failed to compute numerical Jacobian."
-    ))
+  # ---- 3. Align model moments with data moments (by name) ----
+  f0 <- model_solve_fn(theta)
+  if (is.null(f0) || length(f0) == 0L)
+    return(na_result("model_solve_fn returned nothing at theta.", errored = TRUE))
+  al <- .d29_align_moments(f0, m_raw, V_raw, colnames(data), moment_names)
+  if (!is.null(al$error))
+    return(na_result(al$error, errored = TRUE))
+  if (!is.null(al$warning)) .dynhr_warn(al$warning)
+  data_moments <- al$m
+  moment_cov   <- al$V
+  moment_names <- names(data_moments)
+  n_mom <- length(data_moments)
+  mfun <- function(th) {
+    out <- model_solve_fn(th)
+    if (length(out) < max(al$idx)) return(rep(NA_real_, n_mom))
+    stats::setNames(as.numeric(out[al$idx]), moment_names)
   }
-  colnames(J_moment) <- param_names
-  rownames(J_moment) <- moment_names %||% paste0("m_", seq_len(nrow(J_moment)))
+  model_moments <- mfun(theta)
+  if (verbose) .dynhr_cat(sprintf("[d29] %d moments (%s) from %d obs x %d variables.\n",
+                                  n_mom, al$format, T_obs, n_obs))
 
-  # ---- 5. Covariance matrix of data moments (HAC or i.i.d.) ----
-  # If moments were converted to sd/acf1 format, compute covariance
-  # directly from the aligned moment set.
-  if (exists("data_moments_converted", inherits = FALSE) &&
-      n_mom < n_obs * (1 + max_lag)) {
-    # Build moment time series for the aligned moment types:
-    # data SDs and ACF1s (first autocorrelations)
-    if (verbose) cat(sprintf("[d29] Recomputing moment covariance for %d aligned moments (sd/acf1).\n", n_mom))
-    obs_names_data <- sub("^(sd\\.|sd_|acf1\\.|acf1_)", "", moment_names)
-    obs_names_data <- unique(obs_names_data)
-    data_demeaned <- scale(data, scale = FALSE)
-    T_obs <- nrow(data_demeaned)
-    n_aligned <- n_mom
-    moment_ts <- matrix(0, nrow = T_obs, ncol = n_aligned)
-    colnames(moment_ts) <- moment_names
-    for (i in seq_len(n_aligned)) {
-      mn <- moment_names[i]
-      if (grepl("^sd[\\._]", mn)) {
-        obs <- sub("^sd[\\._]", "", mn)
-        j <- which(colnames(data_demeaned) == obs)
-        if (length(j) == 1) moment_ts[, i] <- data_demeaned[, j]^2
-      } else if (grepl("^acf1[\\._]", mn)) {
-        obs <- sub("^acf1[\\._]", "", mn)
-        j <- which(colnames(data_demeaned) == obs)
-        if (length(j) == 1) {
-          moment_ts[2:T_obs, i] <- data_demeaned[2:T_obs, j] * data_demeaned[1:(T_obs - 1), j]
-        }
-      }
-    }
-    moment_cov <- if (use_hac) .newey_west(moment_ts, max_lag = max_lag) else cov(moment_ts, use = "complete.obs")
-  } else {
-    moment_cov <- .compute_moment_covariance(data, max_lag = max_lag, use_hac = use_hac)
-  }
+  # ---- 4. Model moments must be finite ----
+  base_result <- list(data_moments = data_moments, model_moments = model_moments,
+                      moment_cov = moment_cov, moment_cov_source = cov_source,
+                      acov_tail = acov_tail,
+                      bandwidth = bandwidth, T_obs = T_obs, n_moments = n_mom)
+  if (!all(is.finite(model_moments)))
+    return(na_result(paste0(
+      "the model moments are non-finite at theta (the model does not solve / ",
+      "is not stationary). The S statistic is undetermined -- a numerical ",
+      "failure, not a finding."), result = base_result))
 
-  # ---- 6. Data-scaled Jacobian ----
-  # Standardise: J_data = Omega^{-1/2} * J_moment
-  # where Omega is the moment covariance matrix
-  # Compute Omega^{-1/2} via Cholesky, fall back to diagonal if singular
-  Omega_inv_sqrt <- .robust_Omega_inv_sqrt(moment_cov)
+  # ---- 5. V must be a usable (positive definite) weight: no silent fallback ----
+  chk <- .d29_omega_check(moment_cov)
+  if (!chk$ok)
+    return(na_result(sprintf(paste0(
+      "the moment covariance Var(m-hat) is not positive definite (%s; ",
+      "%d moments, T=%d). Data strength and the S test are undefined -- use ",
+      "fewer moments (smaller max_lag / fewer observables) or a longer sample."),
+      chk$reason, n_mom, T_obs), result = base_result))
+  W <- .robust_Omega_inv_sqrt(moment_cov)
+  dimnames(W) <- list(moment_names, moment_names)
 
-  J_data <- Omega_inv_sqrt %*% J_moment
+  # ---- 6. Stock-Wright S statistic at theta ----
+  resid <- data_moments - model_moments
+  S_stat <- sum((W %*% resid)^2)
+  S_df <- n_mom
+  S_pvalue <- stats::pchisq(S_stat, df = S_df, lower.tail = FALSE)
+  moment_z <- resid / sqrt(diag(moment_cov))
 
-  # ---- 7. Compute identification strengths ----
-  # Adaptive ridge: scale regularisation to the matrix's own diagonal so that
-  # near-singular moment matrices (rcond ~ 1e-25) don't crash solve().
-  ## Renamed from `.safe_inv`: that name is the PACKAGE-level helper in
-  ## R/solve-helpers.R, and a local definition here silently shadowed it for
-  ## the rest of this function.
-  .d29_ridge_inv <- function(M) {
-    ridge <- max(1e-6 * max(abs(diag(M))), 1e-10)
-    M_reg <- M + diag(ridge, nrow(M))
-    tryCatch(solve(M_reg), error = function(e) {
-      sv <- svd(M_reg, nu = 0L, nv = 0L)$d
-      sv[sv < .Machine$double.eps * max(sv) * nrow(M)] <- .Machine$double.eps * max(sv) * nrow(M)
-      MASS::ginv(M_reg)
-    })
-  }
-
-  # Model-implied strength (like D20)
-  I_model <- crossprod(J_moment)
-  I_model_inv <- .d29_ridge_inv(I_model)
-  se_model <- sqrt(pmax(diag(I_model_inv), 0))
-  model_strength <- abs(theta[param_names]) / pmax(se_model, 1e-16)
-  names(model_strength) <- param_names
-
-  # Data-driven strength
-  I_data <- crossprod(J_data)
-  I_data_inv <- .d29_ridge_inv(I_data)
-  se_data <- sqrt(pmax(diag(I_data_inv), 0))
-  data_strength <- abs(theta[param_names]) / pmax(se_data, 1e-16)
-  names(data_strength) <- param_names
-
-  # ---- 8. Identify weakly data-identified parameters ----
-  # Handle NAs in data_strength (from singular/ill-conditioned moment covariance).
-  # Parameters with NA strength or strength below threshold are flagged as weak.
-  weak_data_params <- param_names[
-    is.na(data_strength) | data_strength < strength_threshold
-  ]
-  # Replace any NA names with actual parameter names
-  weak_data_params <- weak_data_params[!is.na(weak_data_params)]
-
-  # Parameters where data identifies better or worse than model
-  model_vs_data <- data.frame(
-    parameter = param_names,
-    model_strength = round(model_strength, 4),
-    data_strength = round(data_strength, 4),
-    ratio = round(data_strength / pmax(model_strength, 1e-16), 4),
-    stringsAsFactors = FALSE
-  )
-
-  # ---- 9. Plots ----
+  # ---- 7. Plots ----
   plots <- list()
   if (requireNamespace("ggplot2", quietly = TRUE)) {
-
-    # Detect whether the model-implied series is available and meaningful.
-    # It is absent/uninformative when the Fisher information matrix was singular
-    # (se_model ~ 1/1e-16 => model_strength ~ 0). Compare on the DATA scale:
-    # if the largest model strength is negligible relative to the data strengths
-    # the two-series chart would show invisible model bars, so drop them and use
-    # the single-series threshold-coloured chart instead.
-    .max_data <- max(data_strength, na.rm = TRUE)
-    model_series_ok <- !all(is.na(model_strength)) &&
-      is.finite(.max_data) && .max_data > 0 &&
-      max(model_strength, na.rm = TRUE) > 0.05 * .max_data
-
-    if (model_series_ok) {
-      # Both series available: grouped bar chart coloured by Source
-      comp_df <- data.frame(
-        Parameter = rep(param_names, 2),
-        Source    = rep(c("Model-implied", "Data-driven"), each = n_par),
-        Strength  = c(model_strength, data_strength),
-        stringsAsFactors = FALSE
-      )
-      p_sc <- ggplot2::ggplot(
-        comp_df, ggplot2::aes(x = Parameter, y = Strength, fill = Source)
-      ) +
-        ggplot2::geom_col(position = "dodge", colour = "white", linewidth = 0.3) +
-        ggplot2::geom_hline(yintercept = strength_threshold,
-                           linetype = "dashed", colour = dynhr_colours$red,
-                           linewidth = 0.5) +
-        ggplot2::scale_fill_manual(
-          values = c("Model-implied" = dynhr_colours$mid_blue,
-                     "Data-driven"   = dynhr_colours$orange)
-        ) +
-        theme_dynhr_diagnostic() +
-        ggplot2::theme(axis.text.x = ggplot2::element_text(angle = 45, hjust = 1)) +
-        ggplot2::labs(
-          title    = "D29: Model-implied vs data-driven identification strength",
-          subtitle = sprintf("%d parameters, %d moments, T=%d", n_par, n_mom, T_obs),
-          x = NULL, y = "|t|-ratio"
-        )
-    } else {
-      # Model-implied series is unavailable (singular Fisher info / no Jacobian).
-      # Drop it entirely and colour each bar by pass / fail instead so the
-      # chart is not misleading with an empty or ghost series.
-      data_df <- data.frame(
-        Parameter  = param_names,
-        Strength   = data_strength,
-        Identified = data_strength >= strength_threshold,
-        stringsAsFactors = FALSE
-      )
-      # Replace NA strength with 0 for display purposes
-      data_df$Strength[is.na(data_df$Strength)] <- 0
-      data_df$Identified[is.na(data_df$Identified)] <- FALSE
-
-      p_sc <- ggplot2::ggplot(
-        data_df,
-        ggplot2::aes(x = Parameter, y = Strength,
-                     fill = Identified)
-      ) +
-        ggplot2::geom_col(colour = "white", linewidth = 0.3) +
-        ggplot2::geom_hline(yintercept = strength_threshold,
-                           linetype = "dashed", colour = dynhr_colours$red,
-                           linewidth = 0.5) +
-        ggplot2::scale_fill_manual(
-          values = c(`TRUE`  = dynhr_colours$teal,
-                     `FALSE` = dynhr_colours$orange),
-          labels = c(`TRUE`  = "Identified",
-                     `FALSE` = "Weak"),
-          name   = NULL
-        ) +
-        theme_dynhr_diagnostic() +
-        ggplot2::theme(axis.text.x = ggplot2::element_text(angle = 45, hjust = 1)) +
-        ggplot2::labs(
-          title    = "D29: Data-driven identification strength",
-          subtitle = sprintf(
-            "%d parameters, %d moments, T=%d  [model-implied series unavailable]",
-            n_par, n_mom, T_obs),
-          x = NULL, y = "|t|-ratio"
-        )
-    }
-    plots$strength_comparison <- .apply_meta(p_sc, meta)
+    plots$moment_fit <- .apply_meta(.d29_plot_moment_fit(
+      moment_z, S_stat, S_df, S_pvalue), meta)
   }
 
-  # ---- 10. Result ----
-  pass <- length(weak_data_params) == 0
+  # ---- 8. Result (always INFO: the S test never gates -- see Details) ----
+  result <- c(base_result, list(
+    S_stat = S_stat, S_df = S_df, S_pvalue = S_pvalue, S_level = s_level,
+    S_reject = S_pvalue < s_level, moment_z = moment_z,
+    moment_format = al$format))
 
-  result <- list(
-    data_moments           = data_moments,
-    model_moments          = model_moments,
-    moment_jacobian        = J_moment,
-    data_jacobian          = J_data,
-    data_ident_strength    = data_strength,
-    model_ident_strength   = model_strength,
-    moment_cov             = moment_cov,
-    weak_data_params       = weak_data_params,
-    model_vs_data          = model_vs_data,
-    T_obs                  = T_obs,
-    n_moments              = n_mom
-  )
-
-  weak_str <- if (length(weak_data_params) > 0)
-    sprintf("Weak data-identified: %s", paste(weak_data_params, collapse = ", "))
-  else "All parameters are data-identified."
+  cov_str <- if (identical(cov_source, "model-implied"))
+    sprintf("Var(m-hat) is model-implied at theta (Bartlett/Hannan sum truncated at K=%d; retained tail %.1e of the variance).",
+            as.integer(acov_trunc), acov_tail)
+  else sprintf("Var(m-hat) is the %s SAMPLE estimator%s -- the S test then over-rejects in short or persistent samples; supply model_acov_fn for the model-implied weight.",
+               cov_source,
+               if (is.na(bandwidth)) "" else sprintf(" (bandwidth %d)", bandwidth))
+  if (!is.null(cov_note)) cov_str <- paste0(cov_str, " (", cov_note, ")")
+  worst <- names(moment_z)[order(abs(moment_z), decreasing = TRUE)][seq_len(min(3L, n_mom))]
+  s_str <- sprintf(
+    "S test (Stock-Wright, weak-identification robust; asymptotic) at theta: S=%.2f, df=%d, p=%.3g -- %s at %g%%. INFO ONLY: this statistic over-rejects in finite samples and never gates the badge.",
+    S_stat, S_df, S_pvalue,
+    if (S_pvalue < s_level) "data REJECT the model moments" else "not rejected",
+    100 * s_level)
 
   .make_result(
     result  = result,
-    pass    = pass,
+    pass    = NA,
     plots   = plots,
-    summary = sprintf(
-      "D29 Data-Driven Constraints: %d params, %d moments, T=%d. %s",
-      n_par, n_mom, T_obs, weak_str
-    ),
-    llm_summary = sprintf(
-      "[%s] D29 Data-Driven Constraints n_params=%d n_moments=%d T=%d n_weak=%d",
-      if (isTRUE(pass)) "PASS" else if (is.na(pass)) "INFO" else "FAIL",
-      n_par, n_mom, T_obs, length(weak_data_params)
-    )
+    summary = sprintf("D29 Data constraints: %d params, %d moments, T=%d. %s %s Worst-fitting moments: %s. For parameter identification strength use D20 with weighting=\"sampling\" and this result's moment_cov.",
+                      n_par, n_mom, T_obs, s_str, cov_str,
+                      paste(sprintf("%s (z=%.2f)", worst, moment_z[worst]), collapse = ", ")),
+    llm_summary = paste(c(
+      "D29 | Data Constraints (Stock-Wright S) | INFO",
+      sprintf("  n_params=%d n_moments=%d T=%d moment_cov=%s S=%.2f df=%d p=%.3g reject_at_%g=%s",
+              n_par, n_mom, T_obs, cov_source, S_stat, S_df, S_pvalue,
+              s_level, S_pvalue < s_level),
+      sprintf("  worst_moments: %s",
+              paste(sprintf("%s=%.2f", worst, moment_z[worst]), collapse = ", ")),
+      sprintf("  action: %s",
+              if (S_pvalue < s_level)
+                sprintf(paste0("The data moments %s sit far from the model's at theta. Treat as a ",
+                               "HINT, not a verdict: the S test over-rejects in short/persistent ",
+                               "samples (info only, never gates)."),
+                        paste(head(worst, 2), collapse = " and "))
+              else "Data and model moments are consistent at theta (info only; the S test never gates)."),
+      sprintf("  note: identification strength is no longer reported here -- use D20 with weighting=\"sampling\" and this result's moment_cov.")
+    ), collapse = "\n")
   )
-
 }
 
 
@@ -485,27 +322,231 @@ d29_data_driven_constraints <- function(data,
 # Internal helpers for D29
 # ==========================================================================
 
-#' Robust Omega^{-1/2} via Cholesky with diagonal fallback
+#' Align model moments with the data moments (D29)
 #'
-#' @param Omega Covariance matrix
-#' @return Omega^{-1/2} matrix
+#' Returns \code{idx} (positions in the model output), the matching data
+#' moments \code{m} and their covariance \code{V} (delta method when the model
+#' reports sd/acf1), the \code{format}, and \code{error}/\code{warning}.
+#' @noRd
+.d29_align_moments <- function(f0, m_raw, V_raw, obs, moment_names = NULL) {
+  fn <- names(f0)
+  out <- list(idx = NULL, m = NULL, V = NULL, format = "var/acv",
+              error = NULL, warning = NULL)
+  if (is.null(fn)) {
+    n <- min(length(f0), length(m_raw))
+    if (length(f0) != length(m_raw))
+      out$warning <- sprintf(
+        "d29: model moments are unnamed and have length %d (data: %d); using the first %d in data-moment order (%s, ...).",
+        length(f0), length(m_raw), n, paste(head(names(m_raw), 3), collapse = ", "))
+    out$idx <- seq_len(n)
+    out$m <- m_raw[seq_len(n)]
+    out$V <- V_raw[seq_len(n), seq_len(n), drop = FALSE]
+    return(out)
+  }
+  common <- intersect(fn, names(m_raw))
+  if (length(common) > 0L) {
+    out$idx <- match(common, fn)
+    out$m <- m_raw[common]
+    out$V <- V_raw[common, common, drop = FALSE]
+    return(out)
+  }
+  # sd/acf1 format: g(m) = (sqrt(var), acv1/var), Var(g) = G V G'.
+  keys <- character(0); rows <- list(); gm <- numeric(0)
+  for (o in obs) {
+    v <- paste0("var_", o); a <- paste0("acv1_", o)
+    if (!all(c(v, a) %in% names(m_raw))) next
+    sd_nm <- intersect(paste0(c("sd.", "sd_"), o), fn)
+    ac_nm <- intersect(paste0(c("acf1.", "acf1_"), o), fn)
+    if (length(sd_nm)) {
+      g <- stats::setNames(numeric(length(m_raw)), names(m_raw))
+      g[v] <- 1 / (2 * sqrt(m_raw[[v]]))
+      keys <- c(keys, sd_nm[1]); rows[[length(rows) + 1L]] <- g
+      gm <- c(gm, sqrt(m_raw[[v]]))
+    }
+    if (length(ac_nm)) {
+      g <- stats::setNames(numeric(length(m_raw)), names(m_raw))
+      g[v] <- -m_raw[[a]] / m_raw[[v]]^2
+      g[a] <- 1 / m_raw[[v]]
+      keys <- c(keys, ac_nm[1]); rows[[length(rows) + 1L]] <- g
+      gm <- c(gm, m_raw[[a]] / m_raw[[v]])
+    }
+  }
+  if (!length(keys)) {
+    out$error <- sprintf(paste0(
+      "no model moment matches the data moments. Model names: %s. Data names: %s. ",
+      "Return var_<obs>/acvK_<obs> (or sd/acf1) moments for the data columns."),
+      paste(head(fn, 4), collapse = ", "), paste(head(names(m_raw), 4), collapse = ", "))
+    return(out)
+  }
+  G <- do.call(rbind, rows)
+  names(gm) <- keys
+  out$idx <- match(keys, fn)
+  out$m <- gm
+  out$V <- G %*% V_raw[colnames(G), colnames(G)] %*% t(G)
+  dimnames(out$V) <- list(keys, keys)
+  out$format <- "sd/acf1 (delta method)"
+  out
+}
+
+#' Model-implied sampling covariance of the var/autocovariance moments (D29)
+#'
+#' Bartlett's (Hannan 1970, ch. IV) Gaussian long-run covariance of sample
+#' autocovariances, evaluated at the MODEL's autocovariance function rather
+#' than at sample autocovariances. With
+#' \eqn{G_{ab}(h) = Cov(y_{a,t+h}, y_{b,t})} and moments
+#' \eqn{\hat m_{a,i} = \hat\gamma_{aa}(i)},
+#' \deqn{T\,Cov(\hat m_{a,i}, \hat m_{b,j}) = \sum_d
+#'   G_{ab}(d+i-j) G_{ab}(d) + G_{ab}(d+i) G_{ab}(d-j),}
+#' truncated at \eqn{|d| \le K}. This is the Christiano-Eichenbaum-Trabandt
+#' convention (moment-estimator covariance from the model at theta) and
+#' carries no \eqn{\hat\Omega} estimation noise.
+#'
+#' @param gam Array \code{n_obs x n_obs x (K+1)} with
+#'   \code{gam[a, b, k + 1] = G_ab(k)}; dimnames 1-2 are the observable names.
+#' @param T_obs Sample size (the long-run covariance is divided by it).
+#' @param max_lag Highest autocovariance lag among the moments.
+#' @param obs_names Observable names, in data-column order.
+#' @return list(V = named n_mom x n_mom covariance in
+#'   \code{.compute_data_moments} order, tail = largest retained
+#'   \eqn{|G_{ab}(K)| / \sqrt{G_{aa}(0) G_{bb}(0)}}, a truncation check).
+#' @noRd
+.d29_model_moment_cov <- function(gam, T_obs, max_lag, obs_names) {
+  K <- dim(gam)[3L] - 1L
+  n_obs <- length(obs_names)
+  stopifnot(dim(gam)[1L] == n_obs, dim(gam)[2L] == n_obs, K >= max_lag)
+
+  # Two-sided index: gfull[a, b, h + K + 1] = G_ab(h), G_ab(-h) = G_ba(h).
+  gfull <- array(0, c(n_obs, n_obs, 2L * K + 1L))
+  for (k in 0:K) {
+    gfull[, , K + 1L + k] <- gam[, , k + 1L]
+    if (k > 0L) gfull[, , K + 1L - k] <- t(gam[, , k + 1L])
+  }
+
+  sd0 <- sqrt(pmax(diag(matrix(gam[, , 1L], n_obs, n_obs)), 0))
+  denom <- outer(sd0, sd0)
+  denom[denom <= 0] <- Inf
+  tail_rel <- max(abs(gam[, , K + 1L]) / denom)
+
+  lags <- 0:max_lag
+  nm <- unlist(lapply(lags, function(l)
+    paste0(if (l == 0L) "var" else paste0("acv", l), "_", obs_names)))
+  n_mom <- length(nm)
+  idx_obs <- rep(seq_len(n_obs), times = length(lags))
+  idx_lag <- rep(lags, each = n_obs)
+
+  # Sum over |d| <= K - max_lag so every shifted index stays inside gfull.
+  D <- K - max_lag
+  d <- seq.int(-D, D)
+  V <- matrix(0, n_mom, n_mom, dimnames = list(nm, nm))
+  for (p in seq_len(n_mom)) {
+    a <- idx_obs[p]; i <- idx_lag[p]
+    for (q in p:n_mom) {
+      b <- idx_obs[q]; j <- idx_lag[q]
+      g <- gfull[a, b, ]
+      val <- sum(g[d + i - j + K + 1L] * g[d + K + 1L]) +
+             sum(g[d + i + K + 1L] * g[d - j + K + 1L])
+      V[p, q] <- V[q, p] <- val / T_obs
+    }
+  }
+  list(V = V, tail = tail_rel)
+}
+
+
+#' Model-implied observable autocovariance function at theta (D29)
+#'
+#' Re-solves the model at \code{theta} and returns
+#' \code{g[a, b, k + 1] = Cov(y[a, t + k], y[b, t])} for the observables,
+#' \code{k = 0..K}; NULL when the model does not solve. Used by the
+#' orchestrator to give D29 a model-implied \eqn{Var(\hat m)}.
+#' @noRd
+.d29_model_acov_fn <- function(model, compiled, params, obs_names) {
+  sys_cache <- cache_system_structure(compiled)
+  state <- new.env(parent = emptyenv())
+  function(theta, K) {
+    pp  <- .apply_theta_to_params(model, theta, params)
+    sol <- .solve_dr_for_theta(model, compiled, sys_cache, pp, state)
+    if (is.null(sol)) return(NULL)
+    K <- as.integer(K)
+    mm <- compute_moments(sol$dr, model, n_ar = K, params = sol$params)
+    V0 <- mm$var_cov[obs_names, obs_names, drop = FALSE]
+    sdo <- outer(sqrt(pmax(diag(V0), 0)), sqrt(pmax(diag(V0), 0)))
+    g <- array(NA_real_, c(length(obs_names), length(obs_names), K + 1L),
+               dimnames = list(obs_names, obs_names, NULL))
+    g[, , 1L] <- V0
+    n_o <- length(obs_names)
+    for (k in seq_len(K))
+      g[, , k + 1L] <- matrix(mm$autocorr[obs_names, obs_names, k], n_o, n_o) * sdo
+    g
+  }
+}
+
+
+#' Is a moment covariance usable as a GMM weight? (D29)
+#'
+#' Symmetric, finite, and positive definite with reciprocal condition number
+#' (eigenvalue ratio) above \code{n * eps}. A sample covariance of more
+#' moments than (effective) observations fails this.
+#' @return list(ok, rcond, reason)
+#' @noRd
+.d29_omega_check <- function(Omega) {
+  if (!is.matrix(Omega) || nrow(Omega) != ncol(Omega) || nrow(Omega) == 0L)
+    return(list(ok = FALSE, rcond = NA_real_, reason = "not a square matrix"))
+  if (!all(is.finite(Omega)))
+    return(list(ok = FALSE, rcond = NA_real_, reason = "non-finite entries"))
+  if (max(abs(Omega - t(Omega))) > 1e-10 * max(abs(Omega), 1e-300))
+    return(list(ok = FALSE, rcond = NA_real_, reason = "not symmetric"))
+  ev <- eigen(Omega, symmetric = TRUE, only.values = TRUE)$values
+  rc <- if (max(ev) > 0) min(ev) / max(ev) else -Inf
+  if (!(rc > nrow(Omega) * .Machine$double.eps))
+    return(list(ok = FALSE, rcond = rc,
+                reason = sprintf("eigenvalue ratio %.2e", rc)))
+  list(ok = TRUE, rcond = rc, reason = "")
+}
+
+#' Omega^{-1/2} (inverse transposed Cholesky factor) of a PD covariance
+#'
+#' \code{W = t(R^{-1})} with \code{Omega = R'R}, so \code{crossprod(W) =
+#' Omega^{-1}}. Refuses (error) a matrix that fails
+#' \code{.d29_omega_check}: a diagonal or ridge substitute would silently
+#' change the weighting (it used to fall back to \code{diag(Omega)}).
 #' @noRd
 .robust_Omega_inv_sqrt <- function(Omega) {
-  # Check condition number before Cholesky
-  if (is.matrix(Omega) && all(is.finite(Omega)) &&
-      is.finite(rcond(Omega)) && rcond(Omega) > .Machine$double.eps) {
-    R <- chol(Omega)
-    # Return R^{-T}: the inverse Cholesky factor, a square-root of the precision
-    # J_data = Omega^{-1/2} * J_moment  means we need  t(R^{-1})  = R^{-T}
-    return(t(backsolve(R, diag(nrow(R)))))
-  }
-  # Diagonal fallback
-  d <- diag(Omega)
-  if (all(d > 0)) {
-    return(sqrt(diag(1 / d)))
-  }
-  # Last resort: regularized identity
-  diag(1 / sqrt(pmax(d, 1e-16)))
+  chk <- .d29_omega_check(Omega)
+  if (!chk$ok)
+    .dynhr_abort("Moment covariance is not positive definite (", chk$reason,
+                 "); refusing to weight by it (no diagonal fallback).",
+                 class = "dynhr_error_singular_moment_cov")
+  R <- chol(Omega)
+  t(backsolve(R, diag(nrow(R))))
+}
+
+#' D29 moment-fit plot: standardised moment gaps and the S statistic
+#' @noRd
+.d29_plot_moment_fit <- function(z, S, df, p) {
+  # group by observable, lag order within (var, acv1, ...)
+  obs <- sub("^(var|acv[0-9]+|sd|acf1)[._]", "", names(z))
+  z <- z[order(match(obs, unique(obs)), seq_along(z))]
+  d <- data.frame(moment = factor(names(z), levels = rev(names(z))),
+                  z = as.numeric(z),
+                  outside = abs(as.numeric(z)) > stats::qnorm(0.975))
+  d$status <- ifelse(d$outside, "|z| > 1.96", "|z| <= 1.96")
+  ggplot2::ggplot(d, ggplot2::aes(x = moment, y = z, fill = status)) +
+    ggplot2::geom_col(width = 0.7) +
+    ggplot2::geom_hline(yintercept = c(-1, 1) * stats::qnorm(0.975),
+                        linetype = "dashed", colour = dynhr_colours$grey,
+                        linewidth = 0.5) +
+    ggplot2::geom_hline(yintercept = 0, colour = dynhr_colours$grey, linewidth = 0.3) +
+    ggplot2::coord_flip() +
+    ggplot2::scale_fill_manual(values = c("|z| > 1.96" = dynhr_colours$orange,
+                                          "|z| <= 1.96" = dynhr_colours$mid_blue),
+                               name = NULL) +
+    theme_dynhr_diagnostic() +
+    ggplot2::labs(
+      title = "D29: Data moments vs model moments at theta",
+      subtitle = sprintf(paste0("Joint S = %.2f, asymptotically chi2(%d) under the model: p = %.3g\n",
+                                "(weak-ID robust; HAC weighting over-rejects in short/persistent samples)"),
+                         S, df, p),
+      x = NULL, y = "(data - model) / sd(data moment)")
 }
 
 #' Compute data moments: variances and autocovariances

@@ -21,12 +21,67 @@
 #' @param sample_start Optional date literal (e.g. "1990q1") giving the date
 #'   of sample period 1, used to resolve date-literal periods. May be
 #'   \code{NULL} if the block uses only integer periods.
+#' @param first_obs Dataset row of sample period 1 (Dynare's
+#'   \code{estimation(first_obs=)}, default 1), or \code{NA} when
+#'   \code{first_obs} was given as a date, so that its row is unknown.
 #' @return A list with one element: \code{scales}, a data.frame with columns
 #'   \code{var} (character), \code{periods} (list of integer vectors),
 #'   \code{scales} (list of numeric vectors). One row per \code{var} statement.
+#'   Periods are SAMPLE periods (1 = the first row of the data passed to the
+#'   estimation).
+#'
+#' @details Period semantics follow Dynare 7 (reference manual,
+#' \code{heteroskedastic_shocks}; \code{dynare_estimation_init.m}):
+#' \itemize{
+#'   \item an integer period indexes the ORIGINAL dataset, so sample period =
+#'     \code{p - first_obs + 1};
+#'   \item a date (\code{2020Q1}, \code{2020Q1:2020Q4}; Dynare 7) indexes the
+#'     dataset's dates, so sample period = \code{d - date(first_obs) + 1}.
+#'     The data's date index is known here only when \code{first_obs} is
+#'     itself a date; otherwise a date aborts with class
+#'     \code{dynhr_error_mod_date_unresolved} (as \code{observation_trends}
+#'     does for a date-valued \code{first_obs}).  Likewise an integer period
+#'     cannot be placed when \code{first_obs} is a date.
+#' }
 #' @noRd
-parse_heteroskedastic_shocks_block <- function(body, sample_start = NULL) {
+parse_heteroskedastic_shocks_block <- function(body, sample_start = NULL,
+                                               first_obs = 1L) {
   entries <- list()
+
+  ## One `periods` statement -> sample periods (see @details).
+  expand_periods <- function(spec) {
+    spec <- sub(",\\s*$", "", trimws(spec))
+    toks <- strsplit(spec, "[,\\s]+", perl = TRUE)[[1]]
+    toks <- toks[nchar(toks) > 0L]
+    out  <- integer(0)
+    for (tok in toks) {
+      parts  <- trimws(strsplit(tok, ":", fixed = TRUE)[[1]])
+      is_int <- grepl("^-?[0-9]+$", parts)
+      if (all(is_int)) {
+        if (is.na(first_obs))
+          .dynhr_abort(
+            "heteroskedastic_shocks: integer period '", tok, "' indexes the ",
+            "original dataset, but estimation(first_obs=) is a date, so the ",
+            "dataset row of the first observation is unknown without the data ",
+            "file. Give the periods as dates, or first_obs as an integer.",
+            class = c("dynhr_error_mod_date_unresolved",
+                      "dynhr_error_mod_syntax"))
+        out <- c(out, .expand_period_token(tok, context = "heteroskedastic_shocks") -
+                   as.integer(first_obs) + 1L)
+      } else if (any(is_int)) {
+        .dynhr_abort("heteroskedastic_shocks: period range '", tok, "' mixes ",
+                     "an integer and a date.", class = "dynhr_error_mod_syntax")
+      } else {
+        out <- c(out, .expand_period_token(
+          tok, sample_start, context = "heteroskedastic_shocks",
+          no_start_why = paste0(
+            "A date is resolved against the data's date index, which dynhr ",
+            "knows only from a date-valued estimation(first_obs=...) (the ",
+            "date of the first observation).")))
+      }
+    }
+    out
+  }
 
   stmts <- strsplit(body, ";")[[1]]
   stmts <- trimws(stmts)
@@ -66,14 +121,21 @@ parse_heteroskedastic_shocks_block <- function(body, sample_start = NULL) {
     cur_scales  <<- NULL
   }
 
+  sandbox <- .dynhr_sandbox_env()
   safe_eval_list <- function(spec) {
     spec <- trimws(spec)
     spec <- sub(",\\s*$", "", spec)        # trailing comma tolerance
     toks <- strsplit(spec, "[,\\s]+", perl = TRUE)[[1]]
     toks <- toks[nchar(toks) > 0]
+    ## A-SEC (0.9.4): each token is evaluated in the .mod allowlist sandbox
+    ## (numeric literals + elementary arithmetic only), never in the caller
+    ## frame.  A disallowed call aborts with dynhr_error_unsafe_mod_expression;
+    ## text that is not R, or names an unbound symbol, stays NA as before.
     vapply(toks, function(tok) {
-      val <- tryCatch(eval(parse(text = tok)), error = function(e) NA_real_)
-      as.numeric(val)
+      val <- .dynhr_sandbox_eval(tok, sandbox, .dynhr_safe_fn_names,
+                                 context = "the heteroskedastic_shocks value")
+      if (is.null(val) || !is.numeric(val) || length(val) != 1L) NA_real_
+      else as.numeric(val)
     }, numeric(1), USE.NAMES = FALSE)
   }
 
@@ -94,7 +156,7 @@ parse_heteroskedastic_shocks_block <- function(body, sample_start = NULL) {
       if (is.null(cur_var))
         stop("heteroskedastic_shocks: 'periods' statement without a preceding 'var'.",
              call. = FALSE)
-      cur_periods <- .expand_period_list(m_periods[2], sample_start)
+      cur_periods <- expand_periods(m_periods[2])
       next
     }
 

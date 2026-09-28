@@ -37,22 +37,30 @@
 #'   (aggregate liquid, illiquid, consumption, adjustment cost).  \code{CHI} is
 #'   a real resource cost, so a GE resource constraint that nets it out must
 #'   request it.
+#' @param expectations \code{NULL} (FIRE, default) or a behavioural
+#'   expectations spec (Lenney and Rosso 2026), applied to this block's
+#'   Jacobian before GE assembly; see \code{\link{hank_het_block_spec}} and
+#'   \code{\link{hank_het_jacobian}}.
 #'
 #' @return An object of class \code{hank_block} (kind \code{"het2"}).
 #' @seealso \code{\link{hank_het_block_spec}} (one-asset),
 #'   \code{\link{hank_het2_block}}, \code{\link{hank_twoasset_model}}
 #' @export
 hank_het2_block_spec <- function(name, block, inputs = c("rb", "ra", "w"),
-                                 outputs = c("B", "A", "C")) {
+                                 outputs = c("B", "A", "C"),
+                                 expectations = NULL) {
   if (inherits(block, "hank_het_block"))
     stop("hank_het2_block_spec(): this is a ONE-asset block ",
          "(hank_het_block); use hank_het_block_spec(), whose inputs are ",
          "('r', 'w') and outputs ('A', 'C').")
   .hank_het2_check_inputs(block, inputs)
   .hank_het2_check_outputs(outputs)
-  structure(list(name = name, kind = "het2", inputs = inputs,
-                 outputs = outputs, block = block),
-            class = "hank_block")
+  .ssj_expectations_resolve(expectations, inputs, "hank_het2_block_spec()")
+  .hank_spec_set_expectations(
+    structure(list(name = name, kind = "het2", inputs = inputs,
+                   outputs = outputs, block = block),
+              class = "hank_block"),
+    expectations)
 }
 
 
@@ -82,7 +90,7 @@ hank_het2_block_spec <- function(name, block, inputs = c("rb", "ra", "w"),
 #' @param b_grid,a_grid Liquid and illiquid grids.  Size them so essentially no
 #'   stationary mass reaches either top: where a policy overshoots its grid the
 #'   Young lottery clamps it, which breaks the aggregate resource identity and
-#'   hence market clearing (see \code{briefs/19-twoasset-hank-scope.md} F13).
+#'   hence market clearing.
 #'   Widen the span and refine the grid together as a remedy, then require
 #'   \code{\link{hank_twoasset_grid_check}} to clear; there is no sufficient
 #'   span-to-points formula because failures are non-monotone in the geometric
@@ -145,7 +153,7 @@ hank_twoasset_steady <- function(K = 3, Z = 1, alpha = 0.11, delta = 0.02,
   ## are judgment calls the caller can retune; the returned $grid_check has
   ## the measured numbers either way.
   if (!isTRUE(grid_check$ok))
-    warning("hank_twoasset_steady: the grid-adequacy diagnostic FAILED ",
+    .dynhr_warn("hank_twoasset_steady: the grid-adequacy diagnostic FAILED ",
             "(top-boundary policy mass ", format(grid_check$top_policy_mass),
             ", household resource residual ",
             format(grid_check$resource_residual), "). The calibrated beta, ",
@@ -397,11 +405,14 @@ hank_twoasset_model <- function(ts, T_h) {
 #' @param name Character block name.
 #' @param block A \code{\link{hank_het2d_block}}.
 #' @param inputs,outputs Character vectors, validated at spec time.
+#' @param expectations \code{NULL} (FIRE, default) or a behavioural
+#'   expectations spec; see \code{\link{hank_het2_block_spec}}.
 #' @return An object of class \code{hank_block} (kind \code{"het2d"}).
 #' @seealso \code{\link{hank_het2d_block}}, \code{\link{hank_het2d_jacobian}}
 #' @export
 hank_het2d_block_spec <- function(name, block, inputs = c("rb", "ra", "w"),
-                                  outputs = c("B", "A", "C")) {
+                                  outputs = c("B", "A", "C"),
+                                  expectations = NULL) {
   if (inherits(block, "hank_het2_block"))
     stop("hank_het2d_block_spec(): this is the SMOOTH two-asset block ",
          "(hank_het2_block); use hank_het2_block_spec().")
@@ -410,7 +421,10 @@ hank_het2d_block_spec <- function(name, block, inputs = c("rb", "ra", "w"),
          "(hank_het_block); use hank_het_block_spec().")
   .hank_het2d_check_inputs(block, inputs)
   .hank_het2d_check_outputs(outputs)
-  structure(list(name = name, kind = "het2d", inputs = inputs,
-                 outputs = outputs, block = block),
-            class = "hank_block")
+  .ssj_expectations_resolve(expectations, inputs, "hank_het2d_block_spec()")
+  .hank_spec_set_expectations(
+    structure(list(name = name, kind = "het2d", inputs = inputs,
+                   outputs = outputs, block = block),
+              class = "hank_block"),
+    expectations)
 }

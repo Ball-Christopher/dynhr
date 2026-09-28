@@ -92,12 +92,12 @@ ramsey_regime_deterministic <- function(model,
   regime_names <- names(regime_defs) %||% paste0("regime", seq_len(n_regimes))
 
   if (verbose) {
-    cat(sprintf("[ramsey_regime_deterministic] Solving Ramsey for %d regimes:\n",
+    .dynhr_cat(sprintf("[ramsey_regime_deterministic] Solving Ramsey for %d regimes:\n",
                 n_regimes))
     for (k in seq_len(n_regimes)) {
       rd <- regime_defs[[k]]
       obj <- rd$planner_objective %||% model$planner_objective$text %||% "(default)"
-      cat(sprintf("  %s: objective = %s\n", regime_names[k], obj))
+      .dynhr_cat(sprintf("  %s: objective = %s\n", regime_names[k], obj))
     }
   }
 
@@ -125,7 +125,7 @@ ramsey_regime_deterministic <- function(model,
     }
 
     if (verbose) {
-      cat(sprintf("\n  [%s] Solving Ramsey...\n", r_name))
+      .dynhr_cat(sprintf("\n  [%s] Solving Ramsey...\n", r_name))
     }
 
     result <- ramsey_model(
@@ -275,9 +275,9 @@ ramsey_regime_independent <- function(model,
   if (is.null(params)) params <- model$param_values
 
   if (verbose) {
-    cat(sprintf("[ramsey_regime_independent] Solving per-regime Ramsey independently (%d regimes):\n",
+    .dynhr_cat(sprintf("[ramsey_regime_independent] Solving per-regime Ramsey independently (%d regimes):\n",
                 n_regimes))
-    cat("Transition matrix:\n")
+    .dynhr_cat("Transition matrix:\n")
     print(round(transition_matrix, 4))
   }
 
@@ -309,7 +309,7 @@ ramsey_regime_independent <- function(model,
     }
 
     if (verbose) {
-      cat(sprintf("\n  [%s] Solving Ramsey with regime-specific params/objective...\n",
+      .dynhr_cat(sprintf("\n  [%s] Solving Ramsey with regime-specific params/objective...\n",
                   r_name))
     }
 
@@ -326,7 +326,7 @@ ramsey_regime_independent <- function(model,
   }
 
   # ---- 3. Compute ergodic distribution ----
-  ergodic <- .compute_ergodic_dist(transition_matrix, max_iter = 1000L)
+  ergodic <- .ergodic_dist(transition_matrix, "ramsey regime transition_matrix")
 
   # ---- 4. Build comparison table ----
   comparison <- data.frame(
@@ -398,29 +398,4 @@ summary.dynhr_ramsey_regime_ms <- function(object, ...) {
 # Internal helpers
 # ==========================================================================
 
-#' Compute the ergodic distribution of a Markov chain
-#'
-#' Solves pi = pi * P, with pi >= 0, sum(pi) = 1.
-#' Uses power iteration for robustness.
-#'
-#' @param P         Transition matrix (n x n), rows sum to 1.
-#' @param max_iter  Maximum power iterations (default 1000).
-#' @param tol       Convergence tolerance (default 1e-14).
-#' @return Numeric vector of ergodic probabilities (length n).
-#' @noRd
-.compute_ergodic_dist <- function(P, max_iter = 1000L, tol = 1e-14) {
-  n <- nrow(P)
-  pi <- rep(1.0 / n, n)
 
-  for (iter in seq_len(max_iter)) {
-    pi_new <- pi %*% P
-    diff <- max(abs(pi_new - pi))
-    pi <- as.numeric(pi_new)
-    if (diff < tol) break
-  }
-
-  # Normalise
-  pi <- pi / sum(pi)
-  names(pi) <- rownames(P) %||% colnames(P) %||% paste0("s", seq_len(n))
-  pi
-}

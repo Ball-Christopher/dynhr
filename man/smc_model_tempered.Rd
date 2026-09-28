@@ -101,5 +101,5 @@ Mlikota, M., & Schorfheide, F. (2024). Sequential Monte Carlo with
     Model Tempering. \emph{Journal of Econometrics}.
 }
 \seealso{
-\code{\link{smc}}, \code{\link{mcmc}}, \code{\link{nuts}}
+\code{\link{smc}}, \code{\link{dynhr_mcmc}}, \code{\link{nuts}}
 }

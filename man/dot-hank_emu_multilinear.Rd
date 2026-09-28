@@ -2,30 +2,30 @@
 % Please edit documentation in R/hank-mixture-emulator.R
 \name{.hank_emu_multilinear}
 \alias{.hank_emu_multilinear}
-\title{`d`-dimensional multilinear interpolation of a stored per-node array}
+\title{\code{d}-dimensional multilinear interpolation of a stored per-node array}
 \usage{
 .hank_emu_multilinear(axis_grids, A, theta_vec)
 }
 \arguments{
 \item{axis_grids}{Named list, one sorted numeric grid vector per coordinate
-(in `names(box)` order).}
+(in \code{names(box)} order).}
 
-\item{A}{An array whose first `d = length(axis_grids)` dimensions index the
-tensor-grid nodes (in the SAME axis order as `axis_grids`) and whose
+\item{A}{An array whose first \code{d = length(axis_grids)} dimensions index the
+tensor-grid nodes (in the SAME axis order as \code{axis_grids}) and whose
 remaining ("tail") dimensions are the stored field's own shape (e.g. a
-`T_h x n_obs` `Theta` matrix, or a length-`K` vector).}
+\code{T_h x n_obs} \code{Theta} matrix, or a length-\code{K} vector).}
 
-\item{theta_vec}{Named numeric length-`d` query point (in `axis_grids`
-order; `names(theta_vec)` are not required, only position is used, but
+\item{theta_vec}{Named numeric length-\code{d} query point (in \code{axis_grids}
+order; \code{names(theta_vec)} are not required, only position is used, but
 callers pass named vectors for clarity).}
 }
 \value{
-The interpolated tail-shaped value: a numeric vector if `A` has one
+The interpolated tail-shaped value: a numeric vector if \code{A} has one
   tail dimension, else an array of the tail dimensions.
 }
 \description{
-Generalizes `.bw` + `emu_slice` (bilinear, `d = 2`) to an arbitrary number
-of GE-coupled coordinates: sums over the `2^d` corners of the bracketing
+Generalizes \code{.bw} + \code{emu_slice} (bilinear, \code{d = 2}) to an arbitrary number
+of GE-coupled coordinates: sums over the \code{2^d} corners of the bracketing
 hyper-rectangle with the product of per-axis weights.
 }
 \keyword{internal}

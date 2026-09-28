@@ -244,8 +244,7 @@
 #' the measurement-error block is a trivial closed form, and the rho block is
 #' semi-analytic (central-differences the per-shock slab only, keeping the
 #' expensive stacked-covariance algebra -- one Cholesky, shared across every
-#' parameter -- fully analytic). See the file header for the derivation and
-#' \code{briefs/20-seqspace-gradient-scope.md} for the validation history.
+#' parameter -- fully analytic). See the file header for the derivation.
 #'
 #' @inheritParams hank_loglik_ar
 #' @param wrt Character subset of \code{c("sigma", "rho", "me", "theta")}:
@@ -461,8 +460,7 @@ hank_loglik_ar_grad <- function(data, ss, rho = NULL, sigma = NULL,
 #' pays one adjoint pass for the whole gradient plus two rebuilds per
 #' parameter -- and the rebuilds are themselves much cheaper than they look,
 #' because the block-Jacobian cache skips the fake-news Jacobian for any
-#' parameter that cannot touch the household. Measured scale and the full
-#' rationale: \code{briefs/21-structural-score-api-scope.md}.
+#' parameter that cannot touch the household.
 #'
 #' @section Supplying derivatives, and why nothing is required: with
 #'   \code{dtheta_fn = NULL} (default) \eqn{d\Theta_z/d\theta_k} is obtained by
@@ -662,7 +660,7 @@ hank_loglik_ar_structural_grad <- function(data, model_fn, theta, obs_vars,
     grad <- vapply(nms, function(k) contract(fd_dtheta(k)), numeric(1))
   } else {
     if (!isTRUE(verify))
-      message("hank_loglik_ar_structural_grad: trusting the supplied ",
+      .dynhr_inform("hank_loglik_ar_structural_grad: trusting the supplied ",
               "dtheta_fn unverified for ", paste(nms, collapse = ", "),
               " (verify = TRUE checks each against one central difference).")
     grad <- vapply(nms, function(k) {
@@ -801,7 +799,7 @@ make_posterior_grad_hank_ar <- function(model, data, obs_vars, q = NULL,
                           q = q, check_boundary = FALSE, cache = ar_cache,
                           wrt = c("sigma", "rho"), theta_fn = theta_fn,
                           rho_method = rho_method, dtheta_fn = dtheta_fn),
-      error = function(e) NULL)
+      error = function(e) .dynhr_reraise_bug(e, NULL))
     if (is.null(sc) || !is.finite(sc$loglik))
       return(list(logpost = -Inf, loglik = if (is.null(sc)) NA_real_ else sc$loglik,
                   logprior = logprior, grad = NULL))

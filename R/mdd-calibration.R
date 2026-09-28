@@ -99,10 +99,10 @@
 #' @param n           Number of observations.
 #' @param d           Number of regressors (including intercept).
 #' @param sigma2      Known residual variance.
-#' @param beta_true   Length-`d` true coefficient vector used to simulate `y`.
-#' @param prior_scale Numeric vector of conjugate prior variances (`V0 =
-#'   diag(rep(prior_scale, d))`); one subproblem is built per entry, letting
-#'   `mdd_calibration()` track a multi-value prior-scale sensitivity case in
+#' @param beta_true   Length-\code{d} true coefficient vector used to simulate \code{y}.
+#' @param prior_scale Numeric vector of conjugate prior variances (\code{V0 =
+#'   diag(rep(prior_scale, d))}); one subproblem is built per entry, letting
+#'   \code{mdd_calibration()} track a multi-value prior-scale sensitivity case in
 #'   a single call.
 #' @param n_draws     Posterior draws for THAMES (i.i.d. exact Gaussian draws).
 #' @param n_particles SMC particle count.
@@ -158,9 +158,10 @@
     var eps; stderr sigma_eps;
   end;
   estimated_params;
-    sigma_eps, inv_gamma_pdf, %.10f, %.10f, %.10f, %.10f;
+    sigma_eps, %.10f, %.10f, %.10f, inv_gamma_pdf, %.10f, %.10f;
   end;
-  ", sigma_eta, sigma_eps_true, prior_mean, prior_sd, prior_lower, prior_upper)
+  ", sigma_eta, sigma_eps_true, prior_mean, prior_lower, prior_upper,
+     prior_mean, prior_sd)
 
   m  <- parse_mod(mod_txt, verbose = FALSE)
   cm <- compile_model(m, verbose = FALSE)
@@ -240,11 +241,11 @@
 #' @param sigma_eta       Known state-innovation stderr.
 #' @param sigma_eps_true  True observation-noise stderr used to simulate data.
 #' @param T_obs           Numeric vector of sample sizes. When of length > 1
-#'   (with `prior_sd` left at its scalar default) this builds a T-ladder used
+#'   (with \code{prior_sd} left at its scalar default) this builds a T-ladder used
 #'   to show the Laplace residual shrinking with T.
 #' @param prior_mean,prior_sd,prior_lower,prior_upper Inv-gamma prior
-#'   hyperparameters for `sigma_eps` (`prior_sd` may be a vector for a
-#'   prior-scale sensitivity ladder; `T_obs`/`prior_sd` are recycled against
+#'   hyperparameters for \code{sigma_eps} (\code{prior_sd} may be a vector for a
+#'   prior-scale sensitivity ladder; \code{T_obs}/\code{prior_sd} are recycled against
 #'   each other, i.e. a PARALLEL, not Cartesian, ladder).
 #' @param grid_n          Quadrature grid points for the ground truth.
 #' @param n_iter          Mode-finding iteration budget.
@@ -293,9 +294,9 @@
 ##
 ## where (XtX0, XtY0, YtY0, T0) are the prior/dummy sufficient statistics
 ## implied by the DSGE model's population autocovariances (scaled by the
-## dummy-observation count T0 = round(lambda * n_obs)), (XtX1, XtY1, YtY1,
-## T1) are the REAL data's OLS sufficient statistics, v0 = T0 - k + n + 1,
-## v1 = v0 + T1, S0/S1 are the prior/posterior residual sums of squares, and
+## dummy-observation count T0 = lambda * T1, DS04 units), (XtX1, XtY1, YtY1,
+## T1) are the REAL data's OLS sufficient statistics, v0 = T0 - k (DS04's
+## IW prior degrees of freedom; proper for T0 >= k + n), v1 = v0 + T1, S0/S1 are the prior/posterior residual sums of squares, and
 ## Gamma_n is the multivariate gamma function (the pi^{n(n-1)/4} prefactor
 ## is identical in Gamma_n(v1/2) and Gamma_n(v0/2) and cancels).
 ##
@@ -307,7 +308,7 @@
 ## numerical quadrature (n=1, k=1 reduction) in test-mdd-calibration.R.
 .mdd_dsge_var_exact_log_ml <- function(lam, n_obs, k_coef, T_eff,
                                        G, rhs, Gamma_0, XtX1, XtY1, YtY1) {
-  T0 <- max(1L, round(lam * n_obs))
+  T0 <- lam * T_eff
   XtX0 <- matrix(0, k_coef, k_coef)
   XtX0[1L, 1L]   <- T0
   XtX0[-1L, -1L] <- T0 * G
@@ -315,8 +316,8 @@
   XtY0[-1L, ] <- T0 * rhs
   YtY0 <- T0 * Gamma_0
 
-  v0 <- T0 - k_coef + n_obs + 1
-  v1 <- (T0 + T_eff) - k_coef + n_obs + 1
+  v0 <- T0 - k_coef
+  v1 <- (T0 + T_eff) - k_coef
 
   XtX_post <- XtX0 + XtX1
   XtY_post <- XtY0 + XtY1
@@ -391,7 +392,8 @@
   Y      <- matrix(NA_real_, T_obs, 2L)
   for (t in seq_len(T_obs)) {
     s[t + 1L, ] <- as.numeric(T_mat %*% s[t, ] + R_mat %*% shocks[t, ])
-    Y[t, ]      <- as.numeric(Z_mat %*% s[t + 1L, ] + D_mat %*% shocks[t, ])
+    ## y_t = Z s_{t-1} + D e_t (dr convention); Z s_t here double-counted e_t.
+    Y[t, ]      <- as.numeric(Z_mat %*% s[t, ] + D_mat %*% shocks[t, ])
   }
   colnames(Y) <- c("x", "z")
 
@@ -456,9 +458,9 @@
 
     "local_level::thames" = {
       set.seed(seed)
-      ch  <- mcmc(sp$mf$log_post_fn, sp$mf$theta_mode, sp$mf$Sigma_prop,
-                  n_draws = sp$n_mcmc_draws, n_warmup = sp$n_mcmc_warmup,
-                  verbose = FALSE)
+      ch  <- dynhr_mcmc(sp$mf$log_post_fn, sp$mf$theta_mode, sp$mf$Sigma_prop,
+                        n_draws = sp$n_mcmc_draws, n_warmup = sp$n_mcmc_warmup,
+                        verbose = FALSE)
       res <- thames_mdd_from_chains(ch)
       list(estimate = res$log_mdd, se = res$se)
     },
@@ -510,7 +512,7 @@
 #'     variance). Log-evidence is closed form. Uses hand-rolled log-density
 #'     closures (no dynhr model object) -- a pure check on the estimator
 #'     FORMULAS/implementations, decoupled from the estimation pipeline.
-#'     Supports a `prior_scale` VECTOR: one subproblem is built per entry
+#'     Supports a \code{prior_scale} VECTOR: one subproblem is built per entry
 #'     (distinct \eqn{V_0} => distinct truth), letting a single call track a
 #'     multi-value prior-scale sensitivity case.}
 #'   \item{\code{"local_level"}}{The local-level (random-walk-plus-noise)
@@ -519,16 +521,16 @@
 #'     \code{\link{solve_steady}} -> \code{\link{solve_perturbation}} ->
 #'     \code{\link{run_mode_finding}} pipeline (mirrors the fixture in
 #'     \code{tests/testthat/test-kalman-diffuse.R}). One free parameter (the
-#'     observation-noise stderr `sigma_eps`) with a proper inverse-gamma
+#'     observation-noise stderr \code{sigma_eps}) with a proper inverse-gamma
 #'     prior; the model has a unit root, so \code{lik_init} auto-resolves to
 #'     \code{"diffuse"} exact initialization. Ground truth is a quadrature
 #'     (default 800-point grid) of prior x exact diffuse-KF likelihood, built
 #'     from the SAME \code{\link{kalman_filter}}/prior-density primitives the
 #'     pipeline uses, independent of \code{run_mode_finding()}'s internal
 #'     wiring. This is the rung that exercises the real estimation
-#'     machinery rather than hand-rolled closures. Supports a `T_obs` VECTOR
+#'     machinery rather than hand-rolled closures. Supports a \code{T_obs} VECTOR
 #'     (sample-size ladder, for showing the Laplace residual shrink with T)
-#'     and/or a `prior_sd` vector (prior-scale sensitivity ladder); the two
+#'     and/or a \code{prior_sd} vector (prior-scale sensitivity ladder); the two
 #'     are recycled against each other (a parallel, not Cartesian, ladder).}
 #'   \item{\code{"dsge_var"}}{The DSGE-VAR tightness diagnostic
 #'     (\code{d15_dsge_var()}), Del Negro & Schorfheide (2004): a small
@@ -550,7 +552,7 @@
 #'   \item{\code{"thames"}}{\code{\link{thames_mdd}}
 #'     (\code{conjugate_regression}: applied to i.i.d. exact-Gaussian
 #'     posterior draws) or \code{\link{thames_mdd_from_chains}}
-#'     (\code{local_level}: applied to \code{\link{mcmc}} RWMH draws around
+#'     (\code{local_level}: applied to \code{\link{dynhr_mcmc}} RWMH draws around
 #'     the mode). Reports a self-reported Monte Carlo \code{se}.}
 #'   \item{\code{"smc"}}{The internal data-tempered SMC evidence estimator
 #'     (\code{conjugate_regression}: raw \code{dynhr_smc()}; \code{local_level}:
@@ -623,6 +625,9 @@ mdd_calibration <- function(case = c("conjugate_regression", "local_level", "dsg
   if (!is.numeric(n_reps) || length(n_reps) != 1L || n_reps < 1L)
     stop("mdd_calibration: n_reps must be a positive integer scalar.")
   n_reps <- as.integer(n_reps)
+  ## The builders and .mdd_run_estimator() re-seed internally; this frame owns
+  ## all of it, so restore the caller's RNG stream when it exits (C1).
+  .local_seed(seed)
 
   problem <- switch(case,
     conjugate_regression = .mdd_build_conjugate_regression(seed = seed, verbose = verbose, ...),

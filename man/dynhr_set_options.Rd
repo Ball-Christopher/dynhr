@@ -7,51 +7,117 @@
 dynhr_set_options(...)
 }
 \arguments{
-\item{...}{Named option values.}
+\item{...}{Named option values. A \code{NULL} value un-sets the option, so
+its registered default applies again (as \code{dynhr_reset_options()}).}
 }
 \value{
-Invisibly, the previous values of all modified options.
+Invisibly, a named list of the previous values of the modified
+  options, \code{NULL} for an option that was not set (its registered
+  default was in force). \code{do.call(dynhr_set_options, old)} restores
+  them.
 }
 \description{
 Named values stored here act as defaults for any function that calls
-`.dynhr_opt(name)`. Explicit argument values always take precedence.
+\code{.dynhr_opt(name)}. Explicit argument values always take precedence:
+the priority is explicit argument, then the value set here, then the
+registered default listed below.
 }
 \details{
-Recognised options (non-exhaustive):
+Every option dynhr reads is registered in one internal table, which holds
+its default and whether it can change a numerical result.
+\code{dynhr_get_options(effective = TRUE)} returns all of them with their
+effective values, and the run record attached to every estimation result
+(see \code{\link{dynhr_rerun}}) stores that snapshot so a run made under
+global options can be replayed exactly. Setting a name that is not in the
+list below is allowed but has no effect.
+
+Registered options (default in parentheses):
 \describe{
-  \item{`me_variance`}{Measurement-error variance vector or scalar, passed
-    to `make_log_posterior()`, `run_mode_parallel()`, `run_mcmc_parallel()`.}
-  \item{`perturb_scale`}{Starting-point perturbation scale for mode-finding.}
-  \item{`nm_maxit`}{Iteration budget for each mode-finding chain.}
-  \item{`seed_base`}{Base RNG seed for reproducible parallel runs.}
-  \item{`proposal_cov_method`}{\code{"diagonal"} (default) or
+  \item{\code{me_variance}}{(\code{0}) Measurement-error variance used by the
+    internal PSOCK/future parallel helpers \code{run_mode_parallel()} and
+    \code{run_mcmc_parallel()} when their \code{me_variance} argument is
+    \code{NULL}. It does \emph{not} reach \code{make_log_posterior()},
+    \code{run_mode_finding()} or \code{run_full_estimation()}, which take
+    \code{me_variance} as an argument.}
+  \item{\code{perturb_scale}}{(\code{0.5}) Starting-point perturbation scale
+    (fraction of the prior standard deviation) for the multi-start
+    \code{run_mode_parallel()}.}
+  \item{\code{nm_maxit}}{(\code{5000L}) Iteration budget for each
+    \code{run_mode_parallel()} chain.}
+  \item{\code{mode_method}}{(\code{"cmaes_nmkb"}) Optimiser used by
+    \code{run_mode_parallel()} when its \code{method} argument is
+    \code{NULL}. Not read by \code{run_mode_finding()} (whose \code{method}
+    defaults to \code{"newrat"}) nor by \code{run_full_estimation()}
+    (\code{mode_method}, default \code{"newrat"}).}
+  \item{\code{seed_base}}{(\code{42L}) Base RNG seed for the multi-start
+    \code{run_mode_parallel()}, and for the parallel (mirai) mode
+    starts and RWMH / NUTS chains when no seed is passed (chain k seeds
+    with \code{seed_base + k}); a spec's \code{compute$seed} sets it for
+    the run.}
+  \item{\code{use_exact_hessian}}{(\code{FALSE}) \code{run_mode_finding()}
+    builds the RWMH proposal covariance from the analytic exact posterior
+    Hessian -- see that function's \code{use_exact_hessian} argument.}
+  \item{\code{use_analytic_hess}}{(\code{TRUE}) \code{run_mode_finding()}
+    with \code{method = "newrat"} / \code{"cmaes_newrat"} on the standard
+    Gaussian Kalman likelihood seeds the optimiser's initial curvature
+    \code{H0} from the analytic posterior Hessian (it does not set the
+    reported covariance). \code{FALSE} uses csminwel's default \code{H0}.
+    The spec field \code{mode$analytic_h0}; a
+    \code{mode_options$use_analytic_hess} entry overrides it for one run.}
+  \item{\code{monge_alpha}}{(\code{1}) Monge-metric scale used by the
+    \code{metric = "monge"} MALA option of
+    \code{run_posterior_estimation()} when its \code{monge_alpha} argument
+    is \code{NULL}.}
+  \item{\code{verbosity}}{(\code{"info"}) dynhr message level; set it with
+    \code{\link{dynhr_set_verbosity}}.}
+  \item{\code{proposal_cov_method}}{\code{"diagonal"} (default) or
     \code{"full"}; selects the Step 6 proposal-covariance strategy in
     \code{run_mode_finding()} -- see \code{proposal_cov}.}
-  \item{`transform_params`}{\code{TRUE} (default); mode finding
+  \item{\code{transform_params}}{\code{TRUE} (default); mode finding
     (\code{run_mode_finding()}) and the samplers
     (\code{run_posterior_estimation()}: RWMH, NUTS, MALA, ChEES, HMC) operate
     on an unconstrained reparameterisation built by
     \code{build_param_transform} instead of the raw, box-constrained
-    parameter vector. Default \code{TRUE} because every gradient sampler
-    step-collapses against the bounds of parameters near a unit root; the
+    parameter vector. Default \code{TRUE} because the gradient samplers
+    run into the bounds of parameters near a unit root: on a 68-parameter
+    NZ DSGE, NUTS without the transform had 246 of 300 transitions
+    divergent (minimum bulk ESS 1.3) versus 0 divergent (minimum bulk ESS
+    57) with it -- see \code{\link{run_posterior_estimation}}. The
     transform leaves the target invariant. Set \code{FALSE} to sample in raw
     theta-space -- see \code{\link{run_mode_finding}}.}
-  \item{`rwmh_adapt_cov`}{\code{FALSE} (default); when \code{TRUE}, RWMH
+  \item{\code{rwmh_adapt_cov}}{\code{FALSE} (default); when \code{TRUE}, RWMH
     chains in \code{run_posterior_estimation()} use Haario et al. (2001)
-    adaptive proposal covariance -- see \code{rwmh}'s `adapt_cov`.}
-  \item{`rwmh_n_blocks`}{\code{1L} (default); number of randomized
+    adaptive proposal covariance -- see \code{rwmh}'s \code{adapt_cov}.}
+  \item{\code{rwmh_n_blocks}}{\code{1L} (default); number of randomized
     parameter blocks for RWMH chains in
     \code{run_posterior_estimation()} -- see \code{rwmh}'s
-    `n_blocks`.}
-  \item{`grad_method`}{\code{"hybrid"} (default) or \code{"implicit"};
+    \code{n_blocks}.}
+  \item{\code{grad_method}}{\code{"auto"} (default), \code{"hybrid"},
+    \code{"implicit"}, \code{"adjoint"} or \code{"adjoint_solution"};
     selects the \code{grad_method} passed to
-    \code{\link{make_posterior_grad}} when \code{analytic_grad = TRUE} on
-    the serial NUTS path of \code{run_posterior_estimation()} /
-    \code{run_full_estimation()}. \code{"implicit"} uses the full
-    implicit-differentiation gradient (Childers et al. 2022); has no effect
-    on the parallel multi-chain (mirai) NUTS path, which always uses the
-    numerical gradient.}
-  \item{`power_posterior`}{Scalar in \code{(0, 1]} (default \code{1});
+    \code{\link{make_posterior_grad}} when \code{analytic_grad = TRUE} (the
+    default) for the NUTS, HMC, MALA and ChEES samplers of
+    \code{run_posterior_estimation()} / \code{run_full_estimation()} /
+    \code{run_estimation()}.
+    \code{"auto"} picks the fastest exact method the likelihood supports
+    (\code{"adjoint_solution"} for the Gaussian likelihood,
+    \code{"implicit"} for Whittle / pruned and for cumulant (except
+    \code{"adjoint_solution"} for cumulant orders that include 3 but not 4),
+    \code{"hybrid"} only
+    where no analytic Kalman kernel covers the data); the method it chose
+    is \code{attr(grad_fn, "grad_method")}. \code{"hybrid"} (the previous
+    default) finite-differences the decision-rule-moving parameters; the
+    other three are exact -- see \code{\link{make_posterior_grad}}.}
+  \item{\code{nuts_adapt}}{\code{"independent"} (default) or
+    \code{"pooled"}; warmup adaptation on the parallel multi-chain (mirai)
+    NUTS path of \code{run_posterior_estimation()} /
+    \code{run_full_estimation()}. \code{"pooled"} warms all chains up
+    together (Lao 2026): one shared step size and one metric
+    (\code{"diagonal"}, \code{"fisher_diag"} or \code{"lowrank"}) fitted to
+    the pooled, per-chain-centred warmup draws, then frozen identically for
+    every chain. Not available with \code{metric = "warmup_dense"} or a
+    sampler checkpoint.}
+  \item{\code{power_posterior}}{Scalar in \code{(0, 1]} (default \code{1});
     power-posterior (generalised-Bayes) tempering exponent \eqn{\zeta}.
     The log-posterior returned by \code{make_log_posterior()} becomes
     \eqn{\log p(\theta) + \zeta \cdot \log L(\theta)}: values below 1
@@ -61,13 +127,26 @@ Recognised options (non-exhaustive):
     log-likelihood; only \code{$logpost} is tempered. Default \code{1} is
     bit-identical to the standard Bayesian posterior and is compatible with
     every existing sampler without any changes.}
-  \item{`allow_monge_metric`}{\code{FALSE} (default); the experimental
+  \item{\code{pskf_cdf}}{\code{"accurate"} (default) or \code{"fast"};
+    how the skew-normal (PSKF) likelihood, \code{likelihood = "pskf"} and
+    \code{make_log_posterior_pskf_order2()}, evaluates its multivariate-normal
+    CDFs. \code{"accurate"} evaluates the pruning compensation with the
+    deterministic CDF up to dimension 5, and every 3- to 7-dimensional CDF
+    with a deterministic C++ separation-of-variables lattice rule (Genz
+    reordering, minimax tilting, log scale) whose error is below
+    max(1e-5, 1e-7 |log p|); 2-dimensional CDFs are computed on the log
+    scale. \code{"fast"} is the evaluation before dynhr 0.9.4
+    (Mendell-Elston for the compensation, plain Miwa): about 3 to 4 times cheaper under
+    multi-shock skew, but measured 0.14 nat off an exact likelihood with one
+    skewed shock (T = 20) and 12 to 18 nats off with two or three skewed
+    shocks (T = 60 to 100). Resolved once when the log-posterior is built.}
+  \item{\code{allow_monge_metric}}{\code{FALSE} (default); the experimental
     \code{metric = "monge"} MALA option in \code{run_posterior_estimation()}
     errors unless this is \code{TRUE}, because the Monge metric collapses the
     proposal step on sharp / near-unit-root posteriors (it under-explored a
     tight direction to ~1\% of its variance in testing). It still warns when
     enabled; prefer \code{metric = "hessian"} (constant Laplace).}
-  \item{`allow_whittle_fim_metric`}{\code{FALSE} (default); the experimental
+  \item{\code{allow_whittle_fim_metric}}{\code{FALSE} (default); the experimental
     \code{metric = "whittle_fim"} NUTS option in
     \code{run_posterior_estimation()} errors unless this is \code{TRUE}.
     \code{"whittle_fim"} assembles a one-shot dense mass matrix from the
@@ -75,12 +154,12 @@ Recognised options (non-exhaustive):
     recompute); it is unvalidated on the full estimation pipeline and costs
     one extra evaluation that can be expensive on large models. Falls back
     to the \code{"hessian"} metric on failure.}
-  \item{`checkpoint_flush_every`}{\code{1000L} (default); the chunk size (in
+  \item{\code{checkpoint_flush_every}}{\code{1000L} (default); the chunk size (in
     draws) at which checkpointed RWMH flushes its streaming buffer to disk and
     rewrites the restart state, when \code{run_posterior_estimation()} is
     called with \code{checkpoint_dir}. Smaller values bound RAM more tightly
     and lose less on an interruption, at the cost of more frequent I/O.}
-  \item{`debug_kf_errors`}{\code{FALSE} (default); when \code{TRUE},
+  \item{\code{debug_kf_errors}}{\code{FALSE} (default); when \code{TRUE},
     a Kalman-filter error inside \code{make_log_posterior()} is RE-RAISED
     instead of being caught and treated as an infeasible draw
     (\code{loglik = -Inf}). The default keeps an infeasible parameter draw
@@ -88,4 +167,16 @@ Recognised options (non-exhaustive):
     long chain; set this \code{TRUE} when debugging to surface a genuine code
     bug that would otherwise be silently masked as a rejected draw.}
 }
+
+The options live in dynhr's own store, NOT in R's \code{options()}:
+\code{getOption("dynhr.allow_monge_metric")} is always \code{NULL}. Read
+them with \code{dynhr_get_options()} (the values set) or
+\code{dynhr_get_options(effective = TRUE)} (every registered option with
+the value in force).
+}
+\examples{
+old <- dynhr_set_options(allow_monge_metric = TRUE)
+dynhr_get_options(effective = TRUE)$allow_monge_metric
+do.call(dynhr_set_options, old)   # back to the registered default
+dynhr_get_options(effective = TRUE)$allow_monge_metric
 }

@@ -60,15 +60,14 @@ IRFCollection with the same structure as compute_irfs().
 Four solver options:
 \describe{
   \item{\code{"boehl"}}{Spell-duration fast path (single_spell = TRUE).
-    O(T + log T) cost per shock.  Valid when the binding spell is a single
-    contiguous block starting at t=1 — the standard IRF assumption.}
-  \item{\code{"occbin"}}{Iterative complementarity solver (single_spell = FALSE).
-    O(n_iter × T) cost per shock.  Handles multi-spell, multi-constraint,
-    and escape-and-rebind scenarios.}
-  \item{\code{"lcp"}}{LCP-Newton solver (solve_obc_lcp).
-    Builds a T*n_spec × T*n_spec finite-difference Jacobian and takes Newton
-    steps on the stacked FB system.  Handles multi-spell and coupled-regime
-    scenarios where the iterative path may cycle.}
+    Bisection over the spell length.  Valid when the binding spell is a
+    single contiguous block starting at t=1; \code{converged} is FALSE
+    otherwise.}
+  \item{\code{"occbin"}}{OccBin guess-and-verify (single_spell = FALSE).
+    Handles multi-spell, multi-constraint, and escape-and-rebind
+    scenarios.}
+  \item{\code{"lcp"}}{LCP solver (\code{\link{solve_obc_lcp}}, Lemke on
+    the stacked multiplier LCP).  Same equilibrium as \code{"occbin"}.}
   \item{\code{"mcp"}}{MCP semi-smooth Newton solver (\code{\link{mcp_solve_path}}).
     Uses the Fischer-Burmeister FB reformulation on the full nonlinear model.
     Works for both linear and nonlinear models.  On linear models, matches

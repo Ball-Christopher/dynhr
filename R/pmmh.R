@@ -108,9 +108,10 @@
 #' @examples
 #' \dontrun{
 #' ## 1. Find the mode under a particle likelihood:
-#' mode_res <- find_mode(model, data, prior_spec, obs_vars,
-#'                       likelihood = "tpf", me_variance = 0.01,
-#'                       tpf_options = list(n_particles = 2000L))
+#' mode_res <- run_mode_finding(solve_model(model), data = data,
+#'                              obs_vars = obs_vars, likelihood = "tpf",
+#'                              me_variance = 0.01,
+#'                              posterior_options = list(n_particles = 2000L))
 #'
 #' ## 2. Run PMMH (RWMH over the unbiased TPF loglik). The variance preflight
 #' ##    runs automatically and warns if more particles are needed.
@@ -129,9 +130,13 @@ pmmh <- function(mode_result, ...) {
          "Use run_posterior_estimation() directly for other samplers.")
   }
 
-  lik <- tryCatch(mode_result$ctx$likelihood, error = function(e) NULL)
+  ## Explicit shape checks (not a catch-all tryCatch): a non-list
+  ## mode_result / ctx has no likelihood tag.
+  ctx <- if (is.list(mode_result) || is.environment(mode_result))
+    mode_result$ctx
+  lik <- if (is.list(ctx) || is.environment(ctx)) ctx$likelihood
   if (is.null(lik) || !lik %in% c("tpf", "ppf", "copf", "sv_rbpf")) {
-    warning("pmmh(): mode_result$ctx$likelihood = ",
+    .dynhr_warn("pmmh(): mode_result$ctx$likelihood = ",
             if (is.null(lik)) "NULL" else sQuote(lik),
             " is not an unbiased particle likelihood ",
             "(\"tpf\"/\"ppf\"/\"copf\"/\"sv_rbpf\"). ",

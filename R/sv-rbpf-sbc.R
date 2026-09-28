@@ -179,6 +179,9 @@ sv_rbpf_sbc <- function(n_repl = 100L, T_obs = 60L, n_particles = 500L,
     list(ranks = ranks, accept = n_acc / n_draws, ll_sd = ll_sd, L = k_i)
   }
 
+  ## run_one() re-seeds (seed + r) in THIS process on the serial path; restore
+  ## the caller's RNG stream when this function exits (C1).
+  .local_seed(seed)
   reps <- if (cores > 1L) {
     parallel::mclapply(seq_len(n_repl), run_one, mc.cores = cores,
                        mc.preschedule = FALSE)
@@ -188,7 +191,7 @@ sv_rbpf_sbc <- function(n_repl = 100L, T_obs = 60L, n_particles = 500L,
   bad <- vapply(reps, function(x) inherits(x, "try-error") || is.null(x$ranks),
                 logical(1))
   if (any(bad))
-    warning(sprintf("sv_rbpf_sbc: %d/%d replications failed and were dropped.",
+    .dynhr_warn(sprintf("sv_rbpf_sbc: %d/%d replications failed and were dropped.",
                     sum(bad), n_repl), call. = FALSE)
   reps <- reps[!bad]
 

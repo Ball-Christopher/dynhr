@@ -90,11 +90,11 @@
 .passport_solve_at <- function(model, compiled, pv0, theta) {
   pv <- .apply_theta_to_params(model, theta, pv0)
   ss <- tryCatch(solve_steady_state(model, compiled, pv, verbose = FALSE),
-                error = function(e) NULL)
+                error = function(e) .dynhr_reraise_bug(e, NULL))
   if (is.null(ss) || !isTRUE(ss$converged))
     return(list(bk = FALSE, top_eig = NA_real_))
   sol <- tryCatch(solve_perturbation(model, compiled, ss$ss, pv, verbose = FALSE),
-                  error = function(e) NULL)
+                  error = function(e) .dynhr_reraise_bug(e, NULL))
   if (is.null(sol)) return(list(bk = FALSE, top_eig = NA_real_))
   bk <- isTRUE(sol$bk_satisfied)
   te <- NA_real_
@@ -221,11 +221,20 @@ run_estimation_passport <- function(model, data,
                                     seed    = 1L,
                                     verbose = FALSE,
                                     ...) {
+  ## Own the message epoch for this run: repeat-suppressed warnings
+  ## (`.dynhr_warn(once = TRUE)`) are keyed within it and re-arm for the
+  ## next run, and the close reports what it suppressed. A nested call
+  ## inherits this epoch rather than opening a second one.
+  .dynhr_run_epoch <- .dynhr_epoch("run_estimation_passport")
+  on.exit(.dynhr_close_epoch(.dynhr_run_epoch), add = TRUE)
 
   all_checks <- c("eigen", "hessian", "bk_share", "collision", "contraction",
                   "multistart", "sbc_lite")
   checks <- match.arg(checks, all_checks, several.ok = TRUE)
   run_check <- function(nm) nm %in% checks
+  ## Each check below re-seeds (seed + offset) inside this frame; restore the
+  ## caller's RNG stream when the run exits (C1).
+  .local_seed(seed)
 
   compiled <- compile_model(model, verbose = FALSE)
   if (is.null(prior_spec)) prior_spec <- extract_prior_spec(model, verbose = FALSE)
@@ -466,7 +475,7 @@ run_estimation_passport <- function(model, data,
         mode_k <- tryCatch(
           .run_mode_finding(lp_fn, theta_init, prior_spec,
                            nm_maxit = n_iter, method = "newrat", verbose = FALSE),
-          error = function(e) NULL)
+          error = function(e) .dynhr_reraise_bug(e, NULL))
         ## A chain that never left the infeasible floor (~-1e20, the
         ## log-posterior's -Inf substitute) is a FAILED start, not a worse
         ## mode -- keeping it would inflate the spread by ~1e20 nats and
@@ -481,7 +490,7 @@ run_estimation_passport <- function(model, data,
     })
     if (isTRUE(r$ok) && length(r$value) >= 2L) {
       d7 <- tryCatch(d7_mode_robustness(list(results = r$value)),
-                    error = function(e) NULL)
+                    error = function(e) .dynhr_reraise_bug(e, NULL))
       if (!is.null(d7)) {
         status <- if (isTRUE(d7$pass)) "green"
                   else if (isFALSE(d7$pass)) "amber" else "not_assessed"

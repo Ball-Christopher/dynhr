@@ -129,7 +129,7 @@ hank_coarse_anchored <- function(a_grid, Pi, e, beta, eis, r, w, A_target,
 #' coarse GE directly at the wedged discount factor -- i.e.
 #' \code{hank_ks_steady(a_grid_coarse, ..., beta = beta_draw * exp(lx_ref))}
 #' -- and feed that to \code{\link{hank_reiter_linearize}}. Verified
-#' 2026-07-08 (\code{.claude/orchestration/truncation/m5_reanchor.R}, 3x3
+#' 2026-07-08 (3x3
 #' grid, beta +-0.005 x EIS +-25\%, n_a = 24 vs fine n_a = 500): \code{lx} is
 #' essentially INVARIANT in beta (drift < 1e-6 over +-0.005, so the frozen
 #' wedge is SS-exact in the beta direction) and mildly linear in EIS
@@ -483,7 +483,7 @@ hank_reiter_linearize <- function(ks, delta_fd = 1e-6) {
   }
   sr <- max(Mod(eigen(Tmat, only.values = TRUE)$values))
   if (drop_dist_coord && sr >= 1 - 1e-10)
-    warning(sprintf("hank_reiter_statespace(): spectral radius %.8f >= 1 after
+    .dynhr_warn(sprintf("hank_reiter_statespace(): spectral radius %.8f >= 1 after
   dropping the distribution coordinate -- state space is not stationary.", sr))
 
   structure(

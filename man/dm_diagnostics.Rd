@@ -11,18 +11,20 @@ dm_diagnostics(dm, ...)
 \code{\link{dm_solve}} and \code{\link{dm_sample}}}
 
 \item{...}{Further arguments for \code{\link{run_diagnostics}}
-(e.g. `verbose`, `report`).  These override the forwarded fields.}
+(e.g. \code{verbose}, \code{report}).  These override the forwarded fields.}
 }
 \value{
-The updated `dynhr_model`, with `$diagnostics` set.
+The updated \code{dynhr_model}, with \code{$diagnostics} set.
 }
 \description{
 Forwards whichever of the object's pieces are present -- model, compiled
-derivatives, decision rules, parameters, data, observed names, prior spec
-and posterior draws -- to \code{\link{run_diagnostics}}, and stores the
-returned list in `$diagnostics`.  Stages whose inputs are absent are
-skipped by the battery itself, so this works with a partially-run
-pipeline.
+derivatives, decision rules (at the point \code{\link{dm_solve}} solved
+them) and their parameters, data, observed names, prior spec, the
+posterior draws (equally weighted; one matrix per chain as
+\code{chains_list}) and the mode -- to \code{\link{run_diagnostics}}, and
+stores the returned list in \code{$diagnostics}.  Stages whose inputs are
+absent are skipped by the battery itself, so this works with a
+partially-run pipeline.
 }
 \examples{
 \donttest{

@@ -8,7 +8,7 @@ build_param_transform(prior_spec, par_names)
 }
 \arguments{
 \item{prior_spec}{data.frame (from extract_prior_spec()) with columns
-`name`, `distribution`, `p1`, `p2`, `lower`, `upper` (the latter four
+\code{name}, \code{distribution}, \code{p1}, \code{p2}, \code{lower}, \code{upper} (the latter four
 may be NA / absent for a given row).}
 
 \item{par_names}{Character vector of parameter names, in the order they
@@ -17,14 +17,14 @@ appear in the parameter vector theta the samplers operate on.}
 \value{
 An S3 list of class "dynhr_param_transform" with elements:
   \itemize{
-    \item `types`: named character vector, one of "identity", "log",
+    \item \code{types}: named character vector, one of "identity", "log",
       "reflected_log", "logit" per parameter
-    \item `a`, `b`: named numeric vectors of resolved support bounds
-    \item `to_unconstrained(theta)`: theta -> eta (named, vectorized)
-    \item `to_constrained(eta)`: eta -> theta (named, vectorized)
-    \item `log_jacobian(eta)`: scalar sum of log|d theta/d eta|
-    \item `dlog_jacobian(eta)`: named vector d/deta_j log|J|
-    \item `dtheta_deta(eta)`: named vector d theta_j / d eta_j
+    \item \code{a}, \code{b}: named numeric vectors of resolved support bounds
+    \item \code{to_unconstrained(theta)}: theta -> eta (named, vectorized)
+    \item \code{to_constrained(eta)}: eta -> theta (named, vectorized)
+    \item \code{log_jacobian(eta)}: scalar sum of log|d theta/d eta|
+    \item \code{dlog_jacobian(eta)}: named vector d/deta_j log|J|
+    \item \code{dtheta_deta(eta)}: named vector d theta_j / d eta_j
   }
 }
 \description{

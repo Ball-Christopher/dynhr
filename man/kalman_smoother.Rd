@@ -22,7 +22,8 @@ kalman_smoother(
   pre_sample = 0L,
   known_shocks = NULL,
   shock_means = NULL,
-  shock_timing = c("dated", "transition_next")
+  shock_timing = c("dated", "transition_next"),
+  method = c("auto", "durbin-koopman", "univariate")
 )
 }
 \arguments{
@@ -43,8 +44,9 @@ the same second argument \code{\link{kalman_filter}()} takes.}
 order of \code{data}.}
 
 \item{me_variance}{Base measurement-error variance, added to the diagonal
-of the innovation covariance for every observable and period -- the same
-argument, with the same meaning, as in \code{\link{kalman_filter}()}.
+of the innovation covariance for every period -- the same argument, with
+the same meaning, as in \code{\link{kalman_filter}()}: a scalar for
+every observable, or one variance per observable (\eqn{H = diag(me)}).
 Default \code{0}. Set it to the value you filtered with, or the two will
 describe different noise models.}
 
@@ -183,6 +185,31 @@ unconditional one.}
 \code{\link{kalman_filter}}, whose \emph{Matching another package's
 shock timing} section gives the experiment that settles which one a given
 reference implementation uses.}
+
+\item{method}{Smoothing recursion when the initialisation is proper
+(stationary, \code{"kappa"} or a supplied \code{P0}):
+\describe{
+  \item{\code{"auto"}}{(default) the multivariate Durbin--Koopman
+    recursion, restarting on the univariate smoother, with a warning,
+    if the innovation covariance is singular in any period -- Dynare's
+    \code{use_univariate_smoother_if_singularity_is_detected}.}
+  \item{\code{"durbin-koopman"}}{the multivariate recursion only; a
+    singular innovation covariance is an error (class
+    \code{dynhr_error_smoother_singular}), which is what Dynare does
+    without that option.}
+  \item{\code{"univariate"}}{the univariate (Koopman--Durbin
+    sequential) smoother throughout.}
+}
+The exact diffuse initialisation is sequential by construction, so a
+unit-root model under \code{lik_init = "auto"} or \code{"diffuse"} runs
+it whatever \code{method} says; an explicit \code{"durbin-koopman"}
+there is recorded in \code{diagnostics$routing}.
+\strong{Changed:} a singular innovation covariance used to be
+handled by dropping the zero-variance components from that period's
+multivariate update. That is the same answer (the univariate smoother
+skips exactly those components), so results are unchanged beyond
+rounding; what changed is that the routing is now explicit and can be
+refused.}
 }
 \value{
 List with \code{smoothed_states} (\eqn{T \times n_{state}}, row
@@ -198,9 +225,10 @@ List with \code{smoothed_states} (\eqn{T \times n_{state}}, row
   \code{smoothed_initial_cov} (\eqn{V_{0|T}}), \code{loglik}, and
   \code{diagnostics} -- the same machine-readable record
   \code{\link{kalman_filter}} returns (see its \code{Value} section),
-  with \code{method_requested = NA} because the smoother takes no
-  \code{method} argument and \code{method_used} naming the recursion that
-  ran (\code{"durbin-koopman"} or \code{"sequential-diffuse"}).
+  with \code{method_requested} the \code{method} argument and
+  \code{method_used} naming the recursion that ran
+  (\code{"durbin-koopman"}, \code{"univariate"} or
+  \code{"sequential-diffuse"}).
 
   During a diffuse phase the reported \code{filtered_cov} /
   \code{predicted_cov} are the PROPER (\eqn{P_{star}}) part; the diffuse
@@ -253,13 +281,48 @@ The smoothed states produced this way satisfy the transition
 \eqn{s_{t|T} = T s_{t-1|T} + R \varepsilon_{t|T}} identically (~1e-16),
 and the smoothed shocks are unchanged by this route.
 
-\strong{Exact diffuse initialisation is NOT supported.}  There is no
-\code{lik_init} argument: \eqn{P_{0|0}} is the unconditional (Lyapunov)
-covariance, with a large-\eqn{\kappa} diagonal fallback when the Lyapunov
-solve fails on a unit root.  The smoothed moments are then exact for that
-proper large-variance prior, not for the exact-diffuse limit; use
-\code{kalman_filter(lik_init = "diffuse")} when the diffuse likelihood is
-what is needed.
+\strong{Initialisation.}  \eqn{P_{0|0}} is the unconditional (Lyapunov)
+covariance on a stationary model; on a unit-root model the default runs
+the EXACT diffuse smoother (sequential Koopman--Durbin form) rather than a
+large-\eqn{\kappa} approximation.  See \code{lik_init}.
+
+\strong{Singular innovation covariance.}  When \eqn{F_t} is singular in
+some period -- stochastic singularity (more observables than shocks and
+no measurement error), a shock switched off by \code{shock_scale} or a
+hard \code{filter_tunes} tune -- the multivariate recursion cannot invert
+it.  Under \code{method = "auto"} the smoother then restarts on the
+UNIVARIATE (Koopman--Durbin sequential) smoother, which processes the
+observables one at a time and skips a component whose conditional
+variance is below \code{kalman_tol}: that component is an exact linear
+function of what has already been processed and carries no information.
+This is Dynare's \code{use_univariate_smoother_if_singularity_is_detected}
+(7.0) and the same decision \code{\link{kalman_filter}} makes when it
+falls back to its univariate filter.  A warning says so, and
+\code{diagnostics$routing} records the switch; the log-likelihood is then
+the density of the retained components.  \code{method = "durbin-koopman"}
+refuses a singular \eqn{F_t} instead (Dynare's default), and
+\code{method = "univariate"} runs the sequential smoother throughout --
+on a non-singular system the two recursions agree to machine precision.
+
+\strong{Frequentist (point-estimate) smoother.}  Dynare 7's
+\code{frequentist_smoother} option runs the Kalman smoother at a single
+parameter vector (the ML estimate, or the posterior mode when no
+Metropolis draws are available) and reports the smoothed variables with
+their uncertainty from the smoothed state covariance, instead of the
+Bayesian smoother's quantiles over posterior draws.  In dynhr that is
+simply this function called at the point estimate:
+\preformatted{
+  sm <- kalman_smoother(Y, dr_at_mode, model, params_at_mode,
+                        obs_vars = obs)
+  se <- sqrt(apply(sm$smoothed_cov, 3, diag))   # n_state x T
+  lo <- t(sm$smoothed_states) - 1.96 * se       # 95\% bands
+  hi <- t(sm$smoothed_states) + 1.96 * se
+}
+\code{smoothed_cov} is \eqn{V_{t|T} = \mathrm{Var}(s_t \mid y_{1:T})}
+at those parameters -- Dynare's \code{smoothed_state_uncertainty} -- so
+the bands carry filtering uncertainty only, not parameter uncertainty
+(which is what the posterior-draw smoother adds).  It is always
+returned; there is no option to switch on.
 }
 \examples{
 mod <- system.file("extdata/models/nk_demo.mod", package = "dynhr")

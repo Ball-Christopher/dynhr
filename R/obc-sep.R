@@ -204,7 +204,7 @@ simulate_sep <- function(compiled,
     pf <- pf_newton_solve(compiled, y0, y_ss, shock_path, params,
                           obc_specs = obc_specs, ...)
     if (!pf$converged) {
-      warning(sprintf("simulate_sep: quadrature node %d did not converge.", q))
+      .dynhr_warn(sprintf("simulate_sep: quadrature node %d did not converge.", q))
     }
 
     irf_sum <- irf_sum + quad$weights[q] * pf$irf

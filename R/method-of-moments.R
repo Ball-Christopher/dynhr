@@ -333,14 +333,18 @@
   }
   Om <- (Om + t(Om)) * 0.5
 
-  dmax <- max(diag(Om))
-  if (!is.finite(dmax) || dmax <= 0) dmax <- 1
   ## Omega_reg is only for the DIAGONAL weighting (whose 1/diag would divide
   ## by zero on a degenerate moment); the full inverse goes through
-  ## .mom_omega_inverse(), which does its own scaled eigendecomposition, so no
-  ## condition number is computed here -- that would be a second p x p eigen()
-  ## per weight-matrix build for a number nothing reads.
-  Om_reg <- Om + ridge * dmax * diag(p)
+  ## .mom_omega_inverse(), which does its own scaled eigendecomposition.
+  ## The ridge is PER MOMENT (ridge x its own variance; the largest variance
+  ## only for a degenerate one), the cumulant GMM's rule .gmm_ridge() (W77):
+  ## the old ridge x max(diag Omega) x I added the variance of the
+  ## highest-order moment -- c^8 in the units of the data for an order-4
+  ## moment -- to every moment, so the diagonal weight of a mean moment
+  ## (variance c^2) was swamped at large scale and the criterion was not
+  ## invariant to the units.  (.gmm_ridge()'s condition number, one p x p
+  ## eigen() per weight build, is not used here.)
+  Om_reg <- .gmm_ridge(Om, ridge)$Omega_reg
   list(Omega = Om, Omega_reg = Om_reg, bandwidth = bandwidth,
        T_eff = Te, p = p)
 }
@@ -398,6 +402,25 @@
        condition_number = max(eg$values) / min(eg$values[keep]))
 }
 
+#' Known-correlation pattern for `mom_se_bounds()` from a moment covariance:
+#' exactly duplicated moments (correlation 1 to 1e-10, e.g. the symmetric
+#' entries of vec(Sigma_y)) are marked perfectly correlated; everything else
+#' is unknown. NULL when there are no duplicates.
+#' @noRd
+.mom_duplicate_cor <- function(Omega) {
+  d <- sqrt(pmax(diag(Omega), 0))
+  pos <- d > 0
+  R <- matrix(0, nrow(Omega), ncol(Omega))
+  R[pos, pos] <- Omega[pos, pos] / outer(d[pos], d[pos])
+  dup <- R >= 1 - 1e-10
+  diag(dup) <- FALSE
+  if (!any(dup)) return(NULL)
+  ck <- matrix(NA_real_, nrow(Omega), ncol(Omega))
+  diag(ck) <- 1
+  ck[dup] <- 1
+  ck
+}
+
 #' Symmetric inverse via Cholesky, with a pseudo-inverse fallback.
 #' @noRd
 .mom_sym_inverse <- function(M, what = "matrix") {
@@ -425,7 +448,7 @@
 #' @noRd
 .mom_solve_at <- function(model, compiled, params, order = 1L) {
   ss <- tryCatch(solve_steady_state(model, compiled, params, verbose = FALSE),
-                 error = function(e) NULL)
+                 error = function(e) .dynhr_reraise_bug(e, NULL))
   if (is.null(ss) || !isTRUE(ss$converged)) return(NULL)
   params <- ss$params %||% params
   ## suppressWarnings: an optimiser step INTO the non-stationary region is a
@@ -436,7 +459,7 @@
   dr <- suppressWarnings(tryCatch(
     solve_perturbation(model, compiled, ss$values, params,
                        order = as.integer(order), verbose = FALSE),
-    error = function(e) NULL))
+    error = function(e) .dynhr_reraise_bug(e, NULL)))
   if (is.null(dr) || !isTRUE(dr$bk_satisfied)) return(NULL)
   ## Stationarity: the whole moment map is a stationary-distribution object.
   sr <- tryCatch(
@@ -483,7 +506,7 @@
   sim <- tryCatch(
     .simulate_dr_any_order(dr, n_periods = n_periods, model = model,
                            burn_in = burn_in, shocks = shocks),
-    error = function(e) NULL)
+    error = function(e) .dynhr_reraise_bug(e, NULL))
   if (is.null(sim)) return(NULL)
   lev <- attr(sim, "levels")
   if (is.null(lev)) return(NULL)
@@ -559,7 +582,7 @@
       suppressWarnings(
         solution_derivatives(model, compiled, dr, params, struct,
                              obs_vars = obs_vars, h_rel = h_rel)),
-      error = function(e) NULL)
+      error = function(e) .dynhr_reraise_bug(e, NULL))
     if (is.null(sdv)) return(fail("solution_derivatives() failed"))
     bad <- struct[!vapply(struct, function(p) isTRUE(sdv$derivs[[p]]$ok),
                           logical(1))]
@@ -683,7 +706,7 @@
     msg <- paste0("method_of_moments(): the analytic moment Jacobian is not ",
                   "available here (", an$reason, "); falling back to central ",
                   "finite differences of the full re-solve.")
-    .cumulant_warn_once("mom_jacobian_fd_fallback", msg)
+    .dynhr_warn(msg, once = TRUE, key = "mom_jacobian_fd_fallback")
     J <- .mom_jacobian_fd(theta, obs_vars, orders, lags, moment_fn,
                           h_rel = max(h_rel, 1e-5))
     return(list(J = J, method = "fd", fell_back = TRUE, reason = an$reason))
@@ -787,6 +810,14 @@
 #'   and in \code{$jacobian_method}), \code{"analytic"} (error if unavailable)
 #'   or \code{"fd"}.
 #' @param burn_in  SMM burn-in periods discarded before the simulated sample.
+#' @param se_bounds If \code{TRUE}, also report combined-data standard-error
+#'   bounds in \code{$se_bounds} (see \code{\link{mom_se_bounds}}): the
+#'   best- and worst-case standard errors if each moment had come from a
+#'   different sample, so that only the moment variances
+#'   \eqn{c\,\hat\Omega_{jj}/T} were known. Exactly duplicated moments
+#'   (the symmetric entries of \code{vec(Sigma_y)}) are kept perfectly
+#'   correlated. The full-information sandwich \code{$se} always lies inside
+#'   the bounds. Default \code{FALSE}; nothing else in the result changes.
 #' @param verbose  Print optimiser progress.
 #'
 #' @return An object of class \code{"dynhr_mom"}: a list with
@@ -795,7 +826,9 @@
 #'   \code{weight_matrix},
 #'   \code{moment_fit} (a data.frame with the sample and model moment, their
 #'   difference and a standardized difference), \code{jacobian},
-#'   \code{jacobian_method}, and the settings used.
+#'   \code{jacobian_method}, \code{se_bounds} (a
+#'   \code{"dynhr_se_bounds"} object when \code{se_bounds = TRUE}, else
+#'   \code{NULL}), and the settings used.
 #'
 #' @references
 #'   Hansen, L. P. (1982). Large sample properties of generalized method of
@@ -835,7 +868,14 @@ method_of_moments <- function(model, data, obs_vars = NULL, start = NULL,
                               optimizer = "newrat", n_iter = 2000L,
                               bandwidth = NULL, ridge = 1e-6,
                               jacobian = c("auto", "analytic", "fd"),
-                              burn_in = 100L, verbose = TRUE) {
+                              burn_in = 100L, se_bounds = FALSE,
+                              verbose = TRUE) {
+  ## Own the message epoch for this run: repeat-suppressed warnings
+  ## (`.dynhr_warn(once = TRUE)`) are keyed within it and re-arm for the
+  ## next run, and the close reports what it suppressed. A nested call
+  ## inherits this epoch rather than opening a second one.
+  .dynhr_run_epoch <- .dynhr_epoch("method_of_moments")
+  on.exit(.dynhr_close_epoch(.dynhr_run_epoch), add = TRUE)
 
   method    <- match.arg(method)
   weighting <- match.arg(weighting)
@@ -873,7 +913,8 @@ method_of_moments <- function(model, data, obs_vars = NULL, start = NULL,
 
   ## ---- Starting values ----------------------------------------------------
   if (is.null(start)) {
-    ps <- tryCatch(extract_prior_spec(model), error = function(e) NULL)
+    ps <- tryCatch(extract_prior_spec(model),
+                   error = function(e) .dynhr_reraise_bug(e, NULL))
     if (is.null(ps) || !nrow(ps))
       stop("method_of_moments(): supply `start` (the model has no ",
            "estimated_params block to take starting values from).",
@@ -972,7 +1013,7 @@ method_of_moments <- function(model, data, obs_vars = NULL, start = NULL,
       W  <- inv$W
       rk <- inv$rank
       if (!is.finite(inv$condition_number) || inv$condition_number > 1e12)
-        warning("method_of_moments(): the retained long-run covariance is ",
+        .dynhr_warn("method_of_moments(): the retained long-run covariance is ",
                 "ill-conditioned (condition number ",
                 if (is.finite(inv$condition_number))
                   format(inv$condition_number, scientific = TRUE) else "Inf",
@@ -1023,7 +1064,7 @@ method_of_moments <- function(model, data, obs_vars = NULL, start = NULL,
   two_step_done <- FALSE
   if (isTRUE(two_step)) {
     if (p >= T_obs) {
-      warning("method_of_moments(): skipping the efficient second step -- ",
+      .dynhr_warn("method_of_moments(): skipping the efficient second step -- ",
               "p = ", p, " moments with T = ", T_obs, " observations makes ",
               "the long-run covariance rank-deficient (the too-many-moments ",
               "problem). Reduce `lags`/`orders` or keep identity weighting.",
@@ -1031,7 +1072,7 @@ method_of_moments <- function(model, data, obs_vars = NULL, start = NULL,
     } else {
       m1 <- model_moments(theta_hat)
       if (is.null(m1)) {
-        warning("method_of_moments(): first-step estimate is infeasible; ",
+        .dynhr_warn("method_of_moments(): first-step estimate is infeasible; ",
                 "skipping the second step.", call. = FALSE)
       } else {
         W2 <- build_W("newey_west", m1)
@@ -1074,7 +1115,8 @@ method_of_moments <- function(model, data, obs_vars = NULL, start = NULL,
   se <- setNames(rep(NA_real_, k), names(theta0))
   if (!is.null(J) && all(is.finite(J))) {
     A  <- t(J) %*% W_used %*% J
-    Ai <- tryCatch(.mom_sym_inverse(A, "J' W J"), error = function(e) NULL)
+    Ai <- tryCatch(.mom_sym_inverse(A, "J' W J"),
+                   error = function(e) .dynhr_reraise_bug(e, NULL))
     if (!is.null(Ai)) {
       B <- t(J) %*% W_used %*% Omega %*% W_used %*% J
       V <- scale_c * (Ai %*% B %*% Ai) / T_obs
@@ -1082,6 +1124,22 @@ method_of_moments <- function(model, data, obs_vars = NULL, start = NULL,
       dimnames(V) <- list(names(theta0), names(theta0))
       dv <- diag(V)
       se <- setNames(ifelse(dv > 0, sqrt(dv), NA_real_), names(theta0))
+    }
+  }
+
+  ## ---- Combined-data SE bounds (optional; changes nothing above) ---------
+  se_bnd <- NULL
+  if (isTRUE(se_bounds)) {
+    if (is.null(J) || !all(is.finite(J)) || all(is.na(se))) {
+      .dynhr_warn("method_of_moments(): `se_bounds` skipped -- the sandwich ",
+                  "standard errors are not available.", call. = FALSE)
+    } else {
+      G_b <- J
+      colnames(G_b) <- names(theta0)
+      se_bnd <- mom_se_bounds(G_b, W_used,
+                              var_moments = scale_c * pmax(diag(Omega), 0) /
+                                T_obs,
+                              cor_known = .mom_duplicate_cor(Omega))
     }
   }
 
@@ -1141,7 +1199,8 @@ method_of_moments <- function(model, data, obs_vars = NULL, start = NULL,
     optimizer      = fit1$method,
     convergence    = fit1$convergence,
     iterations     = fit1$iterations,
-    start          = theta0
+    start          = theta0,
+    se_bounds      = se_bnd
   )
   class(out) <- "dynhr_mom"
   out
@@ -1184,6 +1243,13 @@ print.dynhr_mom <- function(x, digits = 4L, ...) {
                     row.names = names(x$estimate))
   tab$t <- tab$estimate / tab$se
   print(round(tab, digits))
+  if (!is.null(x$se_bounds)) {
+    cat("\n  Combined-data SE bounds (moments from separate samples):\n")
+    bt <- x$se_bounds$bounds
+    print(data.frame(se_lower = signif(bt$se_lower, digits),
+                     se_upper = signif(bt$se_upper, digits),
+                     row.names = bt$target))
+  }
   cat(sprintf("\n  J-statistic    : %.4f  (df = %d, p = %.4f)%s\n",
               x$j_stat, x$j_df, x$j_pvalue,
               if (isTRUE(x$j_valid)) "" else

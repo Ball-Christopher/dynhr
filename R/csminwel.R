@@ -72,7 +72,7 @@
         (dx %*% t(dx)) / dgdx -
       (dx %*% t(Hdg) + Hdg %*% t(dx)) / dgdx
   } else {
-    warning("csminwel: bfgs update failed (near-zero curvature); H unchanged.")
+    .dynhr_warn("csminwel: bfgs update failed (near-zero curvature); H unchanged.")
     H <- H0
   }
   ## Symmetrise to suppress round-off drift.
@@ -156,10 +156,10 @@
       dx     <- dx * dxnorm / sqrt(sum(dx * dx))
       dfhat  <- sum(dx * g0)
       if (verbose)
-        cat(sprintf("    csminit: angle correction, predicted dfhat=%g\n", dfhat))
+        .dynhr_cat(sprintf("    csminit: angle correction, predicted dfhat=%g\n", dfhat))
     }
   }
-  if (verbose) cat(sprintf("    csminit: predicted improvement %18.9f\n", -dfhat / 2))
+  if (verbose) .dynhr_cat(sprintf("    csminit: predicted improvement %18.9f\n", -dfhat / 2))
 
   done    <- FALSE
   factor  <- 3
@@ -173,7 +173,7 @@
   while (!done) {
     dxtest <- x0 + lambda * dx
     f      <- fcn(dxtest, ...)
-    if (verbose) cat(sprintf("    lambda = %10.5g; f = %20.7f\n", lambda, f))
+    if (verbose) .dynhr_cat(sprintf("    lambda = %10.5g; f = %20.7f\n", lambda, f))
     fcount <- fcount + 1L
 
     if (f < fhat) { fhat <- f; xhat <- dxtest; lambdahat <- lambda }
@@ -229,7 +229,7 @@
   }
 
   if (verbose)
-    cat(sprintf("    csminit done: retcode=%d  fhat=%18.9f\n", retcode, fhat))
+    .dynhr_cat(sprintf("    csminit done: retcode=%d  fhat=%18.9f\n", retcode, fhat))
   list(fhat = fhat, xhat = xhat, fcount = fcount, retcodeh = retcode)
 }
 
@@ -419,7 +419,7 @@ csminwel <- function(fcn, x0, ..., H0 = NULL, grad = NULL,
     fcount <- fcount + length(gh)   # gradient costs ~n evals
 
     if (verbose)
-      cat(sprintf("  iter %4d  f = %20.10f  improvement = %12.4e  rc=%d\n",
+      .dynhr_cat(sprintf("  iter %4d  f = %20.10f  improvement = %12.4e  rc=%d\n",
                   itct, f, improvement, retcode1))
   }
 

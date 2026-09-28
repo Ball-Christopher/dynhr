@@ -124,7 +124,7 @@ opp_optimal_intervention <- function(instrument_irf,
   if (is.list(instrument_irf) && !is.data.frame(instrument_irf)) {
     # Multiple instruments: recurse to compute per-instrument path
     # (for multi-instrument policy, the solution is joint)
-    if (verbose) cat("Multiple instruments detected. Computing joint optimal path...\n")
+    if (verbose) .dynhr_cat("Multiple instruments detected. Computing joint optimal path...\n")
     return(.opp_multi_instrument(instrument_irf, baseline_forecast,
                                  loss_weights, target_values,
                                  instrument_penalty, discount,
@@ -221,7 +221,7 @@ opp_optimal_intervention <- function(instrument_irf,
   # ---- 7. Solve for optimal intervention ----
   # Δi* = -G^{-1} * RWz
   if (abs(G) < 1e-14) {
-    if (verbose) warning("Sufficient-statistics G is near-zero. Check IRF scaling.")
+    if (verbose) .dynhr_warn("Sufficient-statistics G is near-zero. Check IRF scaling.")
     G <- max(G, 1e-14)
   }
   delta_i <- -RWz / G
@@ -290,18 +290,18 @@ opp_optimal_intervention <- function(instrument_irf,
   class(result) <- c("dynhr_opp_result", "list")
 
   if (verbose) {
-    cat("\n--- Optimal Policy Intervention ---\n")
-    cat(sprintf("Instrument: %s\n", instrument_name))
-    cat(sprintf("Horizons:   %d\n", n_horiz))
-    cat(sprintf("Discount:   %.4f\n", discount))
-    cat(sprintf("Penalty:    %.4f\n", instrument_penalty))
-    cat(sprintf("Targets:    %s\n", paste(names, collapse = ", ")))
-    cat(sprintf("Loss (baseline): %.6f\n", loss_baseline))
-    cat(sprintf("Loss (optimal):  %.6f\n", loss_optimal))
-    cat(sprintf("Loss reduction:  %.2f%%\n", loss_reduction * 100))
-    cat(sprintf("Optimal intervention:\n"))
+    .dynhr_cat("\n--- Optimal Policy Intervention ---\n")
+    .dynhr_cat(sprintf("Instrument: %s\n", instrument_name))
+    .dynhr_cat(sprintf("Horizons:   %d\n", n_horiz))
+    .dynhr_cat(sprintf("Discount:   %.4f\n", discount))
+    .dynhr_cat(sprintf("Penalty:    %.4f\n", instrument_penalty))
+    .dynhr_cat(sprintf("Targets:    %s\n", paste(names, collapse = ", ")))
+    .dynhr_cat(sprintf("Loss (baseline): %.6f\n", loss_baseline))
+    .dynhr_cat(sprintf("Loss (optimal):  %.6f\n", loss_optimal))
+    .dynhr_cat(sprintf("Loss reduction:  %.2f%%\n", loss_reduction * 100))
+    .dynhr_cat(sprintf("Optimal intervention:\n"))
     print(round(delta_i, 6))
-    cat("---\n")
+    .dynhr_cat("---\n")
   }
 
   result
@@ -482,18 +482,18 @@ opp_optimal_intervention <- function(instrument_irf,
   class(result) <- c("dynhr_opp_result", "list")
 
   if (verbose) {
-    cat("\n--- Multi-Instrument Optimal Policy Intervention ---\n")
-    cat(sprintf("Instruments: %s\n", paste(inst_names, collapse = ", ")))
-    cat(sprintf("Horizons:    %d\n", n_horiz))
-    cat(sprintf("Discount:    %.4f\n", discount))
-    cat(sprintf("Loss (baseline): %.6f\n", loss_baseline))
-    cat(sprintf("Loss (optimal):  %.6f\n", loss_optimal))
-    cat(sprintf("Loss reduction:  %.2f%%\n", loss_reduction * 100))
+    .dynhr_cat("\n--- Multi-Instrument Optimal Policy Intervention ---\n")
+    .dynhr_cat(sprintf("Instruments: %s\n", paste(inst_names, collapse = ", ")))
+    .dynhr_cat(sprintf("Horizons:    %d\n", n_horiz))
+    .dynhr_cat(sprintf("Discount:    %.4f\n", discount))
+    .dynhr_cat(sprintf("Loss (baseline): %.6f\n", loss_baseline))
+    .dynhr_cat(sprintf("Loss (optimal):  %.6f\n", loss_optimal))
+    .dynhr_cat(sprintf("Loss reduction:  %.2f%%\n", loss_reduction * 100))
     for (k in seq_len(n_inst)) {
-      cat(sprintf("Optimal intervention [%s]:\n", inst_names[k]))
+      .dynhr_cat(sprintf("Optimal intervention [%s]:\n", inst_names[k]))
       print(round(delta_i_list[[inst_names[k]]], 6))
     }
-    cat("---\n")
+    .dynhr_cat("---\n")
   }
 
   result
@@ -594,7 +594,7 @@ opp_estimate_instrument_irf <- function(dr,
            paste(exo_names, collapse = ", "))
     }
     instrument_shock <- matched[1]
-    message(sprintf("Auto-detected instrument shock: '%s'", instrument_shock))
+    .dynhr_inform(sprintf("Auto-detected instrument shock: '%s'", instrument_shock))
   }
 
   if (!instrument_shock %in% exo_names) {
@@ -647,16 +647,16 @@ opp_estimate_instrument_irf <- function(dr,
         target_irf <- target_irf / impact_response
         if (isTRUE(getOption("dynhr.opp.verbose", FALSE)) ||
             isTRUE(model$options$verbose)) {
-          message(sprintf("Normalised IRF by instrument '%s' impact response: %.6f",
+          .dynhr_inform(sprintf("Normalised IRF by instrument '%s' impact response: %.6f",
                           instrument_name, impact_response))
         }
       } else {
-        warning(sprintf(
+        .dynhr_warn(sprintf(
           "Instrument '%s' impact response is near-zero (%.2e). Using raw IRF.",
           instrument_name, impact_response))
       }
     } else {
-      warning(sprintf(
+      .dynhr_warn(sprintf(
         "Instrument variable '%s' not found in IRF columns. Available: %s",
         instrument_name, paste(colnames(irf_mat)[1:min(10, ncol(irf_mat))],
                                collapse = ", ")))
@@ -788,7 +788,7 @@ opp_sufficient_stats <- function(model,
   # ---- 2. Get decision rules ----
   if (is.null(dr)) {
     # Need to solve the model
-    if (verbose) cat("[1/4] Compiling model and solving perturbation...\n")
+    if (verbose) .dynhr_cat("[1/4] Compiling model and solving perturbation...\n")
     compiled <- compile_model(dynare_model, verbose = FALSE)
     ss <- solve_steady(compiled, params,
                         endo_names = dynare_model$var_names,
@@ -817,7 +817,7 @@ opp_sufficient_stats <- function(model,
   }
 
   # ---- 4. Extract instrument IRF ----
-  if (verbose) cat(sprintf("[2/4] Extracting instrument IRF (shock=%s, periods=%d)...\n",
+  if (verbose) .dynhr_cat(sprintf("[2/4] Extracting instrument IRF (shock=%s, periods=%d)...\n",
                            instrument_shock %||% "auto", n_periods))
 
   instrument_irf <- opp_estimate_instrument_irf(
@@ -837,7 +837,7 @@ opp_sufficient_stats <- function(model,
   used_inst  <- attr(instrument_irf, "instrument_name")
 
   # ---- 5. Build baseline forecast ----
-  if (verbose) cat("[3/4] Preparing baseline forecast...\n")
+  if (verbose) .dynhr_cat("[3/4] Preparing baseline forecast...\n")
 
   if (is.null(baseline_forecast)) {
     # Default: zero forecast (return to steady state)
@@ -875,7 +875,7 @@ opp_sufficient_stats <- function(model,
   }
 
   # ---- 6. Compute optimal intervention ----
-  if (verbose) cat("[4/4] Computing optimal intervention...\n")
+  if (verbose) .dynhr_cat("[4/4] Computing optimal intervention...\n")
 
   result <- opp_optimal_intervention(
     instrument_irf    = instrument_irf,
@@ -1039,13 +1039,13 @@ opp_welfare_gain <- function(opp_result,
   class(result) <- c("dynhr_opp_welfare", "list")
 
   if (verbose) {
-    cat("\n--- OPP Welfare Gain ---\n")
-    cat(sprintf("Loss reduction:     %.2f%%\n", loss_red * 100))
+    .dynhr_cat("\n--- OPP Welfare Gain ---\n")
+    .dynhr_cat(sprintf("Loss reduction:     %.2f%%\n", loss_red * 100))
     if (is.finite(ce_pct)) {
-      cat(sprintf("CE welfare gain:    %.4f%%\n", ce_pct))
+      .dynhr_cat(sprintf("CE welfare gain:    %.4f%%\n", ce_pct))
     }
-    cat(sprintf("Method:             %s\n", result$method))
-    cat("---\n")
+    .dynhr_cat(sprintf("Method:             %s\n", result$method))
+    .dynhr_cat("---\n")
   }
 
   result

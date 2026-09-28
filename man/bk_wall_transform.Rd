@@ -21,7 +21,7 @@ bk_wall_transform(
 \item{model, compiled}{Parsed \code{dynhr_mod} and its compiled form.}
 
 \item{prior_spec}{data.frame (as consumed by
-\code{\link{build_param_transform}}) covering `other_names`'s support.}
+\code{\link{build_param_transform}}) covering \code{other_names}'s support.}
 
 \item{par_names}{Character vector, the full free-parameter vector order
 (same convention as \code{build_param_transform}).}
@@ -31,7 +31,7 @@ boundary-relevant coordinate theta_j.}
 
 \item{bracket}{length-2 numeric, the theta_j search range for uniroot()
 (must straddle the wall for every \eqn{\theta_{-j}} the sampler will visit;
-widen if `to_unconstrained`/`to_constrained` fail loud on a bracket
+widen if \code{to_unconstrained}/\code{to_constrained} fail loud on a bracket
 error).}
 
 \item{params}{Optional named numeric vector of ALL model parameters

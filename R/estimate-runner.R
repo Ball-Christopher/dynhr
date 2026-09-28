@@ -40,7 +40,7 @@
     backend <- config$parallel_backend %||% "mirai"
 
     if (backend == "mirai") {
-      cat("  Running parallel MCMC (mirai backend)...\n")
+      .dynhr_cat("  Running parallel MCMC (mirai backend)...\n")
       return(run_mcmc_mirai(
         parsed_model = parsed_model, Y = Y,
         prior_spec = prior_spec, obs_names = obs_names,
@@ -55,7 +55,7 @@
     }
 
     if (backend == "psock" && exists("run_mcmc_parallel", mode = "function")) {
-      cat("  Running parallel MCMC (psock backend)...\n")
+      .dynhr_cat("  Running parallel MCMC (psock backend)...\n")
       return(run_mcmc_parallel(
         parsed_model = parsed_model, Y = Y,
         prior_spec = prior_spec, obs_names = obs_names,
@@ -70,7 +70,7 @@
     }
   }
 
-  cat(sprintf("  Running sequential MCMC: %d chains x %dk draws...\n",
+  .dynhr_cat(sprintf("  Running sequential MCMC: %d chains x %dk draws...\n",
               n_chains, n_draws / 1000))
 
   L <- t(chol(Sigma_prop))
@@ -100,7 +100,7 @@
     lp0 <- log_post_fn(th0)$logpost
     if (!is.finite(lp0)) th0 <- theta_mode
 
-    cat(sprintf("  Chain %d/%d starting...\n", ch, n_chains))
+    .dynhr_cat(sprintf("  Chain %d/%d starting...\n", ch, n_chains))
     t0 <- Sys.time()
     chains[[ch]] <- rwmh(log_post_fn, th0, Sigma_prop,
                          n_draws     = n_draws + n_burn,
@@ -120,7 +120,7 @@
         elapsed_min   = elapsed,
         stringsAsFactors = FALSE
       ))
-      cat(sprintf("  Chain %d done: accept=%.1f%%, %.1f min\n",
+      .dynhr_cat(sprintf("  Chain %d done: accept=%.1f%%, %.1f min\n",
                   ch, chains[[ch]]$acceptance_rate * 100, elapsed))
     }
   }
@@ -176,38 +176,38 @@ estimate_model <- function(config) {
   vb     <- config$verbose
   prefix <- file.path(config$output_dir, config$output_prefix)
 
-  cat("\n================================================================\n")
-  cat("  estimate_model: end-to-end DSGE estimation\n")
-  cat("================================================================\n\n")
+  .dynhr_cat("\n================================================================\n")
+  .dynhr_cat("  estimate_model: end-to-end DSGE estimation\n")
+  .dynhr_cat("================================================================\n\n")
 
   ## Step 1: Parse
-  if (vb) cat("-- Step 1: Parse model --\n")
+  if (vb) .dynhr_cat("-- Step 1: Parse model --\n")
   parsed_model <- parse_mod(config$model_file)
-  if (vb) cat(sprintf("  %d endo, %d exo, %d params, %d eqs\n",
+  if (vb) .dynhr_cat(sprintf("  %d endo, %d exo, %d params, %d eqs\n",
                       length(parsed_model$var_names),
                       length(parsed_model$varexo_names),
                       length(parsed_model$param_values),
                       length(parsed_model$equations)))
 
   ## Step 2: Extract priors
-  if (vb) cat("\n-- Step 2: Extract prior specification --\n")
+  if (vb) .dynhr_cat("\n-- Step 2: Extract prior specification --\n")
   prior_spec <- extract_prior_spec(parsed_model, verbose = vb)
 
   ## Step 3: Compile
-  if (vb) cat("-- Step 3: Compile model --\n")
+  if (vb) .dynhr_cat("-- Step 3: Compile model --\n")
   compiled <- compile_model(parsed_model, verbose = FALSE)
 
   ## Step 4: Solve at calibration
-  if (vb) cat("-- Step 4: Solve at calibration --\n")
+  if (vb) .dynhr_cat("-- Step 4: Solve at calibration --\n")
   stoch_cal <- stoch_simul(parsed_model, verbose = FALSE)
   bk_ok <- if (!is.null(stoch_cal$dr$bk_satisfied)) stoch_cal$dr$bk_satisfied
             else if (!is.null(stoch_cal$bk_satisfied)) stoch_cal$bk_satisfied
             else NA
-  if (vb) cat(sprintf("  BK satisfied: %s\n", bk_ok))
+  if (vb) .dynhr_cat(sprintf("  BK satisfied: %s\n", bk_ok))
   if (isFALSE(bk_ok)) stop("BK conditions not satisfied at calibration.")
 
   ## Step 5: Load data
-  if (vb) cat("\n-- Step 5: Load data --\n")
+  if (vb) .dynhr_cat("\n-- Step 5: Load data --\n")
   obs_names <- config$obs_names
   data_raw  <- read.csv(config$data_file)
   if (!is.null(config$data_col_map)) {
@@ -219,7 +219,7 @@ estimate_model <- function(config) {
   }
   stopifnot(all(obs_names %in% names(data_raw)))
   Y <- as.matrix(data_raw[, obs_names])
-  if (vb) cat(sprintf("  Y: %d x %d\n", nrow(Y), ncol(Y)))
+  if (vb) .dynhr_cat(sprintf("  Y: %d x %d\n", nrow(Y), ncol(Y)))
 
   ## Apply call-level filter_tunes override (config$filter_tunes).
   parsed_model <- .resolve_filter_tunes(parsed_model, config$filter_tunes)
@@ -235,7 +235,7 @@ estimate_model <- function(config) {
     parsed_model, parsed_model$varexo_names, nrow(Y))
 
   ## Step 6: Build log-posterior
-  if (vb) cat("\n-- Step 6: Build log-posterior --\n")
+  if (vb) .dynhr_cat("\n-- Step 6: Build log-posterior --\n")
   log_post_fn <- make_log_posterior(parsed_model, Y, prior_spec,
                                     obs_names, compiled,
                                     me_extra      = me_extra,
@@ -245,7 +245,7 @@ estimate_model <- function(config) {
                                     system_priors = config$system_priors %||% NULL)
 
   ## Step 7: Test at calibration
-  if (vb) cat("\n-- Step 7: Test KF at calibration --\n")
+  if (vb) .dynhr_cat("\n-- Step 7: Test KF at calibration --\n")
   theta_cal <- setNames(numeric(nrow(prior_spec)), prior_spec$name)
   for (i in seq_len(nrow(prior_spec))) {
     nm <- prior_spec$name[i]
@@ -254,10 +254,10 @@ estimate_model <- function(config) {
                     else prior_spec$mean[i]
   }
   lp_cal <- log_post_fn(theta_cal)
-  if (vb) cat(sprintf("  Log-posterior at calibration: %.4f\n", lp_cal$logpost))
+  if (vb) .dynhr_cat(sprintf("  Log-posterior at calibration: %.4f\n", lp_cal$logpost))
 
   ## Step 9: Mode-finding
-  if (vb) cat("\n-- Step 9: Mode-finding --\n")
+  if (vb) .dynhr_cat("\n-- Step 9: Mode-finding --\n")
   mode_res <- .run_mode_finding(log_post_fn, theta_cal, prior_spec,
                                 nm_maxit     = config$nm_maxit,
                                 lbfgsb_maxit = config$lbfgsb_maxit,
@@ -276,25 +276,25 @@ estimate_model <- function(config) {
     obs_names = obs_names, method = "NM+L-BFGS-B"
   )
   saveRDS(mode_out, paste0(prefix, "_mode.rds"))
-  if (vb) cat(sprintf("  Mode saved: %s_mode.rds\n", prefix))
+  if (vb) .dynhr_cat(sprintf("  Mode saved: %s_mode.rds\n", prefix))
 
   if (vb) {
-    cat("\n  Mode estimates:\n")
-    cat(sprintf("  %-14s %10s %10s %10s %10s\n",
+    .dynhr_cat("\n  Mode estimates:\n")
+    .dynhr_cat(sprintf("  %-14s %10s %10s %10s %10s\n",
                 "Parameter", "Prior", "Mode", "SE", "Mode/Prior"))
     for (i in seq_along(theta_mode)) {
       se_i <- if (!is.null(mode_res$se_mode)) mode_res$se_mode[i] else NA
-      cat(sprintf("  %-14s %10.4f %10.4f %10.4f %10.3f\n",
+      .dynhr_cat(sprintf("  %-14s %10.4f %10.4f %10.4f %10.3f\n",
                   names(theta_mode)[i], prior_spec$mean[i],
                   theta_mode[i], se_i,
                   theta_mode[i] / prior_spec$mean[i]))
     }
-    cat(sprintf("\n  loglik=%.2f  logprior=%.2f  logpost=%.2f\n",
+    .dynhr_cat(sprintf("\n  loglik=%.2f  logprior=%.2f  logpost=%.2f\n",
                 ll_mode, lp_mode, mode_res$logpost))
   }
 
   ## Step 10: Post-mode stoch_simul
-  if (vb) cat("\n-- Step 10: Post-mode diagnostics --\n")
+  if (vb) .dynhr_cat("\n-- Step 10: Post-mode diagnostics --\n")
   orig_pv <- parsed_model$param_values
   for (nm in names(theta_mode))
     if (nm %in% names(parsed_model$param_values))
@@ -306,7 +306,7 @@ estimate_model <- function(config) {
   mcmc_res <- NULL
   conv_res <- NULL
   if (config$n_draws > 0) {
-    if (vb) cat(sprintf("\n-- Step 11: MCMC (%d chains x %dk) --\n",
+    if (vb) .dynhr_cat(sprintf("\n-- Step 11: MCMC (%d chains x %dk) --\n",
                         config$n_chains, config$n_draws / 1000))
 
     n_par      <- length(theta_mode)
@@ -329,11 +329,11 @@ estimate_model <- function(config) {
     combined <- conv_res$combined
 
     if (!is.null(conv_res$rhat) && vb) {
-      cat(sprintf("  R-hat < 1.10: %d / %d\n",
+      .dynhr_cat(sprintf("  R-hat < 1.10: %d / %d\n",
                   sum(conv_res$rhat < 1.10), length(conv_res$rhat)))
-      cat(sprintf("  Worst: %s = %.3f\n",
+      .dynhr_cat(sprintf("  Worst: %s = %.3f\n",
                   names(which.max(conv_res$rhat)), max(conv_res$rhat)))
-      cat(sprintf("  Median ESS: %.0f\n", median(conv_res$ess)))
+      .dynhr_cat(sprintf("  Median ESS: %.0f\n", median(conv_res$ess)))
     }
 
     pp_sds <- .posterior_predictive(combined, parsed_model, obs_names, n_pp = 100)
@@ -352,21 +352,21 @@ estimate_model <- function(config) {
       obs_names   = obs_names
     )
     saveRDS(mcmc_res, paste0(prefix, "_mcmc.rds"))
-    if (vb) cat(sprintf("  MCMC saved: %s_mcmc.rds\n", prefix))
+    if (vb) .dynhr_cat(sprintf("  MCMC saved: %s_mcmc.rds\n", prefix))
   } else {
-    if (vb) cat("\n  MCMC skipped (n_draws = 0)\n")
+    if (vb) .dynhr_cat("\n  MCMC skipped (n_draws = 0)\n")
   }
 
   ## Final summary
-  cat("\n================================================================\n")
-  cat("  ESTIMATION COMPLETE\n")
-  cat("================================================================\n\n")
-  cat(sprintf("  Model:     %s\n", config$model_file))
-  cat(sprintf("  Data:      %s (%d x %d)\n", config$data_file, nrow(Y), ncol(Y)))
-  cat(sprintf("  Params:    %d estimated\n", nrow(prior_spec)))
-  cat(sprintf("  Mode:      logpost=%.2f\n", mode_res$logpost))
+  .dynhr_cat("\n================================================================\n")
+  .dynhr_cat("  ESTIMATION COMPLETE\n")
+  .dynhr_cat("================================================================\n\n")
+  .dynhr_cat(sprintf("  Model:     %s\n", config$model_file))
+  .dynhr_cat(sprintf("  Data:      %s (%d x %d)\n", config$data_file, nrow(Y), ncol(Y)))
+  .dynhr_cat(sprintf("  Params:    %d estimated\n", nrow(prior_spec)))
+  .dynhr_cat(sprintf("  Mode:      logpost=%.2f\n", mode_res$logpost))
   if (!is.null(mcmc_res))
-    cat(sprintf("  MCMC:      %d chains, accept=%s\n",
+    .dynhr_cat(sprintf("  MCMC:      %d chains, accept=%s\n",
                 config$n_chains,
                 paste(sprintf("%.0f%%",
                               mcmc_res$chain_stats$accept_rate * 100),
@@ -407,7 +407,7 @@ estimate_model <- function(config) {
         if (v %in% names(r_k$moments$std_dev))
           pp_sds[k, v] <- r_k$moments$std_dev[v]
 
-    if (k %% 25 == 0) cat(sprintf("    %d/%d\n", k, n_pp))
+    if (k %% 25 == 0) .dynhr_cat(sprintf("    %d/%d\n", k, n_pp))
   }
   parsed_model$param_values <- orig_pv
   pp_sds

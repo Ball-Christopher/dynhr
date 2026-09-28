@@ -39,7 +39,7 @@
 #' Treat each column of an (anything x n_u^3) matrix as indexed by
 #' (k1, k2, k3) in col-major order (k3 fastest, k1 slowest).
 #'
-#' `perm_dims = c(a, b, c)` means: at output column position (k1, k2, k3),
+#' \code{perm_dims = c(a, b, c)} means: at output column position (k1, k2, k3),
 #' pull the source-matrix column whose (k1', k2', k3') = (k_a, k_b, k_c).
 #'
 #' Used to translate Mutschler's identities:
@@ -70,8 +70,8 @@
 #' Reorder dense/sparse derivative rows from compiled equation order to
 #' declaration-variable order.
 #'
-#' `extract_system_matrices()` applies this same row convention to the
-#' Jacobian before building `A_L` and `fp`.  Higher-order derivative tensors
+#' \code{extract_system_matrices()} applies this same row convention to the
+#' Jacobian before building \code{A_L} and \code{fp}.  Higher-order derivative tensors
 #' evaluated directly from the compiled dynamic function still arrive in
 #' compiled equation order, so sigma/cumulant RHS terms must be permuted before
 #' they are combined with first-order system matrices.
@@ -109,7 +109,7 @@
   }
 
   if (verbose) {
-    cat(sprintf("  %s rows reordered: compiled -> declaration order.\n",
+    .dynhr_cat(sprintf("  %s rows reordered: compiled -> declaration order.\n",
                 label))
   }
 
@@ -149,7 +149,7 @@
     }
   }
   if (!all(keep)) {
-    warning("Some jumper variables have no lead compound-column; dropping.")
+    .dynhr_warn("Some jumper variables have no lead compound-column; dropping.")
   }
   list(jumper_idx        = jumper_idx[keep],
        jumper_compound_c = jc[keep])
@@ -160,32 +160,32 @@
 # Main entry: recompute ghs3 given a third-moment vector
 # =====================================================================
 
-#' Recompute the third-cumulant correction term `ghs3`
+#' Recompute the third-cumulant correction term \code{ghs3}
 #'
-#' For Gaussian shocks, SIGMA3 = 0 and `ghs3 = 0`. Supply a non-zero
-#' `sigma3` (the n_u^3 vector of `E[kron(u, u, u)]`) to obtain the
+#' For Gaussian shocks, SIGMA3 = 0 and \code{ghs3 = 0}. Supply a non-zero
+#' \code{sigma3} (the n_u^3 vector of \code{E[kron(u, u, u)]}) to obtain the
 #' non-Gaussian third-cumulant correction.
 #'
-#' This is the order-3 analog of Schmitt-Grohe & Uribe's `ghss` for
-#' covariance: `ghs3` is the unconditional bias the third moment of the
+#' This is the order-3 analog of Schmitt-Grohe & Uribe's \code{ghss} for
+#' covariance: \code{ghs3} is the unconditional bias the third moment of the
 #' innovations introduces into the policy at order (sigma^3).
 #'
-#' Layout convention for `sigma3`: column-major, k3 fastest, k1 slowest
-#' (matches `as.vector(array(E[u_i u_j u_k], dim = c(n_u, n_u, n_u)))`
+#' Layout convention for \code{sigma3}: column-major, k3 fastest, k1 slowest
+#' (matches \code{as.vector(array(E[u_i u_j u_k], dim = c(n_u, n_u, n_u)))}
 #' when the first index varies slowest -- i.e. the same layout as
-#' `kron(u, kron(u, u))` in MATLAB / Mutschler 2022).
+#' \code{kron(u, kron(u, u))} in MATLAB / Mutschler 2022).
 #'
-#' @param dr3      DecisionRules3 from `solve_perturbation_order3()`
-#' @param compiled dynhr_compiled from `compile_model()`
+#' @param dr3      DecisionRules3 from \code{solve_perturbation_order3()}
+#' @param compiled dynhr_compiled from \code{compile_model()}
 #' @param ss       Named numeric steady state vector
 #' @param params   Named numeric parameter vector
 #' @param sigma3   Numeric vector of length n_u^3 with the third-order
 #'                 product moments of the shocks. Default NULL is treated
-#'                 as Gaussian (all zero), yielding `ghs3 = 0`.
-#' @return The `dr3` object with `$ghs3` (length-n_endo vector) and
-#'   `$sigma3` (the moment vector used) added. `$sigma_correction` is
-#'   updated to `"ghs3_only"` (when `sigma3` is non-zero) or stays
-#'   `"not_implemented"` (when Gaussian -- to signal that the rest of
+#'                 as Gaussian (all zero), yielding \code{ghs3 = 0}.
+#' @return The \code{dr3} object with \code{$ghs3} (length-n_endo vector) and
+#'   \code{$sigma3} (the moment vector used) added. \code{$sigma_correction} is
+#'   updated to \code{"ghs3_only"} (when \code{sigma3} is non-zero) or stays
+#'   \code{"not_implemented"} (when Gaussian -- to signal that the rest of
 #'   the sigma terms are still unimplemented).
 #' @export
 solve_third_cumulant <- function(dr3, compiled, ss, params, sigma3 = NULL) {
@@ -382,7 +382,7 @@ solve_third_cumulant <- function(dr3, compiled, ss, params, sigma3 = NULL) {
 
 #' Symmetrize the (zup, zXup) bilinear over the two u'-orderings.
 #'
-#' Input `raw` has rows indexed by equation e and cols flat-(n_u, n_X, n_u)
+#' Input \code{raw} has rows indexed by equation e and cols flat-(n_u, n_X, n_u)
 #' with the (d1, d2, X) layout flattened col-major (d1 fastest, then d2,
 #' then X).  Returns an n_eq x (n_X * n_u * n_u) matrix with cols laid out
 #' (X slow, k1 mid, k2 fast) -- matching Mutschler's F-target convention
@@ -417,24 +417,6 @@ solve_third_cumulant <- function(dr3, compiled, ss, params, sigma3 = NULL) {
 }
 
 
-#' Solve for the order-2 stochastic-SS correction `ghss` (Dynare `ghs2`).
-#'
-#' Canonical solve following Mutschler (2022)
-#' `perturbation_solver_nonsymmetric_order3.m` eqs. 95-99; matches
-#' Dynare's `oo_.dr.ghs2`:
-#'
-#'   ghs2 = -(A_L + f_+)^{-1}
-#'           [ f_+ · ghuu · vec(Σ)  +  H2(T_up, T_up) · vec(Σ) ]
-#'
-#' where `T_up = dz/du'` is the jumper block of the compound-variable
-#' partial.  Called by `solve_perturbation_order2()` to populate
-#' `dr2$ghss`, and reused by `solve_sigma_cross()` via that field.
-#'
-#' Lives in this file (rather than `solve-perturbation-order2.R`)
-#' because it depends on `.bilinear_h2`, which is part of the
-#' sigma-cross tensor toolkit.
-#'
-#' @noRd
 #' Two-sided (row + column) equilibrated linear solve.
 #'
 #' \code{solve()} on a badly-scaled but nonsingular matrix is singular to
@@ -457,6 +439,24 @@ solve_third_cumulant <- function(dr3, compiled, ss, params, sigma3 = NULL) {
   y / cc
 }
 
+#' Solve for the order-2 stochastic-SS correction \code{ghss} (Dynare \code{ghs2}).
+#'
+#' Canonical solve following Mutschler (2022)
+#' \code{perturbation_solver_nonsymmetric_order3.m} eqs. 95-99; matches
+#' Dynare's \code{oo_.dr.ghs2}:
+#'
+#'   ghs2 = -(A_L + f_+)^{-1}
+#'           [ f_+ · ghuu · vec(Σ)  +  H2(T_up, T_up) · vec(Σ) ]
+#'
+#' where \code{T_up = dz/du'} is the jumper block of the compound-variable
+#' partial.  Called by \code{solve_perturbation_order2()} to populate
+#' \code{dr2$ghss}, and reused by \code{solve_sigma_cross()} via that field.
+#'
+#' Lives in this file (rather than \code{solve-perturbation-order2.R})
+#' because it depends on \code{.bilinear_h2}, which is part of the
+#' sigma-cross tensor toolkit.
+#'
+#' @noRd
 .solve_ghss <- function(A_L, fp, ghuu, T_up, H2, Sigma_e) {
   n_eq <- dim(H2)[1]
   n_u  <- ncol(T_up)
@@ -471,20 +471,20 @@ solve_third_cumulant <- function(dr3, compiled, ss, params, sigma3 = NULL) {
 #' Recompute ghxss and ghuss (Levintal / Mutschler sigma-cross terms)
 #'
 #' Translates Mutschler (2022) perturbation_solver_nonsymmetric_order3.m
-#' lines 101-156.  Requires `dr3` to already carry `ghss` (= ghs2) and
+#' lines 101-156.  Requires \code{dr3} to already carry \code{ghss} (= ghs2) and
 #' the deterministic third-order rules (ghxxx/ghxxu/ghxuu/ghuuu).
 #'
-#' Uses the model's declared shock covariance `compiled$model$Sigma_e`
+#' Uses the model's declared shock covariance \code{compiled$model$Sigma_e}
 #' if available, else the identity.
 #'
-#' @param dr3       DecisionRules3 from `solve_perturbation_order3()`
+#' @param dr3       DecisionRules3 from \code{solve_perturbation_order3()}
 #' @param compiled  dynhr_compiled
 #' @param ss        Named numeric SS vector
 #' @param params    Named numeric parameter vector
 #' @param Sigma_e   Optional n_u x n_u shock covariance (default: from
-#'                   `compiled$model$Sigma_e` or identity).
-#' @return The `dr3` object with `$ghxss` (n_endo x n_state) and `$ghuss`
-#'   (n_endo x n_u) added; `$sigma_correction` flag updated.
+#'                   \code{compiled$model$Sigma_e} or identity).
+#' @return The \code{dr3} object with \code{$ghxss} (n_endo x n_state) and \code{$ghuss}
+#'   (n_endo x n_u) added; \code{$sigma_correction} flag updated.
 #' @export
 solve_sigma_cross <- function(dr3, compiled, ss, params, Sigma_e = NULL) {
   if (!inherits(dr3, "DecisionRules3")) {

@@ -136,11 +136,11 @@
 
   c3_p <- if (!is.null(dr_p)) {
     tryCatch(compute_third_cumulant(dr_p, model, params_p)$c3_obs,
-             error = function(e) NULL)
+             error = function(e) .dynhr_reraise_bug(e, NULL))
   } else NULL
   c3_m <- if (!is.null(dr_m)) {
     tryCatch(compute_third_cumulant(dr_m, model, params_m)$c3_obs,
-             error = function(e) NULL)
+             error = function(e) .dynhr_reraise_bug(e, NULL))
   } else NULL
 
   if (!is.null(c3_p) && !is.null(c3_m)) return((c3_p - c3_m) / (2 * h))
@@ -175,11 +175,11 @@
 
   c4_p <- if (!is.null(dr_p)) {
     tryCatch(compute_fourth_cumulant(dr_p, model, params_p)$c4_obs,
-             error = function(e) NULL)
+             error = function(e) .dynhr_reraise_bug(e, NULL))
   } else NULL
   c4_m <- if (!is.null(dr_m)) {
     tryCatch(compute_fourth_cumulant(dr_m, model, params_m)$c4_obs,
-             error = function(e) NULL)
+             error = function(e) .dynhr_reraise_bug(e, NULL))
   } else NULL
 
   if (!is.null(c4_p) && !is.null(c4_m)) {
@@ -242,7 +242,7 @@ cumulant_moment_derivs_3_4 <- function(dr2, model, params, o2d, obs_idx,
   if (is.null(compiled)) {
     compiled <- tryCatch(
       compile_model(model, verbose = FALSE, max_order = 2L),
-      error = function(e) NULL)
+      error = function(e) .dynhr_reraise_bug(e, NULL))
   }
 
   endo_names  <- dr2$endo_names
@@ -261,7 +261,7 @@ cumulant_moment_derivs_3_4 <- function(dr2, model, params, o2d, obs_idx,
     h_k  <- h_rel * (abs(pval) + 1e-8)
 
     if (is.null(compiled)) {
-      warning("cumulant_moment_derivs_3_4: 'compiled' not supplied; orders ",
+      .dynhr_warn("cumulant_moment_derivs_3_4: 'compiled' not supplied; orders ",
               "3-4 finite-difference derivatives set to zero for ", pnm,
               call. = FALSE)
       result[[pnm]] <- list(
@@ -275,8 +275,10 @@ cumulant_moment_derivs_3_4 <- function(dr2, model, params, o2d, obs_idx,
     ## Per-parameter analytic solution derivatives (order-1 dG/dH/dys + order-2
     ## d_ghxx/...) enabling the no-re-solve directional derivative.  NULL -> the
     ## helpers fall back to the re-solving FD.
-    o1_k <- tryCatch(o2d$first$derivs[[pnm]], error = function(e) NULL)
-    o2_k <- tryCatch(o2d$derivs[[pnm]],       error = function(e) NULL)
+    o1_k <- tryCatch(o2d$first$derivs[[pnm]],
+                     error = function(e) .dynhr_reraise_bug(e, NULL))
+    o2_k <- tryCatch(o2d$derivs[[pnm]],
+                     error = function(e) .dynhr_reraise_bug(e, NULL))
     if (!is.null(o1_k) && !isTRUE(o1_k$ok)) o1_k <- NULL
     if (!is.null(o2_k) && !isTRUE(o2_k$ok)) o2_k <- NULL
 
@@ -285,7 +287,7 @@ cumulant_moment_derivs_3_4 <- function(dr2, model, params, o2d, obs_idx,
       .d_cumulant_order3(model, compiled, dr2, params, pnm, h_k, c3_obs_base,
                          o1 = o1_k, o2 = o2_k),
       error = function(e) {
-        warning(sprintf("cumulant_moment_derivs_3_4: order-3 deriv failed for %s: %s",
+        .dynhr_warn(sprintf("cumulant_moment_derivs_3_4: order-3 deriv failed for %s: %s",
                         pnm, conditionMessage(e)))
         NULL
       }
@@ -310,7 +312,7 @@ cumulant_moment_derivs_3_4 <- function(dr2, model, params, o2d, obs_idx,
       .d_cumulant_order4(model, compiled, dr2, params, pnm, h_k, c4_obs_base,
                          o1 = o1_k, o2 = o2_k),
       error = function(e) {
-        warning(sprintf("cumulant_moment_derivs_3_4: order-4 deriv failed for %s: %s",
+        .dynhr_warn(sprintf("cumulant_moment_derivs_3_4: order-4 deriv failed for %s: %s",
                         pnm, conditionMessage(e)))
         NULL
       }
@@ -392,24 +394,30 @@ cumulant_moment_derivs_3_4 <- function(dr2, model, params, o2d, obs_idx,
   ## (a) transposed tensor-Lyapunov solve (**): (I - hx^{⊗3})' M = bar_c3
   ## Eigen-solve in the eigenbasis of hx' (== conj-eigenbasis of hx), mirroring
   ## the forward denominator 1 - lam_i lam_j lam_k.
-  eigT <- eigen(t(hx))
-  V   <- eigT$vectors
-  lam <- eigT$values
-  Vi  <- solve(V)
-  b_tfm <- Vi %*% bar_c3
-  b_tfm <- .apply_kron2(Vi, b_tfm)
-  M_tfm <- matrix(0, n_s, n_s * n_s)
-  for (i in seq_len(n_s)) {
-    row_b <- matrix(b_tfm[i, ], n_s, n_s)
-    for (j in seq_len(n_s)) for (k in seq_len(n_s)) {
-      denom <- 1 - lam[i] * lam[j] * lam[k]
-      row_b[j, k] <- if (abs(denom) > 1e-14) row_b[j, k] / denom else 0
+  ## A numerically singular eigenvector basis (repeated exact eigenvalue, see
+  ## .tensor_lyap_eigenbasis) switches to the doubling solve with hx' instead.
+  eigT <- .tensor_lyap_eigenbasis(t(hx))
+  if (is.null(eigT)) {
+    M <- .tensor_lyap_doubling(t(hx), bar_c3, .tensor_lyap_op3)
+  } else {
+    V   <- eigT$V
+    lam <- eigT$lam
+    Vi  <- eigT$Vi
+    b_tfm <- Vi %*% bar_c3
+    b_tfm <- .apply_kron2(Vi, b_tfm)
+    M_tfm <- matrix(0, n_s, n_s * n_s)
+    for (i in seq_len(n_s)) {
+      row_b <- matrix(b_tfm[i, ], n_s, n_s)
+      for (j in seq_len(n_s)) for (k in seq_len(n_s)) {
+        denom <- 1 - lam[i] * lam[j] * lam[k]
+        row_b[j, k] <- if (abs(denom) > 1e-14) row_b[j, k] / denom else 0
+      }
+      M_tfm[i, ] <- as.numeric(row_b)
     }
-    M_tfm[i, ] <- as.numeric(row_b)
+    M <- V %*% M_tfm
+    M <- .apply_kron2(V, M)
+    M <- Re(M)
   }
-  M <- V %*% M_tfm
-  M <- .apply_kron2(V, M)
-  M <- Re(M)
 
   ## (b) bar_rhs = 1/2 M  (rhs enters (*) as 1/2 vec(rhs))
   bar_rhs <- 0.5 * M
@@ -512,7 +520,8 @@ cumulant_moment_derivs_3_4 <- function(dr2, model, params, o2d, obs_idx,
   if (n == 0L) return(list(bar_Q = matrix(0, 0, 0), bar_A = matrix(0, 0, 0)))
   ## bar_Q solves M' vec(bar_Q) = vec(bar_P) with M = I - kron(A, A);
   ## M' = I - kron(A', A'), i.e. the Lyapunov with A -> A'.
-  bar_Q <- tryCatch(.solve_lyapunov(t(A), bar_P), error = function(e) NULL)
+  bar_Q <- tryCatch(.solve_lyapunov(t(A), bar_P),
+                    error = function(e) .dynhr_reraise_bug(e, NULL))
   if (is.null(bar_Q) || !all(is.finite(bar_Q))) return(NULL)
   ## dP = A dP A' + (dA P A' + A P dA' + dQ); adjoint wrt A:
   ##   bar_A = (bar_Q + t(bar_Q)) A P   (using P = P')

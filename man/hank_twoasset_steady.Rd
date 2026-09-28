@@ -37,7 +37,7 @@ hank_twoasset_steady(
 \item{b_grid, a_grid}{Liquid and illiquid grids.  Size them so essentially no
 stationary mass reaches either top: where a policy overshoots its grid the
 Young lottery clamps it, which breaks the aggregate resource identity and
-hence market clearing (see \code{briefs/19-twoasset-hank-scope.md} F13).
+hence market clearing.
 Widen the span and refine the grid together as a remedy, then require
 \code{\link{hank_twoasset_grid_check}} to clear; there is no sufficient
 span-to-points formula because failures are non-monotone in the geometric

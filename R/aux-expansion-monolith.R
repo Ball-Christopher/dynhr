@@ -58,7 +58,7 @@
   match_strings <- regmatches(model_body, matches)[[1]]
   
   if (length(match_strings) == 0) {
-    if (verbose) cat("  No leads/lags > 1 found; no auxiliary expansion needed.\n")
+    if (verbose) .dynhr_cat("  No leads/lags > 1 found; no auxiliary expansion needed.\n")
     return(list(
       model_body   = model_body,
       aux_var_names = character(0),
@@ -98,7 +98,7 @@
   }
   
   if (nrow(timing_records) == 0) {
-    if (verbose) cat("  No endogenous leads/lags > 1 found.\n")
+    if (verbose) .dynhr_cat("  No endogenous leads/lags > 1 found.\n")
     return(list(
       model_body    = model_body,
       aux_var_names = character(0),
@@ -127,7 +127,7 @@
 
   if (nrow(leads_gt1) == 0 && nrow(lags_gt1) == 0 &&
       nrow(exo_leads) == 0 && nrow(exo_lags) == 0) {
-    if (verbose) cat("  All leads/lags are within [-1, +1]; no auxiliary expansion needed.\n")
+    if (verbose) .dynhr_cat("  All leads/lags are within [-1, +1]; no auxiliary expansion needed.\n")
     return(list(
       model_body    = model_body,
       aux_var_names = character(0),
@@ -158,7 +158,7 @@
       max_lead <- max(leads_gt1$timing[leads_gt1$var_name == vn])
       
       if (verbose) {
-        cat(sprintf("  Expanding %s with max lead %d: creating %d auxiliary variable(s)\n",
+        .dynhr_cat(sprintf("  Expanding %s with max lead %d: creating %d auxiliary variable(s)\n",
                     vn, max_lead, max_lead - 1L))
       }
       
@@ -210,7 +210,7 @@
         new_body <- gsub(pat, replacement, new_body, perl = TRUE)
         
         if (verbose) {
-          cat(sprintf("    Rewrote %s(%d) => %s(1)\n", vn, tt, chain_names[tt - 1L]))
+          .dynhr_cat(sprintf("    Rewrote %s(%d) => %s(1)\n", vn, tt, chain_names[tt - 1L]))
         }
       }
     }
@@ -224,7 +224,7 @@
       max_lag_depth <- max(abs(lags_gt1$timing[lags_gt1$var_name == vn]))
       
       if (verbose) {
-        cat(sprintf("  Expanding %s with max lag %d: creating %d auxiliary variable(s)\n",
+        .dynhr_cat(sprintf("  Expanding %s with max lag %d: creating %d auxiliary variable(s)\n",
                     vn, max_lag_depth, max_lag_depth - 1L))
       }
       
@@ -271,7 +271,7 @@
         new_body <- gsub(pat, replacement, new_body, perl = TRUE)
         
         if (verbose) {
-          cat(sprintf("    Rewrote %s(-%d) => %s(-1)\n", vn, tt, chain_names[tt - 1L]))
+          .dynhr_cat(sprintf("    Rewrote %s(-%d) => %s(-1)\n", vn, tt, chain_names[tt - 1L]))
         }
       }
     }
@@ -289,7 +289,7 @@
       max_lead <- max(exo_leads$timing[exo_leads$var_name == vn])
 
       if (verbose) {
-        cat(sprintf("  Expanding exo %s with max lead %d: creating %d AUX_EXO_LEAD variable(s)\n",
+        .dynhr_cat(sprintf("  Expanding exo %s with max lead %d: creating %d AUX_EXO_LEAD variable(s)\n",
                     vn, max_lead, max_lead))
       }
 
@@ -327,7 +327,7 @@
         )
         new_body <- gsub(pat, chain_names[tt], new_body, perl = TRUE)
         if (verbose) {
-          cat(sprintf("    Rewrote %s(+%d) => %s\n", vn, tt, chain_names[tt]))
+          .dynhr_cat(sprintf("    Rewrote %s(+%d) => %s\n", vn, tt, chain_names[tt]))
         }
       }
     }
@@ -347,7 +347,7 @@
       max_lag_depth <- max(abs(exo_lags$timing[exo_lags$var_name == vn]))
 
       if (verbose) {
-        cat(sprintf("  Expanding exo %s with max lag %d: creating %d AUX_EXO_LAG variable(s)\n",
+        .dynhr_cat(sprintf("  Expanding exo %s with max lag %d: creating %d AUX_EXO_LAG variable(s)\n",
                     vn, max_lag_depth, max_lag_depth))
       }
 
@@ -385,7 +385,7 @@
         replacement <- paste0(chain_names[tt], "(-1)")
         new_body <- gsub(pat, replacement, new_body, perl = TRUE)
         if (verbose) {
-          cat(sprintf("    Rewrote %s(-%d) => %s(-1)\n", vn, tt, chain_names[tt]))
+          .dynhr_cat(sprintf("    Rewrote %s(-%d) => %s(-1)\n", vn, tt, chain_names[tt]))
         }
       }
     }
@@ -417,9 +417,9 @@
   }
   
   if (verbose && length(aux_var_names) > 0) {
-    cat(sprintf("  Total auxiliary variables added: %d\n", length(aux_var_names)))
-    cat(sprintf("  Total auxiliary equations added: %d\n", length(aux_equations)))
-    cat("  Auxiliary variables:", paste(aux_var_names, collapse = ", "), "\n")
+    .dynhr_cat(sprintf("  Total auxiliary variables added: %d\n", length(aux_var_names)))
+    .dynhr_cat(sprintf("  Total auxiliary equations added: %d\n", length(aux_equations)))
+    .dynhr_cat("  Auxiliary variables:", paste(aux_var_names, collapse = ", "), "\n")
   }
   
   list(

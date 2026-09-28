@@ -12,9 +12,9 @@
 \item{...}{Ignored}
 }
 \value{
-`x`, invisibly
+\code{x}, invisibly
 }
 \description{
-Compact one-screen header: model size, data dimensions, observables, and
-which pipeline steps have been run.
+Compact one-screen header: model size, data dimensions, observables, the
+held spec's sampler, and which pipeline steps have been run.
 }

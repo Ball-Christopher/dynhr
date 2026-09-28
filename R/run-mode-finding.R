@@ -12,6 +12,140 @@
 ## --------------------------------------------------------------------------
 
 
+#' Validate and clip a caller-supplied \code{theta_init} against a prior spec
+#'
+#' Matching is BY NAME against \code{priors$name} (never by position: the prior
+#' spec's row order is the \code{estimated_params} order after the \code{eps_* -> sig_*}
+#' rename, which a caller has no reason to reproduce). The returned vector is
+#' reordered to the spec's own order and carries the spec's names, so it is a
+#' drop-in replacement for \code{setNames(priors$mean, priors$name)}.
+#'
+#' Values are clipped strictly INSIDE \code{[lower, upper]}: a start sitting exactly
+#' on a bound makes the eta-transform infinite and makes the bounded optimiser
+#' stages start on the feasibility boundary. The nudge is \code{1e-8 * (upper -
+#' lower)} for a finite support, and \code{1e-8 * max(1, |bound|)} when the other
+#' side is infinite.
+#'
+#' @param theta_init Named numeric vector from the caller.
+#' @param priors     Prior spec data.frame from \code{extract_prior_spec()}.
+#' @return Named numeric vector, length/order/names matching \code{priors$name}.
+#' @noRd
+.rmf_check_theta_init <- function(theta_init, priors) {
+  want <- as.character(priors$name)
+
+  if (!is.numeric(theta_init) || !is.null(dim(theta_init)))
+    .dynhr_abort("run_mode_finding: `theta_init` must be a named numeric ",
+                 "vector (got ", class(theta_init)[1L], ").")
+  nm <- names(theta_init)
+  if (is.null(nm) || any(is.na(nm)) || any(!nzchar(nm)))
+    .dynhr_abort("run_mode_finding: `theta_init` must be NAMED; its names are ",
+                 "matched against the prior spec's parameter names (",
+                 paste(want, collapse = ", "), ").")
+  if (anyDuplicated(nm))
+    .dynhr_abort("run_mode_finding: `theta_init` has duplicated name(s): ",
+                 paste(unique(nm[duplicated(nm)]), collapse = ", "), ".")
+
+  missing_nm <- setdiff(want, nm)
+  extra_nm   <- setdiff(nm, want)
+  if (length(missing_nm) || length(extra_nm))
+    .dynhr_abort(
+      "run_mode_finding: `theta_init` names do not match the estimated ",
+      "parameters. ",
+      if (length(missing_nm))
+        paste0("Missing: ", paste(missing_nm, collapse = ", "), ". ") else "",
+      if (length(extra_nm))
+        paste0("Unknown: ", paste(extra_nm, collapse = ", "), ". ") else "",
+      "Expected exactly: ", paste(want, collapse = ", "), ".")
+
+  th <- as.numeric(theta_init[want])
+  bad <- !is.finite(th)
+  if (any(bad))
+    .dynhr_abort("run_mode_finding: `theta_init` has non-finite value(s) for: ",
+                 paste(want[bad], collapse = ", "),
+                 ". NA/NaN/Inf starts are not allowed.")
+
+  lo <- suppressWarnings(as.numeric(priors$lower))
+  hi <- suppressWarnings(as.numeric(priors$upper))
+  if (length(lo) != length(want)) lo <- rep(-Inf, length(want))
+  if (length(hi) != length(want)) hi <- rep( Inf, length(want))
+  lo[is.na(lo)] <- -Inf
+  hi[is.na(hi)] <-  Inf
+
+  for (i in seq_along(th)) {
+    l <- lo[i]; u <- hi[i]
+    if (!(is.finite(l) || is.finite(u))) next
+    eps <- if (is.finite(l) && is.finite(u)) 1e-8 * (u - l) else
+      1e-8 * max(1, abs(if (is.finite(l)) l else u))
+    if (is.finite(l) && th[i] <= l + eps) th[i] <- l + eps
+    if (is.finite(u) && th[i] >= u - eps) th[i] <- u - eps
+  }
+
+  setNames(th, want)
+}
+
+#' Default mode-finding start: INITVAL / estimated_params_init, else prior mean
+#'
+#' E1 (2026-09-25): Dynare starts the optimiser at the \code{estimated_params}
+#' INITVAL (overridden by an \code{estimated_params_init} block; \code{set_prior.m} falls
+#' back to the prior mean only where INITVAL is NaN). \code{extract_prior_spec()}
+#' records that value in \code{priors$init}; before this fix it was read nowhere and
+#' every run started at the prior means.
+#'
+#' Per parameter: \code{init} when finite and inside \code{[lower, upper]} (nudged off a
+#' bound exactly as \code{.rmf_check_theta_init()} does), otherwise the prior mean.
+#' A finite \code{init} OUTSIDE the bounds (Dynare's check_prior_bounds() would
+#' error) falls back to the prior mean with a classed warning.
+#'
+#' @param priors Prior spec from \code{extract_prior_spec()}.
+#' @return list(theta = named numeric in spec order, source = label).
+#' @noRd
+.rmf_default_theta_init <- function(priors) {
+  nm    <- as.character(priors$name)
+  start <- setNames(as.numeric(priors$mean), nm)
+  init  <- suppressWarnings(as.numeric(priors$init %||% rep(NA_real_, length(nm))))
+  if (length(init) != length(nm) || !any(is.finite(init)))
+    return(list(theta = start, source = "prior means"))
+
+  lo <- suppressWarnings(as.numeric(priors$lower)); lo[is.na(lo)] <- -Inf
+  hi <- suppressWarnings(as.numeric(priors$upper)); hi[is.na(hi)] <-  Inf
+  fin    <- is.finite(init)
+  inside <- fin & init >= lo & init <= hi
+  if (any(fin & !inside))
+    .dynhr_warn(
+      "run_mode_finding: INITVAL outside the prior bounds for ",
+      paste0(nm[fin & !inside], " (", init[fin & !inside], " not in [",
+             lo[fin & !inside], ", ", hi[fin & !inside], "])", collapse = "; "),
+      "; starting those parameter(s) at the prior mean instead.",
+      class = "dynhr_warning_init_outside_bounds")
+  if (!any(inside))
+    return(list(theta = start, source = "prior means"))
+
+  clipped <- .rmf_check_theta_init(setNames(init[inside], nm[inside]),
+                                   priors[inside, , drop = FALSE])
+  start[inside] <- clipped
+  src <- if (all(inside)) "INITVAL (estimated_params / estimated_params_init)"
+         else sprintf("INITVAL for %d of %d parameters, prior means otherwise",
+                      sum(inside), length(nm))
+  list(theta = start, source = src)
+}
+
+
+## The Kalman P0 in force at `theta` under `lik_init` (.grad_init_in_force:
+## "stationary", "diffuse", "kappa" or "reject"), for choosing the newrat H0
+## seed: posterior_hessian() -- the analytic seed -- refuses every init but
+## "stationary". NA when the model does not solve at theta (the seed builder
+## then fails and falls back on its own, as before).
+.rmf_h0_init_in_force <- function(model, compiled, theta, lik_init) {
+  sol <- .grad_solve_dr(model, compiled, cache_system_structure(compiled), theta)
+  if (is.null(sol)) return(NA_character_)
+  dr <- sol$dr
+  .grad_init_in_force(dr$ghx[dr$state_idx, , drop = FALSE],
+                      dr$ghu[dr$state_idx, , drop = FALSE],
+                      .get_shock_cov(model, model$varexo_names, sol$params),
+                      lik_init)
+}
+
+
 #' Run posterior mode-finding for a solved DSGE model
 #'
 #' Takes a solved model (from \code{\link{solve_model}}), observation data,
@@ -37,7 +171,9 @@
 #'   default: CMA-ES then L-BFGS-B). See \code{\link{find_mode}} for the full
 #'   list of options.
 #' @param me_variance Measurement error variance added to the observation
-#'   noise diagonal (default 0).  Use a small positive value for
+#'   noise diagonal. \code{NULL} (default) reads the \code{me_variance}
+#'   option (0 unless set), as the estimation spec's
+#'   \code{likelihood$me_variance} does.  Use a small positive value for
 #'   stochastically singular models.
 #' @param likelihood  Likelihood type: \code{"gaussian"} (Kalman filter,
 #'   default), \code{"cumulant"} (cumulant-matching, Mutschler 2015),
@@ -94,18 +230,21 @@
 #' @param transform_params  Run Step 5 mode-finding in unconstrained eta-space
 #'   (default \code{TRUE}): via
 #'   \code{build_param_transform} (built from \code{priors}) and
-#'   \code{.run_mode_finding}'s `transform` argument -- see there for
+#'   \code{.run_mode_finding}'s \code{transform} argument -- see there for
 #'   the exact semantics (Jacobian-free objective, eta-space bounds for
-#'   bounded optimizer stages, `theta_mode` returned in theta-space as
+#'   bounded optimizer stages, \code{theta_mode} returned in theta-space as
 #'   always). Applies to both the serial path and the PARALLEL multi-start
-#'   path (\code{run_mode_mirai}'s `transform` argument): each
+#'   path (\code{run_mode_mirai}'s \code{transform} argument): each
 #'   daemon's \code{.run_mode_finding} call receives the transform, and
 #'   dispersed multi-start points are jittered in eta-space (no bound
 #'   clamping) before being mapped back to theta-space starts. May also be
 #'   set globally via \code{dynhr_set_options(transform_params = TRUE)}. Has
 #'   no effect on Step 6 (proposal covariance), which is always computed in
 #'   theta-space here; \code{run_posterior_estimation()} performs its own
-#'   delta-method conversion when sampling in eta-space.
+#'   delta-method conversion when sampling in eta-space. Exception: at a
+#'   mode on a prior bound (a constrained, KKT mode, where that conversion
+#'   divides by \eqn{(d\theta/d\eta)^2 \approx} (distance to the bound)^2),
+#'   Step 6 also returns \code{Sigma_prop_eta}, see Value.
 #' @param proposal_cov_method  Step 6 proposal-covariance strategy:
 #'   \code{"diagonal"} (default) keeps the existing
 #'   \code{build_sigma_prop} behaviour (full-Hessian-with-cap,
@@ -131,7 +270,8 @@
 #'   \code{filter_tunes} and \code{heteroskedastic_shocks} overrides.
 #'   Mutually exclusive with \code{filter_tunes} and
 #'   \code{heteroskedastic_shocks}.
-#' @param use_exact_hessian  Opt-in (default \code{FALSE}): build the RWMH
+#' @param use_exact_hessian  Opt-in (default \code{NULL}: the
+#'   \code{use_exact_hessian} option, else \code{FALSE}): build the RWMH
 #'   proposal covariance from the analytic exact posterior Hessian
 #'   (\code{posterior_hessian}) computed at the mode, instead of a
 #'   finite-difference Hessian. Only applied for the standard Gaussian KF
@@ -155,9 +295,32 @@
 #'   uses the same analytic Hessian only to \emph{seed} the newrat optimiser's
 #'   initial curvature \code{H0}; it does not set the reported covariance. On a
 #'   large model that seed is itself expensive and of uncertain benefit -- set
-#'   \code{dynhr_set_options(use_analytic_hess = FALSE)} to fall back to the
-#'   cheap default \code{H0} if mode-finding setup is the bottleneck.)
+#'   \code{mode_options = list(use_analytic_hess = FALSE)} (one run) or
+#'   \code{dynhr_set_options(use_analytic_hess = FALSE)} (the session; the
+#'   spec field \code{mode$analytic_h0}) to fall back to the cheap default
+#'   \code{H0} if mode-finding setup is the bottleneck.)
 #' @param verbose  Print progress messages (default TRUE).
+#' @param theta_init  Optional named numeric vector of starting values for
+#'   Step 4, in place of the default start. Names are matched against the prior
+#'   spec's \code{name} column (the canonical keys \code{extract_prior_spec()}
+#'   produces -- \code{sig_*} after the \code{eps_*} rename, \code{corr a,b},
+#'   \code{skew x}); a vector with missing or unknown names, or carrying any
+#'   \code{NA}/non-finite entry, is an error. Each value is clipped strictly
+#'   inside the prior spec's \code{[lower, upper]} (nudged by
+#'   \eqn{10^{-8}} times the support width when it sits on a bound), so the
+#'   bounded optimiser stages and the eta-transform stay finite. The supplied
+#'   start is used by EVERY path that reads the start: the serial optimiser,
+#'   the parallel multi-start portfolio (where chain 1 is always the start
+#'   itself), and the Hessian evaluated at the start. Default \code{NULL}
+#'   starts each parameter at its \code{estimated_params} INITVAL (as
+#'   overridden by an \code{estimated_params_init} block; the \code{init}
+#'   column of \code{extract_prior_spec()}) when that is finite and inside
+#'   \code{[lower, upper]}, and at its prior mean otherwise -- Dynare's rule.
+#'
+#'   The motivating use is \code{\link{diag_prior_sensitivity}}, which asks a
+#'   LOCAL question -- "does the mode move when the prior is flattened?" --
+#'   and so starts its flat-prior search at the informative mode rather than
+#'   at the midpoint of each flat uniform support.
 #' @param ...      Additional arguments forwarded to the mode-finder.
 #'
 #' @return An object of class \code{"dynhr_mode_result"} containing:
@@ -167,12 +330,33 @@
 #'     \item{\code{obs_vars}}{Observable variable names}
 #'     \item{\code{prior_spec}}{Prior specification data.frame}
 #'     \item{\code{log_post_fn}}{Log-posterior closure}
-#'     \item{\code{theta_init}}{Starting parameter vector (prior means)}
+#'     \item{\code{theta_init}}{Starting parameter vector (INITVAL / prior
+#'       means, or the clipped \code{theta_init=} argument when one was
+#'       supplied)}
 #'     \item{\code{theta_mode}}{Posterior mode parameter vector}
 #'     \item{\code{mode}}{Full mode-finding result list}
-#'     \item{\code{Sigma_prop}}{Proposal covariance for MCMC}
+#'     \item{\code{Sigma_prop}}{Proposal covariance for MCMC (theta-space).
+#'       When the mode sits within the finite-difference stencil of a prior
+#'       bound (a constrained mode: the posterior still rises toward the
+#'       bound), those parameters are differentiated one-sided (inward) and
+#'       decoupled from the rest: the other parameters get the inverse
+#'       curvature of the posterior with the bound parameters held at the
+#'       mode, and each bound parameter the inverse of its one-sided inward
+#'       curvature -- a local step scale, not a posterior variance (its
+#'       marginal is truncated and gradient-dominated; proposals across the
+#'       bound are rejected by the prior). A non-concave inward direction
+#'       falls back to the prior variance.}
+#'     \item{\code{Sigma_prop_eta}}{Present only at such a bound mode: the
+#'       eta-space (unconstrained, \code{transform_params}) proposal
+#'       covariance. Interior parameters: the usual delta-method conversion
+#'       of \code{Sigma_prop}; each bound parameter: the inverse negative
+#'       curvature of the Jacobian-adjusted eta log-posterior at its own
+#'       conditional mode (an O(1) variance), decoupled.}
 #'     \item{\code{V_mode}}{Estimated variance-covariance at mode}
 #'     \item{\code{me_variance},\code{likelihood}}{Settings used}
+#'     \item{\code{run_record}}{A \code{dynhr_run_record}: resolved arguments,
+#'       option snapshot, RNG state and provenance; replay it with
+#'       \code{\link{dynhr_rerun}}.}
 #'   }
 #'
 #' @examples
@@ -189,7 +373,7 @@
 #' mode
 #' round(mode$theta_mode, 4)
 #'
-#' ## The proposal covariance feeds straight into mcmc()
+#' ## The proposal covariance feeds straight into dynhr_mcmc()
 #' dim(mode$Sigma_prop)
 #'
 #' @seealso \code{\link{solve_model}}, \code{\link{run_posterior_estimation}},
@@ -200,7 +384,7 @@ run_mode_finding <- function(solved,
                              obs_vars = NULL,
                              n_iter           = 10000L,
                              method           = "newrat",
-                             me_variance      = 0,
+                             me_variance      = NULL,
                              likelihood       = c("gaussian", "cumulant", "whittle",
                                                   "pruned", "pskf", "student_t",
                                                   "sv_rbpf"),
@@ -217,19 +401,74 @@ run_mode_finding <- function(solved,
                              heteroskedastic_shocks = NULL,
                              stochastic_volatility = NULL,
                              plan             = NULL,
-                             use_exact_hessian = FALSE,
+                             use_exact_hessian = NULL,
                              verbose          = TRUE,
+                             theta_init       = NULL,
                              ...) {
+  ## Own the message epoch for this run: repeat-suppressed warnings
+  ## (`.dynhr_warn(once = TRUE)`) are keyed within it and re-arm for the
+  ## next run, and the close reports what it suppressed. A nested call
+  ## inherits this epoch rather than opening a second one.
+  .dynhr_run_epoch <- .dynhr_epoch("run_mode_finding")
+  on.exit(.dynhr_close_epoch(.dynhr_run_epoch), add = TRUE)
+  ## Run record (R/run-record.R): resolved args, option snapshot and RNG
+  ## state at ENTRY -- before the body touches any argument or the RNG.
+  .rr <- .dynhr_rr_begin("run_mode_finding", environment(), list(...))
+  ## E5 C2: a thin wrapper. The arguments become an estimation spec (the
+  ## single home of the cross-field checks, validate_spec()) and the one spec
+  ## runner does the work (mode stage: .est_mode_stage()).
+  spec <- as_estimation_spec(.rr$args, entry = "run_mode_finding")
+  .run_estimation_impl(spec, rr = .rr)
+}
 
-  ## Capture BEFORE match.arg() collapses the default vector to its first
-  ## element: this is the only reliable "did the caller pass likelihood=
-  ## explicitly?" signal (mirrors the missing()/sentinel convention used
-  ## elsewhere in this codebase for optional args with non-NULL defaults).
-  likelihood_explicit <- !missing(likelihood)
-  likelihood <- match.arg(likelihood)
-  ## For the Whittle path, freq_band can be passed via posterior_options.
-  ## Extract it here so it is threaded into make_log_posterior().
-  freq_band <- posterior_options$freq_band %||% c(0, pi)
+## Log-posterior-constructor extras (likelihood$extra / mode$extra) that
+## make_posterior_grad() takes too: the mode stage forwards them to both.
+.mode_grad_extras <- c("cumulant_orders", "cumulant_weight", "debias")
+## Extras that change the objective of `likelihood` but that the analytic
+## gradient cannot take: with one of them the mode stage keeps the numerical
+## gradient rather than differentiate another posterior.
+.mode_grad_blocking_extras <- function(likelihood)
+  switch(likelihood, cumulant = c("order", "h", "weight_matrix"), character(0))
+
+## The mode stage of the spec runner (formerly the body of run_mode_finding()).
+## `spec`: a validated dynhr_estimation_spec; `inp`: the prepared inputs
+## (.est_inputs(): model, compiled, data, solved). Returns list(result = the
+## dynhr_mode_result without its run record, plus the resolved pieces the
+## later stages of a full run need: model, compiled, priors, data, obs_vars,
+## me_extra, shock_scale, use_obc, obc_specs). `proposal = FALSE` skips Step 6
+## (the proposal covariance: Sigma_prop / V_mode / hessian_exact stay NULL)
+## for a full run that samples nothing. `optimise = FALSE` (prior-initialised
+## samplers, see .spec_mode_stage_needed()) builds the posterior and its
+## context but skips Steps 5-6: the result has no mode (theta_mode, mode,
+## Sigma_prop NULL; meta$mode_skipped TRUE).
+.est_mode_stage <- function(spec, inp, proposal = TRUE, optimise = TRUE) {
+  lik <- spec$likelihood
+  md  <- spec$mode
+  cmp <- spec$compute
+  n_iter              <- md$n_iter
+  method              <- md$method
+  me_variance         <- lik$me_variance
+  likelihood          <- lik$type
+  pruned_order        <- lik$pruned_order
+  mode_options        <- md$options
+  parallel            <- cmp$parallel
+  n_cores             <- cmp$n_cores
+  n_starts            <- md$n_starts
+  proposal_cov_method <- md$proposal_cov
+  transform_params    <- isTRUE(md$transform_params)
+  use_exact_hessian   <- isTRUE(md$exact_hessian)
+  verbose             <- cmp$verbose
+  theta_init          <- md$theta_init
+  plan                <- lik$plan
+  filter_tunes        <- lik$filter_tunes
+  heteroskedastic_shocks <- lik$heteroskedastic_shocks
+  freq_band           <- lik$freq_band
+  lik_init            <- lik$lik_init
+  system_priors       <- lik$system_priors
+  ## run_mode_finding()'s `...`: log-posterior-constructor extras (student_df
+  ## is a likelihood field of the spec) and optimiser arguments.
+  lp_dots <- c(lik$extra, md$extra,
+               if (!is.null(lik$student_df)) list(student_df = lik$student_df))
 
   ## ONE daemon pool spans the whole standard parallel run: the seeded portfolio
   ## (Step 5) provisions it; the Hessian (Step 6) re-binds .worker_lp on it
@@ -241,41 +480,18 @@ run_mode_finding <- function(solved,
     try(mirai::daemons(NULL), silent = TRUE)
   }, add = TRUE)
 
-  proposal_cov_method <- .dynhr_opt("proposal_cov_method", proposal_cov_method,
-                                     default = "diagonal")
-  proposal_cov_method <- match.arg(proposal_cov_method, c("diagonal", "full"))
-  transform_params <- isTRUE(.dynhr_opt("transform_params", transform_params,
-                                         default = TRUE))
-  use_exact_hessian <- isTRUE(.dynhr_opt("use_exact_hessian", use_exact_hessian,
-                                          default = FALSE))
-  .vcat <- function(...) if (verbose) cat(...)
+  .vcat <- function(...) if (verbose) .dynhr_cat(...)
 
-  model    <- solved$model
-  compiled <- solved$compiled
+  model    <- inp$model
+  compiled <- inp$compiled
+  solved   <- inp$solved
+  obs_vars <- spec$obs_vars
 
-  ## Default obs_vars from the model's varobs declaration (same rule as
-  ## make_log_posterior) — pathological-DSGE paper gap #4.
-  if (is.null(obs_vars) || length(obs_vars) == 0L) {
-    obs_vars <- model$obs_vars %||% model$varobs_names
-    if (is.null(obs_vars) || length(obs_vars) == 0L)
-      stop("run_mode_finding: `obs_vars` not supplied and the model ",
-           "declares no `varobs`; pass obs_vars= or add a varobs line to ",
-           "the .mod.", call. = FALSE)
-  }
-
-  ## Apply unified plan= if supplied.  Error if both plan and individual args.
-  ## Tier 8 item 10: plan adaptation now routes through estimation_context()
+  ## Apply unified plan= if supplied (the plan / filter_tunes /
+  ## heteroskedastic_shocks conflicts are checked by likelihood_spec()).
+  ## Tier 8 item 10: plan adaptation routes through estimation_context()
   ## so that the compiled specs live in ctx$plan for provenance.
   if (!is.null(plan)) {
-    if (!inherits(plan, "dynhr_plan"))
-      stop("run_mode_finding: 'plan' must be a dynhr_plan object.", call. = FALSE)
-    if (!is.null(filter_tunes))
-      stop("run_mode_finding: supply either 'plan' or 'filter_tunes', not both.",
-           call. = FALSE)
-    if (!is.null(heteroskedastic_shocks))
-      stop("run_mode_finding: supply either 'plan' or 'heteroskedastic_shocks', not both.",
-           call. = FALSE)
-    ## Compile plan inside estimation_context (TPF check + spec resolution).
     .plan_ctx <- estimation_context(plan = plan,
                                     sample_start = model$sample_start,
                                     likelihood   = likelihood)
@@ -287,31 +503,17 @@ run_mode_finding <- function(solved,
   ## Apply call-level filter_tunes and heteroskedastic_shocks overrides.
   model <- .resolve_filter_tunes(model, filter_tunes)
   model <- .resolve_heteroskedastic_shocks(model, heteroskedastic_shocks)
-  model <- .resolve_stochastic_volatility(model, stochastic_volatility)
+  model <- .resolve_stochastic_volatility(model, lik$stochastic_volatility)
 
   .vcat("\n================================================================\n")
   .vcat("  run_mode_finding\n")
   .vcat("================================================================\n\n")
 
   # -------------------------------------------------------------------
-  # Step 1: Load data (if path provided)
+  # Step 1: Data (loaded from the spec by .est_inputs())
   # -------------------------------------------------------------------
   .vcat("-- Step 1: Load data --\n")
-  if (is.character(data)) {
-    data_raw <- read.csv(data)
-    if (!is.null(data_col_map)) {
-      for (mod_nm in names(data_col_map)) {
-        dat_nm <- data_col_map[[mod_nm]]
-        if (dat_nm %in% names(data_raw) && !(mod_nm %in% names(data_raw)))
-          names(data_raw)[names(data_raw) == dat_nm] <- mod_nm
-      }
-    }
-    if (!all(obs_vars %in% names(data_raw)))
-      stop(sprintf("obs_vars not found in data: %s",
-                   paste(setdiff(obs_vars, names(data_raw)), collapse = ", ")))
-    data <- as.matrix(data_raw[, obs_vars])
-  }
-  if (is.null(colnames(data))) colnames(data) <- obs_vars
+  data <- inp$data
   .vcat(sprintf("  Data: %d x %d  (obs: %s)\n",
                 nrow(data), ncol(data), paste(colnames(data), collapse = ", ")))
 
@@ -329,7 +531,7 @@ run_mode_finding <- function(solved,
   # Step 2: Extract prior specification (auto eps_* -> sig_* rename)
   # -------------------------------------------------------------------
   .vcat("-- Step 2: Extract prior specification --\n")
-  priors <- extract_prior_spec(model, verbose = verbose)
+  priors <- spec$model$prior_spec %||% extract_prior_spec(model, verbose = verbose)
   .vcat(sprintf("  %d parameters to estimate\n", nrow(priors)))
 
   # -------------------------------------------------------------------
@@ -337,92 +539,93 @@ run_mode_finding <- function(solved,
   # -------------------------------------------------------------------
   .vcat("-- Step 3: Build log-posterior --\n")
 
-  # Auto-detect OBC: any equation carries an MCP tag?
-  use_obc <- any(vapply(model$equations,
-                         function(e) {
-                           tg <- e$tag
-                           !is.null(tg) && !is.na(tg) &&
-                             grepl("^\\s*mcp\\s*=", tg, perl = TRUE)
-                         }, logical(1L)))
+  ## OBC: likelihood$obc, else auto-detected mcp tags. validate_spec() has
+  ## already refused an OBC model with a likelihood only the Kalman filter
+  ## implements (the single home of that check).
+  use_obc <- .spec_obc_active(spec)
 
   obc_specs <- NULL
   if (use_obc) {
-    ## OBC models can only be evaluated through the OBC/PKF (or PPF/COPF,
-    ## chosen later via posterior_options$obc_filter) log-posterior -- the
-    ## standard Gaussian/cumulant/whittle/pruned closures do not model the
-    ## occasionally-binding constraint. If the caller left `likelihood` at
-    ## its default, silently switching to PKF is a reasonable convenience,
-    ## but it must be ANNOUNCED (not silent) per this package's fail-loud-on
-    ## -fidelity-downgrade convention. If the caller EXPLICITLY asked for an
-    ## incompatible likelihood, that is very likely a mistake (they think
-    ## they are estimating e.g. "cumulant" but PKF is silently substituted
-    ## instead) -- stop() with an actionable message rather than overriding
-    ## their choice without telling them.
-    if (likelihood_explicit) {
-      stop(sprintf(paste0(
-        "run_mode_finding: model has OBC (mcp=) tagged equations, which are ",
-        "only supported by the OBC/PKF log-posterior -- but likelihood = ",
-        "\"%s\" was explicitly requested. These are incompatible: OBC models ",
-        "must be estimated via the occasionally-binding-constraint filter ",
-        "(PKF by default; PPF/COPF via posterior_options$obc_filter). Either ",
-        "drop the `likelihood` argument (default) to use PKF automatically, ",
-        "or remove the mcp= tags from the model if you intend to estimate it ",
-        "as a standard linear model."),
-        likelihood), call. = FALSE)
-    }
+    ## Announced, not silent: an OBC model is estimated through the OBC/PKF
+    ## log-posterior (per the fail-loud-on-fidelity-downgrade convention).
     .vcat("  OBC model detected -- using PKF log-posterior\n")
-    message("run_mode_finding: model has OBC (mcp=) tagged equations; ",
+    .dynhr_inform("run_mode_finding: model has OBC (mcp=) tagged equations; ",
             "auto-switching likelihood from the default \"", likelihood,
             "\" to the OBC/PKF log-posterior (standard Kalman-filter ",
             "likelihoods cannot represent occasionally-binding constraints). ",
             "Pass posterior_options = list(obc_filter = \"ppf\"|\"copf\") to ",
             "use a particle filter instead.")
     obc_specs   <- obc_parse_tags(model)
-    max_inner   <- posterior_options$max_inner %||% 10L
     log_post_fn <- make_log_posterior_obc_pkf(
       model, data, priors, obs_vars, compiled,
       specs       = obc_specs,
       me_variance = me_variance,
-      max_inner   = max_inner
+      max_inner   = lik$obc_max_inner
     )
   } else {
     ## CPM routing (v1 limitation, documented on make_log_posterior_tpf's
-    ## `burn_in_init` @param): when posterior_options$tpf_options$cpm_rho_u is
-    ## set, run_posterior_estimation() will later dispatch this closure to
-    ## rwmh_cpm(), which calls it with a non-NULL U_list on every step after
-    ## the priming call. burn_in_init > 0 hard-errors against a supplied
-    ## U_list (the CPM slot layout has no burn-in slots), so this is the
-    ## build site that must pin burn_in_init = 0L for that case -- unless the
-    ## caller already passed burn_in_init explicitly via `...`.
-    .mf_dots <- list(...)
-    .cpm_rho_u <- posterior_options$tpf_options$cpm_rho_u %||% NULL
+    ## `burn_in_init` @param): when likelihood$tpf_options$cpm_rho_u is set,
+    ## the sampler stage will later dispatch this closure to rwmh_cpm(),
+    ## which calls it with a non-NULL U_list on every step after the priming
+    ## call. burn_in_init > 0 hard-errors against a supplied U_list (the CPM
+    ## slot layout has no burn-in slots), so this is the build site that must
+    ## pin burn_in_init = 0L for that case -- unless the caller already passed
+    ## burn_in_init explicitly.
+    .mf_dots <- lp_dots
+    .cpm_rho_u <- lik$tpf_options$cpm_rho_u %||% NULL
     if (identical(likelihood, "tpf") && !is.null(.cpm_rho_u) &&
         is.null(.mf_dots$burn_in_init)) {
       .mf_dots$burn_in_init <- 0L
     }
+    ## The target, ONE list: the objective gets it all and the Step-5
+    ## gradient gets the part make_posterior_grad() takes (brief 28 S1: the
+    ## gradient used to miss the extras and the tempering exponent passed
+    ## through them, and so differentiated another posterior). The exponent
+    ## is the typed field (validate_spec() refuses it as an `extra`).
+    lp_target <- list(
+      me_variance        = me_variance,
+      likelihood         = likelihood,
+      pruned_order       = pruned_order,
+      lik_init           = lik_init,
+      me_extra           = me_extra,
+      shock_scale        = shock_scale_mat,
+      freq_band          = freq_band,
+      system_priors      = system_priors,
+      infeasible_penalty = lik$infeasible_penalty,
+      power              = lik$power_posterior)
+    ## the PSKF CDF setting is a typed field (it changes results); only the
+    ## pskf factory takes it
+    if (identical(likelihood, "pskf")) lp_target$pskf_cdf <- lik$pskf_cdf
     log_post_fn <- do.call(make_log_posterior,
-      c(list(model, data, priors, obs_vars, compiled,
-             me_variance        = me_variance,
-             likelihood         = likelihood,
-             pruned_order       = pruned_order,
-             lik_init           = posterior_options$lik_init %||% "auto",
-             me_extra           = me_extra,
-             shock_scale        = shock_scale_mat,
-             freq_band          = freq_band,
-             system_priors      = posterior_options$system_priors %||% NULL,
-             infeasible_penalty = posterior_options$infeasible_penalty %||% NULL),
-        .mf_dots))
+      c(list(model, data, priors, obs_vars, compiled), lp_target, .mf_dots))
   }
 
   # -------------------------------------------------------------------
-  # Step 4: Starting values from prior means
+  # Step 4: Starting values -- INITVAL / prior means, or a caller-supplied vector
   # -------------------------------------------------------------------
-  .vcat("-- Step 4: Initialise from prior means --\n")
-  theta_init <- setNames(priors$mean, priors$name)
+  ## `theta_init` is assigned ONCE here and every downstream path (serial
+  ## optimiser, parallel multi-start portfolio, mirai Hessian at the start,
+  ## the recorded result field) reads that one object -- nothing re-derives a
+  ## start from `priors$mean`. Overriding it here is therefore sufficient.
+  if (is.null(theta_init)) {
+    .def_init    <- .rmf_default_theta_init(priors)
+    theta_init   <- .def_init$theta
+    .init_source <- .def_init$source
+    .vcat(sprintf("-- Step 4: Initialise from %s --\n", .init_source))
+  } else {
+    .vcat("-- Step 4: Initialise from supplied theta_init --\n")
+    theta_init <- .rmf_check_theta_init(theta_init, priors)
+    .init_source <- "supplied theta_init"
+  }
 
-  # Evaluate at calibration
-  lp_cal <- log_post_fn(theta_init)
-  .vcat(sprintf("  Log-posterior at prior means: %.4f\n", lp_cal$logpost %||% -Inf))
+  # Evaluate at the start
+  if (isTRUE(optimise)) {
+    lp_cal <- log_post_fn(theta_init)
+    .vcat(sprintf("  Log-posterior at %s: %.4f\n", .init_source,
+                  lp_cal$logpost %||% -Inf))
+  } else {
+    .vcat("-- Steps 5-6 skipped: the sampler(s) start from the prior and use no mode --\n")
+  }
 
   # -------------------------------------------------------------------
   # Step 5: Mode-finding
@@ -433,10 +636,6 @@ run_mode_finding <- function(solved,
   mo <- modifyList(list(), mode_options)
 
   ## Build a temporary ctx to use .ctx_is_standard_gaussian (avoids duplication).
-  ## student_t needs student_df threaded through here too (estimation_context()
-  ## validates it at construction) -- pulled from `...` the same way as the
-  ## final mode_ctx below.
-  .tmp_dots <- list(...)
   .tmp_mode_ctx <- estimation_context(
     me_variance  = me_variance,
     likelihood   = likelihood,
@@ -444,32 +643,20 @@ run_mode_finding <- function(solved,
     shock_scale  = shock_scale_mat,
     freq_band    = freq_band,
     pruned_order = pruned_order,
-    student_df   = .tmp_dots$student_df %||% NULL
+    student_df   = lik$student_df
   )
-  rm(.tmp_dots)
-  par_standard <- .ctx_is_standard_gaussian(.tmp_mode_ctx, use_obc = use_obc)
+  par_standard <- .ctx_is_standard_gaussian(.tmp_mode_ctx, use_obc = use_obc,
+                                            model = model)
   rm(.tmp_mode_ctx)
   ## Decouple the parallel MULTI-START (Step 5) from the parallel HESSIAN
   ## (Step 6, use_par_hess below -- independent).
   ##
-  ## The parallel multi-start re-initialises the model per daemon and CANNOT
-  ## carry newrat's analytic H0 seed (posterior_hessian, ~216 s -- absurd to
-  ## rebuild on every daemon). A seed-less parallel newrat chain is ~10x slower
-  ## than the serial newrat (measured: 5687 s vs 570 s on NZSIM) and, on a
-  ## razor-thin near-unit-root surface, its eta-space/FD steps stall at the start
-  ## -- so parallel = TRUE used to return the UNOPTIMISED prior mean for the
-  ## (default) newrat method. For these H0-seed-dependent methods, run Step 5
-  ## SERIALLY (with the seed + analytic gradient) and parallelise ONLY the Step 6
-  ## Hessian. The multi-start parallelism still applies to the gradient-free /
-  ## global methods (cmaes, jade, nmkb, combined, ...), which need no seed.
-  ## UPDATE: the H0 seed is now computed ONCE on the host (a parallel FD Hessian
-  ## at the prior mean, ~9 s) and shipped to the daemons as a cheap matrix, so the
-  ## "seed not replicable per daemon -> serial" constraint no longer holds. For
-  ## seeded methods + parallel we now run a SEEDED PORTFOLIO (run_mode_mirai):
+  ## For the H0-seed-dependent methods (newrat, cmaes_newrat) + parallel we
+  ## run a SEEDED PORTFOLIO (run_mode_mirai): the H0 seed is computed ONCE on
+  ## the host (a parallel FD Hessian at the start) and shipped to the daemons;
   ## chain 1 = newrat @ theta_init with the seed = bit-identical to the serial
-  ## run; chains 2+ cycle dispersed starts and the global searchers, all newrat
-  ## chains sharing the seed. Same wall time as the serial newrat (chains run
-  ## concurrently) but far more robust (multi-start + multi-algo, keep-best).
+  ## run; chains 2+ cycle dispersed starts and the global searchers. The
+  ## gradient-free / global methods use the plain parallel multi-start.
   seed_dependent_method <- method %in% c("newrat", "cmaes_newrat")
   use_portfolio <- isTRUE(parallel) && seed_dependent_method && par_standard &&
     requireNamespace("mirai", quietly = TRUE)
@@ -480,6 +667,10 @@ run_mode_finding <- function(solved,
                          "running serially + parallel Hessian only (Step 6).\n"),
                   method))
 
+  ## Multi-start dispersal of the parallel paths: the spec's mode$perturb_scale
+  ## and compute$seed (else the seed_base option).
+  mode_seed_base <- cmp$seed %||% .dynhr_opt("seed_base", default = 42L)
+
   # Opt-in unconstrained-parameter transform (eta-space mode finding). Built
   # from `priors` (the prior_spec already in scope) -- see
   # build_param_transform() and .run_mode_finding()'s `transform` argument.
@@ -489,7 +680,19 @@ run_mode_finding <- function(solved,
     mode_transform <- build_param_transform(priors, names(theta_init))
   }
 
-  if (use_portfolio) {
+  ## W88: Step 6 differences the EXACT gradient when the mode stage has one
+  ## (2n gradient calls instead of the 2n(n+1)-evaluation lp stencil). The
+  ## serial Step-5 path builds it (grad_fn below) and Step 6 reuses it; the
+  ## per-daemon pool path (no host gradient) builds it on each daemon under
+  ## the same eligibility (grad_on_pool).
+  grad_fn <- NULL
+  grad_on_pool <- isTRUE(mo$use_analytic_grad %||% TRUE) && !use_obc &&
+    likelihood %in% c("gaussian", "cumulant", "whittle") &&
+    !length(intersect(names(lp_dots), .mode_grad_blocking_extras(likelihood)))
+
+  if (!isTRUE(optimise)) {
+    mode_res <- NULL
+  } else if (use_portfolio) {
     ## Seeded portfolio: compute the shared H0 seed once on the host (parallel
     ## FD Hessian at the prior mean -- option B), then run the multi-start
     ## portfolio with the seed shipped to every newrat chain.
@@ -506,15 +709,27 @@ run_mode_finding <- function(solved,
     pool_sh <- tryCatch(
       .mirai_pool_init(ncs, model, data, priors, obs_vars, me_variance,
                        me_extra = me_extra, shock_scale = shock_scale_mat,
+                       ## the H0 seed is the curvature of the SAME posterior
+                       ## (system prior included) the portfolio optimises
+                       system_priors = system_priors,
                        lik_init = "stationary"),
       error = function(e) {
-        .vcat(sprintf("  (shared daemon pool unavailable: %s; each stage self-provisions)\n",
-                      conditionMessage(e)))
-        try(mirai::daemons(NULL), silent = TRUE); NULL
+        ## A worker/host version skew is not "pool unavailable": every stage
+        ## would hit it again. Re-raise it (brief 23 B1 follow-up).
+        if (inherits(e, "dynhr_error_worker_version_skew")) stop(e)
+        ## Nor is a programming error: tear the half-started pool down, then
+        ## re-raise it.
+        bug <- .dynhr_is_programming_error(e)
+        if (!bug)
+          .vcat(sprintf("  (shared daemon pool unavailable: %s; each stage self-provisions)\n",
+                        conditionMessage(e)))
+        try(mirai::daemons(NULL), silent = TRUE)
+        if (bug) stop(e)
+        NULL
       })
     pool_ok <- !is.null(pool_sh)
     ## Keep this pool ALIVE for Step 6 (build_sigma_prop re-binds .worker_lp on
-    ## it). Torn down once by run_mode_finding's on.exit. We deliberately do NOT
+    ## it). Torn down once by this stage's on.exit. We deliberately do NOT
     ## tear it down here.
     shared_pool_ok <- pool_ok
     par_mode <- tryCatch({
@@ -523,28 +738,31 @@ run_mode_finding <- function(solved,
                                   verbose = FALSE, pool_ready = TRUE)
           if (any(!is.finite(H))) NULL else H
         }, error = function(e) {
+          if (.dynhr_is_programming_error(e)) stop(e)
           .vcat(sprintf("  (shared H0 seed unavailable: %s; chains run unseeded)\n",
                         conditionMessage(e))); NULL
         }) else NULL
       if (!is.null(H0_seed)) .vcat("  Shared H0 seed built; launching portfolio.\n")
       ## The portfolio runs in the SAME space as the serial path (eta-space when
-      ## transform_params = TRUE). The earlier "eta breaks on the daemon" was a
-      ## double chain-rule bug in mode_task (it pre-transformed grad_fn AND passed
-      ## transform, so .run_mode_finding chain-ruled twice -> newrat stuck at the
-      ## prior mean); now fixed (mode_task passes the THETA-space gradient and lets
-      ## .run_mode_finding apply the chain rule, exactly like the host path). The
-      ## H0 seed is theta-space; .run_mode_finding chain-rules it to eta too. Running
-      ## in eta-space recovers ~248 nats of mode quality on NZSIM (9060 vs 8812).
+      ## transform_params = TRUE); mode_task passes the THETA-space gradient and
+      ## lets .run_mode_finding apply the chain rule, exactly like the host path.
       run_mode_mirai(
         parsed_model   = model, Y = data, prior_spec = priors, obs_names = obs_vars,
         theta_init     = theta_init, n_chains = n_starts, nm_maxit = n_iter,
         method         = method, n_cores = if (pool_ok) ncs else n_cores,
+        perturb_scale  = md$perturb_scale, seed_base = mode_seed_base,
         me_variance    = me_variance,
         me_extra       = me_extra, shock_scale = shock_scale_mat,
+        ## the daemons' .worker_lp is re-bound with it (pool_ready): without
+        ## it the chains optimised the posterior WITHOUT the system prior
+        ## (W76, 2026-09-26)
+        system_priors  = system_priors,
         transform      = mode_transform,
         analytic_grad  = isTRUE(mo$use_analytic_grad %||% TRUE),
         likelihood     = likelihood, freq_band = freq_band,
-        newrat_H0_seed = H0_seed, lik_init = "auto", pool_ready = pool_ok,
+        ## the stage's own lik_init: run_mode_mirai re-binds .worker_lp to it
+        ## (pool_ready) and the chains build their gradients with it.
+        newrat_H0_seed = H0_seed, lik_init = lik_init, pool_ready = pool_ok,
         progress = verbose)
     })
     ## Pool stays alive for Step 6; torn down once by the on.exit above.
@@ -563,9 +781,14 @@ run_mode_finding <- function(solved,
       nm_maxit     = n_iter,
       method       = method,
       n_cores      = n_cores,
+      perturb_scale = md$perturb_scale,
+      seed_base    = mode_seed_base,
       me_variance  = me_variance,
       me_extra     = me_extra,
       shock_scale  = shock_scale_mat,
+      ## the per-daemon .worker_lp (standard path) is built with it; the
+      ## shipped closure (non-standard path) already carries it
+      system_priors = system_priors,
       log_post_fn  = if (par_standard) NULL else log_post_fn,
       transform    = mode_transform,
       ## Build the analytic gradient on each daemon so the parallel newrat /
@@ -574,6 +797,9 @@ run_mode_finding <- function(solved,
       ## mode_options$use_analytic_grad = FALSE.
       analytic_grad = par_standard && isTRUE(mo$use_analytic_grad %||% TRUE),
       likelihood   = likelihood,
+      ## The pool's .worker_lp and the chains' gradients use this init; it
+      ## defaulted to "auto" whatever the stage's lik_init was.
+      lik_init     = lik_init,
       progress     = verbose
     )
     mode_res <- par_mode$best
@@ -596,13 +822,22 @@ run_mode_finding <- function(solved,
     if (use_analytic_grad && !use_obc &&
         method %in% methods_using_grad &&
         likelihood %in% c("gaussian", "cumulant", "whittle")) {
-      grad_fn <- tryCatch(
-        make_posterior_grad(
-          model, data, priors, obs_vars, compiled,
-          me_variance = me_variance, me_extra = me_extra,
-          shock_scale = shock_scale_mat, likelihood = likelihood,
-          freq_band = freq_band, verbose = FALSE),
+      ## The SAME target as log_post_fn (brief 28 S1): lp_target's gradient
+      ## arguments (power_posterior, system prior, ...) plus the extras
+      ## make_posterior_grad() takes. An extra that changes the objective but
+      ## that the gradient cannot take leaves the numerical gradient.
+      grad_blockers <- intersect(names(.mf_dots), .mode_grad_blocking_extras(likelihood))
+      grad_fn <- if (length(grad_blockers)) {
+        .vcat(sprintf("  (analytic gradient unavailable: extra argument(s) %s; using numerical FD)\n",
+                      paste(grad_blockers, collapse = ", ")))
+        NULL
+      } else tryCatch(
+        do.call(make_posterior_grad, c(
+          list(model, data, priors, obs_vars, compiled, verbose = FALSE),
+          lp_target[intersect(names(lp_target), names(formals(make_posterior_grad)))],
+          .mf_dots[intersect(names(.mf_dots), .mode_grad_extras)])),
         error = function(e) {
+          if (.dynhr_is_programming_error(e)) stop(e)
           .vcat(sprintf("  (analytic gradient unavailable: %s; using numerical FD)\n",
                         conditionMessage(e)))
           NULL
@@ -621,7 +856,9 @@ run_mode_finding <- function(solved,
     ## use_exact_hessian). Falls back to csminwel default (1e-4 * I) if
     ## unavailable/fails -- .run_mode_finding handles the NULL case.
     hessian_fn <- NULL
-    use_analytic_hess <- isTRUE(mo$use_analytic_hess %||% TRUE)
+    ## mode_options$use_analytic_hess (this run) over the spec field
+    ## mode$analytic_h0 (default: the use_analytic_hess option at build time)
+    use_analytic_hess <- isTRUE(mo$use_analytic_hess %||% md$analytic_h0 %||% TRUE)
     h0_method <- mo$h0_method %||% "auto"   # "auto" | "numderiv" | "analytic"
     ## Shared eligibility for an analytic-quality H0 seed (standard Gaussian KF).
     h0_eligible <- method %in% c("newrat", "cmaes_newrat") && !use_obc &&
@@ -629,14 +866,11 @@ run_mode_finding <- function(solved,
       is.null(me_extra) && is.null(shock_scale_mat) && !anyNA(data)
 
     ## Option B: when a parallel pool is available, seed newrat's H0 from a
-    ## PARALLEL finite-difference Hessian at theta_init (the prior mean -- an
-    ## interior point where the FD Hessian is finite) instead of the analytic
-    ## posterior_hessian. ~20x faster (NZSIM: 205s -> 9s on 16 cores) and an
-    ## equivalent seed: csminwel BFGS-refines H0, and the two H0 matrices agree
-    ## to <1% Frobenius. mode-orchestrate .make_pd-regularises + inverts the
-    ## result and falls back to csminwel's default 1e-4*I on any failure, so an
-    ## indefinite/approximate seed is safe. "auto" uses it whenever a pool
-    ## exists; opt out with mode_options$h0_method = "analytic".
+    ## PARALLEL finite-difference Hessian at theta_init (an interior point:
+    ## a supplied start is clipped strictly inside the bounds) instead of the
+    ## analytic posterior_hessian. ~20x faster (NZSIM: 205s -> 9s on 16 cores)
+    ## and an equivalent seed: csminwel BFGS-refines H0. "auto" uses it
+    ## whenever a pool exists; opt out with mode_options$h0_method = "analytic".
     want_parallel_h0 <- h0_eligible && h0_method %in% c("auto", "numderiv") &&
       isTRUE(parallel) && par_standard && requireNamespace("mirai", quietly = TRUE)
     if (want_parallel_h0) {
@@ -656,6 +890,18 @@ run_mode_finding <- function(solved,
         }
       })
       .vcat("  Will build newrat initial H0 from a parallel finite-difference Hessian (option B)\n")
+    } else if (use_analytic_hess && h0_eligible &&
+               !is.na(h0_init <- .rmf_h0_init_in_force(
+                 model, compiled, theta_init, lik_init)) &&
+               h0_init != "stationary") {
+      ## posterior_hessian()'s curvature kernel starts from the Lyapunov P0,
+      ## so it refuses an init that puts another P0 in force at the start
+      ## point (lik_init = "kappa"; "diffuse" or "auto" at a unit root). The
+      ## seed is then csminwel's default H0 -- chosen here, not by catching
+      ## the refusal.
+      .vcat(sprintf(paste0("  (analytic newrat H0 not used: lik_init = \"%s\" puts the ",
+                           "\"%s\" P0 in force at the start; csminwel default H0)\n"),
+                    lik_init, h0_init))
     } else if (use_analytic_hess && h0_eligible) {
       hessian_fn <- tryCatch({
         local({
@@ -665,12 +911,14 @@ run_mode_finding <- function(solved,
           .obs_vars <- obs_vars
           .data     <- data
           .me_var   <- me_variance
+          .sys_pr   <- system_priors
+          .lik_init <- lik_init
           function(theta) {
             pm <- .model$param_values
             pm[names(theta)] <- theta
             ss_h <- tryCatch(
               solve_steady_state(.model, .compiled, pm, verbose = FALSE),
-              error = function(e) NULL)
+              error = function(e) .dynhr_reraise_bug(e, NULL))
             if (is.null(ss_h) || !isTRUE(ss_h$converged))
               stop("steady state did not converge in hessian_fn")
             pm2 <- ss_h$params %||% pm
@@ -689,12 +937,15 @@ run_mode_finding <- function(solved,
               names(theta), .obs_vars, t(.data),
               me_variance  = .me_var,
               include_prior = TRUE, prior_spec = .priors,
+              system_priors = .sys_pr,
+              lik_init = .lik_init,
               check_mode = FALSE)
             ## Convert logpost Hessian -> neg-logpost Hessian (flip sign).
             -H_logpost
           }
         })
       }, error = function(e) {
+        if (.dynhr_is_programming_error(e)) stop(e)
         .vcat(sprintf("  (analytic Hessian for newrat H0 unavailable: %s)\n",
                       conditionMessage(e)))
         NULL
@@ -708,7 +959,7 @@ run_mode_finding <- function(solved,
     ## consumed above by make_log_posterior(); strip them here so they don't
     ## also leak into .run_mode_finding()'s optimizer-args `...` (which has no
     ## such formals and errors on an unused argument).
-    dots_optim <- list(...)
+    dots_optim <- md$extra
     dots_optim[c("student_df", "cut_tol")] <- NULL
     ## Opt-in (default FALSE, off by default): stash the newrat/csminwel final
     ## BFGS inverse-Hessian (H0 seed updated by every curvature pair collected
@@ -731,11 +982,13 @@ run_mode_finding <- function(solved,
     ))
   }
 
-  if (is.null(mode_res) || !is.finite(mode_res$logpost))
-    stop("Mode-finding failed or returned non-finite log-posterior.")
+  if (isTRUE(optimise) && (is.null(mode_res) || !is.finite(mode_res$logpost)))
+    .dynhr_abort("Mode-finding failed or returned non-finite log-posterior.",
+                 class = "dynhr_error_mode_failed")
 
   theta_mode <- mode_res$theta_mode
-  .vcat(sprintf("  Log-posterior at mode: %.4f\n", mode_res$logpost))
+  if (isTRUE(optimise))
+    .vcat(sprintf("  Log-posterior at mode: %.4f\n", mode_res$logpost))
 
   # -------------------------------------------------------------------
   # Step 6: Proposal covariance (via Hessian or prior std)
@@ -753,8 +1006,12 @@ run_mode_finding <- function(solved,
   .allows_exact_hess <- identical(likelihood, "gaussian") &&
     !isTRUE(use_obc) && is.null(me_extra) && is.null(shock_scale_mat) &&
     !anyNA(data) &&
-    !identical(posterior_options$lik_init %||% "auto", "diffuse")
-  if (isTRUE(use_exact_hessian) && .allows_exact_hess) {
+    ## posterior_hessian() has no curvature kernel for these inits (it
+    ## refuses them; see .rmf_h0_init_in_force)
+    !(lik_init %in% c("diffuse", "kappa"))
+  if (!isTRUE(proposal) || !isTRUE(optimise)) {
+    .vcat("  (skipped: no sampler stage uses it)\n")
+  } else if (isTRUE(use_exact_hessian) && .allows_exact_hess) {
     hessian_exact <- tryCatch({
       pm <- model$param_values
       pm[names(theta_mode)] <- theta_mode
@@ -765,13 +1022,25 @@ run_mode_finding <- function(solved,
       ## (not stale) p_c (no-op for non-SSM-parameter models; Tier 13 #1).
       pm <- ss_m$params %||% pm
       dr_m <- solve_perturbation(model, compiled, ss_m$ss, pm, verbose = FALSE)
+      ## At a bound-constrained (KKT) mode the gradient is non-zero along the
+      ## active bounds BY CONSTRUCTION, so posterior_hessian()'s
+      ## mode-criticality guard would warn about a legitimate mode; skip it
+      ## there (build_sigma_prop decouples those coordinates).
+      .bnd6 <- .step6_bounds(priors, names(theta_mode))
+      .h6   <- max(1e-4, 1e-4 * abs(theta_mode)) * pmax(1, abs(theta_mode))
+      .kkt6 <- any(.step6_bound_active(theta_mode, .bnd6$lower, .bnd6$upper,
+                                       2 * .h6))
       H <- posterior_hessian(model, compiled, dr_m, pm, names(theta_mode),
                              obs_vars, t(data), me_variance = me_variance,
-                             include_prior = TRUE, prior_spec = priors)
+                             include_prior = TRUE, prior_spec = priors,
+                             system_priors = system_priors,
+                             lik_init = lik_init,
+                             check_mode = if (.kkt6) FALSE else NULL)
       if (any(!is.finite(H))) stop("non-finite entries in exact Hessian")
       .vcat("  Computed exact posterior Hessian at mode (analytic adjoint).\n")
       H
     }, error = function(e) {
+      if (.dynhr_is_programming_error(e)) stop(e)
       .vcat(sprintf("  Exact Hessian unavailable (%s); using numerical.\n",
                     conditionMessage(e)))
       NULL
@@ -780,17 +1049,28 @@ run_mode_finding <- function(solved,
     .vcat("  use_exact_hessian = TRUE but the model is not standard-Gaussian; using numerical.\n")
   }
 
-  if (identical(proposal_cov_method, "full")) {
+  V_mode_hess <- NULL
+  ## Eta-space proposal covariance, set only at a bound-constrained mode
+  ## (R/mode-hessian.R, "Step-6 proposal covariance at a bound-constrained
+  ## mode"); NULL otherwise, and then not stored.
+  Sigma_prop_eta <- NULL
+  if (!isTRUE(proposal) || !isTRUE(optimise)) {
+    Sigma_prop <- NULL
+  } else if (identical(proposal_cov_method, "full")) {
     .vcat("  Using full-Hessian proposal covariance (method = 'full').\n")
     Sigma_prop <- proposal_cov(
       lp_fn      = log_post_fn,
       theta_mode = theta_mode,
       prior_spec = priors,
       verbose    = verbose,
-      method     = "full"
+      method     = "full",
+      grad_fn    = grad_fn
     )
+    Sigma_prop_eta <- attr(Sigma_prop, "Sigma_eta")
+    attr(Sigma_prop, "Sigma_eta") <- NULL
   } else {
-    Sigma_prop <- build_sigma_prop(
+    .bsp <- build_sigma_prop(
+      return_V     = TRUE,
       lp_fn        = log_post_fn,
       theta_mode   = theta_mode,
       prior_spec   = priors,
@@ -805,10 +1085,18 @@ run_mode_finding <- function(solved,
       me_variance  = me_variance,
       me_extra     = me_extra,
       shock_scale  = shock_scale_mat,
+      lik_init     = lik_init,
       ## Re-bind .worker_lp on the live portfolio pool instead of recompiling the
       ## model on every daemon again (Step 5 -> Step 6 pool sharing).
-      pool_ready   = shared_pool_ok
+      pool_ready   = shared_pool_ok,
+      ## W88: the Hessian from the exact gradient (host / per daemon)
+      grad_fn      = grad_fn,
+      grad_on_pool = grad_on_pool,
+      system_priors = system_priors
     )
+    Sigma_prop <- .bsp$Sigma
+    V_mode_hess <- .bsp$V_mode
+    Sigma_prop_eta <- .bsp$Sigma_eta
   }
 
   # -------------------------------------------------------------------
@@ -818,34 +1106,25 @@ run_mode_finding <- function(solved,
   .vcat("  Mode-finding complete\n")
   .vcat("================================================================\n\n")
 
-  ## Build estimation context to store in the result.
-  ## This fixes the system_priors and freq_band bugs in run_posterior_estimation:
-  ## the ctx carries all options so they can be read back without loss.
+  ## Build estimation context to store in the result: the ctx carries all
+  ## options so they can be read back without loss (system_priors, freq_band).
   ## Tier 8 item 10: store plan provenance in mode_ctx$plan.
-  ## When use_obc = TRUE, stamp the OBC filter type that was actually used so
+  ## When use_obc = TRUE, stamp the OBC filter type (likelihood$obc_filter) so
   ## that conditional_forecast() dispatches to the correct terminal-state path
-  ## (Tier 10 item 5; Tier 15 §C: ppf/copf stamping).
-  ## run_mode_finding always calls make_log_posterior_obc_pkf; mode_ctx$likelihood
-  ## is "pkf".  Callers using PPF/COPF can override via posterior_options$obc_filter.
-  mode_ctx_likelihood <- if (use_obc) {
-    ft <- posterior_options$obc_filter %||% "pkf"
-    match.arg(as.character(ft), c("pkf", "ppf", "copf"))
-  } else likelihood
-  ## student_t needs student_df threaded through to estimation_context() too
-  ## (it validates student_df at construction); it is passed to
-  ## make_log_posterior() above via `...`, picked back up here the same way.
-  dots_ <- list(...)
+  ## (Tier 10 item 5; Tier 15 §C: ppf/copf stamping). The mode stage always
+  ## builds make_log_posterior_obc_pkf.
+  mode_ctx_likelihood <- if (use_obc) lik$obc_filter else likelihood
   mode_ctx <- estimation_context(
     me_variance   = me_variance,
     likelihood    = mode_ctx_likelihood,
-    lik_init      = posterior_options$lik_init %||% "auto",
+    lik_init      = lik_init,
     me_extra      = me_extra,
     shock_scale   = shock_scale_mat,
     freq_band     = freq_band,
-    system_priors = posterior_options$system_priors %||% NULL,
-    tpf_options   = posterior_options$tpf_options %||% list(),
+    system_priors = system_priors,
+    tpf_options   = lik$tpf_options,
     obc_specs     = obc_specs,
-    student_df    = dots_$student_df %||% NULL,
+    student_df    = lik$student_df,
     ## pruned_order=3 is only valid with likelihood="pruned" or "tpf"; the
     ## OBC branch rewrites the ctx likelihood, so fall back to the default there.
     pruned_order  = if (mode_ctx_likelihood %in% c("pruned", "tpf")) pruned_order else 2L
@@ -862,7 +1141,7 @@ run_mode_finding <- function(solved,
     theta_mode     = theta_mode,
     mode           = mode_res,
     Sigma_prop     = Sigma_prop,
-    V_mode         = mode_res$V_mode %||% NULL,
+    V_mode         = mode_res$V_mode %||% V_mode_hess,
     hessian_exact  = hessian_exact,
     log_marglik_laplace = NA_real_,
     me_variance    = me_variance,
@@ -870,7 +1149,7 @@ run_mode_finding <- function(solved,
     shock_scale    = shock_scale_mat,
     likelihood     = likelihood,
     freq_band      = freq_band,
-    system_priors  = posterior_options$system_priors %||% NULL,
+    system_priors  = system_priors,
     obc_specs      = obc_specs,
     ctx            = mode_ctx,
     meta           = list(
@@ -883,9 +1162,14 @@ run_mode_finding <- function(solved,
   ## Hessian is available. NA when the Hessian is absent or -H is not PD.
   if (!is.null(hessian_exact))
     result$log_marglik_laplace <- laplace_log_marglik(result)
+  if (!is.null(Sigma_prop_eta)) result$Sigma_prop_eta <- Sigma_prop_eta
+  if (!isTRUE(optimise)) result$meta$mode_skipped <- TRUE
 
   class(result) <- c("dynhr_mode_result", "list")
-  invisible(result)
+  list(result = result, model = model, compiled = compiled, priors = priors,
+       data = data, obs_vars = obs_vars, me_extra = me_extra,
+       shock_scale = shock_scale_mat, use_obc = use_obc,
+       obc_specs = obc_specs, log_post_fn = log_post_fn)
 }
 
 
@@ -896,10 +1180,16 @@ print.dynhr_mode_result <- function(x, ...) {
   cat("\n<dynhr_mode_result>\n")
   cat(sprintf("  Estimated params: %d\n", nrow(x$prior_spec)))
   cat(sprintf("  Observed vars  : %s\n", paste(x$obs_vars, collapse = ", ")))
-  cat(sprintf("  Log-posterior  : %.4f\n", x$mode$logpost))
-  cat(sprintf("  Method         : %s\n", x$meta$method))
+  if (isTRUE(x$meta$mode_skipped)) {
+    cat("  Mode           : not run (prior-initialised sampler)\n")
+  } else {
+    cat(sprintf("  Log-posterior  : %.4f\n", x$mode$logpost))
+    cat(sprintf("  Method         : %s\n", x$meta$method))
+  }
   if (!is.null(x$obc_specs))
     cat(sprintf("  OBC constraints: %d\n", length(x$obc_specs)))
+  il <- .est_integrity_lines(x$provenance$integrity)
+  if (length(il)) cat(il, sep = "\n")
   invisible(x)
 }
 
@@ -939,10 +1229,41 @@ build_sigma_prop <- function(lp_fn, theta_mode, prior_spec,
                               ## a daemon pool (model compiled per daemon) and owns
                               ## teardown; we only RE-BIND .worker_lp to the filter
                               ## we need (stationary/auto) instead of a fresh pool.
-                              pool_ready = FALSE) {
+                              pool_ready = FALSE,
+                              ## The log-posterior's lik_init: the daemon
+                              ## filter when "stationary" disagrees with lp_fn
+                              ## at the mode.
+                              lik_init = "auto",
+                              ## return_V = TRUE: return list(Sigma, V_mode) so
+                              ## the caller can keep the regularised inverse
+                              ## Hessian (documented as result$V_mode) instead
+                              ## of discarding it. V_mode is NULL on the
+                              ## empirical-covariance path.
+                              return_V = FALSE,
+                              ## W88: the mode stage's theta-space gradient
+                              ## (make_posterior_grad()). When usable the
+                              ## Hessian is the central difference of it
+                              ## (grad_hessian(): 2n calls) instead of the
+                              ## 2n(n+1)-evaluation lp stencil.
+                              grad_fn = NULL,
+                              ## W88: the per-daemon (par_standard) pool path
+                              ## may build the gradient on each daemon from
+                              ## the daemon's model (the Step-5 eligibility:
+                              ## analytic gradient not opted out, no OBC,
+                              ## no blocking extras) and difference it there.
+                              grad_on_pool = FALSE,
+                              ## The system prior the daemon posterior and
+                              ## gradient carry on the pool path.
+                              system_priors = NULL) {
   n_par <- length(theta_mode)
 
-  .vcat <- function(...) if (verbose) cat(...)
+  .vcat <- function(...) if (verbose) .dynhr_cat(...)
+  .out <- function(Sigma, V_mode = NULL, Sigma_eta = NULL) {
+    if (!isTRUE(return_V)) return(Sigma)
+    res <- list(Sigma = Sigma, V_mode = V_mode)
+    if (!is.null(Sigma_eta)) res$Sigma_eta <- Sigma_eta
+    res
+  }
 
   # Priority 1: empirical covariance from pooled draws
   if (!is.null(pooled_draws) && nrow(pooled_draws) > n_par) {
@@ -950,21 +1271,52 @@ build_sigma_prop <- function(lp_fn, theta_mode, prior_spec,
     Sigma <- cov(pooled_draws)
     opt_scale <- 2.38^2 / n_par
     rownames(Sigma) <- colnames(Sigma) <- names(theta_mode)
-    return(Sigma * opt_scale)
+    return(.out(Sigma * opt_scale))
   }
 
   # Priority 2: Hessian at mode. When an exact posterior Hessian (analytic
   # adjoint, log-posterior i.e. include_prior = TRUE) is supplied it is used
   # directly in place of the finite-difference Hessian; all downstream repair
   # (ill-conditioning fallback, prior-scale cap, PD regularisation) is identical.
+  #
+  # Bound-constrained (KKT) mode: coordinates whose central stencil (num_hessian
+  # reaches 2 h_i) leaves the prior support are differentiated one-sided and
+  # decoupled (.step6_bound_hessian, R/mode-hessian.R); the stencil for the
+  # rest never moves them. No such coordinate -> the path below is unchanged.
+  #
+  # With an exact gradient (W88; grad_fn on the host, or grad_on_pool on the
+  # per-daemon pool) the Hessian is the symmetrised central difference of the
+  # gradient (grad_hessian(): 2n calls, R/mode-hessian.R) -- the same
+  # bound-active selection, the bound coordinates' one-sided curvature from
+  # their own gradient component. A gradient stencil with a non-finite entry
+  # falls back to the log-posterior stencil below.
+  h <- max(1e-4, 1e-4 * abs(theta_mode))
+  h_vec  <- h * pmax(1, abs(theta_mode))
+  bnds   <- .step6_bounds(prior_spec, names(theta_mode))
+  at_bnd <- .step6_bound_active(theta_mode, bnds$lower, bnds$upper, 2 * h_vec)
+  coords <- which(!at_bnd)
+  os_grad <- NULL
+  .grad_ok <- function(gh) {
+    ok <- all(is.finite(gh$hess))
+    if (!ok)
+      .vcat("  (gradient stencil has non-finite entries; using the log-posterior stencil)\n")
+    ok
+  }
   if (!is.null(hess_exact)) {
     .vcat("  Using exact posterior Hessian at mode (analytic adjoint).\n")
     hess <- hess_exact
   } else {
-    h <- max(1e-4, 1e-4 * abs(theta_mode))
-    use_par_hess <- isTRUE(parallel) && n_par > 1L &&
+    hess <- NULL
+    if (.step6_grad_usable(grad_fn)) {
+      .vcat(sprintf("  Estimating Hessian at mode (central differences of the analytic gradient, %d calls)...\n",
+                    2L * length(coords) + if (any(at_bnd)) 1L + 2L * sum(at_bnd) else 0L))
+      gh <- grad_hessian(grad_fn, theta_mode, coords = coords, at_bnd = at_bnd,
+                         bnds = bnds)
+      if (.grad_ok(gh)) { hess <- gh$hess; os_grad <- gh$os }
+    }
+    use_par_hess <- isTRUE(parallel) && length(coords) > 1L &&
                     requireNamespace("mirai", quietly = TRUE)
-    if (use_par_hess && par_standard) {
+    if (is.null(hess) && use_par_hess && par_standard) {
       ## Re-initialise the model natively on each daemon (.mirai_pool_init) and
       ## reuse that pool, instead of shipping the log-posterior closure (whose
       ## compiled-model Rcpp external pointers serialise to DEAD pointers on the
@@ -981,21 +1333,25 @@ build_sigma_prop <- function(lp_fn, theta_mode, prior_spec,
       ## (e.g. boundary -Inf perturbations) flow to the shared make_pd handler
       ## below, exactly as the serial numDeriv path does -- no separate re-run.
       .vcat("  Estimating Hessian at mode (mirai, parallel; per-daemon re-init)...\n")
-      n_cores_h <- .mirai_n_cores(n_cores, n_par * (n_par + 1L) %/% 2L)
+      n_cores_h <- .mirai_n_cores(n_cores,
+                                  length(coords) * (length(coords) + 1L) %/% 2L)
       host_lp_mode <- lp_fn(theta_mode)$logpost %||% -Inf
       ## Set the daemon filter: on a SHARED pool (pool_ready, caller-owned) just
       ## re-bind .worker_lp -- no model recompile; otherwise stand up a fresh
-      ## pool here. Returns the share handle (NULL on the rebind path).
+      ## pool here. Returns the share handle (NULL on the rebind path). The
+      ## system prior is part of the target (the host lp_fn carries it).
       .set_filter <- function(lik) {
         if (isTRUE(pool_ready)) {
           .mirai_rebind_worker_lp(prior_spec, obs_vars, me_variance = me_variance,
                                   me_extra = me_extra, shock_scale = shock_scale,
+                                  system_priors = system_priors,
                                   lik_init = lik)
           NULL
         } else {
           .mirai_pool_init(n_cores_h, parsed_model, data, prior_spec, obs_vars,
                            me_variance, me_extra = me_extra,
-                           shock_scale = shock_scale, lik_init = lik)
+                           shock_scale = shock_scale,
+                           system_priors = system_priors, lik_init = lik)
         }
       }
       fit_filter <- "stationary"
@@ -1006,38 +1362,66 @@ build_sigma_prop <- function(lp_fn, theta_mode, prior_spec,
           lpf <- get0(".worker_lp", envir = globalenv(), inherits = FALSE)
           r <- lpf(.tm); if (is.list(r)) r$logpost else r
         }, .tm = .tm)[]
-      }, error = function(e) NA_real_)
+      }, error = function(e) .dynhr_reraise_bug(e, NA_real_))
       if (!is.finite(stat_lp_mode) ||
             abs(stat_lp_mode - host_lp_mode) > 1e-4 * max(1, abs(host_lp_mode))) {
-        .vcat("  Stationary filter disagrees at the mode; re-initialising with auto (diffuse).\n")
+        .vcat(sprintf("  Stationary filter disagrees at the mode; re-initialising with lik_init = %s.\n",
+                      lik_init))
         ## Only tear down a pool we OWN; a shared pool is just re-bound.
         if (!isTRUE(pool_ready)) { mirai::daemons(NULL); if (!is.null(sh)) rm(sh) }
-        sh <- .set_filter("auto")
-        fit_filter <- "auto"
+        sh <- .set_filter(lik_init)
+        fit_filter <- lik_init
       }
       .vcat(sprintf("    (filter = %s, %d daemons%s)\n", fit_filter, n_cores_h,
                     if (isTRUE(pool_ready)) ", shared pool" else ""))
-      hess <- tryCatch(
-        num_hessian_mirai(lp_fn, theta_mode, h = h, n_cores = n_cores_h,
-                          verbose = verbose, pool_ready = TRUE),
-        error = function(e) matrix(NA_real_, n_par, n_par))
+      ## W88: the exact gradient of the daemon posterior, built per daemon from
+      ## its model (.mirai_bind_worker_grad), differenced over the pool. Not
+      ## used when the daemon gradient resolves to "hybrid" or is unavailable.
+      if (isTRUE(grad_on_pool)) {
+        gm <- .mirai_bind_worker_grad(prior_spec, obs_vars,
+                                      me_variance = me_variance,
+                                      me_extra = me_extra,
+                                      shock_scale = shock_scale,
+                                      system_priors = system_priors)
+        if (!is.na(gm) && !identical(gm, "hybrid")) {
+          .vcat("    (central differences of the analytic gradient on the pool)\n")
+          gh <- grad_hessian_mirai(theta_mode, coords = coords, at_bnd = at_bnd,
+                                   bnds = bnds, verbose = verbose)
+          if (.grad_ok(gh)) { hess <- gh$hess; os_grad <- gh$os }
+        }
+      }
+      if (is.null(hess))
+        hess <- tryCatch(
+          num_hessian_mirai(lp_fn, theta_mode, h = h, n_cores = n_cores_h,
+                            verbose = verbose, pool_ready = TRUE,
+                            coords = coords),
+          error = function(e) .dynhr_reraise_bug(e,
+            matrix(NA_real_, n_par, n_par)))
       ## Tear down only a pool we created here; the caller owns a shared pool.
       if (!isTRUE(pool_ready)) { mirai::daemons(NULL); if (!is.null(sh)) rm(sh) }
-    } else if (use_par_hess) {
+    } else if (is.null(hess) && use_par_hess) {
       ## Non-standard likelihood (me_extra / shock_scale / non-Gaussian): the
       ## per-daemon re-init path does not cover it, so ship the closure.
       .vcat("  Estimating Hessian at mode (mirai, parallel)...\n")
       hess <- num_hessian_mirai(lp_fn, theta_mode, h = h, n_cores = n_cores,
-                                verbose = verbose)
-    } else {
+                                verbose = verbose, coords = coords)
+    } else if (is.null(hess)) {
       .vcat("  Estimating Hessian at mode (numDeriv)...\n")
-      hess <- num_hessian(lp_fn, theta_mode, h = h)
+      hess <- num_hessian(lp_fn, theta_mode, h = h, coords = coords)
     }
   }
+  bh <- NULL
+  if (any(at_bnd)) {
+    bh <- .step6_bound_hessian(hess, lp_fn, theta_mode, at_bnd, h_vec, bnds,
+                               prior_spec, keep_diag = !is.null(hess_exact),
+                               verbose = verbose, os = os_grad)
+    hess <- bh$hess
+  }
   .pc   <- .proposal_cov_from_hessian(hess, prior_spec, theta_mode, verbose)
-  V_mode <- .pc$V_mode
-  Sigma  <- .pc$Sigma
-  Sigma
+  ## Bound-active mode: also the eta-space proposal (see R/mode-hessian.R).
+  Sigma_eta <- if (!is.null(bh))
+    .step6_eta_cov(.pc$Sigma, bh, theta_mode, prior_spec, scale = 2.38^2 / n_par)
+  .out(.pc$Sigma, .pc$V_mode, Sigma_eta)
 }
 
 
@@ -1067,7 +1451,7 @@ build_sigma_prop <- function(lp_fn, theta_mode, prior_spec,
   ## `.vcat` is a LOCAL closure in each caller (run-mode-finding.R:251, :945),
   ## not a package-level function, so it must be re-made here or the
   ## regularisation branches below would fail to find it.
-  .vcat <- function(...) if (verbose) cat(...)
+  .vcat <- function(...) if (verbose) .dynhr_cat(...)
 
   if (any(!is.finite(hess)) ||
       !(is.finite(rcond(-hess)) && rcond(-hess) > .Machine$double.eps)) {
@@ -1147,15 +1531,20 @@ build_sigma_prop <- function(lp_fn, theta_mode, prior_spec,
 }
 
 #' Numerical Hessian via central differences
+#'
+#' @param coords Coordinates to differentiate (default all). Entries outside
+#'   \code{coords} x \code{coords} are left 0 -- used by Step 6 to keep the
+#'   stencil off a bound-active coordinate (see .step6_bound_hessian).
 #' @noRd
-num_hessian <- function(fn, theta, h = 1e-4) {
+num_hessian <- function(fn, theta, h = 1e-4, coords = seq_along(theta)) {
   n <- length(theta)
   H <- matrix(0, nrow = n, ncol = n)
   f0 <- fn(theta)
   f0_val <- if (is.list(f0)) f0$logpost else f0
 
-  for (i in seq_len(n)) {
-    for (j in i:n) {
+  for (a in seq_along(coords)) {
+    i <- coords[a]
+    for (j in coords[a:length(coords)]) {
       th_pp <- th_pm <- th_mp <- th_mm <- theta
       hi <- h * max(1, abs(theta[i]))
       hj <- h * max(1, abs(theta[j]))
@@ -1192,22 +1581,26 @@ num_hessian <- function(fn, theta, h = 1e-4) {
 #' @param n_cores  Daemon count (\code{NULL} = auto, capped at the number of
 #'   parameter pairs).
 #' @param verbose  Print timing.
+#' @param coords   Coordinates to differentiate (default all), as in
+#'   \code{\link{num_hessian}}; other entries are left 0.
 #' @return n x n Hessian matrix (unnamed dimnames, as \code{num_hessian}).
 #' @noRd
 num_hessian_mirai <- function(fn, theta, h = 1e-4, n_cores = NULL,
-                              verbose = TRUE, pool_ready = FALSE) {
+                              verbose = TRUE, pool_ready = FALSE,
+                              coords = seq_along(theta)) {
   n <- length(theta)
   par_names <- names(theta)
 
-  pairs <- vector("list", n * (n + 1L) %/% 2L)
+  nc <- length(coords)
+  pairs <- vector("list", nc * (nc + 1L) %/% 2L)
   k <- 0L
-  for (i in seq_len(n)) for (j in i:n) {
+  for (a in seq_len(nc)) for (j in coords[a:nc]) {
     k <- k + 1L
-    pairs[[k]] <- c(i, j)
+    pairs[[k]] <- c(coords[a], j)
   }
 
   n_cores <- .mirai_n_cores(n_cores, length(pairs))
-  if (verbose) cat(sprintf("    %d Hessian evaluations on %d daemons\n",
+  if (verbose) .dynhr_cat(sprintf("    %d Hessian evaluations on %d daemons\n",
                            length(pairs) * 4L, n_cores))
 
   t0 <- proc.time()
@@ -1264,7 +1657,52 @@ num_hessian_mirai <- function(fn, theta, h = 1e-4, n_cores = NULL,
     H[p[1L], p[2L]] <- H[p[2L], p[1L]] <- v
   }
 
-  if (verbose) cat(sprintf("    Hessian: %.1f sec\n",
+  if (verbose) .dynhr_cat(sprintf("    Hessian: %.1f sec\n",
                            (proc.time() - t0)[["elapsed"]]))
   H
+}
+
+
+#' Parallel Step-6 Hessian from the exact gradient on a mirai daemon pool
+#'
+#' The pool counterpart of \code{grad_hessian()} (R/mode-hessian.R): the
+#' same evaluation points (\code{.step6_grad_plan}) and the same assembly
+#' (\code{.step6_grad_finish}), the gradient calls spread over the daemons.
+#' The caller has stood up the pool (\code{.mirai_pool_init}) and bound each
+#' daemon's gradient with \code{.mirai_bind_worker_grad()}; a daemon without
+#' one (or a failed task) yields an NA gradient, i.e. a non-finite Hessian
+#' the caller treats as "gradient unavailable".
+#'
+#' @param theta Named parameter vector (the mode).
+#' @param h Base relative step, as in \code{grad_hessian()}.
+#' @param coords,at_bnd,bnds As in \code{grad_hessian()}.
+#' @param verbose Print timing.
+#' @return list(hess, os) as \code{grad_hessian()}.
+#' @noRd
+grad_hessian_mirai <- function(theta, h = .step6_grad_h,
+                               coords = seq_along(theta),
+                               at_bnd = rep(FALSE, length(theta)),
+                               bnds = NULL, verbose = TRUE) {
+  n    <- length(theta)
+  h_g  <- h * pmax(1, abs(theta))
+  plan <- .step6_grad_plan(theta, coords, at_bnd, h_g, bnds)
+  if (verbose) .dynhr_cat(sprintf("    %d gradient evaluations on the pool\n",
+                                  length(plan$points)))
+  t0 <- proc.time()
+  task <- function(th, .ev) {
+    gfn <- get0(".worker_grad", envir = globalenv(), inherits = FALSE)
+    if (!is.function(gfn)) return(NULL)
+    .ev(gfn, th)
+  }
+  ## Severed from this frame for the reason given in num_hessian_mirai(): the
+  ## task needs nothing from it. `.ev` is the host's .step6_grad_eval (its
+  ## namespace environment resolves to the daemon's dynhr).
+  environment(task) <- globalenv()
+  raw <- mirai::mirai_map(plan$points, task,
+                          .args = list(.ev = .step6_grad_eval))[]
+  G <- lapply(raw, function(v)
+    if (is.numeric(v) && length(v) == n) as.numeric(v) else rep(NA_real_, n))
+  if (verbose) .dynhr_cat(sprintf("    Hessian: %.1f sec\n",
+                                  (proc.time() - t0)[["elapsed"]]))
+  .step6_grad_finish(plan, G)
 }

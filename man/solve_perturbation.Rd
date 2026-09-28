@@ -68,7 +68,16 @@ model equations are linearised. Defaults to \code{NULL}
 expand around an alternative path.}
 }
 \value{
-For order=1: DecisionRules object.
+For order=1: DecisionRules object. Its \code{bk_satisfied} field is
+  \code{FALSE} when EITHER half of Blanchard-Kahn fails: the unstable-root
+  COUNT, or the RANK condition (a singular QZ block \eqn{Z_{11}}, which
+  additionally sets \code{bk_rank_deficient = TRUE}). Before 0.9.4 a rank
+  failure returned a pseudo-inverse rule with \code{bk_satisfied = TRUE}.
+  The shock loading \code{ghu} solves \eqn{(f_0 + f_+ P) ghu = -f_u} by
+  plain LU (as Dynare), however ill-conditioned; only an EXACTLY singular
+  system falls back to a pseudo-inverse, with a warning of class
+  \code{dynhr_warning_ghu_singular}, \code{ghu_singular = TRUE} and
+  \code{bk_satisfied = FALSE}.
   For order=2: DecisionRules2 object.
   For order=3: DecisionRules3 object.
   For order=4: DecisionRules4 object (Levintal compact).

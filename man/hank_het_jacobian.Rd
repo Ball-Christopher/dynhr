@@ -11,7 +11,8 @@ hank_het_jacobian(
   outputs = c("A", "C"),
   delta_in = 1e-05,
   delta_va = 1e-06,
-  delta_d = 1e-06
+  delta_d = 1e-06,
+  expectations = NULL
 )
 }
 \arguments{
@@ -38,6 +39,36 @@ perturbation in the s=0 term.}
 \item{delta_va}{Relative FD step for the backward value-function propagation.}
 
 \item{delta_d}{FD step for the distributional (curly-D) response.}
+
+\item{expectations}{\code{NULL} (default: full-information rational
+expectations, FIRE) or a named list selecting the behavioural
+expectations of Lenney and Rosso (2026, Bank of England Staff Working
+Paper 1197), applied to the FIRE Jacobian before it is returned:
+\itemize{
+  \item \code{theta}: stickiness in \eqn{[0, 1)}; each period a fraction
+    \eqn{1-\theta} of households updates its information set (the
+    paper's \eqn{\delta} is \eqn{\theta/(1-\theta)}).
+  \item \code{gamma}: extrapolation (default 0); an updating household's
+    forecast of every future input moves by \eqn{-\gamma} times the input
+    observed at the update (\eqn{\gamma < 0} is overreaction to current
+    conditions).
+  \item \code{type}: optional, \code{"behavioural"} (default),
+    \code{"sticky"} (requires \code{gamma = 0}: the sticky expectations of
+    Auclert, Rognlie and Straub 2020) or \code{"fire"} (same as
+    \code{NULL}).
+}
+\code{theta} and \code{gamma} are either scalars (every input) or numeric
+vectors named by input (inputs left out stay FIRE). The time-\eqn{h}
+average forecast of the input path is \eqn{A_h\,dX}, with
+\eqn{A_h[s,s] = 1} for \eqn{s \le h} (observed),
+\eqn{A_h[s,s] = 1-\theta^{h+1}} and
+\eqn{A_h[s,r] = -\gamma(1-\theta)\theta^{h-r}} (\eqn{r \le h}) for
+\eqn{s > h}; the behavioural Jacobian is
+\eqn{\bar J = \sum_h P_h A_h}, where \eqn{P_h} is the fake-news matrix
+shifted down the diagonal by \eqn{h} (the paper's eq. 7). \code{theta = 0},
+\code{gamma = 0} returns the FIRE Jacobian unchanged. Only the linear
+(Jacobian) path is behavioural: the nonlinear transition functions stay
+perfect-foresight.}
 }
 \value{
 Nested list \code{J[[output]][[input]]}, each a \code{T x T} matrix

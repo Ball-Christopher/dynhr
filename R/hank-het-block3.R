@@ -468,6 +468,10 @@ hank_td3_nonlinear <- function(block,rd_path=NULL,rf_path=NULL,ra_path=NULL,w_pa
 #'   the capital/foreign adjustment resources). \code{CHI} and \code{PHI} are
 #'   real goods absorbed by rebalancing, so a resource constraint that nets
 #'   them out must request them.
+#' @param expectations \code{NULL} (FIRE, default) or a behavioural
+#'   expectations spec (Lenney and Rosso 2026), applied to this block's
+#'   Jacobian before GE assembly; see \code{\link{hank_het_block_spec}} and
+#'   \code{\link{hank_het_jacobian}}.
 #'
 #' @return An object of class \code{hank_block} (kind \code{"het3"}).
 #' @seealso \code{\link{hank_het_block_spec}} (one-asset),
@@ -485,7 +489,8 @@ hank_td3_nonlinear <- function(block,rd_path=NULL,rf_path=NULL,ra_path=NULL,w_pa
 #' @export
 hank_het3_block_spec <- function(name, block,
                                  inputs = c("rd", "rf", "ra", "w"),
-                                 outputs = c("D", "F", "A", "C")) {
+                                 outputs = c("D", "F", "A", "C"),
+                                 expectations = NULL) {
   ## Reject the lower tiers explicitly. Validation below is on input NAMES,
   ## and a het/het2 block would fail it -- but with an error about an
   ## unsupported input rather than about the block, which sends the reader to
@@ -506,7 +511,10 @@ hank_het3_block_spec <- function(name, block,
     stop("hank_het3_block_spec(): unsupported output(s) ",
          paste0("'", bad, "'", collapse = ", "), "; this block supports ",
          paste0("'", .hank3_jac_outputs, "'", collapse = ", "), ".")
-  structure(list(name = name, kind = "het3", inputs = inputs,
-                 outputs = outputs, block = block),
-            class = "hank_block")
+  .ssj_expectations_resolve(expectations, inputs, "hank_het3_block_spec()")
+  .hank_spec_set_expectations(
+    structure(list(name = name, kind = "het3", inputs = inputs,
+                   outputs = outputs, block = block),
+              class = "hank_block"),
+    expectations)
 }

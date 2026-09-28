@@ -83,7 +83,12 @@
 ## beats the general-k .solve_kron_compact for this k=1 case. _factor self-tests
 ## on a fixed RHS and returns NULL (=> caller falls back to .solve_kron_compact)
 ## if QZ fails or the realized residual is large, so the result is never wrong.
-.gen_sylvester_k1_factor <- function(A, fp, hx, tol = 1e-9) {
+## self_test = FALSE (W89) skips that fixed-RHS solve for a caller that solves
+## ONE right-hand side and gates ITS residual instead (.solution_adjoint): the
+## self-test was a full second back-substitution pass. A rank-deficient block
+## QR (which would make qr.solve() stop, and the self-test fail) still returns
+## NULL, so the caller's .solve_kron_compact fallback is taken as before.
+.gen_sylvester_k1_factor <- function(A, fp, hx, tol = 1e-9, self_test = TRUE) {
   n <- nrow(A); ns <- nrow(hx)
   if (ns == 0L) return(list(n = n, ns = 0L, empty = TRUE))
   if (!requireNamespace("QZ", quietly = TRUE)) return(NULL)
@@ -111,9 +116,15 @@
   if (!ok) return(NULL)
   fac <- list(n = n, ns = ns, U = U, Tm = Tm, fp = fp, blocks = blocks,
               empty = FALSE)
+  if (!self_test) {
+    for (blk in blocks)
+      if (blk$fac$rank != min(dim(blk$fac$qr))) return(NULL)
+    return(fac)
+  }
   ## Deterministic self-test: solve a fixed RHS and check the Sylvester residual.
   Rtest <- matrix(1, n, ns)
-  Xt <- tryCatch(.gen_sylvester_k1_solve(fac, Rtest), error = function(e) NULL)
+  Xt <- tryCatch(.gen_sylvester_k1_solve(fac, Rtest),
+                 error = function(e) .dynhr_reraise_bug(e, NULL))
   if (is.null(Xt)) return(NULL)
   resid <- max(abs(A %*% Xt + fp %*% Xt %*% hx - Rtest))
   if (!is.finite(resid) || resid > tol * max(1, max(abs(Rtest)))) return(NULL)
@@ -260,8 +271,34 @@ solution_derivatives <- function(model, compiled, dr, params, param_names,
   derivs <- vector("list", length(param_names))
   names(derivs) <- param_names
 
+  ## Requested names that are NOT model parameters -- estimated shock stds,
+  ## which apply_theta_to_params() injects into `params` under the SHOCK name
+  ## -- enter no residual function: the steady state and every dynamic
+  ## Jacobian block are independent of them, so dG, dH and dys are EXACTLY
+  ## zero (certainty equivalence; their only channel is Sigma_e, which this
+  ## function does not return). The analytic primitive layer is indexed by the
+  ## model parameters alone, so asking it for a shock name was a
+  ## subscript-out-of-bounds crash (brief W68 item 2; the same fix W65 made in
+  ## .solution_adjoint_order2's first-order call).
+  model_pars <- compiled$model$param_names %||% names(model$param_values)
+
   for (j in seq_along(param_names)) {
     pname <- param_names[j]
+    if (!(pname %in% model_pars)) {
+      derivs[[pname]] <- list(
+        dG  = matrix(0, n_endo, n_state),
+        dH  = matrix(0, n_endo, n_exo),
+        dys = setNames(numeric(n_endo), endo),
+        dTT = matrix(0, n_state, n_state),
+        dRR = matrix(0, n_state, n_exo),
+        dZZ = matrix(0, length(obs_idx), n_state),
+        dDD = matrix(0, length(obs_idx), n_exo),
+        dd  = setNames(numeric(length(obs_vars)), obs_vars),
+        ok  = TRUE,
+        message = NA_character_
+      )
+      next
+    }
     precomp <- if (!is.null(analytic)) {
       ## Preserve the endogenous-variable names: single-column matrix
       ## extraction drops them when the matrix has one row (n_endo == 1),
@@ -281,7 +318,7 @@ solution_derivatives <- function(model, compiled, dr, params, param_names,
     })
 
     if (!isTRUE(res$ok)) {
-      warning(sprintf(
+      .dynhr_warn(sprintf(
         "solution_derivatives: parameter '%s' failed (%s); returning NA derivatives.",
         pname, res$message %||% "unknown error"))
       derivs[[pname]] <- list(

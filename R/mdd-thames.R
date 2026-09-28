@@ -43,10 +43,20 @@
 #' inverting), which reduces estimator bias at the cost of a factor-of-two
 #' effective sample size per half.
 #'
-#' **SE note.** The reported standard error treats the in-region draws as
-#' approximately i.i.d. (delta method on the Monte Carlo variance of
-#' \eqn{1/u_i}). For autocorrelated MCMC chains the true SE is larger; treat
-#' \code{se} as a lower bound in that case.
+#' **SE note.** The estimator is a mean over ALL \eqn{N_e} evaluation draws of
+#' \eqn{v_i = \mathbf{1}\{i \in A\} / u_i}, a variable that is zero outside the
+#' ellipsoid, so its Monte Carlo variance includes the variance of the
+#' TRUNCATION INDICATOR. Before 0.9.4 the \code{"iid"} SE averaged over the
+#' in-region draws only, dropping that term and reporting an SE roughly 2-3x
+#' too small (measured against the across-seed spread on i.i.d. Gaussian draws
+#' with a closed-form \eqn{\log Z}). Both \code{se_method} choices now estimate
+#' the variance of the same \eqn{N_e}-length vector.
+#'
+#' The delta method still treats the ellipsoid \eqn{(\hat\mu, \hat\Sigma, r)}
+#' as fixed, so the reported SE understates the truth by a further ~5% on
+#' i.i.d. draws; with autocorrelated MCMC output use
+#' \code{se_method = "batch"}, which is what \code{thames_mdd_from_chains()}
+#' passes by default.
 #'
 #' @param draws           Numeric matrix of posterior draws, \eqn{N \times d}
 #'   (rows = draws, columns = parameters).
@@ -63,8 +73,12 @@
 #'   and evaluate the estimator on the second, then average both orderings.
 #' @param se_method       Character: \code{"iid"} (default) or \code{"batch"}.
 #'   \itemize{
-#'     \item \code{"iid"}: delta-method SE assuming the in-region draws are
+#'     \item \code{"iid"}: delta-method SE assuming the EVALUATION draws are
 #'       approximately i.i.d. (lower bound for autocorrelated MCMC chains).
+#'       Computed from the variance of
+#'       \eqn{v_i = \mathbf{1}\{i \in A\} \exp(-\log u_i)} over all
+#'       \eqn{N_{\text{eval}}} draws, so it includes the truncation
+#'       indicator's contribution.
 #'     \item \code{"batch"}: batch-means SE that captures autocorrelation.
 #'       With \eqn{N_{\text{eval}}} in-region contributions
 #'       \eqn{v_i = \mathbf{1}\{i \in A\} \exp(-\log u_i) / (N_{\text{eval}} \cdot \text{Vol}(A))}
@@ -74,7 +88,36 @@
 #'       where \eqn{\bar{M}} is the vector of batch means of \eqn{v_i}.
 #'       Honest for autocorrelated chains; use this choice for MCMC output.
 #'   }
-#'   The default \code{"iid"} keeps all existing tests bit-identical.
+#'   Both are calibrated: on i.i.d. Gaussian draws with a closed-form
+#'   \eqn{\log Z}, the mean reported SE is within ~7% of the across-seed
+#'   standard deviation of \code{log_mdd} (200 seeds, N = 400 and N = 2000,
+#'   d = 2 and d = 5).
+#' @param lower,upper Optional bounds of the posterior's support \eqn{S}
+#'   (e.g. the prior bounds): numeric, one per column of \code{draws}
+#'   (matched by name when both are named) or a scalar recycled; \code{NULL}
+#'   = unbounded on that side. See \strong{Support correction}.
+#' @param in_support Optional \code{function(theta)} returning \code{TRUE}
+#'   when the named parameter vector \code{theta} is inside the support
+#'   (e.g. the model solves / is determinate there). Evaluated only at Monte
+#'   Carlo points that already satisfy \code{lower}/\code{upper}, so an
+#'   expensive check should come with a smaller \code{n_support}.
+#' @param n_support Number of uniform Monte Carlo points in the ellipsoid used
+#'   to estimate the in-support fraction (default 20000). Only used when a
+#'   finite bound or \code{in_support} is given.
+#'
+#' @section Support correction:
+#' The reciprocal identity above holds with \eqn{\text{Vol}(A \cap S)} in
+#' place of \eqn{\text{Vol}(A)}: posterior draws never fall in the part of the
+#' ellipsoid outside the support \eqn{S}, so the uncorrected estimator
+#' over-states \eqn{\log Z} by \eqn{-\log p}, where
+#' \eqn{p = \text{Vol}(A \cap S)/\text{Vol}(A)}. This bias is not small next
+#' to the Monte Carlo error when the posterior piles up against a bound, and
+#' it ADDS across boundary parameters. When \code{lower}, \code{upper} or
+#' \code{in_support} is given, \eqn{p} is estimated by uniform Monte Carlo on
+#' the ellipsoid (the revised THAMES of Metodiev et al.) and
+#' \eqn{\log \hat p} is added to \code{log_mdd}; its delta-method s.e.
+#' \eqn{\sqrt{(1-\hat p)/(n\hat p)}} is added to \code{se} in quadrature.
+#' Without them, \eqn{p = 1} and no random numbers are drawn.
 #'
 #' @return A named list with elements:
 #'   \describe{
@@ -97,6 +140,13 @@
 #'     \item{d}{Dimension \eqn{d}.}
 #'     \item{n_used}{Number of draws after dropping non-finite
 #'       \code{log_post_values}.}
+#'     \item{support_fraction}{Only when \code{lower}, \code{upper} or
+#'       \code{in_support} restricts the support: the estimated fraction
+#'       \eqn{\hat p} of the ellipsoid inside it (averaged over the two halves
+#'       when \code{split = TRUE}).}
+#'     \item{support_se}{Only with a support restriction: the Monte Carlo s.e.
+#'       of the \eqn{\log \hat p} correction (already included in
+#'       \code{se}).}
 #'   }
 #'
 #' @references
@@ -126,7 +176,11 @@ thames_mdd <- function(draws,
                        radius    = NULL,
                        quantile  = 0.5,
                        split     = TRUE,
-                       se_method = c("iid", "batch")) {
+                       se_method = c("iid", "batch"),
+                       lower     = NULL,
+                       upper     = NULL,
+                       in_support = NULL,
+                       n_support = 20000L) {
 
   se_method <- match.arg(se_method)
 
@@ -147,7 +201,7 @@ thames_mdd <- function(draws,
   ok <- is.finite(log_post_values)
   if (!all(ok)) {
     n_drop <- sum(!ok)
-    message(sprintf("thames_mdd: dropping %d draw(s) with non-finite log_post_values",
+    .dynhr_inform(sprintf("thames_mdd: dropping %d draw(s) with non-finite log_post_values",
                     n_drop))
     draws            <- draws[ok, , drop = FALSE]
     log_post_values  <- log_post_values[ok]
@@ -157,6 +211,63 @@ thames_mdd <- function(draws,
     stop(sprintf(
       "thames_mdd requires N > 2d; have N = %d, d = %d (after dropping non-finite values)",
       N, d))
+
+  ## ---- support (B6) -----------------------------------------------------
+  ## Bounds are matched to the draw columns by name when both carry names,
+  ## else taken positionally; a NULL side is unbounded.
+  .align_bound <- function(b, default, what) {
+    if (is.null(b)) return(rep(default, d))
+    b <- as.numeric(if (!is.null(names(b)) && !is.null(colnames(draws)) &&
+                          all(colnames(draws) %in% names(b)))
+                      b[colnames(draws)] else b)
+    if (length(b) == 1L) b <- rep(b, d)
+    if (length(b) != d || anyNA(b))
+      .dynhr_abort("thames_mdd: `", what, "` must have one (non-NA) bound ",
+                   "per column of `draws` (", d, "); got ", length(b), ".",
+                   class = "dynhr_error_thames_support")
+    b
+  }
+  sup_lo <- .align_bound(lower, -Inf, "lower")
+  sup_hi <- .align_bound(upper,  Inf, "upper")
+  if (!is.null(in_support) && !is.function(in_support))
+    .dynhr_abort("thames_mdd: `in_support` must be NULL or a function(theta) ",
+                 "returning TRUE inside the support.",
+                 class = "dynhr_error_thames_support")
+  use_support <- any(is.finite(sup_lo)) || any(is.finite(sup_hi)) ||
+                 !is.null(in_support)
+  n_support <- as.integer(n_support)
+  if (use_support && (length(n_support) != 1L || is.na(n_support) ||
+                      n_support < 100L))
+    .dynhr_abort("thames_mdd: `n_support` must be an integer >= 100.",
+                 class = "dynhr_error_thames_support")
+
+  ## Fraction of the ellipsoid A = {mu + r U' u : |u| <= 1} (Sigma = U'U)
+  ## that lies inside the support S, by uniform Monte Carlo on A. Returns
+  ## log(p) and its delta-method s.e. sqrt((1 - p) / (n p)).
+  .support_fraction <- function(mu, U, r) {
+    if (!use_support) return(list(p = 1, log_p = 0, se = 0))
+    z   <- matrix(stats::rnorm(n_support * d), n_support, d)
+    u   <- z / sqrt(rowSums(z^2)) * stats::runif(n_support)^(1 / d)
+    pts <- sweep(r * (u %*% U), 2L, mu, "+")
+    inside <- rowSums(sweep(pts, 2L, sup_lo, "<")) == 0 &
+              rowSums(sweep(pts, 2L, sup_hi, ">")) == 0
+    if (!is.null(in_support) && any(inside)) {
+      k <- which(inside)
+      inside[k] <- vapply(k, function(j) {
+        th <- pts[j, ]
+        names(th) <- colnames(draws)
+        isTRUE(in_support(th))
+      }, logical(1))
+    }
+    n_in <- sum(inside)
+    if (n_in == 0L)
+      .dynhr_abort("thames_mdd: none of the ", n_support, " uniform points ",
+                   "in the ellipsoid lies inside the support; the draws and ",
+                   "the bounds / in_support are inconsistent.",
+                   class = "dynhr_error_thames_support")
+    p <- n_in / n_support
+    list(p = p, log_p = log(p), se = sqrt((1 - p) / (n_support * p)))
+  }
 
   ## ---- log-volume helper ----------------------------------------------
   ## log Vol(ellipsoid) = log(V_d) + d*log(r) + 0.5*log(det(Sigma_hat))
@@ -181,7 +292,7 @@ thames_mdd <- function(draws,
     ev <- eigen(Sigma_hat, symmetric = TRUE, only.values = TRUE)$values
     if (any(ev <= 0)) {
       ridge <- max(abs(ev)) * .Machine$double.eps^0.5 * d
-      warning(sprintf(
+      .dynhr_warn(sprintf(
         "thames_mdd: posterior covariance singular (min eigenvalue %.2e); adding ridge %.2e",
         min(ev), ridge))
       diag(Sigma_hat) <- diag(Sigma_hat) + ridge
@@ -231,11 +342,22 @@ thames_mdd <- function(draws,
     log_vol    <- .log_vol(r, log_det_sigma)
     lp_in      <- lp_e[in_A]
 
-    ## log(1/Z)^ = -log(N_e) - log(Vol) + logsumexp(-lp_in)
-    ## => logZ^ = log(N_e) + log(Vol) - logsumexp(-lp_in)
+    ## B6 (brief 23, 2026-09-25): the reciprocal identity is
+    ##   E_post[ 1_A(theta) / u(theta) ] = Vol(A n S) / Z,
+    ## S the support of the posterior -- the ellipsoid mass OUTSIDE S carries
+    ## no posterior draws, so dividing by the full Vol(A) overstates log Z by
+    ## -log(p), p = Vol(A n S) / Vol(A) (measured +0.059 nats for one
+    ## boundary parameter at d = 15, adding up across boundary parameters).
+    ## p is estimated by Monte Carlo (Metodiev et al., revised THAMES) and its
+    ## s.e. is added in quadrature below. Without bounds / in_support, p = 1
+    ## exactly and no random numbers are drawn.
+    sf         <- .support_fraction(mu_hat, L, r)
+
+    ## log(1/Z)^ = -log(N_e) - log(Vol) - log(p) + logsumexp(-lp_in)
+    ## => logZ^ = log(N_e) + log(Vol) + log(p) - logsumexp(-lp_in)
     neg_lp_in  <- -lp_in
     lse        <- .logsumexp(neg_lp_in)
-    log_recip  <- -log(N_e) - log_vol + lse
+    log_recip  <- -log(N_e) - log_vol - sf$log_p + lse
 
     ## SE on log(1/Z)^, two methods:
     ##
@@ -252,14 +374,34 @@ thames_mdd <- function(draws,
     ## Both methods work on a relative scale to avoid overflow.
     if (n_in > 1L) {
       if (identical(se_method, "iid")) {
-        ## iid: delta-method on in-region draws (original code)
-        rel     <- neg_lp_in - max(neg_lp_in)   # log(w_i / w_max)
-        w_rel   <- exp(rel)
-        mean_w  <- mean(w_rel)
-        var_w   <- stats::var(w_rel)
-        se_half <- sqrt(var_w / (n_in * mean_w^2))   # SE of mean(1/u) / w_max
-        ## SE of log(mean(1/u)) via delta method = SE(mean(1/u)) / mean(1/u)
-        se_logz <- se_half / mean_w
+        ## 0.9.4 (ledger A11) -- the iid SE was ~2.4x too SMALL because it
+        ## averaged over the WRONG sample.
+        ##
+        ## The estimator is  (1/Z)^ = mean_{i = 1..N_e}(v_i) / Vol(A)  with
+        ##   v_i = 1{i in A} * exp(-log u_i),
+        ## i.e. a mean over ALL N_e eval draws of a variable that is ZERO
+        ## outside the ellipsoid. The old code instead took the mean and
+        ## variance over the n_in IN-REGION draws only, which drops the
+        ## variance of the truncation INDICATOR -- and that term dominates:
+        ## writing p = n_in/N_e, mA and sA for the in-region mean and sd,
+        ##   Var(v) = p*sA^2 + p*(1-p)*mA^2,
+        ## so the relative SE is sqrt(sA^2/mA^2 + (1-p)) / sqrt(n_in) whereas
+        ## the old formula reported only sqrt(sA^2/mA^2) / sqrt(n_in). For a
+        ## Gaussian posterior at the default median radius the indicator term
+        ## is several times the weight-dispersion term. (The old code also
+        ## divided by `mean_w` twice, which partly masked the shortfall by
+        ## inflating the answer.)
+        ##
+        ## Working directly with v on a relative scale gives the right answer
+        ## with no case analysis -- and makes the "iid" and "batch" branches
+        ## two estimators of the SAME variance, differing only in whether
+        ## serial correlation is accounted for.
+        log_anchor <- max(neg_lp_in)
+        v_full <- numeric(N_e)
+        v_full[in_A] <- exp(neg_lp_in - log_anchor)
+        mean_v <- mean(v_full)
+        se_logz <- if (mean_v <= 0) NA_real_
+                   else sqrt(stats::var(v_full) / N_e) / mean_v
       } else {
         ## batch: batch-means on chain-ordered v_i in the eval half.
         ## v_i = 1{i in A} * exp(-lp_e[i]) in original scale (not /N_e*Vol,
@@ -294,6 +436,8 @@ thames_mdd <- function(draws,
     } else {
       se_logz <- NA_real_
     }
+    ## Independent Monte Carlo error of log(p) (B6), in quadrature.
+    if (use_support) se_logz <- sqrt(se_logz^2 + sf$se^2)
 
     ## Reliability: effective sample size of the in-region importance weights
     ## w_i = 1/u_i (Kong-Liu-Wong 1994). The THAMES reciprocal sum is dominated
@@ -314,7 +458,9 @@ thames_mdd <- function(draws,
          n_in       = n_in,
          weight_ess = weight_ess,
          r          = r,
-         N_e        = N_e)
+         N_e        = N_e,
+         support_p  = sf$p,
+         support_se = sf$se)
   }
 
   ## ---- run estimator --------------------------------------------------
@@ -335,7 +481,7 @@ thames_mdd <- function(draws,
       NA_real_
 
     w_ess <- min(res_a$weight_ess, res_b$weight_ess)   # conservative
-    list(
+    out <- list(
       log_mdd     = -log_recip_avg,
       se          = se_comb,
       n_in_region = res_b$n_in,        # second-half eval (conventional report)
@@ -346,9 +492,12 @@ thames_mdd <- function(draws,
       d           = d,
       n_used      = N
     )
+    sup <- list(support_fraction = 0.5 * (res_a$support_p + res_b$support_p),
+                support_se = 0.5 * sqrt(res_a$support_se^2 +
+                                        res_b$support_se^2))
   } else {
     res <- .thames_half(build_idx = seq_len(N), eval_idx = seq_len(N))
-    list(
+    out <- list(
       log_mdd     = res$log_mdd,
       se          = res$se,
       n_in_region = res$n_in,
@@ -359,7 +508,12 @@ thames_mdd <- function(draws,
       d           = d,
       n_used      = N
     )
+    sup <- list(support_fraction = res$support_p,
+                support_se       = res$support_se)
   }
+  ## The support diagnostics are reported only when a correction was asked
+  ## for; without bounds the result keeps its historical shape.
+  if (use_support) c(out, sup) else out
 }
 
 
@@ -368,7 +522,7 @@ thames_mdd <- function(draws,
 #' Convenience wrapper around \code{\link{thames_mdd}} that extracts posterior
 #' draws and their theta-space unnormalized log-posterior values from a
 #' \code{dynhr_chains} object (as returned by \code{\link{run_full_estimation}}
-#' or the public samplers \code{\link{mcmc}}, \code{\link{nuts}},
+#' or the public samplers \code{\link{dynhr_mcmc}}, \code{\link{nuts}},
 #' \code{\link{smc}}).
 #'
 #' @details
@@ -387,6 +541,14 @@ thames_mdd <- function(draws,
 #' variance component.  For a per-chain breakdown, call \code{thames_mdd}
 #' directly on each \code{chain_list[[k]]$chain} and
 #' \code{chain_list[[k]]$post_logpost}.
+#'
+#' **SMC results.** A weighted SMC cloud whose \code{post_logpost} is still in
+#' particle order (no \code{resample_idx}) is resampled to equal weights with
+#' all per-particle fields re-indexed together before pairing, so every draw
+#' carries its own log-posterior. The prior-support box an SMC run records
+#' (\code{support_lower}/\code{support_upper}) is passed to
+#' \code{thames_mdd(lower =, upper =)} for the support correction unless
+#' \code{lower}/\code{upper} are given in \code{...}.
 #'
 #' **Never errors.** Any failure (too few draws, singular covariance, missing
 #' log-posterior) returns \code{list(log_mdd = NA_real_, se = NA_real_, ...)}
@@ -423,56 +585,238 @@ thames_mdd_from_chains <- function(chains, ...) {
     if (!inherits(chains, "dynhr_chains") && !is.list(chains))
       stop("'chains' must be a dynhr_chains object or list")
 
-    draws <- chains$chain
-    if (!is.matrix(draws) || nrow(draws) == 0L || ncol(draws) == 0L) {
-      message("thames_mdd_from_chains: chains$chain is absent or empty; returning NA")
+    ## Draws paired with their own log-posterior values (shared with
+    ## marginal_likelihoods() / the MHM estimator).
+    ext <- .mdd_chain_draws_logpost(chains)
+    if (is.null(ext$logpost)) {
+      .dynhr_inform("thames_mdd_from_chains: ", ext$reason, "; returning NA")
       return(.na_result)
     }
-
-    ## ---- Extract log-posterior vector in chain order --------------------
-    ## Multi-chain: chain_list[[k]]$post_logpost, concatenated in order.
-    ## Single-chain: chains$post_logpost directly.
-    cl <- chains$chain_list
-    if (!is.null(cl) && length(cl) >= 1L) {
-      ## Multi-chain: collect per-chain post_logpost values.
-      ## Concatenate in chain order (same order as combined chain matrix).
-      lp_parts <- lapply(cl, function(ch) ch$post_logpost)
-      ok_parts <- !sapply(lp_parts, is.null)
-      if (!any(ok_parts)) {
-        message("thames_mdd_from_chains: no post_logpost in chain_list; returning NA")
-        return(.na_result)
-      }
-      ## Concatenate only the non-NULL parts, but only use chains that also
-      ## contributed to chains$chain (same number of rows).
-      lp_vec <- unlist(lp_parts[ok_parts])
-    } else {
-      ## Single-chain path
-      lp_vec <- chains$post_logpost
-      if (is.null(lp_vec)) {
-        message("thames_mdd_from_chains: chains$post_logpost not found; returning NA")
-        return(.na_result)
-      }
-    }
-    lp_vec <- as.numeric(lp_vec)
-
-    ## ---- Dimension check ------------------------------------------------
-    n_draws <- nrow(draws)
-    if (length(lp_vec) != n_draws) {
-      message(sprintf(
-        paste0("thames_mdd_from_chains: length(logpost) = %d != nrow(draws) = %d",
-               " (possible chain-list mismatch); returning NA"),
-        length(lp_vec), n_draws))
-      return(.na_result)
-    }
+    draws  <- ext$draws
+    lp_vec <- ext$logpost
+    chains <- ext$chains
 
     ## ---- Call thames_mdd with batch SE by default -----------------------
     dots <- list(...)
     if (is.null(dots$se_method)) dots$se_method <- "batch"
+    ## B6: the prior-support box recorded by the SMC drivers
+    ## ($support_lower / $support_upper) turns on the support correction
+    ## unless the caller passed its own bounds.
+    if (!"lower" %in% names(dots) && !is.null(chains$support_lower))
+      dots$lower <- chains$support_lower
+    if (!"upper" %in% names(dots) && !is.null(chains$support_upper))
+      dots$upper <- chains$support_upper
 
     do.call(thames_mdd, c(list(draws = draws, log_post_values = lp_vec), dots))
 
   }, error = function(e) {
-    message("thames_mdd_from_chains: ", conditionMessage(e), "; returning NA")
+    .dynhr_inform("thames_mdd_from_chains: ", conditionMessage(e), "; returning NA")
     .na_result
   })
+}
+
+
+## Pair a chains object's draws with their OWN log-posterior values.
+##
+## Shared by thames_mdd_from_chains() and the modified-harmonic-mean path of
+## marginal_likelihoods(): both estimators need (theta_i, log u(theta_i)) in
+## chain order. A weighted SMC cloud whose $post_logpost is still aligned with
+## $particles (no $resample_idx -- a raw dynhr_smc() result, or a driver that
+## resampled only $chain) is first resampled with every per-particle field
+## re-indexed together (B5). Multi-chain objects concatenate the per-chain
+## $post_logpost in chain order, the same order as the pooled $chain.
+##
+## Returns list(draws, logpost, chains, reason): `logpost` is NULL (and
+## `reason` says why) when no correctly-sized log-posterior vector exists.
+## @noRd
+.mdd_chain_draws_logpost <- function(chains) {
+  w_smc <- chains$smc_weights
+  if (is.null(chains$resample_idx) && is.matrix(chains$particles) &&
+      length(w_smc) == nrow(chains$particles) && length(w_smc) >= 2L &&
+      length(chains$post_logpost) == nrow(chains$particles) &&
+      !all(w_smc == w_smc[1L]))
+    chains <- .smc_equal_weight_result(chains)
+
+  out <- list(draws = NULL, logpost = NULL, chains = chains, reason = NULL)
+  draws <- chains$chain
+  if (!is.matrix(draws) || nrow(draws) == 0L || ncol(draws) == 0L) {
+    out$reason <- "chains$chain is absent or empty"
+    return(out)
+  }
+  out$draws <- draws
+
+  cl <- chains$chain_list
+  if (!is.null(cl) && length(cl) >= 1L) {
+    lp_parts <- lapply(cl, function(ch) ch$post_logpost)
+    ok_parts <- !vapply(lp_parts, is.null, logical(1))
+    if (!any(ok_parts)) {
+      out$reason <- "no post_logpost in chain_list"
+      return(out)
+    }
+    lp_vec <- unlist(lp_parts[ok_parts])
+  } else {
+    lp_vec <- chains$post_logpost
+    if (is.null(lp_vec)) {
+      out$reason <- "chains$post_logpost not found"
+      return(out)
+    }
+  }
+  lp_vec <- as.numeric(lp_vec)
+  if (length(lp_vec) != nrow(draws)) {
+    out$reason <- sprintf(paste0(
+      "length(logpost) = %d != nrow(draws) = %d (possible chain-list ",
+      "mismatch)"), length(lp_vec), nrow(draws))
+    return(out)
+  }
+  out$logpost <- lp_vec
+  out
+}
+
+
+#' Modified harmonic mean (Geweke 1999) marginal-likelihood estimator
+#'
+#' Estimates \eqn{\log Z = \log \int L(\theta) p(\theta)\, d\theta} from
+#' posterior draws and their unnormalized log-posterior values with Geweke's
+#' (1999) modified harmonic mean, the estimator Dynare reports as
+#' \code{oo_.MarginalDensity.ModifiedHarmonicMean}. A sibling of
+#' \code{\link{thames_mdd}}: both rest on the reciprocal-importance identity
+#' \eqn{E_{\mathrm{post}}[f(\theta)/u(\theta)] = 1/Z} for a density \eqn{f}
+#' supported inside the posterior's support; they differ in \eqn{f}.
+#'
+#' @details
+#' \strong{Weight density.} \eqn{f} is the normal density with the mean
+#' \eqn{\hat\mu} and covariance \eqn{\hat\Sigma} of the draws, truncated to the
+#' ellipsoid \eqn{(\theta-\hat\mu)^\top\hat\Sigma^{-1}(\theta-\hat\mu) \le
+#' \chi^2_{d}(\tau)} and renormalised by \eqn{1/\tau}:
+#' \deqn{\widehat{1/Z} = \frac{1}{N}\sum_{i=1}^N \frac{f(\theta_i)}{u(\theta_i)}.}
+#' The truncation keeps \eqn{f/u} bounded in the tails, which is what makes
+#' the estimator's variance finite where the plain harmonic mean's is not.
+#' Unlike \code{\link{thames_mdd}} (default), there is no sample split:
+#' \eqn{\hat\mu, \hat\Sigma} come from the same draws, as in Dynare.
+#'
+#' \strong{Several \code{tau}.} Dynare evaluates \eqn{\tau = 0.1, \dots, 0.9}
+#' and reports the MEAN of the nine estimates. Pass that vector as \code{tau}
+#' to reproduce it; the per-\eqn{\tau} estimates are in \code{$by_tau}, and a
+#' spread across them that is large next to \code{se} flags a non-Gaussian
+#' posterior.
+#'
+#' \strong{Standard error.} Delta method on the influence values
+#' \eqn{(f/u)_i / \overline{f/u} - 1} (averaged over the \code{tau} values, so
+#' the reported s.e. is that of the reported mean): \code{"iid"} treats the
+#' draws as independent; \code{"batch"} uses batch means in chain order and is
+#' the honest choice for autocorrelated MCMC output.
+#'
+#' \strong{Support.} Like THAMES without its support correction, the
+#' identity needs \eqn{f} to put no mass outside the posterior support; a
+#' posterior piled against a prior bound makes the estimate too high by
+#' \eqn{-\log} of the ellipsoid's in-support mass fraction. Use
+#' \code{thames_mdd(lower =, upper =)} when that matters.
+#'
+#' @param draws Numeric matrix of posterior draws, \eqn{N \times d}.
+#' @param logpost Length-\eqn{N} numeric vector of unnormalized log-posterior
+#'   values \eqn{\log L(\theta_i) + \log p(\theta_i)} (normalized prior).
+#'   Non-finite entries are dropped with their draws.
+#' @param tau Truncation probability (or a vector of them) in \eqn{(0, 1)}.
+#'   Default 0.5.
+#' @param se_method \code{"iid"} (default) or \code{"batch"}; see Details.
+#' @return A list with \code{log_mdd} (the mean over \code{tau} of the
+#'   per-\eqn{\tau} log marginal-likelihood estimates), \code{se},
+#'   \code{by_tau} (data frame: \code{tau}, \code{log_mdd}, \code{se},
+#'   \code{n_in_region}), \code{d}, \code{n_used} and \code{se_method}.
+#' @references Geweke, J. (1999). Using simulation methods for Bayesian
+#'   econometric models: inference, development, and communication.
+#'   \emph{Econometric Reviews}, 18(1), 1-73.
+#' @seealso \code{\link{thames_mdd}}, \code{\link{marginal_likelihoods}},
+#'   \code{\link{laplace_log_marglik}}
+#' @examples
+#' set.seed(1)
+#' S <- matrix(c(1, 0.5, 0.5, 2), 2)
+#' draws <- MASS::mvrnorm(4000, mu = c(1, -1), Sigma = S)
+#' log_u <- -0.5 * mahalanobis(draws, c(1, -1), S)
+#' mdd_modified_harmonic_mean(draws, log_u)$log_mdd
+#' log(2 * pi) + 0.5 * log(det(S))     # exact log Z
+#' @export
+mdd_modified_harmonic_mean <- function(draws, logpost, tau = 0.5,
+                                       se_method = c("iid", "batch")) {
+  se_method <- match.arg(se_method)
+  if (!is.matrix(draws)) draws <- as.matrix(draws)
+  logpost <- as.numeric(logpost)
+  if (!is.numeric(draws) || length(logpost) != nrow(draws))
+    .dynhr_abort("mdd_modified_harmonic_mean: `draws` must be a numeric ",
+                 "matrix with one row per element of `logpost`.",
+                 class = "dynhr_error_mdd_input")
+  tau <- as.numeric(tau)
+  if (length(tau) < 1L || anyNA(tau) || any(tau <= 0 | tau >= 1))
+    .dynhr_abort("mdd_modified_harmonic_mean: `tau` must be in (0, 1).",
+                 class = "dynhr_error_mdd_input")
+
+  ok <- is.finite(logpost) & rowSums(!is.finite(draws)) == 0
+  if (!all(ok)) {
+    .dynhr_inform(sprintf(paste0("mdd_modified_harmonic_mean: dropping %d ",
+                                 "draw(s) with non-finite values"), sum(!ok)))
+    draws   <- draws[ok, , drop = FALSE]
+    logpost <- logpost[ok]
+  }
+  N <- nrow(draws)
+  d <- ncol(draws)
+  if (d < 1L || N <= 2L * d)
+    .dynhr_abort(sprintf(paste0("mdd_modified_harmonic_mean: needs N > 2d ",
+                                "finite draws; have N = %d, d = %d."), N, d),
+                 class = "dynhr_error_mdd_input")
+
+  mu  <- colMeans(draws)
+  Sig <- stats::cov(draws)
+  ev  <- eigen(Sig, symmetric = TRUE, only.values = TRUE)$values
+  if (min(ev) <= max(ev) * 1e-14)
+    .dynhr_abort("mdd_modified_harmonic_mean: the covariance of the draws is ",
+                 "singular (a parameter is constant, or two are collinear); ",
+                 "drop it before estimating the MDD.",
+                 class = "dynhr_error_mdd_input")
+  U <- chol(Sig)
+  Z <- backsolve(U, t(sweep(draws, 2L, mu, "-")), transpose = TRUE)
+  maha2  <- colSums(Z^2)
+  logdet <- 2 * sum(log(diag(U)))
+
+  n_tau  <- length(tau)
+  infl   <- matrix(0, N, n_tau)
+  by_tau <- data.frame(tau = tau, log_mdd = NA_real_, se = NA_real_,
+                       n_in_region = NA_integer_)
+  for (j in seq_len(n_tau)) {
+    inside <- maha2 <= stats::qchisq(tau[j], df = d)
+    if (!any(inside))
+      .dynhr_abort("mdd_modified_harmonic_mean: no draw falls inside the ",
+                   "truncation ellipsoid for tau = ", tau[j], ".",
+                   class = "dynhr_error_mdd_input")
+    ## log f(theta_i) - log u(theta_i) on the ellipsoid.
+    a <- -log(tau[j]) - 0.5 * d * log(2 * pi) - 0.5 * logdet -
+         0.5 * maha2 - logpost
+    v <- numeric(N)
+    v[inside] <- exp(a[inside] - max(a[inside]))
+    infl[, j] <- v / mean(v) - 1
+    by_tau$log_mdd[j]     <- log(N) - .logsumexp(a[inside])
+    by_tau$se[j]          <- .mdd_mean_se(infl[, j], se_method)
+    by_tau$n_in_region[j] <- sum(inside)
+  }
+
+  list(log_mdd   = mean(by_tau$log_mdd),
+       se        = .mdd_mean_se(rowMeans(infl), se_method),
+       by_tau    = by_tau,
+       d         = d,
+       n_used    = N,
+       se_method = se_method)
+}
+
+## Monte Carlo s.e. of the mean of an influence sequence `x`: "iid" =
+## sd / sqrt(n); "batch" = batch means over floor(sqrt(n)) consecutive batches
+## in the given (chain) order, the thames_mdd(se_method = "batch") convention.
+## @noRd
+.mdd_mean_se <- function(x, se_method = c("iid", "batch")) {
+  se_method <- match.arg(se_method)
+  n <- length(x)
+  if (n < 2L) return(NA_real_)
+  if (identical(se_method, "iid")) return(stats::sd(x) / sqrt(n))
+  b <- max(2L, floor(sqrt(n)))
+  m <- floor(n / b)
+  bm <- colMeans(matrix(x[seq_len(b * m)], nrow = m, ncol = b))
+  sqrt(stats::var(bm) / b)
 }

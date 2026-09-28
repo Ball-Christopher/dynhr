@@ -50,8 +50,10 @@
 #'   If set, overrides n.
 #' @param return_model      If TRUE, return the modified model objects for
 #'   debugging.
-#' @param beta              Discount factor. Defaults to \code{params["beta"]}
-#'   or 0.99.
+#' @param beta              Discount factor. Defaults to the .mod's
+#'   \code{ramsey_model(planner_discount = ...)} option, else the parameter
+#'   \code{beta} / \code{betta}; errors (class \code{dynhr_error_no_discount})
+#'   when none exists.
 #' @param orig_ss           Optional pre-computed steady state list (from
 #'   \code{\link{solve_steady}}).  When \code{NULL} (default) the steady state
 #'   is solved internally.
@@ -118,9 +120,9 @@ ramsey_nn1 <- function(model,
   if (n < 1L) stop("n must be >= 1.")
 
   if (verbose) {
-    cat(sprintf("\n============================================\n"))
-    cat(sprintf("ramsey_nn1: (n=%d, n+1=%d) approximation\n", n, n + 1))
-    cat(sprintf("============================================\n\n"))
+    .dynhr_cat(sprintf("\n============================================\n"))
+    .dynhr_cat(sprintf("ramsey_nn1: (n=%d, n+1=%d) approximation\n", n, n + 1))
+    .dynhr_cat(sprintf("============================================\n\n"))
   }
 
   timing <- list()
@@ -133,16 +135,11 @@ ramsey_nn1 <- function(model,
   }
 
   params <- model$param_values
-  if (is.null(beta)) {
-    beta <- if ("beta" %in% names(params) && is.finite(params[["beta"]])) {
-      as.numeric(params[["beta"]])
-    } else {
-      0.99
-    }
-  }
+  if (is.null(beta))
+    beta <- .ramsey_discount(NULL, model, params, "ramsey_nn1")$value
 
   # ---- 3. Compile original model and solve steady state ----
-  if (verbose) cat("[1/6] Compiling model and solving SS...\n")
+  if (verbose) .dynhr_cat("[1/6] Compiling model and solving SS...\n")
   t1 <- Sys.time()
 
   # Detect instruments: extra endogenous vars beyond equations
@@ -159,7 +156,7 @@ ramsey_nn1 <- function(model,
     instruments_used <- setdiff(model$var_names, all_lhs_names)
     if (length(instruments_used) > 0) {
       if (verbose) {
-        cat(sprintf("  Detected %d instrument(s) (%d vars, %d eqs): %s\n",
+        .dynhr_cat(sprintf("  Detected %d instrument(s) (%d vars, %d eqs): %s\n",
                     length(instruments_used), n_endo, n_eq,
                     paste(instruments_used, collapse = ", ")))
       }
@@ -169,7 +166,7 @@ ramsey_nn1 <- function(model,
   # Use provided orig_ss if available
   if (!is.null(orig_ss)) {
     ss <- orig_ss
-    if (verbose) cat("  Using provided orig_ss (skipping SS solve).\n")
+    if (verbose) .dynhr_cat("  Using provided orig_ss (skipping SS solve).\n")
     if (is.null(compiled)) {
       compiled <- compile_model(model, verbose = verbose)
     }
@@ -184,10 +181,10 @@ ramsey_nn1 <- function(model,
                               verbose = verbose)
     if (!isTRUE(ss_result$converged)) {
       # Try fallback
-      if (verbose) cat("  Steady-state Newton did not converge. Trying nleqslv...\n")
+      if (verbose) .dynhr_cat("  Steady-state Newton did not converge. Trying nleqslv...\n")
       ss_result <- tryCatch(
         solve_steady_state(model, compiled, params = params, verbose = FALSE),
-        error = function(e) NULL
+        error = function(e) .dynhr_reraise_bug(e, NULL)
       )
     }
 
@@ -202,7 +199,7 @@ ramsey_nn1 <- function(model,
   timing$ss <- as.numeric(difftime(Sys.time(), t1, units = "secs"))
 
   # ---- 4. Compute steady-state multipliers (E1) ----
-  if (verbose) cat("[2/6] Computing steady-state multipliers...\n")
+  if (verbose) .dynhr_cat("[2/6] Computing steady-state multipliers...\n")
   t1 <- Sys.time()
 
   # Try Phase B first if available
@@ -223,7 +220,7 @@ ramsey_nn1 <- function(model,
       backward_eqs = .classify_equations(model)$backward_idx,
       beta = beta
     )
-    if (verbose) cat("  Using Phase B multipliers.\n")
+    if (verbose) .dynhr_cat("  Using Phase B multipliers.\n")
   } else {
     multipliers <- .compute_ramsey_ss_multipliers(
       model, compiled, ss, params, obj_text,
@@ -234,7 +231,7 @@ ramsey_nn1 <- function(model,
   timing$multipliers <- as.numeric(difftime(Sys.time(), t1, units = "secs"))
 
   # ---- 5. Compute Taylor expansions (E2) ----
-  if (verbose) cat(sprintf("[3/6] Computing Taylor expansions (order %d)...\n", n + 1))
+  if (verbose) .dynhr_cat(sprintf("[3/6] Computing Taylor expansions (order %d)...\n", n + 1))
   t1 <- Sys.time()
 
   # Parse objective for Taylor expansion
@@ -253,7 +250,7 @@ ramsey_nn1 <- function(model,
   timing$taylor <- as.numeric(difftime(Sys.time(), t1, units = "secs"))
 
   # ---- 6. Build modified objective (E3) ----
-  if (verbose) cat("[4/6] Building modified objective W_t^{(n,n+1)}...\n")
+  if (verbose) .dynhr_cat("[4/6] Building modified objective W_t^{(n,n+1)}...\n")
   t1 <- Sys.time()
 
   nn1_objective <- .nn1_build_modified_objective(
@@ -262,7 +259,7 @@ ramsey_nn1 <- function(model,
 
   # Verify blue correction
   if (!.nn1_verify_blue_correction(nn1_objective)) {
-    warning(sprintf(
+    .dynhr_warn(sprintf(
       "Blue correction gradient at SS = %.2e. May exceed tolerance.", 
       nn1_objective$grad_at_ss))
   }
@@ -270,7 +267,7 @@ ramsey_nn1 <- function(model,
   timing$objective <- as.numeric(difftime(Sys.time(), t1, units = "secs"))
 
   # ---- 7. Build and solve modified model (E4) ----
-  if (verbose) cat("[5/6] Building and solving modified model...\n")
+  if (verbose) .dynhr_cat("[5/6] Building and solving modified model...\n")
   t1 <- Sys.time()
 
   nn1_result <- .nn1_solve(
@@ -282,7 +279,7 @@ ramsey_nn1 <- function(model,
   timing$solve <- as.numeric(difftime(Sys.time(), t1, units = "secs"))
 
   # ---- 8. Compute welfare ----
-  if (verbose) cat("[6/6] Computing welfare...\n")
+  if (verbose) .dynhr_cat("[6/6] Computing welfare...\n")
 
   welfare <- .nn1_compute_welfare(
     nn1_result$dr, model, ss, params,
@@ -330,14 +327,14 @@ ramsey_nn1 <- function(model,
   class(result) <- c("dynhr_nn1_result", "list")
 
   if (verbose) {
-    cat(sprintf("\n============================================\n"))
-    cat(sprintf("ramsey_nn1 complete (%.1f sec)\n", timing$total))
-    cat(sprintf("  BK: %s\n", if (result$bk_ok) "PASSED" else "FAILED"))
-    cat(sprintf("  Welfare (uncond): %.6f\n", result$welfare$unconditional))
+    .dynhr_cat(sprintf("\n============================================\n"))
+    .dynhr_cat(sprintf("ramsey_nn1 complete (%.1f sec)\n", timing$total))
+    .dynhr_cat(sprintf("  BK: %s\n", if (result$bk_ok) "PASSED" else "FAILED"))
+    .dynhr_cat(sprintf("  Welfare (uncond): %.6f\n", result$welfare$unconditional))
     if (!is.null(comparison)) {
-      cat(sprintf("  Welfare diff vs Ramsey: %.6f\n", comparison$welfare_diff))
+      .dynhr_cat(sprintf("  Welfare diff vs Ramsey: %.6f\n", comparison$welfare_diff))
     }
-    cat(sprintf("============================================\n"))
+    .dynhr_cat(sprintf("============================================\n"))
   }
 
   result
@@ -362,30 +359,27 @@ ramsey_nn1 <- function(model,
   # Steady-state welfare
   welfare_ss <- .eval_planner_ast(obj_ast, ss, params, ss) / (1 - beta)
 
-  # --- Unconditional welfare via simulation ---
-  # For order 1: Lyapunov-based computation
-  # For order 2+: use simulation
-  welfare_uncond <- NA_real_
-
+  # --- Unconditional welfare ---
+  # A7 (0.9.4): at FIRST order the solution is certainty-equivalent -- the
+  # unconditional mean of every endogenous variable IS its deterministic steady
+  # state -- so there is no stochastic welfare to compute at n = 1. The old code
+  # simply COPIED welfare_ss into `unconditional` ("placeholder"), manufacturing
+  # a welfare gap of exactly 0 that read like a computed result. Report NA with
+  # a machine-readable reason instead; D18 treats a missing unconditional
+  # welfare as "not computed". (The discarded tryCatch around compute_moments()
+  # went with it: nothing used its result.)
   if (n == 1) {
-    # Use Lyapunov moments for first-order solution
-    # Wrap in tryCatch: the solver may fail for models with unit roots
-    # (e.g. NN1 placeholder equations). Fall through to simulation.
-    moments <- tryCatch(
-      compute_moments(dr, model, params = params),
-      error = function(e) NULL
-    )
-    if (!is.null(moments) && !is.null(moments$std_dev) &&
-        all(is.finite(moments$std_dev))) {
-      # Welfare = E[f(y)] ≈ f(ss) + ½·tr(Σ_y · H_yy)
-      # where H_yy is the Hessian of f w.r.t. endogenous variables
-      # For LQ (n=1), the welfare is computed from the quadratic objective
-      # which is already in the DR. Use simulation as fallback.
-      welfare_uncond <- welfare_ss  # placeholder
-    }
+    return(list(
+      steady_state         = welfare_ss,
+      unconditional        = NA_real_,
+      unconditional_reason = "order1_certainty_equivalent",
+      discount             = beta
+    ))
   }
 
-  # Simulation-based welfare (works for any order)
+  welfare_uncond <- NA_real_
+
+  # Simulation-based welfare (order >= 2, where the risk correction is real)
   if (is.na(welfare_uncond)) {
     sim <- {
       ## Dispatch on the rule's order: an order-2 (n>=2) rule must use the
@@ -407,9 +401,11 @@ ramsey_nn1 <- function(model,
   }
 
   list(
-    steady_state   = welfare_ss,
-    unconditional  = welfare_uncond,
-    discount       = beta
+    steady_state         = welfare_ss,
+    unconditional        = welfare_uncond,
+    unconditional_reason = if (is.na(welfare_uncond)) "simulation_unavailable"
+                           else NA_character_,
+    discount             = beta
   )
 }
 

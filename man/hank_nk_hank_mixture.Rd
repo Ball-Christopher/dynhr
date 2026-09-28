@@ -31,7 +31,9 @@ by every type).}
 
 \item{r_ss}{Target steady-state real rate (also the Taylor-rule intercept).}
 
-\item{phi}{Taylor-rule inflation coefficient (\code{> 1} for determinacy).}
+\item{phi}{Taylor-rule inflation coefficient. The determinacy threshold is
+model-specific (with household heterogeneity it need not sit at
+\code{phi = 1}); check a calibration with \code{\link{hank_determinacy}}.}
 
 \item{kappa}{NKPC slope on the output gap.}
 

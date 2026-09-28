@@ -129,7 +129,7 @@ plot.dynhr_steady <- function(x, ...) {
 plot.DecisionRules <- function(x, n_shocks = 4L, n_cols = 3L, ...) {
   irfs <- x$irfs
   if (is.null(irfs)) {
-    message("No IRFs stored in DecisionRules object. ",
+    .dynhr_inform("No IRFs stored in DecisionRules object. ",
             "Run compute_irfs() or stoch_simul() first.")
     return(invisible(x))
   }

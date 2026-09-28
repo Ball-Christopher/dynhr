@@ -13,7 +13,7 @@
 ##   $var_idx  -- index of the constrained variable in model$var_names (1-based)
 ##   $var_name -- name of the constrained variable (for diagnostics)
 ##   $op       -- ">" (lower bound) or "<" (upper bound)
-##   $bound    -- numeric bound value (in model deviation units)
+##   $bound    -- numeric bound value (a LEVEL of the model variable)
 ## --------------------------------------------------------------------------
 
 
@@ -31,18 +31,19 @@
 #'
 #' For nonlinear models we therefore issue a \emph{warning} rather than an
 #' error: the PKF is mathematically well-defined against the order-1 DR, but
-#' the user should be aware that the constraint bounds are expressed in
-#' deviation units at the linearisation point, not in levels.
+#' the user should be aware that the constraint is imposed on the first-order
+#' approximation.  Bounds are LEVELS of the model variable (converted to
+#' deviations internally, see .obc_bound_dev in R/obc-binding.R).
 #'
 #' @param model dynhr_mod
 #' @noRd
 obc_assert_linear <- function(model) {
   if (!isTRUE(model$model_options$linear)) {
-    warning(
+    .dynhr_warn(
       "OBC/PKF is being applied to a nonlinear model (model; block detected). ",
       "The piecewise-linear Kalman filter will use the first-order (linear) ",
-      "decision rules as its approximation.  OBC bounds should be expressed in ",
-      "deviation units at the linearisation point.  For a fully global solution ",
+      "decision rules as its approximation (bounds are levels of the model ",
+      "variable).  For a fully global solution ",
       "with large constraint violations, consider a sparse-grid or projection method.",
       call. = FALSE
     )
@@ -57,7 +58,7 @@ obc_assert_linear <- function(model) {
 
 #' Parse MCP equation tags from a dynhr_mod object
 #'
-#' Reads `model$equations[[i]]$tag`, which the parser already populates from
+#' Reads \code{model$equations[[i]]$tag}, which the parser already populates from
 #' \[ mcp = '...' \] annotations in the .mod/.txt file. Extracts the constrained
 #' variable name, direction, and numeric bound from each tag.
 #'
@@ -75,7 +76,7 @@ obc_assert_linear <- function(model) {
 #'   $var_idx  -- index of the constrained variable in model$var_names (1-based)
 #'   $var_name -- name of the constrained variable (for diagnostics)
 #'   $op       -- ">" (lower bound) or "<" (upper bound)
-#'   $bound    -- numeric bound value (in model deviation units)
+#'   $bound    -- numeric bound value (a LEVEL of the model variable)
 #' Stops if the model has no MCP tags, or if a tag references an unknown variable.
 #' @export
 obc_parse_tags <- function(model) {
@@ -83,6 +84,36 @@ obc_parse_tags <- function(model) {
   specs <- list()
 
   for (i in seq_along(eqs)) {
+    # Dynare 7 complementarity condition `EQ ⟂ L < x < U;` (parse_mod() stores
+    # it in eq$complementarity): one spec per bound, lower first.  The bounds
+    # are functions of parameters, evaluated at the model's calibration.
+    cc <- eqs[[i]]$complementarity
+    if (!is.null(cc)) {
+      var_idx <- match(cc$variable, model$var_names)
+      if (is.na(var_idx))
+        stop(sprintf(paste0(
+          "Complementarity condition on equation %d references variable ",
+          "'%s', which is not in var_names.\n"), i, cc$variable))
+      for (side in c("lower", "upper")) {
+        bexpr <- cc[[side]]
+        if (is.na(bexpr)) next
+        bound <- suppressWarnings(as.numeric(bexpr))
+        if (is.na(bound)) bound <- .mcp_eval_bound(bexpr, model$param_values)
+        if (!is.finite(bound))
+          stop(sprintf(paste0(
+            "Complementarity bound '%s' on equation %d could not be ",
+            "evaluated from the model's parameter values.\n"), bexpr, i))
+        specs <- c(specs, list(list(
+          eq_idx   = i,
+          var_idx  = var_idx,
+          var_name = cc$variable,
+          op       = if (side == "lower") ">" else "<",
+          bound    = bound
+        )))
+      }
+      next
+    }
+
     # Prefer tag_raw (full bracket content: name='...', mcp='...') over tag
     # (which only stores the name= attribute).  Fall back to tag for models
     # whose parser does not populate tag_raw.
@@ -241,17 +272,24 @@ obc_resolve_block_specs <- function(raw_specs, model, ss = NULL, params = NULL) 
           if (is.na(vi_ss)) vi_ss <- match(vname, var_names)
           ss_val <- if (!is.na(vi_ss)) ss[vi_ss] else NA_real_
           if (is.na(ss_val)) {
-            warning(sprintf(
+            .dynhr_warn(sprintf(
               "obc_resolve_block_specs: steady_state(%s) not found in ss; ",
               vname), "bound expression may be NA.")
           }
           expr <- gsub(cap, as.character(ss_val), expr, fixed = TRUE)
         }
 
-        # Evaluate the expression
-        bound_val <- tryCatch(
-          as.numeric(eval(parse(text = expr), envir = eval_env)),
-          error = function(e) NA_real_
+        # Evaluate the expression -- A-SEC: inside the .mod allowlist sandbox
+        # (params-seeded), never the function frame; a disallowed call aborts
+        # with dynhr_error_unsafe_mod_expression (re-raised past the NA
+        # fallback) instead of executing.
+        bound_val <- tryCatch({
+          v <- .dynhr_sandbox_eval(expr, .dynhr_param_eval_env(eval_env),
+                                   .dynhr_safe_fn_names,
+                                   context = "the occbin_constraints bound")
+          if (is.null(v)) NA_real_ else as.numeric(v)
+        },
+          error = function(e) .dynhr_reraise_unsafe(e, NA_real_)
         )
       }
 
@@ -298,7 +336,8 @@ obc_resolve_block_specs <- function(raw_specs, model, ss = NULL, params = NULL) 
 #' @noRd
 obc_collect_specs <- function(model) {
   has_tags <- any(vapply(model$equations,
-                         function(e) !is.na(e$tag) && nzchar(trimws(e$tag)),
+                         function(e) (!is.na(e$tag) && nzchar(trimws(e$tag))) ||
+                           !is.null(e$complementarity),
                          logical(1)))
   has_block <- length(model$occbin_constraints) > 0L
 

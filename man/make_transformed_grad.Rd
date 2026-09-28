@@ -14,7 +14,9 @@ gradient of the (unadjusted) log-posterior.}
 }
 \value{
 function(eta) -> named numeric vector, eta-space gradient of the
-  Jacobian-adjusted log-posterior.
+  Jacobian-adjusted log-posterior. \code{eta} is read as in
+  \code{\link{make_transformed_logpost}}; the theta-space gradient is
+  aligned with \code{tr$par_names} by name.
 }
 \description{
 d/deta_j log p(theta(eta)) + log|J(eta)|

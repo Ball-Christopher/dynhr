@@ -22,7 +22,8 @@ An S3 object of class \code{"dynhr_sampler_diagnostics"} with
       \code{NA} if not recorded.}
     \item{n_draws}{Integer; post-warmup draw count.}
     \item{n_burn}{Integer; warmup / burn-in draw count.}
-    \item{acceptance_rate}{Numeric; overall MH acceptance rate
+    \item{acceptance_rate}{Numeric; overall MH acceptance rate -- for
+      NUTS the mean post-warmup NUTS acceptance statistic
       (\code{NA} when not applicable, e.g. SMC).}
     \item{ess_bulk}{Named numeric vector; bulk ESS per parameter.
       \code{NA} when chains are not available.}

@@ -3,26 +3,25 @@
 ## OBC log-posterior factory functions for MCMC estimation.
 ##
 ## Provides:
-##   make_log_posterior_obc()      -- legacy: OccBin outer-loop + kalman_filter_obc
-##   make_log_posterior_obc_pkf()  -- preferred: Pfeiffer-Ratto PKF (exported)
+##   make_log_posterior_obc()      -- OccBin PKF via obc_guess_verify()
+##   make_log_posterior_obc_pkf()  -- OccBin PKF, kalman_filter_obc_pkf() (exported)
 ##
 ## Both return Function(theta) -> list(logpost, loglik, logprior[, regime_path])
 ## and are drop-in replacements for make_log_posterior() when the model has OBC
-## constraints.
-##
-## make_log_posterior_obc_pkf() is the preferred estimator: the per-period inner
-## convergence loop discovers regimes from the extracted shock eps_{t|t} and
-## backward-smoothed state s_{t-1|t}, requiring no separate outer pass.
-## Supports warm-starting via attr(theta, "regime_hint").
+## constraints.  Since W49 (0.9.3.93) both evaluate the same likelihood:
+## Dynare's OccBin piecewise-linear Kalman filter (time-varying rules of the
+## regime sequence expected in every period).  The PKF closure no longer
+## warm-starts from attr(theta, "regime_hint"): a warm start made the
+## likelihood depend on the previous draw.
 ## --------------------------------------------------------------------------
 
 
-#' Create an OBC-aware log-posterior evaluator (legacy OccBin outer loop)
+#' Create an OBC-aware log-posterior evaluator (OccBin PKF)
 #'
-#' Mirrors make_log_posterior (dynhr_estimation.R) but adds two steps inside
-#' the closure at each parameter draw:
-#'   1. Run the OccBin guess-and-verify loop (lazily building per-regime policies).
-#'   2. Pass the regime path and policy cache to kalman_filter_obc.
+#' Mirrors make_log_posterior (dynhr_estimation.R); the likelihood of each
+#' parameter draw is the OccBin piecewise-linear Kalman filter's, obtained
+#' through obc_guess_verify() (before W49 an outer guess-and-verify loop with
+#' one policy per regime followed by kalman_filter_obc()).
 #'
 #' Validation guards (obc_assert_linear, obc_parse_tags) run ONCE at factory
 #' creation time, not inside the per-draw closure.
@@ -51,6 +50,10 @@ make_log_posterior_obc <- function(model, data, prior_spec, obs_vars,
 
   ## Resolve zeta ONCE here, not per draw (see .resolve_power_posterior).
   power <- .resolve_power_posterior(power, "make_log_posterior_obc")
+  ## H = me I only: a per-observable vector is refused (classed) at build time,
+  ## not left to the per-draw tryCatch, which would make it -Inf everywhere.
+  me_variance <- .kf_me_variance(me_variance, obs_vars,
+                                 "make_log_posterior_obc", allow_vector = FALSE)
 
   # ---- Guards: run once, fail fast ----------------------------------------
   obc_assert_linear(model)
@@ -75,8 +78,8 @@ make_log_posterior_obc <- function(model, data, prior_spec, obs_vars,
 
   ## Adapter over the shared closure builder (R/posterior-closure.R). Specific
   ## to this branch: the cold (never warm-started) steady-state solve, the
-  ## always-eigen() stationarity guard, and the OccBin guess-and-verify pass
-  ## feeding kalman_filter_obc(). No system priors on the OBC paths.
+  ## always-eigen() stationarity guard, and the OccBin PKF run by
+  ## obc_guess_verify(). No system priors on the OBC paths.
   .make_posterior_closure(
     model, data, prior_spec, obs_vars, compiled,
     stationarity = "eigen",
@@ -86,40 +89,29 @@ make_log_posterior_obc <- function(model, data, prior_spec, obs_vars,
         dr_slack, model, params, obs_vars, obs_idx, me_variance,
         check = me_floor_check)
 
-      # OccBin regime path + lazy per-regime policy cache
+      # OccBin PKF: regime path and log-likelihood
       gv <- obc_guess_verify(
         Y, dr_slack, sol$sys, obs_idx,
         model, params, obs_vars, specs,
         me_variance = me_variance
       )
-      if (is.null(gv)) return(NULL)
-
-      # Regime-switching Kalman filter
-      kf <- kalman_filter_obc(
-        Y, dr_slack, gv$regime_cache,
-        model, params, obs_vars, gv$regime_path,
-        me_variance     = me_variance,
-        return_filtered = FALSE
-      )
-      if (is.null(kf) || !is.finite(kf$loglik)) return(NULL)
-      list(loglik = kf$loglik)
+      if (is.null(gv) || !is.finite(gv$loglik)) return(NULL)
+      list(loglik = gv$loglik)
     },
     power      = power,
     warm_start = FALSE)
 }
 
 
-#' Create a PKF-based log-posterior evaluator (Pfeiffer-Ratto inversion filter)
+#' Create a PKF-based log-posterior evaluator (OccBin piecewise-linear KF)
 #'
-#' Drop-in replacement for make_log_posterior_obc() that calls
-#' kalman_filter_obc_pkf() directly.  Unlike the outer obc_guess_verify()
-#' approach, the per-period inner loop discovers the OBC regime from the
-#' extracted shock and backward-smoothed state, so no separate pre-pass is
-#' needed.
-#'
-#' Warm-starting: the returned closure optionally accepts a $regime_hint
-#' attribute on the theta vector (integer vector length T) to initialise the
-#' inner loop from a previous MCMC draw's accepted regime path.
+#' Log-posterior whose likelihood is \code{kalman_filter_obc_pkf()}: Dynare's
+#' OccBin piecewise-linear Kalman filter (Giovannini, Pfeiffer and Ratto
+#' 2021), with the time-varying rule of the regime sequence expected in each
+#' period.  The closure returns the filtered regime path as
+#' \code{$regime_path}.  (Before 0.9.3.93 an attribute \code{regime_hint}
+#' on theta warm-started the regime search from a previous draw; it is
+#' ignored now, as a warm start made the likelihood path-dependent.)
 #'
 #' @param model       dynhr_mod
 #' @param data        Observation matrix (T x n_obs or n_obs x T)
@@ -131,7 +123,8 @@ make_log_posterior_obc <- function(model, data, prior_spec, obs_vars,
 #'   (warn-only, once per closure) against a near-degenerate slack-regime
 #'   innovation covariance via \code{getOption("dynhr.me_floor_check", TRUE)};
 #'   see \code{.obc_warn_me_floor_lock()} in R/obc-regime.R.
-#' @param max_inner   Max inner iterations per period (default 10)
+#' @param max_inner   Maximum re-updates per period of the PKF (default 10,
+#'   Dynare's \code{likelihood.max_number_of_iterations})
 #' @param power       Power-posterior (generalised-Bayes) tempering exponent
 #'   \eqn{\zeta}: \code{$logpost} becomes
 #'   \eqn{\log p(\theta) + \zeta \cdot \log L(\theta)} while \code{$loglik}
@@ -152,6 +145,11 @@ make_log_posterior_obc_pkf <- function(model, data, prior_spec, obs_vars,
   force(prior_spec); force(me_variance); force(max_inner)
   ## Resolve zeta ONCE here, not per draw (see .resolve_power_posterior).
   power <- .resolve_power_posterior(power, "make_log_posterior_obc_pkf")
+  ## H = me I only: a per-observable vector is refused (classed) at build time,
+  ## not left to the per-draw tryCatch, which would make it -Inf everywhere.
+  me_variance <- .kf_me_variance(me_variance, obs_vars,
+                                 "make_log_posterior_obc_pkf",
+                                 allow_vector = FALSE)
 
   if (is.null(specs)) specs <- obc_parse_tags(model)
 
@@ -186,14 +184,10 @@ make_log_posterior_obc_pkf <- function(model, data, prior_spec, obs_vars,
       regime_cache <- new.env(parent = emptyenv(), hash = TRUE)
       obc_ensure_policy(0L, regime_cache, sol$sys, dr_slack, specs, obs_idx)
 
-      # Warm-start from a previously accepted regime path if provided
-      regime_hint <- attr(theta, "regime_hint")
-
       kf <- kalman_filter_obc_pkf(
         Y, dr_slack, regime_cache, sol$sys,
         model, params, obs_vars, specs,
         obs_idx          = obs_idx,
-        regime_path_init = regime_hint,
         me_variance      = me_variance,
         max_inner        = max_inner,
         return_filtered  = FALSE,

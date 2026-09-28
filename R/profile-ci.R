@@ -34,7 +34,7 @@
 ## so it is safe to call inside a screening loop.
 .profile_ci_bk_feasible <- function(model, compiled, params) {
   ss <- tryCatch(solve_steady_state(model, compiled, params, verbose = FALSE),
-                error = function(e) NULL)
+                error = function(e) .dynhr_reraise_bug(e, NULL))
   if (is.null(ss) || !isTRUE(ss$converged)) return(FALSE)
   ## An indeterminate/explosive draw is an EXPECTED outcome of the
   ## feasibility screen (that is the whole point of screening), not a
@@ -45,7 +45,7 @@
     suppressWarnings(solve_perturbation(model, compiled, ss$ss,
                                         params = ss$params %||% params,
                                         order = 1L, verbose = FALSE)),
-    error = function(e) NULL
+    error = function(e) .dynhr_reraise_bug(e, NULL)
   )
   if (is.null(dr)) return(FALSE)
   isTRUE(dr$bk_satisfied)
@@ -66,7 +66,8 @@
     ## Same rationale as .profile_ci_bk_feasible(): an infeasible draw during
     ## re-optimization is expected (the optimizer is actively probing
     ## infeasible neighbourhoods), not a warning-worthy event.
-    r <- tryCatch(suppressWarnings(lp_fn(theta)), error = function(e) NULL)
+    r <- tryCatch(suppressWarnings(lp_fn(theta)),
+                  error = function(e) .dynhr_reraise_bug(e, NULL))
     if (is.null(r) || !is.list(r) || !is.finite(r$logpost)) return(-Inf)
     r$logpost
   }
@@ -159,7 +160,7 @@
     r  <- tryCatch(
       csminwel(neg_obj, x0 = x0, H0 = diag(length(free_names)) * 1e-2,
               crit = optimizer_crit, nit = n_iter, verbose = FALSE),
-      error = function(e) NULL
+      error = function(e) .dynhr_reraise_bug(e, NULL)
     )
     if (is.null(r) || !is.finite(r$value)) next
     val <- -r$value
@@ -352,7 +353,7 @@ profile_ci <- function(param,
     stop("profile_ci: `param` = \"", param, "\" is not a name in `mode`.",
          call. = FALSE)
 
-  if (!is.null(seed)) set.seed(seed)
+  .local_seed(seed)  # seeded, but the caller's RNG stream is restored on exit (C1)
 
   use_objective <- !is.null(objective_fn)
   if (!use_objective) {
@@ -403,7 +404,12 @@ profile_ci <- function(param,
 
   ## ---- Per-grid-point re-optimization ------------------------------------
   one_point <- function(v) {
-    if (isTRUE(verbose)) cat(".")
+    ## A per-point progress DOT cannot survive the move to the message stream:
+    ## each .dynhr_cat() is its own message, so n_g dots would print as n_g
+    ## lines instead of one growing row. Report the point being evaluated
+    ## instead -- one line per point either way, but a legible one.
+    if (isTRUE(verbose))
+      .dynhr_cat(sprintf("  profile_ci: evaluating %s = %.6g\n", param, v))
     .profile_ci_optimize_at(param, v, free_names, mode, objective_fn,
                             feasible_fn, prior_sampler, n_seeds, n_iter)
   }
@@ -415,7 +421,7 @@ profile_ci <- function(param,
   } else {
     lapply(grid, one_point)
   }
-  if (isTRUE(verbose)) cat("\n")
+  if (isTRUE(verbose)) .dynhr_cat("\n")
 
   profile_val <- vapply(results, `[[`, numeric(1), "value")
   feasible_v  <- vapply(results, `[[`, logical(1), "feasible")

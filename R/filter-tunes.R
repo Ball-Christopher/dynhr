@@ -15,7 +15,7 @@
 
 
 ## ---------------------------------------------------------------------------
-## 1.  Constructor: filter_tunes() and tune()
+## 1.  Constructor: filter_tunes() and filter_tune()
 ## ---------------------------------------------------------------------------
 
 #' Specify call-level filter tunes for a DSGE model
@@ -34,7 +34,7 @@
 #' across all periods when \code{periods} has length > 1, matching the
 #' \code{filter_tunes} block behaviour.
 #'
-#' @param ...  One or more tune entries created by \code{\link{tune}()}.
+#' @param ...  One or more tune entries created by \code{\link{filter_tune}()}.
 #'
 #' @return An object of class \code{"filter_tunes_spec"}: a list with one
 #'   element \code{$tunes}, a data.frame with columns \code{var} (character),
@@ -52,13 +52,13 @@
 #' \dontrun{
 #' ## Hard tune: pin z at 0.1 for periods 3-5
 #' tunes <- filter_tunes(
-#'   tune("z", 3:5, 0.1)
+#'   filter_tune("z", 3:5, 0.1)
 #' )
 #'
 #' ## Mixed: hard tune on z, soft tune on a (per-period value, global stderr)
 #' tunes <- filter_tunes(
-#'   tune("z", 3:5, 0.1),
-#'   tune("a", 7L, -0.2, stderr = 0.05)
+#'   filter_tune("z", 3:5, 0.1),
+#'   filter_tune("a", 7L, -0.2, stderr = 0.05)
 #' )
 #'
 #' ## Override the mod-file block at estimation time:
@@ -78,7 +78,7 @@
 #' )
 #' }
 #'
-#' @seealso \code{\link{tune}}, \code{\link{run_full_estimation}},
+#' @seealso \code{\link{filter_tune}}, \code{\link{run_full_estimation}},
 #'   \code{\link{run_mode_finding}}
 #' @export
 filter_tunes <- function(...) {
@@ -92,7 +92,7 @@ filter_tunes <- function(...) {
     e <- entries[[i]]
     if (!inherits(e, "tune_entry"))
       stop(sprintf(
-        "filter_tunes: argument %d is not a tune() entry (got %s).",
+        "filter_tunes: argument %d is not a filter_tune() entry (got %s).",
         i, class(e)[1L]), call. = FALSE)
   }
 
@@ -137,29 +137,29 @@ filter_tunes <- function(...) {
 #' @examples
 #' \dontrun{
 #' filter_tunes(
-#'   tune("z", 3:5, 0.1),
-#'   tune("a", 7L, -0.2, stderr = 0.05)
+#'   filter_tune("z", 3:5, 0.1),
+#'   filter_tune("a", 7L, -0.2, stderr = 0.05)
 #' )
 #' }
 #'
 #' @seealso \code{\link{filter_tunes}}
 #' @export
-tune <- function(var, periods, values, stderr = NULL) {
+filter_tune <- function(var, periods, values, stderr = NULL) {
   if (!is.character(var) || length(var) != 1L || nchar(var) == 0L)
-    stop("tune: 'var' must be a non-empty character scalar.", call. = FALSE)
+    stop("filter_tune: 'var' must be a non-empty character scalar.", call. = FALSE)
 
   periods <- as.integer(periods)
   if (length(periods) == 0L)
-    stop(sprintf("tune: var '%s' has zero periods.", var), call. = FALSE)
+    stop(sprintf("filter_tune: var '%s' has zero periods.", var), call. = FALSE)
   if (any(!is.finite(periods)))
-    stop(sprintf("tune: var '%s' has non-finite periods.", var), call. = FALSE)
+    stop(sprintf("filter_tune: var '%s' has non-finite periods.", var), call. = FALSE)
 
   values <- as.numeric(values)
   if (length(values) == 1L && length(periods) > 1L)
     values <- rep(values, length(periods))
   if (length(values) != length(periods))
     stop(sprintf(
-      "tune: var '%s' has %d periods but %d values.",
+      "filter_tune: var '%s' has %d periods but %d values.",
       var, length(periods), length(values)), call. = FALSE)
 
   if (!is.null(stderr)) {
@@ -168,10 +168,10 @@ tune <- function(var, periods, values, stderr = NULL) {
       stderr <- rep(stderr, length(periods))
     if (length(stderr) != length(periods))
       stop(sprintf(
-        "tune: var '%s' has %d periods but %d stderr values.",
+        "filter_tune: var '%s' has %d periods but %d stderr values.",
         var, length(periods), length(stderr)), call. = FALSE)
     if (any(!is.finite(stderr) | stderr < 0))
-      stop(sprintf("tune: var '%s' stderr must be finite and non-negative.", var),
+      stop(sprintf("filter_tune: var '%s' stderr must be finite and non-negative.", var),
            call. = FALSE)
   }
 

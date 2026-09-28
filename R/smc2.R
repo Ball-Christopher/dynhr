@@ -251,7 +251,7 @@
 #'
 #' @return A \code{\link{dynhr_chains}} object (so \code{print()},
 #'   \code{summary()} and \code{plot()} work exactly as for
-#'   \code{\link{mcmc}} / \code{\link{smc}} / \code{\link{nuts}} /
+#'   \code{\link{dynhr_mcmc}} / \code{\link{smc}} / \code{\link{nuts}} /
 #'   \code{\link{dime}}).  Every field of \code{dynhr_smc()}'s return value is
 #'   retained unchanged (particles/chain, smc_weights, log_liks,
 #'   log_marginal_lik, lambda_schedule, ess_schedule, accept_schedule,
@@ -311,6 +311,12 @@ dynhr_smc2 <- function(
     verbose            = TRUE,
     progressor         = NULL
 ) {
+  ## Own the message epoch for this run: repeat-suppressed warnings
+  ## (`.dynhr_warn(once = TRUE)`) are keyed within it and re-arm for the
+  ## next run, and the close reports what it suppressed. A nested call
+  ## inherits this epoch rather than opening a second one.
+  .dynhr_run_epoch <- .dynhr_epoch("dynhr_smc2")
+  on.exit(.dynhr_close_epoch(.dynhr_run_epoch), add = TRUE)
   if (!is.character(likelihood) || length(likelihood) < 1L ||
       !likelihood[1] %in% c("tpf", "sv_rbpf")) {
     stop("dynhr_smc2: `likelihood` must be \"tpf\" or \"sv_rbpf\", got ",

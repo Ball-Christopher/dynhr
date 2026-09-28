@@ -9,14 +9,14 @@ hank_emulator_level_mean(emu, theta)
 \arguments{
 \item{emu}{A \code{\link{hank_mixture_emulator}}.}
 
-\item{theta}{Named list or length-`d` named numeric in `names(emu$box)`
+\item{theta}{Named list or length-\code{d} named numeric in \code{names(emu$box)}
 order.}
 }
 \value{
-Length-`emu$K` numeric vector.
+Length-\code{emu$K} numeric vector.
 }
 \description{
-The interpolated `m1` field: the B_ref-projection `t(B_ref) D0(theta)` of the
+The interpolated \code{m1} field: the B_ref-projection \code{t(B_ref) D0(theta)} of the
 candidate mixture's STATIONARY wealth distribution. This is the model mean of
 the LEVEL cross-section observable -- a single stationary wealth survey, as
 opposed to the price-shock reweighting RESPONSE

@@ -65,7 +65,7 @@
   total_cols <- dyn$total_cols
 
   if (verbose) {
-    cat(sprintf("[nn1_taylor] Expanding to order %d (%d cols, %d eqs)\n",
+    .dynhr_cat(sprintf("[nn1_taylor] Expanding to order %d (%d cols, %d eqs)\n",
                 order, total_cols, n_eq))
   }
 

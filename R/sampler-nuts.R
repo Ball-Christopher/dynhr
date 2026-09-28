@@ -49,18 +49,28 @@
 #' @param joint0 Initial joint log density (for acceptance stats and
 #'   divergence detection: \code{joint0 - joint1 > delta_max} is divergent)
 #' @param delta_max Maximum energy error before flagging divergence (default 1000)
+#' @param g The gradient at \code{theta}, carried from the evaluation that
+#'   produced it (W92 fused path; W94 the separate-call path too); NULL:
+#'   computed with \code{grad_fn}.
+#' @param vg_fn Fused path (W92): \code{function(theta) -> list(lp, grad)}
+#'   (\code{.hmc_fused_target()}); NULL = separate \code{lp_fn} /
+#'   \code{grad_fn} calls.
 #'
 #' @return list with theta_minus, r_minus, theta_plus, r_plus,
-#'         theta_prime, log_weight, stop, sum_alpha, n_leaves, divergent
+#'         theta_prime, log_weight, stop, sum_alpha, n_leaves, divergent,
+#'         g_minus, g_plus (gradients at the two ends) and lp_prime, g_prime
+#'         (log density and gradient at theta_prime)
 #' @noRd
 .nuts_build_tree <- function(theta, r, v, j, eps,
                               lp_fn, grad_fn, M_inv_diag, joint0,
-                              delta_max = 1000, M_inv = NULL) {
+                              delta_max = 1000, M_inv = NULL,
+                              g = NULL, vg_fn = NULL) {
   par_names <- names(theta)
 
   if (j == 0L) {
     # --- Base case: single leapfrog step ---
-    step <- .hmc_leapfrog(theta, r, v * eps, grad_fn, M_inv_diag, M_inv = M_inv)
+    step <- .hmc_leapfrog(theta, r, v * eps, grad_fn, M_inv_diag, M_inv = M_inv,
+                          g0 = g, vg_fn = vg_fn)
 
     if (is.null(step) || any(!is.finite(step$theta)) || any(!is.finite(step$r))) {
       # Divergent step: log_weight = -Inf (zero probability mass)
@@ -70,7 +80,8 @@
         theta_prime = theta,
         log_weight = -Inf, stop = TRUE,
         sum_alpha = 0, n_leaves = 1L,
-        divergent = TRUE
+        divergent = TRUE,
+        g_minus = g, g_plus = g, lp_prime = NULL, g_prime = g
       ))
     }
 
@@ -78,7 +89,10 @@
     r1     <- step$r
     names(theta1) <- par_names
 
-    lp1    <- lp_fn(theta1)
+    ## Fused: the leapfrog's end-point evaluation already carries the value.
+    ## Either path: its gradient is carried to the next step from here (W94).
+    lp1    <- if (is.null(vg_fn)) lp_fn(theta1) else step$lp
+    g1     <- step$g
     joint1 <- lp1 - .hmc_kinetic(r1, M_inv_diag, M_inv = M_inv)
 
     # Multinomial log-weight: unnormalised log probability of this leaf.
@@ -99,13 +113,14 @@
       log_weight  = log_weight,
       stop        = !s_ok,
       sum_alpha   = alpha1, n_leaves = 1L,
-      divergent   = (joint0 - joint1 > delta_max)
+      divergent   = (joint0 - joint1 > delta_max),
+      g_minus = g1, g_plus = g1, lp_prime = lp1, g_prime = g1
     )
   } else {
     # --- Recursion ---
     tree <- .nuts_build_tree(theta, r, v, j - 1L, eps,
                               lp_fn, grad_fn, M_inv_diag, joint0, delta_max,
-                              M_inv = M_inv)
+                              M_inv = M_inv, g = g, vg_fn = vg_fn)
     # Early exit: if left subtree already stops, combined tree stops too.
     # The right subtree is NOT built (log_weight covers only the left
     # subtree, which is correct: the trajectory would be rejected anyway).
@@ -114,19 +129,25 @@
     if (v == -1) {
       tree2 <- .nuts_build_tree(tree$theta_minus, tree$r_minus, v,
                                  j - 1L, eps, lp_fn, grad_fn, M_inv_diag,
-                                 joint0, delta_max, M_inv = M_inv)
+                                 joint0, delta_max, M_inv = M_inv,
+                                 g = tree$g_minus, vg_fn = vg_fn)
       theta_minus <- tree2$theta_minus
       r_minus     <- tree2$r_minus
+      g_minus     <- tree2$g_minus
       theta_plus  <- tree$theta_plus
       r_plus      <- tree$r_plus
+      g_plus      <- tree$g_plus
     } else {
       tree2 <- .nuts_build_tree(tree$theta_plus, tree$r_plus, v,
                                  j - 1L, eps, lp_fn, grad_fn, M_inv_diag,
-                                 joint0, delta_max, M_inv = M_inv)
+                                 joint0, delta_max, M_inv = M_inv,
+                                 g = tree$g_plus, vg_fn = vg_fn)
       theta_minus <- tree$theta_minus
       r_minus     <- tree$r_minus
+      g_minus     <- tree$g_minus
       theta_plus  <- tree2$theta_plus
       r_plus      <- tree2$r_plus
+      g_plus      <- tree2$g_plus
     }
 
     # Multinomial biased progressive sampling (Betancourt 2017, Alg 6):
@@ -142,9 +163,15 @@
     }
 
     theta_prime <- tree$theta_prime
+    lp_prime    <- tree$lp_prime
+    g_prime     <- tree$g_prime
     if (is.finite(tree2$log_weight) && is.finite(log_w_total)) {
       accept_sub <- exp(tree2$log_weight - log_w_total)
-      if (runif(1) < accept_sub) theta_prime <- tree2$theta_prime
+      if (runif(1) < accept_sub) {
+        theta_prime <- tree2$theta_prime
+        lp_prime    <- tree2$lp_prime
+        g_prime     <- tree2$g_prime
+      }
     }
 
     # Generalized U-turn criterion: stop if EITHER subtree stops OR the
@@ -160,8 +187,8 @@
                      (sum(dtheta * (M_inv_diag * r_plus))  < 0)
     } else {
       ## Dense path: velocity = M⁻¹ r
-      u_turn_full <- (sum(dtheta * as.numeric(M_inv %*% r_minus)) < 0) ||
-                     (sum(dtheta * as.numeric(M_inv %*% r_plus))  < 0)
+      u_turn_full <- (sum(dtheta * .metric_apply_inv(M_inv, r_minus)) < 0) ||
+                     (sum(dtheta * .metric_apply_inv(M_inv, r_plus))  < 0)
     }
     stop_flag <- tree2$stop || u_turn_full
 
@@ -173,7 +200,8 @@
       stop        = stop_flag,
       sum_alpha   = tree$sum_alpha + tree2$sum_alpha,
       n_leaves    = tree$n_leaves + tree2$n_leaves,
-      divergent   = tree$divergent || tree2$divergent
+      divergent   = tree$divergent || tree2$divergent,
+      g_minus = g_minus, g_plus = g_plus, lp_prime = lp_prime, g_prime = g_prime
     )
   }
 }
@@ -291,6 +319,149 @@
 
 
 # ============================================================================
+# .nuts_transition() -- one NUTS transition at a fixed step size and metric
+# ============================================================================
+
+#' One NUTS transition (momentum refresh + multinomial doubling tree)
+#'
+#' The loop body of \code{dynhr_nuts()}, factored out so the pooled
+#' multi-chain warmup (\code{.nuts_pooled_warmup()}, sampler-nuts-pooled.R)
+#' runs the identical kernel. RNG consumption order is unchanged: one momentum
+#' draw, then per doubling one direction draw and the tree's multinomial draws.
+#'
+#' @param theta Current position (sampler space), named.
+#' @param lp_curr Log density at \code{theta}.
+#' @param eps Step size.
+#' @param lp_fn,grad_fn Scalar log density and its gradient.
+#' @param M_diag,M_inv_diag Diagonal mass / inverse mass (diagonal path).
+#' @param M_inv,chol_M Dense or low-rank metric (NULL = diagonal path).
+#' @param max_treedepth,delta_max As in \code{dynhr_nuts()}.
+#' @param g_curr The gradient at \code{theta} when already known (NULL: one
+#'   \code{grad_fn} call here); carried along the trajectory on both paths
+#'   (W92 fused, W94 separate-call).
+#' @param vg_fn Fused path (W92): the value-and-gradient function
+#'   (\code{.hmc_fused_target()}); NULL = separate \code{lp_fn} /
+#'   \code{grad_fn} calls.
+#' @return list(theta, joint0, depth, divergent, alpha_sum, n_alpha, n_leaves,
+#'   lp, g) -- \code{theta} is the selected proposal (unnamed-safe: callers
+#'   re-apply names), \code{alpha_sum / n_alpha} the trajectory-averaged
+#'   acceptance statistic, \code{n_leaves} the new-point evaluations spent;
+#'   \code{g} is the gradient at \code{theta}, and on the fused path
+#'   \code{lp} its log density (NULL otherwise).
+#' @noRd
+.nuts_transition <- function(theta, lp_curr, eps, lp_fn, grad_fn,
+                             M_diag, M_inv_diag, M_inv, chol_M,
+                             max_treedepth, delta_max,
+                             g_curr = NULL, vg_fn = NULL) {
+  d <- length(theta)
+  # --- Sample momentum ---
+  r0 <- .hmc_sample_momentum(d, M_diag, chol_M = chol_M)
+  ## W94: the gradient at the start point, once for both directions (the
+  ## separate-call path used to recompute it at the first leaf of each).
+  if (is.null(g_curr) && max_treedepth > 0L) g_curr <- grad_fn(theta)
+
+  # --- Joint log density (multinomial: no slice variable needed) ---
+  joint0 <- lp_curr - .hmc_kinetic(r0, M_inv_diag, M_inv = M_inv)
+
+  # --- Initialize tree ---
+  # Multinomial: initial point has log_weight = joint0 (the reference mass)
+  theta_minus <- theta
+  theta_plus  <- theta
+  r_minus     <- r0
+  r_plus      <- r0
+  theta_m     <- theta          # current proposal
+  lp_m        <- lp_curr        # ... its log density and gradient
+  g_m         <- g_curr
+  g_minus     <- g_curr         # gradients at the two trajectory ends
+  g_plus      <- g_curr
+  log_w_total <- joint0         # cumulative log-weight of all leaves so far
+  j <- 0L
+  stop <- FALSE
+  any_divergent <- FALSE
+  n_leaves <- 0L
+  # Dual-averaging acceptance statistic, accumulated over the WHOLE trajectory
+  # (Hoffman & Gelman 2014, Alg. 6 -- alpha / n_alpha). Using only the final
+  # doubling makes the statistic swing between 0 and 1 iteration-to-iteration
+  # and destabilises step-size adaptation.
+  alpha_sum <- 0
+  n_alpha   <- 0L
+
+  while (!stop && j < max_treedepth) {
+    # Choose direction
+    v <- sample(c(-1L, 1L), 1)
+
+    if (v == -1L) {
+      tree <- .nuts_build_tree(theta_minus, r_minus, v, j, eps,
+                                lp_fn, grad_fn, M_inv_diag, joint0, delta_max,
+                                M_inv = M_inv, g = g_minus, vg_fn = vg_fn)
+      theta_minus <- tree$theta_minus
+      r_minus     <- tree$r_minus
+      g_minus     <- tree$g_minus
+    } else {
+      tree <- .nuts_build_tree(theta_plus, r_plus, v, j, eps,
+                                lp_fn, grad_fn, M_inv_diag, joint0, delta_max,
+                                M_inv = M_inv, g = g_plus, vg_fn = vg_fn)
+      theta_plus <- tree$theta_plus
+      r_plus     <- tree$r_plus
+      g_plus     <- tree$g_plus
+    }
+
+    # BIASED progressive multinomial (Betancourt 2017, Stan): accept the new
+    # subtree's proposal with probability min(1, W_new / W_old) -- the new
+    # subtree's weight relative to the trajectory weight BEFORE merging.
+    # This deliberately over-weights the fresh subtree (anti-correlated
+    # exploration); it remains an exact sampler because the within-subtree
+    # selection (in .nuts_build_tree) is unbiased multinomial. (The initial
+    # point's weight joint0 is already in log_w_total at the first doubling.)
+    if (!tree$stop && is.finite(tree$log_weight)) {
+      accept_prob <- min(1, exp(tree$log_weight - log_w_total))
+      if (runif(1) < accept_prob) {
+        theta_m <- tree$theta_prime
+        lp_m    <- tree$lp_prime
+        g_m     <- tree$g_prime
+      }
+      log_w_total <- if (is.finite(log_w_total)) {
+        w_max <- max(log_w_total, tree$log_weight)
+        w_max + log(exp(log_w_total - w_max) + exp(tree$log_weight - w_max))
+      } else {
+        tree$log_weight
+      }
+    }
+
+    alpha_sum <- alpha_sum + tree$sum_alpha
+    n_alpha   <- n_alpha + tree$n_leaves
+    if (tree$divergent) any_divergent <- TRUE
+
+    # Outer U-turn check on the full tree boundary (velocity metric).
+    # The generalized check is already embedded in .nuts_build_tree
+    # (recursive subtrees); this outer check guards the full doublings.
+    dtheta  <- theta_plus - theta_minus
+    if (is.null(M_inv)) {
+      ## Diagonal path (bit-identical to pre-dense behaviour)
+      v_minus <- M_inv_diag * r_minus
+      v_plus  <- M_inv_diag * r_plus
+    } else {
+      ## Dense path: velocity = M⁻¹ r
+      v_minus <- .metric_apply_inv(M_inv, r_minus)
+      v_plus  <- .metric_apply_inv(M_inv, r_plus)
+    }
+    stop <- tree$stop ||
+      (sum(dtheta * v_minus) < 0) ||
+      (sum(dtheta * v_plus) < 0)
+
+    n_leaves <- n_leaves + tree$n_leaves
+
+    j <- j + 1L
+  }
+
+  list(theta = theta_m, joint0 = joint0, depth = j, divergent = any_divergent,
+       alpha_sum = alpha_sum, n_alpha = n_alpha, n_leaves = n_leaves,
+       lp = if (is.null(vg_fn)) NULL else lp_m,
+       g  = g_m)
+}
+
+
+# ============================================================================
 # dynhr_nuts() -- NUTS with dual averaging + windowed mass adaptation
 # ============================================================================
 
@@ -310,15 +481,61 @@
 #'   three phases: fast-init (step size only), expanding slow windows (mass
 #'   update from within-window variance + step-size re-find + dual-averaging
 #'   reset at each window boundary), and fast-final (step size only).
+#'   Convention (Stan's): the momentum is \code{p ~ N(0, M)} and the adapted
+#'   quantity is the INVERSE mass \code{M^{-1}}, set to the within-window
+#'   posterior variance (\code{metric = "diagonal"}), so each coordinate is
+#'   rescaled to unit posterior scale. Before 0.9.3.50 the mass itself was set
+#'   to the variance (inverted), which squared the target's conditioning
+#'   instead of removing it; results remained valid at convergence but finite
+#'   runs could be badly under-mixed. \code{mass_diag} is the MASS diagonal
+#'   \code{M} (i.e. \code{1 / variance}), and the returned \code{mass_matrix}
+#'   is the diagonal mass \code{M} on the diagonal paths and the dense
+#'   INVERSE mass \code{M^{-1}} on the dense / low-rank paths.
 #' @param init_buffer Fast-init window width (NULL = auto: min(75, 15% of
 #'   n_warmup)).
 #' @param base_window Minimum slow-window width for windowed mass adaptation
 #'   (default 25L); windows double in width.
 #' @param term_buffer Fast-final window width (NULL = auto: min(50, 10% of
 #'   n_warmup)).
-#' @param grad_fn Optional analytical gradient function(theta) -> numeric
+#' @param grad_fn Optional analytical gradient function(theta) -> numeric.
+#'   When it carries a fused log-posterior (\code{attr(grad_fn,
+#'   "logpost_grad")}, as \code{make_posterior_grad()}'s Gaussian closures do)
+#'   that equals \code{log_post_fn} at \code{theta_init} to 1e-10 relative,
+#'   every new leaf costs ONE value-and-gradient evaluation (gradients carried
+#'   along the trajectory; \code{.hmc_fused_target()}) and \code{log_post_fn}
+#'   is not called after that check.
 #' @param grad_method "simple" or "Richardson" for numerical gradients
 #' @param delta_max Maximum energy error before marking divergence
+#' @param metric Mass-matrix adaptation: \code{"diagonal"} (default; inverse
+#'   mass = within-window variance, Stan's rule),
+#'   \code{"warmup_dense"} (Ledoit-Wolf dense at the final slow window),
+#'   \code{"fisher_diag"} (opt-in; Seyboldt, Carlson & Carpenter 2026,
+#'   arXiv:2603.18845, Theorem 2.2): same Stan window schedule as
+#'   \code{"diagonal"}, but at each slow-window end the inverse mass is
+#'   \code{sigma^2 = sqrt(var(x) / var(g))} from the window's draws x AND
+#'   log-density gradients g (\code{.fisher_diag_estimate()}), the diagonal
+#'   minimiser of the sample Fisher divergence to N(0, I). Costs one extra
+#'   gradient per warmup iteration inside a slow window (counted in
+#'   \code{n_grad_evals}); sampling is unchanged. Or
+#'   \code{"lowrank"} (opt-in; Lao 2026, arXiv:2607.23788): starts diagonal
+#'   and at every window endpoint re-estimates a low-rank-plus-diagonal
+#'   inverse mass \code{G = diag(sd) (I + U (Lambda - I) U') diag(sd)} from
+#'   the window's draws AND log-density gradients (the Fisher-divergence
+#'   estimator of Seyboldt, Carlson & Carpenter 2026, arXiv:2603.18845,
+#'   Algorithm 1; see \code{.lowrank_estimate()}), promoting from diagonal
+#'   (rank 0) to rank
+#'   \code{k >= 1} when eigenvalues clear the threshold. Uses its own
+#'   schedule (\code{.lowrank_warmup_windows()}: 1-step init, first window
+#'   \code{8 (k_cap + 1)}, 1.5x growth, final 15\% step size only), so
+#'   \code{init_buffer}/\code{base_window}/\code{term_buffer} are ignored.
+#'   Costs one extra gradient per warmup iteration inside a slow window
+#'   (counted in \code{n_grad_evals}). The result gains a \code{lowrank}
+#'   element (final rank, per-window history) and \code{mass_matrix} is the
+#'   dense inverse mass \code{G}. Ignored when a dense \code{M_inv} is supplied.
+#' @param lowrank_control Optional list for \code{metric = "lowrank"}:
+#'   \code{cutoff} (eigenvalue-ratio promotion threshold, default 2),
+#'   \code{max_rank} (rank cap below \code{k_cap = min(50, floor(d/2))};
+#'   0 = Fisher diagonal only), \code{gamma} (ridge, default 1e-5).
 #' @param verbose Print progress
 #' @param progressor progressr callback or NULL
 #' @param chain_id Label for progress messages
@@ -358,7 +575,13 @@
 #'       remain on disk only; default TRUE).}
 #'   }
 #'
-#' @return List compatible with rwmh() output + NUTS-specific diagnostics
+#' @return List compatible with rwmh() output + NUTS-specific diagnostics.
+#'   \code{acceptance_rate} and \code{accept_stat} are the mean post-warmup
+#'   NUTS acceptance statistic (the trajectory-averaged Metropolis alpha that
+#'   \code{target_accept} targets; Stan's mean \code{accept_stat__}),
+#'   \code{accept_stats} its per-iteration values, and \code{move_rate} the
+#'   fraction of post-warmup iterations whose draw differs from the previous
+#'   one.
 #' @noRd
 dynhr_nuts <- function(
     log_post_fn,
@@ -376,17 +599,29 @@ dynhr_nuts <- function(
     grad_method   = "forward",
     delta_max     = 1000,
     mass_diag     = NULL,
-    metric        = c("diagonal", "warmup_dense"),
+    metric        = c("diagonal", "warmup_dense", "lowrank", "fisher_diag"),
     verbose       = TRUE,
     progressor    = NULL,
     chain_id      = NULL,
     transform     = NULL,
     M_inv         = NULL,
     chol_M        = NULL,
-    checkpoint    = NULL
+    checkpoint    = NULL,
+    lowrank_control = NULL
 ) {
   stopifnot(is.function(log_post_fn), is.numeric(theta_init))
   metric <- match.arg(metric)
+  lr_ctrl <- list(cutoff = 2, max_rank = NULL, gamma = 1e-5)
+  if (!is.null(lowrank_control)) {
+    if (!is.list(lowrank_control) ||
+        (length(lowrank_control) > 0L && is.null(names(lowrank_control))) ||
+        !all(names(lowrank_control) %in% names(lr_ctrl))) {
+      .dynhr_abort(paste0("`lowrank_control` must be a named list with elements in: ",
+                          paste(names(lr_ctrl), collapse = ", "), "."),
+                   class = "dynhr_error_invalid_argument")
+    }
+    lr_ctrl[names(lowrank_control)] <- lowrank_control
+  }
   d <- length(theta_init)
   par_names <- names(theta_init)
   n_total <- n_draws + n_warmup
@@ -435,6 +670,17 @@ dynhr_nuts <- function(
   } else {
     .grad <- grad_fn
   }
+  # --- Fused value + gradient (W92): one evaluation per new leaf, gradients
+  # carried along the trajectory; NULL = separate calls exactly as before.
+  # (A checkpoint resume keeps its saved lp_curr; the gradient at the saved
+  # position is re-evaluated once below.)
+  fz <- .hmc_fused_target(log_post_fn, grad_fn, state_init, par_names,
+                          transform = transform, verbose = verbose,
+                          sampler = "NUTS")
+  vg_fn <- if (is.null(fz)) NULL else fz$vg
+  ## gradient at state_init when known (fused; W94 also the separate-call
+  ## path once the step-size search has taken it)
+  g_init <- if (is.null(fz)) NULL else fz$g0
 
   # --- Mass matrix ---
   # Dense path: M_inv (d×d) and chol_M (upper Cholesky of M = solve(M_inv))
@@ -462,13 +708,17 @@ dynhr_nuts <- function(
   if (ckpt_resume) {
     eps0 <- 1  # placeholder; overwritten from saved state before the loop
   } else if (is.null(step_size)) {
+    ## W94: the separate-call path takes the start gradient once, for the
+    ## search and the first transition alike
+    if (is.null(fz)) g_init <- .grad(state_init)
     eps0 <- .hmc_find_stepsize(state_init, .lp_scalar, .grad,
                                 M_inv_diag, M_diag,
-                                M_inv = M_inv, chol_M = chol_M)
+                                M_inv = M_inv, chol_M = chol_M,
+                                vg_fn = vg_fn, lp0 = fz$lp0, g0 = g_init)
   } else {
     eps0 <- step_size
   }
-  if (verbose && !ckpt_resume) message(sprintf("NUTS: initial step_size = %.4e", eps0))
+  if (verbose && !ckpt_resume) .dynhr_inform(sprintf("NUTS: initial step_size = %.4e", eps0))
 
   # --- Dual averaging parameters ---
   mu      <- log(10 * eps0)   # target log step size
@@ -483,12 +733,30 @@ dynhr_nuts <- function(
   da_m <- 0L
 
   # --- Windowed warmup schedule (Stan-style) ---
+  # metric = "lowrank" (Lao 2026) is active only when adapting and no fixed
+  # dense metric was supplied; it uses its own dimension-derived schedule.
+  use_lowrank <- identical(metric, "lowrank") && !use_dense && adapt_mass
+  # metric = "fisher_diag" (Seyboldt et al. 2026) keeps the Stan schedule and
+  # the diagonal hot path; only the slow-window estimator differs (draws AND
+  # scores), so it needs the per-iteration gradients too.
+  use_fisher_diag <- identical(metric, "fisher_diag") && !use_dense && adapt_mass
+  use_scores      <- use_lowrank || use_fisher_diag
   warmup_windows <- if (adapt_mass && n_warmup >= 10L) {
-    .nuts_warmup_windows(n_warmup, init_buffer = init_buffer,
-                          base_window = base_window, term_buffer = term_buffer)
+    if (use_lowrank) {
+      .lowrank_warmup_windows(n_warmup, d)
+    } else {
+      .nuts_warmup_windows(n_warmup, init_buffer = init_buffer,
+                            base_window = base_window, term_buffer = term_buffer)
+    }
   } else {
     NULL
   }
+  # Low-rank / Fisher-diagonal bookkeeping: gradients at the warmup states (the
+  # Fisher estimators need scores as well as draws) and the per-window
+  # decision history (low-rank only).
+  grad_chain <- if (use_scores) matrix(NA_real_, n_warmup, d) else NULL
+  lr_history <- list()
+  lr_last    <- NULL
 
   # Build a lookup: for each warmup iteration m (1-indexed in the loop),
   # is it the END of a slow window?  We precompute slow-window end indices.
@@ -544,10 +812,19 @@ dynhr_nuts <- function(
   treedepths    <- integer(n_total)
   divergences   <- logical(n_total)
   energy_trace  <- numeric(n_total)  # Hamiltonian H = logpost - kinetic (for BFMI)
+  # Per-iteration NUTS acceptance statistic (the trajectory-averaged alpha the
+  # dual averaging targets) and whether the draw moved. NA = no transition
+  # recorded in this run (draw 1; the pre-resume rows of a resumed run), so
+  # the reported means cover exactly the transitions this run made.
+  accept_stats  <- rep(NA_real_, n_total)
+  moved         <- rep(NA, n_total)
   n_grad_evals  <- 0L
 
   theta   <- state_init
-  lp_curr <- .lp_scalar(theta)
+  ## Fused (W92): the start point's value comes from the same function as
+  ## every leaf's; g_curr is the gradient there.
+  lp_curr <- if (is.null(fz)) .lp_scalar(theta) else fz$lp0
+  g_curr  <- g_init   # W94: carried on the separate-call path too
   trace_lp_curr <- if (!is.null(transform)) {
     lp_curr - transform$log_jacobian(theta)
   } else {
@@ -571,6 +848,9 @@ dynhr_nuts <- function(
     theta         <- st$theta
     lp_curr       <- st$lp_curr
     trace_lp_curr <- st$trace_lp_curr
+    ## fused: the gradient at the saved position (a deterministic function of
+    ## it, so the continuation matches the uninterrupted run)
+    g_curr <- if (!is.null(vg_fn)) vg_fn(theta)$grad else NULL
     eps_m         <- st$eps_m
     M_diag        <- st$M_diag
     M_inv_diag    <- st$M_inv_diag
@@ -589,6 +869,8 @@ dynhr_nuts <- function(
       treedepths    <- c(treedepths,   integer(n_total - length(treedepths)))
       divergences   <- c(divergences,  logical(n_total - length(divergences)))
       energy_trace  <- c(energy_trace, numeric(n_total - length(energy_trace)))
+      accept_stats  <- c(accept_stats, rep(NA_real_, n_total - length(accept_stats)))
+      moved         <- c(moved, rep(NA, n_total - length(moved)))
     }
   } else {
     # ---- Fresh run: record draw 1 (to the streaming buffer or in-RAM chain).
@@ -615,109 +897,41 @@ dynhr_nuts <- function(
   t_start <- Sys.time()
 
   for (m in i_start + seq_len(max(0L, n_total - i_start))) {
-    # --- Sample momentum ---
-    r0 <- .hmc_sample_momentum(d, M_diag, chol_M = chol_M)
-
-    # --- Joint log density (multinomial: no slice variable needed) ---
-    joint0 <- lp_curr - .hmc_kinetic(r0, M_inv_diag, M_inv = M_inv)
+    # --- One NUTS transition (momentum draw + multinomial tree) ---
+    tr <- .nuts_transition(theta, lp_curr, eps_m, .lp_scalar, .grad,
+                           M_diag, M_inv_diag, M_inv, chol_M,
+                           max_treedepth, delta_max,
+                           g_curr = g_curr, vg_fn = vg_fn)
+    theta_m       <- tr$theta
+    j             <- tr$depth
+    any_divergent <- tr$divergent
+    alpha_sum     <- tr$alpha_sum
+    n_alpha       <- tr$n_alpha
+    n_grad_evals  <- n_grad_evals + tr$n_leaves
+    # Acceptance stat averaged over the whole trajectory (see the accumulator
+    # in .nuts_transition()): recorded for every iteration, fed to the dual
+    # averaging during warmup.
+    alpha_m         <- if (n_alpha > 0) alpha_sum / n_alpha else 0
+    accept_stats[m] <- alpha_m
+    moved[m]        <- any(theta_m != theta)
     # energy_trace stores the Hamiltonian using the THETA-SPACE logpost (for
     # BFMI), i.e. with the eta-space Jacobian subtracted back out -- the
     # NUTS dynamics themselves (tree building, U-turn checks) use the
-    # eta-space `joint0` below, unchanged.
+    # eta-space `joint0`, unchanged.
     energy_trace[m] <- if (!is.null(transform)) {
-      joint0 - transform$log_jacobian(theta)
+      tr$joint0 - transform$log_jacobian(theta)
     } else {
-      joint0
-    }
-
-    # --- Initialize tree ---
-    # Multinomial: initial point has log_weight = joint0 (the reference mass)
-    theta_minus <- theta
-    theta_plus  <- theta
-    r_minus     <- r0
-    r_plus      <- r0
-    theta_m     <- theta          # current proposal
-    log_w_total <- joint0         # cumulative log-weight of all leaves so far
-    j <- 0L
-    stop <- FALSE
-    any_divergent <- FALSE
-    # Dual-averaging acceptance statistic, accumulated over the WHOLE trajectory
-    # (Hoffman & Gelman 2014, Alg. 6 -- alpha / n_alpha). Using only the final
-    # doubling makes the statistic swing between 0 and 1 iteration-to-iteration
-    # and destabilises step-size adaptation.
-    alpha_sum <- 0
-    n_alpha   <- 0L
-
-    while (!stop && j < max_treedepth) {
-      # Choose direction
-      v <- sample(c(-1L, 1L), 1)
-
-      if (v == -1L) {
-        tree <- .nuts_build_tree(theta_minus, r_minus, v, j, eps_m,
-                                  .lp_scalar, .grad, M_inv_diag, joint0, delta_max,
-                                  M_inv = M_inv)
-        theta_minus <- tree$theta_minus
-        r_minus     <- tree$r_minus
-      } else {
-        tree <- .nuts_build_tree(theta_plus, r_plus, v, j, eps_m,
-                                  .lp_scalar, .grad, M_inv_diag, joint0, delta_max,
-                                  M_inv = M_inv)
-        theta_plus <- tree$theta_plus
-        r_plus     <- tree$r_plus
-      }
-
-      # BIASED progressive multinomial (Betancourt 2017, Stan): accept the new
-      # subtree's proposal with probability min(1, W_new / W_old) -- the new
-      # subtree's weight relative to the trajectory weight BEFORE merging.
-      # This deliberately over-weights the fresh subtree (anti-correlated
-      # exploration); it remains an exact sampler because the within-subtree
-      # selection (in .nuts_build_tree) is unbiased multinomial. (The initial
-      # point's weight joint0 is already in log_w_total at the first doubling.)
-      if (!tree$stop && is.finite(tree$log_weight)) {
-        accept_prob <- min(1, exp(tree$log_weight - log_w_total))
-        if (runif(1) < accept_prob) {
-          theta_m <- tree$theta_prime
-        }
-        log_w_total <- if (is.finite(log_w_total)) {
-          w_max <- max(log_w_total, tree$log_weight)
-          w_max + log(exp(log_w_total - w_max) + exp(tree$log_weight - w_max))
-        } else {
-          tree$log_weight
-        }
-      } else if (!is.finite(tree$log_weight)) {
-        # All leaves in the new subtree have -Inf weight; nothing to update
-      }
-
-      alpha_sum <- alpha_sum + tree$sum_alpha
-      n_alpha   <- n_alpha + tree$n_leaves
-      if (tree$divergent) any_divergent <- TRUE
-
-      # Outer U-turn check on the full tree boundary (velocity metric).
-      # The generalized check is already embedded in .nuts_build_tree
-      # (recursive subtrees); this outer check guards the full doublings.
-      dtheta  <- theta_plus - theta_minus
-      if (is.null(M_inv)) {
-        ## Diagonal path (bit-identical to pre-dense behaviour)
-        v_minus <- M_inv_diag * r_minus
-        v_plus  <- M_inv_diag * r_plus
-      } else {
-        ## Dense path: velocity = M⁻¹ r
-        v_minus <- as.numeric(M_inv %*% r_minus)
-        v_plus  <- as.numeric(M_inv %*% r_plus)
-      }
-      stop <- tree$stop ||
-        (sum(dtheta * v_minus) < 0) ||
-        (sum(dtheta * v_plus) < 0)
-
-      n_grad_evals <- n_grad_evals + tree$n_leaves
-
-      j <- j + 1L
+      tr$joint0
     }
 
     # --- Update state ---
     names(theta_m) <- par_names
     theta   <- theta_m
-    lp_curr <- .lp_scalar(theta)
+    ## Fused: the selected point's value and gradient came with it (the leaf
+    ## evaluation, or the unchanged start point's); no re-evaluation.
+    ## W94: the separate-call path carries the gradient too (same values).
+    lp_curr <- if (is.null(vg_fn)) .lp_scalar(theta) else tr$lp
+    g_curr  <- tr$g
     trace_lp_curr <- if (!is.null(transform)) {
       lp_curr - transform$log_jacobian(theta)
     } else {
@@ -759,6 +973,13 @@ dynhr_nuts <- function(
     # directly by m during warmup).  In non-checkpoint mode it is n_total rows
     # indexed by m.  Either way we only write during warmup.
     if (m <= n_warmup) state_chain[m, ] <- theta
+    if (use_scores && m <= n_warmup && !is.na(cur_slow_start) && m >= cur_slow_start) {
+      if (is.null(g_curr)) {
+        g_curr          <- .grad(theta)
+        n_grad_evals    <- n_grad_evals + 1L
+      }
+      grad_chain[m, ] <- g_curr   # carried with the state: no extra call
+    }
     treedepths[m]  <- j
     divergences[m] <- any_divergent
     if (any_divergent) n_divergent_total <- n_divergent_total + 1L
@@ -766,8 +987,6 @@ dynhr_nuts <- function(
     # --- Dual averaging (step size adaptation during warmup) ---
     if (m <= n_warmup) {
       da_m <- da_m + 1L
-      # Acceptance stat averaged over the whole trajectory (see accumulator above)
-      alpha_m <- if (n_alpha > 0) alpha_sum / n_alpha else 0
       w <- 1 / (da_m + t0_da)
       H_bar <- (1 - w) * H_bar + w * (target_accept - alpha_m)
       log_eps_m <- mu - (sqrt(da_m) / gamma_da) * H_bar
@@ -790,7 +1009,42 @@ dynhr_nuts <- function(
       # directly (same as non-checkpoint path during warmup).
       win_rows <- seq.int(cur_slow_start, cur_slow_end)
       win_rows <- win_rows[win_rows >= 1L & win_rows <= m]
-      if (length(win_rows) >= 2L) {
+      if (use_lowrank && length(win_rows) < 3L) {
+        ## Window too short for the low-rank estimator: keep the current metric.
+        lr_history[[length(lr_history) + 1L]] <- data.frame(
+          start = cur_slow_start, end = cur_slow_end, n = length(win_rows),
+          rank = NA_integer_, threshold = NA_real_, step_size = eps_m)
+      } else if (use_lowrank) {
+        ## Low-rank-plus-diagonal (Lao 2026 controller, single chain): the
+        ## window's draws + scores give the Fisher estimate; rank 0 = the
+        ## diagonal route, rank >= 1 = promotion. Every window is memoryless
+        ## and re-estimated; step size re-found and dual averaging reset.
+        lr_est <- .lowrank_estimate(state_chain[win_rows, , drop = FALSE],
+                                    grad_chain[win_rows, , drop = FALSE],
+                                    cutoff   = lr_ctrl$cutoff,
+                                    max_rank = lr_ctrl$max_rank,
+                                    gamma    = lr_ctrl$gamma)
+        lr_last    <- lr_est
+        M_inv      <- lr_est$metric
+        chol_M     <- lr_est$metric
+        M_diag     <- rep(1, d)   ## sentinel (low-rank path active)
+        M_inv_diag <- NULL        ## signals: ignore diagonal path
+        eps0 <- .hmc_find_stepsize(theta, .lp_scalar, .grad,
+                                   M_inv_diag, M_diag,
+                                   M_inv = M_inv, chol_M = chol_M,
+                                   vg_fn = vg_fn, lp0 = lp_curr, g0 = g_curr)
+        mu      <- log(10 * eps0)
+        eps_bar <- 1
+        H_bar   <- 0
+        eps_m   <- eps0
+        da_m    <- 0L
+        lr_history[[length(lr_history) + 1L]] <- data.frame(
+          start = cur_slow_start, end = cur_slow_end, n = length(win_rows),
+          rank = lr_est$rank, threshold = lr_est$threshold, step_size = eps0)
+        if (verbose) .dynhr_inform(sprintf(
+          "NUTS: slow window [%d,%d] -> lowrank metric rank %d (k_max %d), reset step_size = %.4e",
+          cur_slow_start, cur_slow_end, lr_est$rank, lr_est$k_max, eps0))
+      } else if (length(win_rows) >= 2L) {
         if (identical(metric, "warmup_dense")) {
           ## Dense path: apply Ledoit-Wolf shrunken covariance -> M_inv.
           ## For all-but-last slow windows: update diagonal (same as default)
@@ -812,28 +1066,34 @@ dynhr_nuts <- function(
               use_dense  <- TRUE        ## freeze: no further mass adaptation
               eps0 <- .hmc_find_stepsize(theta, .lp_scalar, .grad,
                                          M_inv_diag, M_diag,
-                                         M_inv = M_inv, chol_M = chol_M)
+                                         M_inv = M_inv, chol_M = chol_M,
+                                         vg_fn = vg_fn, lp0 = lp_curr,
+                                         g0 = g_curr)
               mu      <- log(10 * eps0)
               eps_bar <- 1
               H_bar   <- 0
               eps_m   <- eps0
               da_m    <- 0L
-              if (verbose) message(sprintf(
+              if (verbose) .dynhr_inform(sprintf(
                 "NUTS: slow window [%d,%d] (final) -> warmup_dense mass set (lambda=%.3f), reset step_size = %.4e",
                 cur_slow_start, cur_slow_end, dense_res$lambda, eps0))
             } else {
               ## Fallback to diagonal for the final window
               vars <- apply(state_chain[win_rows, , drop = FALSE], 2, var)
               vars[!is.finite(vars) | vars < 1e-12] <- 1
-              M_diag     <- vars
-              M_inv_diag <- 1 / M_diag
-              eps0 <- .hmc_find_stepsize(theta, .lp_scalar, .grad, M_inv_diag, M_diag)
+              ## Stan's rule: the INVERSE mass is the posterior variance. This used
+              ## to set the MASS to the variance (inverted), squaring the problem's
+              ## conditioning instead of removing it (brief 23 W14 finding).
+              M_inv_diag <- vars
+              M_diag     <- 1 / vars
+              eps0 <- .hmc_find_stepsize(theta, .lp_scalar, .grad, M_inv_diag, M_diag,
+                                         vg_fn = vg_fn, lp0 = lp_curr, g0 = g_curr)
               mu      <- log(10 * eps0)
               eps_bar <- 1
               H_bar   <- 0
               eps_m   <- eps0
               da_m    <- 0L
-              if (verbose) message(sprintf(
+              if (verbose) .dynhr_inform(sprintf(
                 "NUTS: slow window [%d,%d] (final) -> warmup_dense fallback to diagonal, reset step_size = %.4e",
                 cur_slow_start, cur_slow_end, eps0))
             }
@@ -841,34 +1101,57 @@ dynhr_nuts <- function(
             ## Intermediate slow window: update diagonal to improve step-size DA
             vars <- apply(state_chain[win_rows, , drop = FALSE], 2, var)
             vars[!is.finite(vars) | vars < 1e-12] <- 1
-            M_diag     <- vars
-            M_inv_diag <- 1 / M_diag
-            eps0 <- .hmc_find_stepsize(theta, .lp_scalar, .grad, M_inv_diag, M_diag)
+            ## Stan's rule: the INVERSE mass is the posterior variance. This used
+            ## to set the MASS to the variance (inverted), squaring the problem's
+            ## conditioning instead of removing it (brief 23 W14 finding).
+            M_inv_diag <- vars
+            M_diag     <- 1 / vars
+            eps0 <- .hmc_find_stepsize(theta, .lp_scalar, .grad, M_inv_diag, M_diag,
+                                       vg_fn = vg_fn, lp0 = lp_curr, g0 = g_curr)
             mu      <- log(10 * eps0)
             eps_bar <- 1
             H_bar   <- 0
             eps_m   <- eps0
             da_m    <- 0L
-            if (verbose) message(sprintf(
+            if (verbose) .dynhr_inform(sprintf(
               "NUTS: slow window [%d,%d] -> diag update (warmup_dense pending final), reset step_size = %.4e",
               cur_slow_start, cur_slow_end, eps0))
           }
         } else {
           ## Default diagonal adaptation
-          vars <- apply(state_chain[win_rows, , drop = FALSE], 2, var)
+          if (use_fisher_diag) {
+            ## Fisher-divergence diagonal (Seyboldt et al. 2026, Thm 2.2):
+            ## inverse mass sqrt(var(x) / var(g)) from draws AND scores. Rows
+            ## without a stored score (a window starting at the unrecorded
+            ## first state) are dropped.
+            fd_rows <- win_rows[stats::complete.cases(grad_chain[win_rows, , drop = FALSE])]
+            vars <- if (length(fd_rows) >= 2L) {
+              .fisher_diag_estimate(state_chain[fd_rows, , drop = FALSE],
+                                    grad_chain[fd_rows, , drop = FALSE])
+            } else {
+              apply(state_chain[win_rows, , drop = FALSE], 2, var)
+            }
+          } else {
+            vars <- apply(state_chain[win_rows, , drop = FALSE], 2, var)
+          }
           vars[!is.finite(vars) | vars < 1e-12] <- 1
-          M_diag     <- vars
-          M_inv_diag <- 1 / M_diag
+          ## Stan's rule: the INVERSE mass is the posterior variance. This used
+          ## to set the MASS to the variance (inverted), squaring the problem's
+          ## conditioning instead of removing it (brief 23 W14 finding).
+          M_inv_diag <- vars
+          M_diag     <- 1 / vars
           # Re-find step size and reset dual averaging
-          eps0 <- .hmc_find_stepsize(theta, .lp_scalar, .grad, M_inv_diag, M_diag)
+          eps0 <- .hmc_find_stepsize(theta, .lp_scalar, .grad, M_inv_diag, M_diag,
+                                     vg_fn = vg_fn, lp0 = lp_curr, g0 = g_curr)
           mu      <- log(10 * eps0)
           eps_bar <- 1
           H_bar   <- 0
           eps_m   <- eps0
           da_m    <- 0L
           if (verbose) {
-            message(sprintf("NUTS: slow window [%d,%d] -> mass update, reset step_size = %.4e",
-                            cur_slow_start, cur_slow_end, eps0))
+            .dynhr_inform(sprintf("NUTS: slow window [%d,%d] -> %s mass update, reset step_size = %.4e",
+                            cur_slow_start, cur_slow_end,
+                            if (use_fisher_diag) "fisher_diag" else "diagonal", eps0))
           }
         }
       }
@@ -887,7 +1170,7 @@ dynhr_nuts <- function(
     # --- Fix step size at end of warmup (use dual-averaged value) ---
     if (m == n_warmup) {
       eps_m <- eps_bar
-      if (verbose) message(sprintf("NUTS: warmup complete, final step_size = %.4e", eps_m))
+      if (verbose) .dynhr_inform(sprintf("NUTS: warmup complete, final step_size = %.4e", eps_m))
     }
 
     # --- Progress ---
@@ -904,7 +1187,7 @@ dynhr_nuts <- function(
       if (!is.null(progressor)) {
         progressor(message = msg, amount = 1)
       } else if (verbose) {
-        message(msg)
+        .dynhr_inform(msg)
       }
     }
   }
@@ -925,15 +1208,28 @@ dynhr_nuts <- function(
   post_depths    <- treedepths[(n_warmup + 1):n_total]
   post_divs      <- divergences[(n_warmup + 1):n_total]
   post_energy    <- energy_trace[(n_warmup + 1):n_total]
+  post_accept    <- accept_stats[(n_warmup + 1):n_total]
+  post_moved     <- moved[(n_warmup + 1):n_total]
+  accept_stat    <- if (any(!is.na(post_accept))) mean(post_accept, na.rm = TRUE)
+                    else NA_real_
+  move_rate      <- if (any(!is.na(post_moved))) mean(post_moved, na.rm = TRUE)
+                    else NA_real_
 
-  list(
+  out <- list(
     chain           = post_chain,
     full_chain      = chain,
     logpost_trace   = logpost_trace,
     post_logpost    = post_logpost,
-    acceptance_rate = 1 - mean(post_depths == 0),
+    ## acceptance_rate is the mean post-warmup NUTS acceptance statistic
+    ## (Stan's mean accept_stat__; what target_accept targets). Before
+    ## 0.9.3.127 it was 1 - mean(treedepth == 0), identically 1.
+    acceptance_rate = accept_stat,
+    accept_stat     = accept_stat,
+    accept_stats    = post_accept,
+    move_rate       = move_rate,
     step_size       = eps_m,
-    mass_matrix     = if (use_dense && !is.null(M_inv)) M_inv else M_diag,
+    mass_matrix     = if (inherits(M_inv, "dynhr_lowrank_metric")) .lowrank_dense_inv(M_inv)
+                      else if (use_dense && !is.null(M_inv)) M_inv else M_diag,
     treedepths      = post_depths,
     divergences     = post_divs,
     n_divergent     = sum(post_divs),
@@ -948,6 +1244,17 @@ dynhr_nuts <- function(
     kernel_stats    = if (is.null(grad_fn_kernel_stats)) NULL
                        else as.list(grad_fn_kernel_stats)
   )
+  if (use_lowrank) {
+    out$lowrank <- list(
+      rank        = if (is.null(lr_last)) 0L else lr_last$rank,
+      promoted    = any(vapply(lr_history, function(h) isTRUE(h$rank >= 1L), logical(1))),
+      eigenvalues = if (is.null(lr_last)) NULL else lr_last$eigenvalues,
+      threshold   = if (is.null(lr_last)) NA_real_ else lr_last$threshold,
+      metric      = if (inherits(M_inv, "dynhr_lowrank_metric")) M_inv else NULL,
+      history     = if (length(lr_history)) do.call(rbind, lr_history) else NULL
+    )
+  }
+  out
 }
 
 

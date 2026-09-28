@@ -48,14 +48,17 @@
 ## In a standard state-space model (y_t = Z s_t + ...) that is only the usual
 ## GPB(2) collapse error.  Under dynhr's LAG-1 observation timing it is much
 ## worse, because
-##     y_{t+1} = d_i + ZZ_i s_t + DD_j eps_{t+1}
-## loads the regime i = s_t DIRECTLY (through ZZ_i and the intercept d_i), so
-## y_{t+1} is a first-order-informative signal about s_t that (KA) discards.
-## An orchestrator brute-force oracle (all 2^{T+1} regime paths enumerated on
-## T = 8 with an exact joint-Gaussian projection per path) measured the shipped
-## pass at up to 0.31 away from the exact smoothed regime probability under
-## genuine switching -- while agreeing with Kim's own formula to 1e-16, i.e.
-## the code was right and the FORMULA was the error.
+##     y_{t+1} = d_j + ZZ_j s_t + DD_j eps_{t+1}      (j = s_{t+1})
+## loads the STATE s_t that regime s_t has just generated (through TT_{s_t},
+## RR_{s_t}, Sigma_e^{(s_t)}), so y_{t+1} is a first-order-informative signal
+## about s_t that (KA) discards.  An orchestrator brute-force oracle (all
+## 2^{T+1} regime paths enumerated on T = 8 with an exact joint-Gaussian
+## projection per path) measured the shipped pass at up to 0.31 away from the
+## exact smoothed regime probability under genuine switching -- while agreeing
+## with Kim's own formula to 1e-16, i.e. the code was right and the FORMULA
+## was the error.  (That figure was measured under the pre-W39b structural
+## law, whose y_{t+1} also loaded s_t's measurement block; the argument does
+## not depend on it.)
 ##
 ## THE JOINT PASS uses the filter's own posterior joint one period later:
 ##     Pr[s_t=i, s_{t+1}=j | y_{1:T}]
@@ -186,6 +189,45 @@
 ## they index, not in a parameter, and merging them would put the release path
 ## at the mercy of an edit meant for the other.
 ## --------------------------------------------------------------------------
+## THE IMM BACKWARD PASS (W22, 2026-09-25).
+##
+## ms_kim_filter(collapse = "imm") keeps h components indexed by s_t, exactly
+## as gpb2 does, but builds each period's update from ONE mixed prior per
+## destination regime j,  (b0_j, P0_j) = moments of s_{t-1} given
+## {s_t = j, y_{1:t-1}}.  Hashimzade, Kirsanov, Kirsanova & Maih (JBES 2026;
+## arXiv 2402.08051, Lemma 1 part 2 and Algorithm 4) smooth it with the DK adjoint
+##   r_t^{(j)} = Z' F_j^{-1} v_j + sum_k W(j, k) L_{t+1,t}^{(j)'} r_{t+1}^{(k)} .
+## Written in the paper's contemporaneous form with the augmented state
+## alpha_t = (s_{t-1}, eps_t) (see .ms_imm_filter_rf()), the s-block of that
+## recursion is, per (j at t) -> (k at t+1),
+##   r^{(j,k)} = a_{t+1}^{(k)} + L_{t+1}^{(k)'} r_{t+1}^{(k)} ,
+## with (a, L) the blocks of destination k's mixed-prior step, and the
+## eps-block is the shock formula eps = Sigma_e^{(j)} (G r + du) the gpb2 core
+## already applies; E[s_t | s_t = j, y_T] = b_{t|t}^{(j)} + P_{t|t}^{(j)} r.
+## That is the gpb2 core with every (i -> k) cell's DK blocks replaced by the
+## destination-k blocks, which is exactly how the IMM forward pass lays out
+## `dk_path` (t = 1, scored unmixed, keeps its exact per-cell blocks).  So the
+## IMM smoother IS .ms_smoother_core() on the IMM forward pass; no second
+## backward recursion exists to drift.
+##
+## Two consequences, both measured against the brute-force all-path oracle
+## (rbc2shock, 2 obs, regime scales (1, .5) / (3, 2), T = 7, 8 draws):
+##  * WEIGHTS W(j, k).  The paper approximates the future-regime weight by the
+##    PRIOR transition Q(j, k) = P[j, k].  The core uses the SMOOTHED
+##    transition Pr[s_{t+1} = k | s_t = j, y_T] instead.  With P[j, k] the
+##    smoothed states missed the exact ones by 2.5% - 125% of their scale;
+##    with the smoothed weights by 0.2% - 3%, the same as GPB(2)'s pass on the
+##    same draws (0.2% - 2.7%).  The smoothed weight is the exact law the
+##    paper's Q stands in for, so it is used.
+##  * REGIME PASS.  IMM's posterior joint is its own approximation
+##    Pr[s_t = i | s_{t+1} = j, y_{1:t}] Pr[s_{t+1} = j | y_{1:t+1}] (the
+##    filter never scores the (i, j) pair against y_{t+1}), so the "joint"
+##    pass's conditional reduces to Kim's (1994, eq. 10) -- which is the
+##    paper's eq. (14).  regime_pass = "joint" and "kim" therefore agree to
+##    round-off under "imm" (asserted in test-fix-0925-imm.R); smoothed regime
+##    probabilities were within 6.6e-3 of the exact ones on every draw, GPB(2)'s
+##    joint pass within 6.4e-3.
+## --------------------------------------------------------------------------
 ##
 ## ORACLES (test-ms-smoother.R): with P = I and IDENTICAL regimes this is the
 ## single-regime DK smoother, so states, covariances AND shocks must reproduce
@@ -237,7 +279,16 @@
 #'   with it the backward recursion.  \code{"gpb2"} (the default) is Kim's:
 #'   the backward core carries one Durbin-Koopman adjoint and one filtered
 #'   pair per REGIME and collapses them with the \eqn{h \times h} smoothed
-#'   joint.  \code{"gpb3"} runs the forward pass at
+#'   joint.  \code{"imm"} runs the interacting-multiple-model forward pass
+#'   (\code{\link{ms_kim_filter}(collapse = "imm")}, \eqn{h} Kalman steps per
+#'   period) and smooths it with the switching smoother of Hashimzade,
+#'   Kirsanov, Kirsanova and Maih (JBES 2026): per-regime Durbin-Koopman
+#'   adjoints built from each destination regime's mixed-prior update, with
+#'   the smoothed (not the prior) transition probabilities weighting the
+#'   future regimes, and Kim's regime pass (under \code{"imm"} the two
+#'   \code{regime_pass} values coincide, because IMM's own posterior joint
+#'   is Kim's conditional).  The output has the gpb2 shape.
+#'   \code{"gpb3"} runs the forward pass at
 #'   \code{collapse = "gpb3"} --- \eqn{h^2} components indexed by the PAIR
 #'   \eqn{(s_{t-1}, s_t)} --- and smooths it with the matching PAIR-INDEXED
 #'   backward pass: one adjoint per pair, collapsed with the
@@ -262,9 +313,9 @@
 #' differ only in the information set of the conditional.  Kim (1994, eq. 10)
 #' conditions on \eqn{y_{1:t}}, which requires
 #' \eqn{y_{t+1:T} \perp s_t \mid s_{t+1}, y_{1:t}}.  Under this package's lag-1
-#' observation timing \eqn{y_{t+1} = d_i + Z_i s_t + D_j \varepsilon_{t+1}}
-#' loads the regime \eqn{i = s_t} DIRECTLY, so that assumption throws away a
-#' first-order-informative signal: a brute-force enumeration oracle (all regime
+#' observation timing \eqn{y_{t+1} = d + Z s_t + D \varepsilon_{t+1}} loads the
+#' state that regime \eqn{s_t} has just generated, so that assumption throws
+#' away a first-order-informative signal: a brute-force enumeration oracle (all regime
 #' paths, exact joint-Gaussian projection per path) puts the Kim pass up to
 #' 0.31 away from the exact smoothed regime probability under genuine
 #' switching.  \code{regime_pass = "joint"} instead conditions on
@@ -327,7 +378,7 @@ ms_kim_smoother <- function(data, dr, model, params, obs_vars, ms_spec,
                              me_variance = 0,
                              lik_init = c("auto", "stationary", "kappa"),
                              regime_pass = c("joint", "kim"),
-                             collapse = c("gpb2", "gpb3")) {
+                             collapse = c("gpb2", "gpb3", "imm")) {
 
   lik_init    <- match.arg(lik_init)
   regime_pass <- match.arg(regime_pass)
@@ -368,11 +419,17 @@ ms_kim_smoother <- function(data, dr, model, params, obs_vars, ms_spec,
          call. = FALSE)
 
   if (gpb3)
-    .ms_smoother_core_gpb3(fwd, ms_spec$transition, ms_spec$pi0,
-                           ms_spec$regime_names)
-  else
-    .ms_smoother_core(fwd, ms_spec$transition, ms_spec$pi0,
-                      ms_spec$regime_names, regime_pass = regime_pass)
+    return(.ms_smoother_core_gpb3(fwd, ms_spec$transition, ms_spec$pi0,
+                                  ms_spec$regime_names))
+
+  ## IMM: the h-component forward pass hands the gpb2 core per-regime
+  ## components, per-cell DK blocks (destination j's mixed-prior step in every
+  ## (i, j) cell) and IMM's own posterior joint; see "THE IMM BACKWARD PASS"
+  ## in the file header for why that core IS the Hashimzade et al. smoother.
+  res <- .ms_smoother_core(fwd, ms_spec$transition, ms_spec$pi0,
+                           ms_spec$regime_names, regime_pass = regime_pass)
+  if (identical(collapse, "imm")) res$collapse <- "imm"
+  res
 }
 
 
@@ -428,7 +485,7 @@ ms_kim_smoother <- function(data, dr, model, params, obs_vars, ms_spec,
     if (rel < 0) { bad_j <- bad_j + 1L; bad_rel <- min(bad_rel, rel) }
   }
   if (bad_n > 0L || bad_j > 0L)
-    warning(sprintf(paste0(
+    .dynhr_warn(sprintf(paste0(
       "ms_kim_smoother: ", what, " produced a non-PSD smoothed ",
       "covariance in %d of %d periods (regime-averaged) and %d of %d ",
       "regime-period cells; worst relative min-eigenvalue %.2e. This is the ",
@@ -441,12 +498,20 @@ ms_kim_smoother <- function(data, dr, model, params, obs_vars, ms_spec,
 }
 
 
+## Internal: prior mean of s_0 for initial component i -- the structural
+## filter's `b0_list` (W47: nonzero when the regimes' steady states differ),
+## zero for the reduced-form filter, whose law has no state intercept.
+## @noRd
+.ms_fwd_s0 <- function(fwd, i, n_state) {
+  if (is.null(fwd$b0_list)) numeric(n_state) else fwd$b0_list[[i]]
+}
+
 ## Internal: the shared Kim (1994) + Durbin-Koopman BACKWARD pass.
 ##
 ## Both smoothers -- reduced-form (ms_kim_smoother, one decision rule with
 ## switching shock scales) and structural (ms_kim_smoother_struct, per-regime
 ## decision rules) -- run EXACTLY this recursion.  Everything regime-specific
-## about the state space (TT_j, RR_j, ZZ_i, DD_i, Sigma_e^{(j)}) has already
+## about the state space (TT_j, RR_j, ZZ_j, DD_j, Sigma_e^{(j)}) has already
 ## been absorbed by the forward pass into the per-path DK blocks
 ## (a, M, L, G, du), so the backward pass never touches a state-space matrix
 ## and there is only ONE copy of it to get right.
@@ -454,7 +519,8 @@ ms_kim_smoother <- function(data, dr, model, params, obs_vars, ms_spec,
 ## @param fwd  Output of ms_kim_filter(return_state_path = TRUE) or
 ##   ms_kim_filter_struct(return_state_path = TRUE).  Consumed fields:
 ##   loglik, n_T, regime_probs, beta_filt, P_filt, dk_path, Sigma_e_list,
-##   P0_list, state_names, shock_names.
+##   P0_list, state_names, shock_names, and b0_list when present (the
+##   per-regime prior means of s_0; zero when absent).
 ## @param P   h x h transition matrix.
 ## @param pi0 Length-h initial regime distribution.
 ## @param regime_names Length-h character vector.
@@ -534,6 +600,12 @@ ms_kim_smoother <- function(data, dr, model, params, obs_vars, ms_spec,
   beta_s  <- array(0, c(n_state, h, n_T))
   P_s     <- array(0, c(n_state, n_state, h, n_T))
   eps_s   <- array(0, c(n_shk, h, n_T))
+  ## lag_s[, j, t] = E[s_{t-1} | s_t = j, y_{1:T}]: the per-cell smoothed
+  ## LAGGED state (component i's filtered pair plus P r^{(i,j)}), collapsed over
+  ## i with the SAME weights as eps_s.  Consumed by ms_smoothed_fit_struct(),
+  ## whose observation equation y_t = d_j + Z_j s_{t-1} + D_j eps_t pairs the
+  ## lagged state with the regime in force at t (W39b).
+  lag_s   <- array(0, c(n_state, h, n_T))
   ## r_cur[, j] = r_t^{(j)} ; N_cur[, , j] = N_t^{(j)}. Terminal: both zero,
   ## which is what makes the smoothed pair at t = T the FILTERED pair (no
   ## observation loads s_T).
@@ -612,6 +684,18 @@ ms_kim_smoother <- function(data, dr, model, params, obs_vars, ms_spec,
       r_ij[, i, j]   <- blk$a + as.numeric(crossprod(Lt, r_cur[, j]))
       N_ij[, , i, j] <- blk$M + crossprod(Lt, N_cur[, , j]) %*% Lt
     }
+    for (j in seq_len(h)) {
+      acc <- numeric(n_state)
+      for (i in seq_len(h)) {
+        if (w_from[i, j] <= 0) next
+        s_in <- if (t == 1L) .ms_fwd_s0(fwd, i, n_state) else beta_f[, i, t - 1L]
+        P_in <- if (t == 1L) fwd$P0_list[[i]]
+                else matrix(P_f[, , i, t - 1L], n_state, n_state)
+        acc <- acc + w_from[i, j] *
+          (s_in + as.numeric(P_in %*% r_ij[, i, j]))
+      }
+      lag_s[, j, t] <- acc
+    }
 
     ## Weights for collapsing the (i -> j) adjoints back onto regime i at
     ## t-1: Pr[s_t = j | s_{t-1} = i, y_T], i.e. the ROW-normalised smoothed
@@ -649,7 +733,7 @@ ms_kim_smoother <- function(data, dr, model, params, obs_vars, ms_spec,
     ## (t = 1 uses the pre-sample pair (0, P_0^{(i)}) and gives s_{0|T}.)
     for (i in seq_len(h)) {
       if (t == 1L) {
-        s_in <- numeric(n_state)
+        s_in <- .ms_fwd_s0(fwd, i, n_state)
         P_in <- fwd$P0_list[[i]]
         b0_s[, i] <- s_in + as.numeric(P_in %*% r_cur[, i])
       } else {
@@ -725,6 +809,7 @@ ms_kim_smoother <- function(data, dr, model, params, obs_vars, ms_spec,
   rownames(filt_prob) <- regime_names
   dimnames(beta_s)    <- list(st_names, regime_names, NULL)
   dimnames(eps_s)     <- list(sh_names, regime_names, NULL)
+  dimnames(lag_s)     <- list(st_names, regime_names, NULL)
   dimnames(b0_s)      <- list(st_names, regime_names)
 
   structure(
@@ -738,6 +823,7 @@ ms_kim_smoother <- function(data, dr, model, params, obs_vars, ms_spec,
       smoothed_cov_by_regime     = P_s,
       smoothed_shocks            = smoothed_shocks,
       smoothed_shocks_by_regime  = eps_s,
+      smoothed_lag_states_by_regime = lag_s,
       smoothed_initial           = smoothed_initial,
       smoothed_initial_by_regime = b0_s,
       filtered_states            = filtered_states,
@@ -859,6 +945,7 @@ ms_kim_smoother <- function(data, dr, model, params, obs_vars, ms_spec,
   beta_sp <- array(0, c(n_state, hh, n_T))          # per-pair smoothed mean
   P_sp    <- array(0, c(n_state, n_state, hh, n_T))
   eps_sp  <- array(0, c(n_shk, hh, n_T))
+  lag_sp  <- array(0, c(n_state, hh, n_T))          # E[s_{t-1} | pair_t, y_T]
   r_cur   <- matrix(0, n_state, hh)
   N_cur   <- array(0, c(n_state, n_state, hh))
   beta_sp[, , n_T] <- beta_f[, , n_T]
@@ -878,6 +965,7 @@ ms_kim_smoother <- function(data, dr, model, params, obs_vars, ms_spec,
     r_mk   <- array(0, c(n_state, M, h))
     N_mk   <- array(0, c(n_state, n_state, M, h))
     eps_mk <- array(0, c(n_shk, M, h))
+    lag_mk <- array(0, c(n_state, M, h))
     for (m in seq_len(M)) for (k in seq_len(h)) {
       cell <- m + (k - 1L) * M
       g    <- (cell - 1L) %/% n_coll + 1L           # post-update pair (j, k)
@@ -888,6 +976,11 @@ ms_kim_smoother <- function(data, dr, model, params, obs_vars, ms_spec,
       ## The shock adjoint reads the PAIR-conditioned r, not an s_t-only one.
       eps_mk[, m, k]  <- as.numeric(
         Se_l[[k]] %*% (blk$G %*% r_cur[, g] + blk$du))
+      ## Per-cell smoothed LAGGED state (see lag_s in the gpb2 core).
+      s_in <- if (t == 1L) .ms_fwd_s0(fwd, m, n_state) else beta_f[, m, t - 1L]
+      P_in <- if (t == 1L) fwd$P0_list[[m]]
+              else matrix(P_f[, , m, t - 1L], n_state, n_state)
+      lag_mk[, m, k]  <- s_in + as.numeric(P_in %*% r_mk[, m, k])
     }
 
     ## -- smoothed shocks per surviving pair g = (j, k) ---------------------
@@ -896,6 +989,7 @@ ms_kim_smoother <- function(data, dr, model, params, obs_vars, ms_spec,
     ## stands in when the group's smoothed mass underflowed (and at t = 1,
     ## where n_coll = 1 and the weight is 1 either way).
     eps_flat <- matrix(as.numeric(eps_mk), n_shk, M * h)
+    lag_flat <- matrix(as.numeric(lag_mk), n_state, M * h)
     smc_flat <- as.numeric(smc)
     for (g in seq_len(hh)) {
       cells <- (g - 1L) * n_coll + seq_len(n_coll)
@@ -907,9 +1001,13 @@ ms_kim_smoother <- function(data, dr, model, params, obs_vars, ms_spec,
       } else {
         wv <- wv / sw
       }
-      acc <- numeric(n_shk)
-      for (u in seq_len(n_coll)) acc <- acc + wv[u] * eps_flat[, cells[u]]
+      acc <- numeric(n_shk); lac <- numeric(n_state)
+      for (u in seq_len(n_coll)) {
+        acc <- acc + wv[u] * eps_flat[, cells[u]]
+        lac <- lac + wv[u] * lag_flat[, cells[u]]
+      }
       eps_sp[, g, t] <- acc
+      lag_sp[, g, t] <- lac
     }
 
     ## -- backward step: adjoint of the period-(t-1) component m = (i, j) ---
@@ -935,7 +1033,8 @@ ms_kim_smoother <- function(data, dr, model, params, obs_vars, ms_spec,
     ## -- smoothed pair moments for period t-1 ------------------------------
     for (m in seq_len(M)) {
       if (t == 1L) {
-        b0_s[, m] <- as.numeric(fwd$P0_list[[m]] %*% r_cur[, m])
+        b0_s[, m] <- .ms_fwd_s0(fwd, m, n_state) +
+          as.numeric(fwd$P0_list[[m]] %*% r_cur[, m])
       } else {
         s_in <- beta_f[, m, t - 1L]
         P_in <- matrix(P_f[, , m, t - 1L], n_state, n_state)
@@ -953,6 +1052,7 @@ ms_kim_smoother <- function(data, dr, model, params, obs_vars, ms_spec,
   beta_s <- array(0, c(n_state, h, n_T))
   P_s    <- array(0, c(n_state, n_state, h, n_T))
   eps_s  <- array(0, c(n_shk, h, n_T))
+  lag_s  <- array(0, c(n_state, h, n_T))
   filt_prob <- fwd$regime_probs
   beta_fj   <- array(0, c(n_state, h, n_T))
 
@@ -962,12 +1062,14 @@ ms_kim_smoother <- function(data, dr, model, params, obs_vars, ms_spec,
     for (k in seq_len(h)) {
       wj <- pm[, k]; sw <- sum(wj)
       wj <- if (is.finite(sw) && sw > 0) wj / sw else w_from_prior[, k]
-      bs <- numeric(n_state); es <- numeric(n_shk)
+      bs <- numeric(n_state); es <- numeric(n_shk); ls <- numeric(n_state)
       for (j in seq_len(h)) {
         g  <- j + (k - 1L) * h
         bs <- bs + wj[j] * beta_sp[, g, t]
         es <- es + wj[j] * eps_sp[, g, t]
+        ls <- ls + wj[j] * lag_sp[, g, t]
       }
+      lag_s[, k, t] <- ls
       Vk <- matrix(0, n_state, n_state)
       for (j in seq_len(h)) {
         g <- j + (k - 1L) * h
@@ -1038,6 +1140,7 @@ ms_kim_smoother <- function(data, dr, model, params, obs_vars, ms_spec,
   rownames(filt_prob) <- regime_names
   dimnames(beta_s)    <- list(st_names, regime_names, NULL)
   dimnames(eps_s)     <- list(sh_names, regime_names, NULL)
+  dimnames(lag_s)     <- list(st_names, regime_names, NULL)
   dimnames(b0_s)      <- list(st_names, regime_names)
 
   structure(
@@ -1051,6 +1154,7 @@ ms_kim_smoother <- function(data, dr, model, params, obs_vars, ms_spec,
       smoothed_cov_by_regime     = P_s,
       smoothed_shocks            = smoothed_shocks,
       smoothed_shocks_by_regime  = eps_s,
+      smoothed_lag_states_by_regime = lag_s,
       smoothed_initial           = smoothed_initial,
       smoothed_initial_by_regime = b0_s,
       filtered_states            = filtered_states,
@@ -1085,35 +1189,33 @@ ms_kim_smoother <- function(data, dr, model, params, obs_vars, ms_spec,
 ## taken around DIFFERENT means is a well-known way to manufacture a bias
 ## (the mixture mean would silently absorb the difference of the means).
 ##
-## DECISION: a COMMON REFERENCE.  ms_kim_filter_struct()'s state recursion is
-##     s_t = TT_j s_{t-1} + RR_j eps_t
-## with NO regime-dependent intercept, while the per-regime steady state enters
-## ONLY the observation equation, as the switching intercept d_i in
-##     y_t = ZZ_i s_{t-1} + d_i + DD_i eps_t .
+## DECISION: a COMMON REFERENCE.  ms_kim_filter_struct()'s state is the
+## lagged state measured from ONE reference shared by all regimes,
+## s_t = x_t[state] - ref with ref = ys_1[state], and the regime steady states
+## (and the solver's regime constant c_const) enter as INTERCEPTS
+##     s_t = c_j + TT_j s_{t-1} + RR_j eps_t ,
+##     y_t = d_j + ZZ_j s_{t-1} + DD_j eps_t     (j = s_t, W39b / W47) .
 ## So the filtered state vector is, by construction, one single coordinate
-## system shared by all regimes -- there is no per-regime state mean in it at
-## all, and Kim's collapse (in the filter) and the collapses in the backward
-## pass are therefore mixtures of quantities measured from the SAME origin.
-## That is what makes them legitimate; the trap is avoided by not having
-## per-regime state means, not by correcting for them.
+## system shared by all regimes, and Kim's collapse (in the filter) and the
+## collapses in the backward pass are therefore mixtures of quantities
+## measured from the SAME origin.  The intercepts never enter the backward
+## pass: they are inside the filter's innovations (hence the DK `a`/`du`
+## blocks) and its filtered means; the pass only needs the per-regime prior
+## means of s_0 (fwd$b0_list), read by .ms_fwd_s0().
 ##
 ## The regime-specific means are then reported where they actually belong:
 ##   * observation level: y_hat_t = sum_j Pr[s_t=j|y_T] (ZZ_j s_{t-1|T}^{(j)}
 ##     + d_j + DD_j eps_{t|T}^{(j)}) -- computed by ms_smoothed_fit_struct()
 ##     below and pinned by the data-reproduction oracle;
-##   * state LEVELS: `smoothed_states_level` mixes LEVELS, not deviations,
-##       sum_j Pr[s_t=j|y_T] * (s_{t|T}^{(j)} + ys_j[state_vars]) ,
-##     which is the only regime average of levels that is unbiased when the
-##     ys_j differ.  `ss_states_by_regime` ships the ys_j[state_vars] columns
-##     so a caller can redo the mapping against any other reference.
+##   * state LEVELS: `smoothed_states_level` = ref + the regime mixture of
+##     the smoothed deviations (every regime's deviation is from the SAME
+##     ref).  `ss_states_by_regime` ships the ys_j[state_vars] columns and
+##     `state_ref` the reference.
 ##
-## KNOWN LIMITATION (inherited from the filter, NOT introduced here).
-## solve_ms_perturbation() also returns the FRWZ (2016, Prop. 2) constant drift
-## c_s = ghx_s sum_{s'} P[s,s'](ys_{s'} - ys_s), which the structural FILTER
-## does not use; the smoother deliberately reproduces the filter's state space
-## exactly rather than smoothing a different model from the one whose
-## likelihood it decomposes.  Under P = I (every oracle below) c_s = 0
-## identically, so the drift is not what any of the gates are absorbing.
+## (Before W47, 2026-09-25, the filter had no state intercept and ignored
+## c_const, which was exact only for a shared steady state, and the level
+## output added each regime's OWN ys_j to deviations that were in fact
+## measured from a common origin.)
 
 
 #' Kim (1994) smoother for structural Markov-switching DSGE
@@ -1133,16 +1235,15 @@ ms_kim_smoother <- function(data, dr, model, params, obs_vars, ms_spec,
 #' forward pass, so there is exactly one backward recursion in the package.
 #'
 #' @section Deviation reference:
-#' Smoothed states are deviations from the COMMON reference implied by the
-#' structural filter's state equation \eqn{s_t = T_j s_{t-1} + R_j
-#' \varepsilon_t}, which carries no regime-dependent intercept: the per-regime
-#' steady state enters only as the switching observation intercept
-#' \eqn{d_i = ys_i[obs\_vars]}.  All regimes' state vectors therefore live in
-#' one coordinate system and Kim's collapse mixes like with like.  Regime
-#' means are re-introduced only in level space, in
-#' \code{smoothed_states_level}, which mixes LEVELS
-#' \eqn{s_{t|T}^{(j)} + ys_j[\text{state}]} with the smoothed regime
-#' probabilities.
+#' Smoothed states are deviations from the COMMON reference
+#' \code{state_ref} \eqn{= ys_1[\mathrm{state}]} of the structural filter's
+#' state equation \eqn{s_t = c_j + T_j s_{t-1} + R_j \varepsilon_t} (see
+#' \emph{The law} in \code{\link{ms_kim_filter_struct}}): the regime steady
+#' states and the solver's regime constant enter as the intercepts
+#' \eqn{c_j} and \eqn{d_j}, so all regimes' state vectors live in one
+#' coordinate system and Kim's collapse mixes like with like.
+#' \code{smoothed_states_level} is \code{state_ref} plus the regime mixture
+#' of the smoothed deviations.
 #'
 #' @section Smoothed covariances under switching dynamics:
 #' The Durbin-Koopman covariance \eqn{V = P - P N P} is PSD for an exact
@@ -1207,7 +1308,10 @@ ms_kim_smoother <- function(data, dr, model, params, obs_vars, ms_spec,
 #'   costs about \eqn{h} times as much.  \code{regime_pass = "kim"} is not
 #'   defined for it (its backward step conditions on \eqn{y_{1:t}}, which
 #'   discards exactly what the extra components are kept for) and is an
-#'   error.
+#'   error.  \code{"imm"} runs the interacting-multiple-model forward pass
+#'   (\code{\link{ms_kim_filter_struct}(collapse = "imm")}) and smooths it with
+#'   the same per-regime backward core as \code{"gpb2"}, exactly as
+#'   \code{\link{ms_kim_smoother}(collapse = "imm")} does.
 #'
 #' @return A list of class \code{"ms_kim_smoother"} with all the fields
 #'   documented in \code{\link{ms_kim_smoother}}, plus
@@ -1218,6 +1322,8 @@ ms_kim_smoother <- function(data, dr, model, params, obs_vars, ms_spec,
 #'       section).}
 #'     \item{\code{ss_states_by_regime}}{\code{n_state x h} matrix of
 #'       per-regime steady states of the state variables.}
+#'     \item{\code{state_ref}}{The common reference the smoothed states are
+#'       deviations from, \code{ys_1[state_vars]}.}
 #'   }
 #' @seealso \code{\link{ms_kim_filter_struct}}, \code{\link{ms_kim_smoother}},
 #'   \code{\link{solve_ms_perturbation}}
@@ -1228,7 +1334,7 @@ ms_kim_smoother_struct <- function(data, ms_dr, model, params, obs_vars,
                                     lik_init = c("auto", "stationary",
                                                  "kappa"),
                                     regime_pass = c("joint", "kim"),
-                                    collapse = c("gpb2", "gpb3")) {
+                                    collapse = c("gpb2", "gpb3", "imm")) {
 
   lik_init    <- match.arg(lik_init)
   regime_pass <- match.arg(regime_pass)
@@ -1267,6 +1373,10 @@ ms_kim_smoother_struct <- function(data, ms_dr, model, params, obs_vars,
   out <- if (gpb3) .ms_smoother_core_gpb3(fwd, ms_dr$P, ms_dr$pi0, rn)
          else .ms_smoother_core(fwd, ms_dr$P, ms_dr$pi0, rn,
                                 regime_pass = regime_pass)
+  ## IMM: the forward pass lays out destination-j's mixed-prior DK blocks in
+  ## every (i, j) cell, exactly as the reduced-form IMM does, so the gpb2 core
+  ## IS the IMM smoother here too (see "THE IMM BACKWARD PASS" above).
+  if (identical(collapse, "imm")) out$collapse <- "imm"
 
   ## ---- level-space companion (see the deviation-reference note above) -----
   st_names <- fwd$state_names
@@ -1275,18 +1385,25 @@ ms_kim_smoother_struct <- function(data, ms_dr, model, params, obs_vars,
   ss_by_j  <- matrix(ss_by_j, nrow = length(st_names), ncol = h,
                      dimnames = list(st_names, rn))
 
+  ## Every regime's smoothed state is a deviation from the SAME reference
+  ## (W47: fwd$state_ref = ys_1[state]), so the level is that reference plus
+  ## the mixed deviation.  (Before W47 each regime's deviation was added to
+  ## its OWN ys_j, which read the common coordinates as if they were
+  ## regime-specific ones.)
+  ref <- fwd$state_ref
   lev <- matrix(0, length(st_names), fwd$n_T,
                 dimnames = list(st_names, NULL))
   for (t in seq_len(fwd$n_T)) {
     w <- out$smoothed_probs[, t]
     for (j in seq_len(h))
       lev[, t] <- lev[, t] + w[j] * (out$smoothed_states_by_regime[, j, t] +
-                                       ss_by_j[, j])
+                                       ref)
   }
 
   out$ms_dr                <- ms_dr
   out$smoothed_states_level <- lev
   out$ss_states_by_regime  <- ss_by_j
+  out$state_ref            <- stats::setNames(ref, st_names)
   out
 }
 
@@ -1295,31 +1412,24 @@ ms_kim_smoother_struct <- function(data, ms_dr, model, params, obs_vars,
 #'
 #' Rebuilds the observables from a \code{\link{ms_kim_smoother_struct}} result
 #' through the regime-weighted observation equation
-#' \deqn{\hat y_t = \sum_i \Pr[s_{t-1} = i \mid y_{1:T}]
-#'   (Z_i s_{t-1|T}^{(i)} + d_i)
-#'   + \sum_j \Pr[s_t = j \mid y_{1:T}] D_j \varepsilon_{t|T}^{(j)},}
+#' \deqn{\hat y_t = \sum_j \Pr[s_t = j \mid y_{1:T}]
+#'   \left(d_j + Z_j E[s_{t-1} \mid s_t = j, y_{1:T}]
+#'   + D_j \varepsilon_{t|T}^{(j)}\right),}
 #' i.e. the check that the smoothed states and shocks actually reproduce the
 #' data they were smoothed from.
 #'
-#' The regime index follows the structural filter's own timing: under dynhr's
-#' lag-1 convention \eqn{y_t} loads \eqn{s_{t-1}} through the FROM-regime
-#' matrices \eqn{(Z_i, d_i)}, while the contemporaneous shock loads the
-#' TO-regime \eqn{D_j}; each expectation is therefore taken under the regime
-#' distribution that actually governs that term (\eqn{\Pr[s_0 = i]} is
-#' \code{pi0} at \eqn{t = 1}).  With \eqn{P = I} the two distributions
-#' coincide and the identity is exact to round-off; with genuine switching a
-#' residual remains, because the Kim filter/smoother is itself an
-#' approximation (the \eqn{h^2 \to h} collapse keeps only \eqn{h} conditional
-#' moments per period, so the state and the shock terms are averaged under
-#' regime marginals that no longer share a single exact joint).
-#'
-#' A \code{collapse = "gpb3"} smoother uses the same formula (its pair index
-#' at \eqn{t-1} is \eqn{(s_{t-2}, s_{t-1})}, so it is NOT the conditioning
-#' pair of this equation, and summing the pair joint over the coordinate each
-#' term does not condition on returns exactly this regime-marginal form), with
-#' one refinement: at \eqn{t = 1} the FROM distribution is the smoothed
-#' \eqn{\Pr[s_0 \mid y_{1:T}]} the GPB(3) pass supplies rather than the
-#' prior \code{pi0}.
+#' Every block of the structural law belongs to the regime in force at
+#' \eqn{t}, \eqn{y_t = d_j + Z_j s_{t-1} + D_j \varepsilon_t + u_t}, so the
+#' lagged state enters through its expectation conditional on the CURRENT
+#' regime, \code{smoothed_lag_states_by_regime[, j, t]}, which the smoother
+#' collapses with the same weights as the smoothed shocks.  Under
+#' \code{collapse = "gpb2"} or \code{"gpb3"} each forward cell satisfies the
+#' observation identity for any backward adjoint, so with
+#' \code{me_variance = 0} the fit reproduces the data to round-off; with
+#' \code{me_variance > 0} the residual is the smoothed measurement error.
+#' Under \code{"imm"} the forward cells are built from the MIXED prior, not the
+#' per-regime component the lagged state is read from, so a residual of the
+#' order of the mixing error remains.
 #'
 #' @param sm  An object returned by \code{\link{ms_kim_smoother_struct}}.
 #' @param data  The same observation matrix (\code{n_obs x T}) that was
@@ -1349,42 +1459,30 @@ ms_smoothed_fit_struct <- function(sm, data) {
     stop("ms_smoothed_fit_struct: observables not found in the model: ",
          paste(obs_var[is.na(obs_idx)], collapse = ", "), call. = FALSE)
 
-  st_idx <- dr1$state_idx
   ZZ <- lapply(ms_dr$dr, function(d) d$ghx[obs_idx, , drop = FALSE])
   DD <- lapply(ms_dr$dr, function(d) d$ghu[obs_idx, , drop = FALSE])
-  dd <- lapply(ms_dr$dr, function(d) as.numeric(d$ys[obs_var]))
+  ## The filter's own observation intercepts (W47: they carry the regime
+  ## steady states and c_const in the common state coordinates).
+  dd <- lapply(.ms_struct_intercepts(ms_dr, obs_var)$d_list, as.numeric)
 
   fitted <- matrix(0, length(obs_var), n_T,
                    dimnames = list(obs_var, colnames(data)))
-  pi0 <- ms_dr$pi0
+  lag <- sm$smoothed_lag_states_by_regime
+  if (is.null(lag))
+    stop("ms_smoothed_fit_struct: `sm` carries no ",
+         "smoothed_lag_states_by_regime; re-run ms_kim_smoother_struct().",
+         call. = FALSE)
 
-  ## THE PAIR COMPONENTS DO NOT SHORTCUT THIS IDENTITY (F4-D).  A GPB(3)
-  ## smoother carries E[s_{t-1} | s_{t-2}, s_{t-1}, y_T] -- the pair one
-  ## period back is (s_{t-2}, s_{t-1}), NOT the (s_{t-1}, s_t) this equation
-  ## conditions on -- so pairing the period-(t-1) state component with the
-  ## period-t shock component would mismatch the state's regime by one lag.
-  ## (Measured: doing that lifts the relative residual on the T = 300
-  ## switching fixture from 5.9e-3 to 1.6e-1.)  Summing the correct pair joint
-  ## over the coordinate each term does not condition on returns exactly the
-  ## regime-marginal form below, so gpb3 uses the same code; only the t = 1
-  ## FROM distribution improves, because the pair pass HAS a smoothed
-  ## Pr[s_0 | y_{1:T}] where the gpb2 pass can only offer the prior pi0.
-  pri0 <- if (!is.null(sm$smoothed_initial_probs)) sm$smoothed_initial_probs
-          else pi0
-
+  ## y_t = d_j + Z_j s_{t-1} + D_j eps_t (+ u_t), j = s_t (W39b): every term
+  ## is conditioned on the regime in force at t, with the lagged state taken
+  ## as E[s_{t-1} | s_t = j, y_T] (the core collapses it with the SAME weights
+  ## as the shock, so each forward cell's identity carries through).
   for (t in seq_len(n_T)) {
-    ## FROM-regime distribution (governs Z_i, d_i and s_{t-1}); at t = 1 the
-    ## only distribution over s_0 the model supplies is pi0.
-    w_from <- if (t == 1L) pri0 else sm$smoothed_probs[, t - 1L]
-    ## TO-regime distribution (governs D_j and eps_t).
-    w_to   <- sm$smoothed_probs[, t]
-    acc <- numeric(length(obs_var))
-    for (j in seq_len(h)) {
-      prev <- if (t == 1L) sm$smoothed_initial_by_regime[, j]
-              else         sm$smoothed_states_by_regime[, j, t - 1L]
-      acc <- acc + w_from[j] * (as.numeric(ZZ[[j]] %*% prev) + dd[[j]]) +
-        w_to[j] * as.numeric(DD[[j]] %*% sm$smoothed_shocks_by_regime[, j, t])
-    }
+    w_to <- sm$smoothed_probs[, t]
+    acc  <- numeric(length(obs_var))
+    for (j in seq_len(h))
+      acc <- acc + w_to[j] * (dd[[j]] + as.numeric(ZZ[[j]] %*% lag[, j, t]) +
+        as.numeric(DD[[j]] %*% sm$smoothed_shocks_by_regime[, j, t]))
     fitted[, t] <- acc
   }
 

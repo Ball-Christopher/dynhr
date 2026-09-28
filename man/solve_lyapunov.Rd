@@ -13,7 +13,11 @@ solve_lyapunov(A, B, max_iter = 500L, tol = 1e-14)
 
 \item{max_iter}{Maximum iterations}
 
-\item{tol}{Convergence tolerance}
+\item{tol}{Convergence tolerance, RELATIVE to \code{max(abs(X))}: the
+doubling iteration stops once the largest change in \code{X} is at most
+\code{tol * max(abs(X))}, so the solution is scale-equivariant
+(\code{solve_lyapunov(A, c * B) = c * solve_lyapunov(A, B)} to round-off
+for any \code{c > 0}).}
 }
 \value{
 Solution matrix X

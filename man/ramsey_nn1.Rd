@@ -36,8 +36,10 @@ If set, overrides n.}
 \item{return_model}{If TRUE, return the modified model objects for
 debugging.}
 
-\item{beta}{Discount factor. Defaults to \code{params["beta"]}
-or 0.99.}
+\item{beta}{Discount factor. Defaults to the .mod's
+\code{ramsey_model(planner_discount = ...)} option, else the parameter
+\code{beta} / \code{betta}; errors (class \code{dynhr_error_no_discount})
+when none exists.}
 
 \item{orig_ss}{Optional pre-computed steady state list (from
 \code{\link{solve_steady}}).  When \code{NULL} (default) the steady state

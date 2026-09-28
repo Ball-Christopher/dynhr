@@ -74,7 +74,7 @@ fixed aggregate prices, and stores everything the sequence-space Jacobian
 (\code{\link{hank_het2d_jacobian}}) and nonlinear transition
 (\code{\link{hank_td2d_nonlinear}}) need.  This is the household for the
 wealthy hand-to-mouth calibrations the smooth convex cost cannot reach
-(briefs/19, F21/F22): the fixed cost generates INACTION, and the
+-- the fixed cost generates INACTION, and the
 KiwiSaver-style contribution \code{phi_contrib} keeps the illiquid
 participation trap closed (F26 -- without an inflow the stationary
 distribution is initial-condition-dependent; the constructor verifies

@@ -15,6 +15,7 @@ make_log_posterior_pskf_order2(
   cut_tol = 0.01,
   max_q = 5L,
   power = NULL,
+  pskf_cdf = NULL,
   ...
 )
 }
@@ -29,14 +30,15 @@ make_log_posterior_pskf_order2(
 
 \item{compiled}{dynhr_compiled (from \code{compile_model}, order >= 2).}
 
-\item{me_variance}{Measurement-error variance (default 0).}
+\item{me_variance}{Measurement-error variance (default 0): a scalar, or
+one variance per observable (\eqn{H = diag(me)}).}
 
 \item{system_priors}{Named list of system-prior closures, or NULL.}
 
 \item{cut_tol}{Pruning tolerance (default 0.01; see \code{.pskf_filter}).}
 
 \item{max_q}{Hard cap on the retained skew dimension (default 5, the
-Miwa-exact Phi_q range).}
+deterministic Phi_q evaluator range).}
 
 \item{power}{Power-posterior exponent applied to the LIKELIHOOD only
 (prior and system priors stay untempered). \code{NULL} (default) resolves
@@ -44,6 +46,12 @@ the \code{power_posterior} package option ONCE, at factory time, so every
 draw evaluated by the returned closure uses the same tempering -- an
 option flipped mid-chain can no longer silently change the target
 distribution between draws.}
+
+\item{pskf_cdf}{Evaluation of the multivariate-normal CDFs of the filter:
+\code{"accurate"} or \code{"fast"} (the pre-0.9.4 evaluation: cheaper, but
+measured up to 12-18 nats off an exact likelihood under multi-shock skew;
+see \code{\link{dynhr_set_options}}). \code{NULL} (default) resolves the
+\code{pskf_cdf} package option once, at factory time.}
 
 \item{...}{Ignored (interface compatibility).}
 }

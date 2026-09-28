@@ -231,7 +231,7 @@
       } else {
         .solution_adjoint_fd_prims(pnm, model, compiled, ys, params, h_rel)
       }
-    }, error = function(e) NULL)
+    }, error = function(e) .dynhr_reraise_bug(e, NULL))
     if (is.null(pr) || is.null(pr$df_plus)) next
     prim1[[pnm]] <- list(dG = d1$dG, dH = d1$dH,
                          df_plus = pr$df_plus, df_zero = pr$df_zero,
@@ -275,8 +275,8 @@
       pnm <- param_names[k]; h <- hvec[k]
       tp <- params; tp[[pnm]] <- tp[[pnm]] + h
       tm <- params; tm[[pnm]] <- tm[[pnm]] - h
-      prim_p[[k]] <- tryCatch(.sd2_primitives_at(tp, model, compiled, ys), error = function(e) NULL)
-      prim_m[[k]] <- tryCatch(.sd2_primitives_at(tm, model, compiled, ys), error = function(e) NULL)
+      prim_p[[k]] <- tryCatch(.sd2_primitives_at(tp, model, compiled, ys), error = function(e) .dynhr_reraise_bug(e, NULL))
+      prim_m[[k]] <- tryCatch(.sd2_primitives_at(tm, model, compiled, ys), error = function(e) .dynhr_reraise_bug(e, NULL))
     }
   }
 
@@ -303,10 +303,10 @@
       tpm <- params; tpm[[pi_name]] <- tpm[[pi_name]] + hi; tpm[[pj_name]] <- tpm[[pj_name]] - hj
       tmp <- params; tmp[[pi_name]] <- tmp[[pi_name]] - hi; tmp[[pj_name]] <- tmp[[pj_name]] + hj
       tmm <- params; tmm[[pi_name]] <- tmm[[pi_name]] - hi; tmm[[pj_name]] <- tmm[[pj_name]] - hj
-      Fpp <- tryCatch(.sd2_primitives_at(tpp, model, compiled, ys), error = function(e) NULL)
-      Fpm <- tryCatch(.sd2_primitives_at(tpm, model, compiled, ys), error = function(e) NULL)
-      Fmp <- tryCatch(.sd2_primitives_at(tmp, model, compiled, ys), error = function(e) NULL)
-      Fmm <- tryCatch(.sd2_primitives_at(tmm, model, compiled, ys), error = function(e) NULL)
+      Fpp <- tryCatch(.sd2_primitives_at(tpp, model, compiled, ys), error = function(e) .dynhr_reraise_bug(e, NULL))
+      Fpm <- tryCatch(.sd2_primitives_at(tpm, model, compiled, ys), error = function(e) .dynhr_reraise_bug(e, NULL))
+      Fmp <- tryCatch(.sd2_primitives_at(tmp, model, compiled, ys), error = function(e) .dynhr_reraise_bug(e, NULL))
+      Fmm <- tryCatch(.sd2_primitives_at(tmm, model, compiled, ys), error = function(e) .dynhr_reraise_bug(e, NULL))
       if (is.null(Fpp) || is.null(Fpm) || is.null(Fmp) || is.null(Fmm)) return(NULL)
       den <- 4 * hi * hj
       mix <- function(fld) (Fpp[[fld]] - Fpm[[fld]] - Fmp[[fld]] + Fmm[[fld]]) / den

@@ -2,13 +2,13 @@
 % Please edit documentation in R/hank-mixture-emulator.R
 \name{.hank_sbc_sim_Y}
 \alias{.hank_sbc_sim_Y}
-\title{Simulate a macro series from a `dsge_ss` state space (single-shock MA form)}
+\title{Simulate a macro series from a \code{dsge_ss} state space (single-shock MA form)}
 \usage{
 .hank_sbc_sim_Y(ss_obj, T_data, me_variance, sigma_Z, obs_vars)
 }
 \description{
-Mirrors the research scratch's `sim_Y` (`wave3_lib.R`): draws iid `N(0,
-sigma_Z^2)` innovations, forms the truncated-MA observation path, adds iid
+Mirrors the research scratch's \code{sim_Y} (\code{wave3_lib.R}): draws iid \code{N(0,
+sigma_Z^2)} innovations, forms the truncated-MA observation path, adds iid
 measurement error, and demeans.
 }
 \keyword{internal}

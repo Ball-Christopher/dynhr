@@ -37,7 +37,7 @@
 ##
 ## BENCHMARK.  `model = "rw"` (or "ar1"/"mean") runs the same driver on a
 ## naive reduced-form benchmark instead of the structural model, so that
-## `dm_test()` has something to compare against. A random walk is the
+## `diebold_mariano_test()` has something to compare against. A random walk is the
 ## benchmark a forecast evaluation is expected to beat.
 ##
 ## Public API: forecast_backtest(), plus summary/print/plot methods.
@@ -168,7 +168,7 @@
   Z_mat <- ss$Z_mat; D_mat <- ss$D_mat
   Q <- ss$Sigma_e
   if (is.null(Q)) {
-    warning("forecast_backtest: state space has no Sigma_e; using Q = I, ",
+    .dynhr_warn("forecast_backtest: state space has no Sigma_e; using Q = I, ",
             "which assumes every shock has stderr 1.", call. = FALSE)
     Q <- diag(ss$n_shock)
   }
@@ -339,8 +339,8 @@
     return(list(params = params, theta_draws = NULL))
 
   ## estimator == "posterior"
-  ch <- mcmc(mode_res$log_post_fn, mode_res$theta_mode, mode_res$Sigma_prop,
-             n_draws = mcmc_draws, n_warmup = mcmc_warmup)
+  ch <- dynhr_mcmc(mode_res$log_post_fn, mode_res$theta_mode, mode_res$Sigma_prop,
+                   n_draws = mcmc_draws, n_warmup = mcmc_warmup)
   dr_mat <- ch$chain
   idx <- unique(round(seq(1, nrow(dr_mat), length.out = n_post_draws)))
   list(params = params, theta_draws = dr_mat[idx, , drop = FALSE])
@@ -389,7 +389,7 @@
 #' AR(1) with intercept) or \code{"mean"} (unconditional sample moments) runs
 #' the same driver on a naive reduced-form benchmark.  Score the structural
 #' model and the benchmark over the same origins and hand the two score series
-#' to \code{\link{dm_test}}.
+#' to \code{\link{diebold_mariano_test}}.
 #'
 #' @param model A \code{dynhr_solved} object (from \code{\link{solve_model}}),
 #'   a list carrying \code{$model}/\code{$compiled}/\code{$dr}, or one of the
@@ -407,7 +407,7 @@
 #' @param horizons Integer vector of forecast horizons, default \code{1:8}.
 #' @param estimator \code{"mode"} (posterior mode via
 #'   \code{\link{run_mode_finding}}), \code{"posterior"} (mode, then
-#'   \code{\link{mcmc}}, integrating the predictive over parameter draws), or
+#'   \code{\link{dynhr_mcmc}}, integrating the predictive over parameter draws), or
 #'   \code{"fixed"} (no estimation -- use the parameters already in
 #'   \code{model}, or \code{theta}).
 #' @param refit \code{"each"} or \code{"once"}; see the section above.
@@ -444,7 +444,7 @@
 #'   }
 #' @export
 #'
-#' @seealso \code{\link{score_forecast}}, \code{\link{dm_test}},
+#' @seealso \code{\link{score_forecast}}, \code{\link{diebold_mariano_test}},
 #'   \code{\link{conditional_forecast}}
 #'
 #' @examples
@@ -473,6 +473,12 @@ forecast_backtest <- function(model,
                               mcmc_warmup = 250L,
                               verbose = FALSE,
                               ...) {
+  ## Own the message epoch for this run: repeat-suppressed warnings
+  ## (`.dynhr_warn(once = TRUE)`) are keyed within it and re-arm for the
+  ## next run, and the close reports what it suppressed. A nested call
+  ## inherits this epoch rather than opening a second one.
+  .dynhr_run_epoch <- .dynhr_epoch("forecast_backtest")
+  on.exit(.dynhr_close_epoch(.dynhr_run_epoch), add = TRUE)
 
   if (length(list(...)))
     stop("forecast_backtest: unused argument(s): ",
@@ -556,7 +562,7 @@ forecast_backtest <- function(model,
     t0    <- origins[i]
     train <- Y[seq_len(t0), , drop = FALSE]
     if (verbose)
-      message(sprintf("forecast_backtest: origin %d/%d (t = %d)",
+      .dynhr_inform(sprintf("forecast_backtest: origin %d/%d (t = %d)",
                       i, length(origins), t0))
 
     if (is_naive) {
@@ -627,7 +633,7 @@ forecast_backtest <- function(model,
                                      verbose = FALSE, params = pp)
       fm   <- .fbt_filter(ss_m, train, me_variance)
       .fbt_predictive_ss(ss_m, fm$s[t0, ], fm$P[, , t0], horizons, me_variance)
-    }, error = function(e) NULL)
+    }, error = function(e) .dynhr_reraise_bug(e, NULL))
     if (!is.null(pr)) { out[[m]] <- pr; keep[m] <- TRUE }
   }
   out <- out[keep]

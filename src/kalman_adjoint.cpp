@@ -48,8 +48,10 @@ inline arma::mat sym(const arma::mat& X) {
   return 0.5 * (X + X.t());
 }
 
-// Doubling recovery for the two stationary Lyapunov solves below (X = A X A'
-// + B). The kron vec-solve's rcond gate fires on HIGHLY NON-NORMAL stable A
+// Doubling: the PRIMARY solver for the two stationary Lyapunov solves below
+// (X = A X A' + B), tried before the O(n^6) kron vec-solve (W59: the kron
+// solves dominated this kernel). It is also the recovery path the kron-first
+// order used to need: the kron vec-solve's rcond gate fires on HIGHLY NON-NORMAL stable A
 // (e.g. Reiter-HANK transition matrices), where rcond(I - A (x) A) underflows
 // machine eps while the Lyapunov equation itself is well-posed. Doubling
 // (X_{k+1} = X_k + A_k X_k A_k', A_{k+1} = A_k^2) converges for any spectral
@@ -65,8 +67,11 @@ bool lyap_doubling(const arma::mat& A, const arma::mat& B, arma::mat& X) {
     arma::mat Xn = X + Apow * X * Apow.t();
     if (!Xn.is_finite()) return false;
     const double diff  = arma::abs(Xn - X).max();
-    const double scale = std::max(1.0, arma::abs(Xn).max());
-    if (diff < 1e-14 * scale) { X = Xn; return true; }
+    // Purely RELATIVE, as R solve_lyapunov() (W76, 2026-09-26): a max(1, .)
+    // floor made the test absolute for max|X| < 1, so a small-scale model's
+    // P0 stopped early and this kernel's likelihood left the forward's.
+    const double scale = arma::abs(Xn).max();
+    if (diff <= 1e-14 * scale) { X = Xn; return true; }
     Apow = Apow * Apow;
     if (!Apow.is_finite()) return false;
     X = Xn;
@@ -122,7 +127,12 @@ List kf_adjoint_cpp(const arma::mat& Y,
   // -----------------------------------------------------------------------
   // Stationary initialisation: P0 = solve_lyapunov(TT, QQ)
   // Always uses baseline Sigma_e (tv scaling is a sample-period phenomenon).
-  // Mirrors kf_tangent.cpp: n_state==1 scalar branch; general kron solve.
+  // n_state==1 scalar branch; general case DOUBLING FIRST (the same
+  // algorithm and relative tolerance as R solve_lyapunov(), which gives the
+  // forward kalman_filter()'s P0), kron vec-solve only as the fallback.
+  // The kron solve is O(n^6): an (n^2 x n^2) LU plus an rcond estimate; at
+  // n_state = 37 (NZSIM) the two kron solves in this kernel were ~70 of its
+  // ~80 ms, ~25x the whole forward filter. Doubling is O(n^3 log k).
   // -----------------------------------------------------------------------
   arma::mat P0(n_state, n_state, arma::fill::zeros);
   bool lyap_ok = true;
@@ -132,21 +142,25 @@ List kf_adjoint_cpp(const arma::mat& Y,
     P0(0, 0) = QQ(0, 0) / denom;
     if (!std::isfinite(P0(0, 0))) lyap_ok = false;
   } else {
-    const arma::uword n2 = n_state * n_state;
-    arma::mat M = arma::eye(n2, n2) - arma::kron(TT, TT);
-    double rc = arma::rcond(M);
-    bool kron_ok = (rc >= std::numeric_limits<double>::epsilon());
-    if (kron_ok) {
-      arma::vec p0_vec;
-      kron_ok = arma::solve(p0_vec, M, arma::vectorise(QQ),
-                            arma::solve_opts::no_approx);
+    bool dbl_ok = lyap_doubling(TT, QQ, P0) && P0.is_finite();
+    if (!dbl_ok) {
+      // Doubling did not converge (unit/explosive root, or overflow): the
+      // pre-existing kron path with its rcond gate decides, as before.
+      const arma::uword n2 = n_state * n_state;
+      arma::mat M = arma::eye(n2, n2) - arma::kron(TT, TT);
+      double rc = arma::rcond(M);
+      bool kron_ok = (rc >= std::numeric_limits<double>::epsilon());
       if (kron_ok) {
-        P0 = arma::reshape(p0_vec, n_state, n_state);
-        kron_ok = P0.is_finite();
+        arma::vec p0_vec;
+        kron_ok = arma::solve(p0_vec, M, arma::vectorise(QQ),
+                              arma::solve_opts::no_approx);
+        if (kron_ok) {
+          P0 = arma::reshape(p0_vec, n_state, n_state);
+          kron_ok = P0.is_finite();
+        }
       }
+      lyap_ok = kron_ok;
     }
-    // Non-normal-TT recovery: see lyap_doubling() above.
-    if (!kron_ok) lyap_ok = lyap_doubling(TT, QQ, P0) && P0.is_finite();
   }
 
   if (!lyap_ok) {
@@ -447,30 +461,32 @@ List kf_adjoint_cpp(const arma::mat& Y,
     // G_TT from P_0(TT): bar_P_0 * 2 TT P_0 / (1 - TT^2)
     G_TT(0, 0) += bar_P0(0, 0) * 2.0 * TT(0, 0) * P0(0, 0) / denom;
   } else {
-    // General: bar_QQ = solve_lyapunov(TT', bar_P_0)
-    // i.e. solve (I - kron(TT', TT')) vec(bar_QQ) = vec(bar_P_0)
-    const arma::uword n2 = n_state * n_state;
+    // General: bar_QQ = solve_lyapunov(TT', bar_P_0), i.e.
+    // (I - kron(TT', TT')) vec(bar_QQ) = vec(bar_P_0). Doubling FIRST (it
+    // handles the indefinite symmetric bar_P0 RHS; spectral radius of TT' ==
+    // TT, so it converges whenever the forward P0 did); the O(n^6) kron
+    // vec-solve with its rcond gate is only the fallback (see the P0 block).
     arma::mat tTT = TT.t();
-    arma::mat M   = arma::eye(n2, n2) - arma::kron(tTT, tTT);
-
-    double rc = arma::rcond(M);
-    bool kron_ok = (rc >= std::numeric_limits<double>::epsilon());
-    if (kron_ok) {
-      arma::vec bq_vec;
-      kron_ok = arma::solve(bq_vec, M, arma::vectorise(bar_P0),
-                            arma::solve_opts::no_approx);
+    bool dbl_ok = lyap_doubling(tTT, bar_P0, bar_QQ) && bar_QQ.is_finite();
+    if (!dbl_ok) {
+      const arma::uword n2 = n_state * n_state;
+      arma::mat M   = arma::eye(n2, n2) - arma::kron(tTT, tTT);
+      double rc = arma::rcond(M);
+      bool kron_ok = (rc >= std::numeric_limits<double>::epsilon());
       if (kron_ok) {
-        bar_QQ = arma::reshape(bq_vec, n_state, n_state);
-        kron_ok = bar_QQ.is_finite();
+        arma::vec bq_vec;
+        kron_ok = arma::solve(bq_vec, M, arma::vectorise(bar_P0),
+                              arma::solve_opts::no_approx);
+        if (kron_ok) {
+          bar_QQ = arma::reshape(bq_vec, n_state, n_state);
+          kron_ok = bar_QQ.is_finite();
+        }
       }
-    }
-    // Non-normal-TT recovery: see lyap_doubling() above (doubling handles
-    // the indefinite symmetric bar_P0 RHS; spectral radius of TT' == TT).
-    if (!kron_ok &&
-        (!lyap_doubling(tTT, bar_P0, bar_QQ) || !bar_QQ.is_finite())) {
-      return List::create(_["loglik"] = R_NegInf,
-                          _["grad"]   = grad_na,
-                          _["ok"]     = false);
+      if (!kron_ok) {
+        return List::create(_["loglik"] = R_NegInf,
+                            _["grad"]   = grad_na,
+                            _["ok"]     = false);
+      }
     }
     if (!bar_QQ.is_finite()) {
       return List::create(_["loglik"] = R_NegInf,

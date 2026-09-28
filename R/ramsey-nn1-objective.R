@@ -78,9 +78,9 @@
   }
 
   if (verbose) {
-    cat(sprintf("[nn1_objective] Building modified objective (n=%d, %d cols)\n",
+    .dynhr_cat(sprintf("[nn1_objective] Building modified objective (n=%d, %d cols)\n",
                 n, n_cols))
-    cat(sprintf("  Multiplier weights: %d equations\n", n_eq))
+    .dynhr_cat(sprintf("  Multiplier weights: %d equations\n", n_eq))
   }
 
   # ---- 2. For each order k from 2 to (n+1), build W_k ----
@@ -123,14 +123,14 @@
   max_grad <- max(abs(grad_at_ss), na.rm = TRUE)
 
   if (verbose) {
-    cat(sprintf("  Modified objective: gradient at SS = %.2e (should be ~0)\n",
+    .dynhr_cat(sprintf("  Modified objective: gradient at SS = %.2e (should be ~0)\n",
                 max_grad))
     n_terms <- sum(sapply(coefficients, function(c) {
       if (is.matrix(c)) ncol(c)*(ncol(c)+1)/2
       else if (is.array(c) && length(dim(c)) >= 2) prod(dim(c))
       else 0
     }))
-    cat(sprintf("  Total polynomial terms: ~%d\n", n_terms))
+    .dynhr_cat(sprintf("  Total polynomial terms: ~%d\n", n_terms))
   }
 
   # ---- 4. Return ----

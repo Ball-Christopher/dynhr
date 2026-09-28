@@ -550,7 +550,7 @@ tiny_floor <- function() 1e-12
 #' against \eqn{u'(c)} the illiquid condition is branch-universal.  (This is
 #' the defect that sank the first, cut implementation of this function -- its
 #' illiquid residual GREW under grid refinement because the constrained region
-#' resolves better as the grid refines; see briefs/19, F20.)
+#' resolves better as the grid refines.)
 #'
 #' The residuals are not zero by construction: the two-stage EGM interpolates
 #' its endogenous grids back onto the fixed ones, so what remains measures the
@@ -660,8 +660,7 @@ hank_euler2_residual <- function(hh, constraint_tol = 1e-8) {
 #' \code{ra > rb} this produces the wealthy-hand-to-mouth households a
 #' one-asset model cannot: rich in illiquid wealth, constrained in liquid.
 #'
-#' Ported from and validated against SSJ's \code{hh_twoasset.py} (see
-#' \code{briefs/19-twoasset-hank-scope.md}).
+#' Ported from and validated against SSJ's \code{hh_twoasset.py}.
 #'
 #' @param b_grid Numeric: increasing LIQUID grid (see
 #'   \code{\link{hank_asset_grid}}); \code{b_grid[1]} is the liquid floor.
@@ -767,8 +766,7 @@ hank_egm2_solve <- function(b_grid, a_grid, y, rb, ra, beta, eis,
   if (chi2 <= 1)
     stop("hank_egm2_solve: 'chi2' must be > 1 (the adjustment cost must be ",
          "strictly convex in a'; chi2 = 1 is the kinked/linear cost, which ",
-         "this solver's illiquid FOC crossing search does not handle -- see ",
-         "briefs/19-twoasset-hank-scope.md).")
+         "this solver's illiquid FOC crossing search does not handle).")
   if (beta <= 0 || beta >= 1) stop("hank_egm2_solve: 'beta' must be in (0, 1).")
   if (eis <= 0) stop("hank_egm2_solve: 'eis' must be > 0.")
   if (!is.finite(tol) || tol <= 0)
@@ -925,7 +923,7 @@ hank_egm2_solve <- function(b_grid, a_grid, y, rb, ra, beta, eis,
          "infeasible -- then the adjustment cost is overwhelming income ",
          "(Psi grows like chi1*|da|^chi2 / ((1+ra)a + chi0)^(chi2-1), so ",
          "raising chi2 above 2 at an unchanged chi1 blows it up): reduce ",
-         "chi1 or raise chi0. See briefs/19-twoasset-hank-scope.md F16.")
+         "chi1 or raise chi0.")
 
   ## True liquid policy: b = x - theta*a. At theta_coll = 0 the x and b
   ## coordinates coincide, and b_liq IS out$b (the same object, no copy).

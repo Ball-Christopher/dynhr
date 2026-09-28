@@ -27,7 +27,9 @@ declarations, parameter values, \code{model}, \code{initval} /
 \code{endval} / \code{histval} / \code{steady_state_model}, \code{shocks},
 \code{estimated_params}, \code{filter_tunes},
 \code{heteroskedastic_shocks}, \code{stochastic_volatility},
-\code{occbin_constraints}, and the command lines.
+\code{occbin_constraints}, \code{observation_trends},
+\code{deterministic_trends}, the OSR inputs (\code{optim_weights},
+\code{osr_params}, \code{osr_params_bounds}), and the command lines.
 }
 \details{
 \strong{What round-trips.} The exporter is faithful to the \emph{parsed
@@ -54,12 +56,28 @@ announced in a comment in the emitted file:
     the emitted model states the shifted timing explicitly and does
     \strong{not} re-emit the \code{predetermined_variables} line (which
     would shift a second time).
+  \item \emph{Nonstationary models.}  A model declared with
+    \code{trend_var} / \code{log_trend_var} and \code{var(deflator=...)} /
+    \code{var(log_deflator=...)} has already been detrended by the parser;
+    the emitted model is the stationary (detrended) one, the trend
+    declarations are \strong{not} re-emitted (which would detrend a second
+    time) and \code{model$nonstationary} is absent after the round trip.
+    A \code{deterministic_trends} block is written back as such.
   \item \emph{Exogenous auxiliary chains.}  A non-zero timing on an
     exogenous variable is rewritten by the parser into an
     \code{AUX_EXO_LEAD_*}/\code{AUX_EXO_LAG_*} chain, and that rewrite is
     not idempotent, so \code{write_mod()} folds the chain back to a plain
     \code{x(+k)} / \code{x(-k)} reference and lets \code{parse_mod()}
     rebuild it.  The rebuilt chain is identical, in the same order.
+  \item \emph{var(log).}  The parser rewrites every \code{x} of a
+    \code{var(log) x;} variable into \code{exp(LOG_x)} and appends
+    \code{x = exp(LOG_x);}; \code{write_mod()} folds that back and
+    re-declares \code{x} under \code{var(log)}.  The \code{LOG_x = log(x)}
+    line the parser adds to a \code{steady_state_model} (and the
+    \code{LOG_x} starting values it adds to \code{initval}) are written
+    explicitly and read back unchanged.  A \code{var(log)} variable that
+    ends up inside an auxiliary lead/lag chain cannot be folded back and is
+    an error.
   \item \emph{Multiple shocks blocks.}  Several \code{shocks} blocks are
     merged by the parser into one \code{model$shocks}; that merged block is
     what gets written, so the per-block \code{model$shocks_blocks}
@@ -80,9 +98,9 @@ naming the field, as does any block content that cannot be expressed in
 \code{.mod} syntax.  A silently lossy exporter is worse than none.
 
 \strong{Not stored by the parser} (and hence not emitted):
-\code{estimated_params_bounds},
-\code{observation_trends} and the other blocks that
-\code{parse_mod()} strips without parsing.  \code{estimation(...)} options
+\code{estimated_params_bounds} and the other blocks that
+\code{parse_mod()} strips without parsing (\code{observation_trends} IS
+stored and written back).  \code{estimation(...)} options
 that contain a parenthesis (e.g. \code{optim=('MaxIter',200)}) are captured
 only partially by the parser; \code{write_mod()} reproduces exactly what
 was captured, so the round trip is stable but the emitted command line can

@@ -16,7 +16,8 @@ Common choices:
 \itemize{
   \item \code{list(dist = "beta", p1 = 0.50, p2 = 0.20)} -- soft prior
     that the shock explains about half of the variance.
-  \item \code{list(dist = "uniform", p1 = 0, p2 = 1)} -- flat prior
+  \item \code{list(dist = "uniform", p3 = 0, p4 = 1)} -- flat prior
+    on [0, 1]
     (effectively no restriction); mainly useful as a placeholder.
 }}
 }

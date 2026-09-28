@@ -14,6 +14,7 @@ posterior_hessian_fd_grad(
   param_names = names(theta),
   h_rel = 1e-05,
   me_variance = 0,
+  lik_init = "auto",
   ...
 )
 }
@@ -46,6 +47,12 @@ central-difference Hessian.}
 
 \item{me_variance}{scalar measurement-error variance (default 0); passed
 through to \code{make_posterior_grad}.}
+
+\item{lik_init}{Kalman filter \code{P0} initialisation of the likelihood
+(default \code{"auto"}; \code{"stationary"},
+\code{"diffuse"} or \code{"kappa"}), passed to
+\code{make_posterior_grad}, so the Hessian is that of the
+posterior \code{make_log_posterior(lik_init = )} evaluates.}
 
 \item{...}{additional arguments forwarded to \code{make_posterior_grad}
 (e.g. \code{grad_method}, \code{likelihood}).}

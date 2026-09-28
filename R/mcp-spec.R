@@ -50,6 +50,14 @@
 #' an expression (e.g. \code{i+1/beta-1}), it is parsed into an AST and
 #' stored in the \code{bound_ast} field; \code{bound} is \code{NA_real_}.
 #'
+#' Dynare 7 complementarity conditions written after the equation
+#' (\code{mu = 0 _|_ 0 < i < 1+2*alpha;}, or with the \code{U+27C2}
+#' perpendicular symbol) are read from the parsed equations as well: each
+#' bound becomes one spec (lower first), with the bound text in
+#' \code{bound_expr}; a bound that is a function of parameters is evaluated
+#' at the model's calibration and re-evaluated by the solvers at the
+#' parameter vector they are called with.
+#'
 #' If no MCP tags are found, attempts to fall back to OccBin bind/relax
 #' tags (via \code{mcp_specs_from_occbin()}) for backward compatibility
 #' with existing nonlinear model annotations.
@@ -102,6 +110,7 @@ mcp_parse_tags <- function(model, verbose = FALSE) {
     has_bind_tag <- !is.null(tag_raw) && !is.na(tag_raw) &&
                     grepl("\\bbind\\s*=", tag_raw, perl = TRUE)
     if (has_mcp_tag || has_bind_tag) next  # already annotated
+    if (!is.null(eq[["complementarity"]])) next  # Dynare 7 `U+27C2` condition
 
     lhs <- eq[["lhs"]]
     rhs <- eq[["rhs"]]
@@ -125,6 +134,48 @@ mcp_parse_tags <- function(model, verbose = FALSE) {
   }
 
   for (i in seq_along(eqs)) {
+    # Dynare 7 complementarity condition (`EQ U+27C2 L < x < U;`, stored by
+    # parse_mod() in eq$complementarity): one spec per bound, the lower one
+    # first.  Bounds are functions of parameters (the parser rejects anything
+    # else), so each is evaluated at the model's calibration here and kept as
+    # text in `bound_expr` for mcp_resolve_bounds() to re-evaluate at the
+    # caller's parameter vector.
+    cc <- eqs[[i]][["complementarity"]]
+    if (!is.null(cc)) {
+      var_idx <- match(cc$variable, model$var_names)
+      if (is.na(var_idx))
+        stop(sprintf(paste0(
+          "Complementarity condition on equation %d references variable ",
+          "'%s', which is not in var_names."), i, cc$variable))
+      for (side in c("lower", "upper")) {
+        bexpr <- cc[[side]]
+        if (is.na(bexpr)) next
+        bound <- suppressWarnings(as.numeric(bexpr))
+        bound_ast <- NULL
+        if (is.na(bound)) {
+          bound_ast <- parse_expression(bexpr, var_names = var_names_all,
+                                        param_names = param_names_all)
+          bound <- .mcp_eval_bound(bexpr, model$param_values)
+        }
+        n_mcp <- n_mcp + 1L
+        specs[[n_mcp]] <- list(
+          var_name   = cc$variable,
+          var_idx    = var_idx,
+          eq_idx     = i,
+          op         = if (side == "lower") ">" else "<",
+          bound      = bound,
+          bound_ast  = bound_ast,
+          bound_expr = bexpr,
+          tag_type   = "mcp",
+          name       = NA_character_
+        )
+        if (verbose)
+          .dynhr_inform(sprintf("  [\u27c2] eq %d: %s %s %s", i, cc$variable,
+                                if (side == "lower") ">" else "<", bexpr))
+      }
+      next
+    }
+
     # Try both tag and tag_raw.  The 'tag' field stores the name= value
     # (e.g. "LOM susceptible"), while 'tag_raw' stores the full bracket
     # content (e.g. "mcp='S>0',name='LOM susceptible'") which may contain
@@ -166,7 +217,7 @@ mcp_parse_tags <- function(model, verbose = FALSE) {
     bound_ast <- NULL
 
     if (is.na(bound)) {
-      # Not a plain number — parse as an expression AST
+      # Not a plain number -- parse as an expression AST
       bound_ast <- tryCatch(
         parse_expression(bound_str,
                          var_names   = var_names_all,
@@ -194,18 +245,18 @@ mcp_parse_tags <- function(model, verbose = FALSE) {
     if (verbose) {
       bound_repr <- if (is.finite(bound)) sprintf("%.6g", bound) else
                     sprintf("<expr: %s>", ast_to_string(bound_ast))
-      message(sprintf("  [mcp] eq %d: %s %s %s", i, var_name, op, bound_repr))
+      .dynhr_inform(sprintf("  [mcp] eq %d: %s %s %s", i, var_name, op, bound_repr))
     }
   }
 
   # Fall back to OccBin bind/relax if no MCP tags found
   if (n_mcp == 0L) {
-    if (verbose) message("  No MCP tags found; trying OccBin bind/relax fallback...")
+    if (verbose) .dynhr_inform("  No MCP tags found; trying OccBin bind/relax fallback...")
     specs <- mcp_specs_from_occbin(model, verbose = verbose)
   }
 
   if (length(specs) == 0L) {
-    if (verbose) message("  No MCP constraints found in model.")
+    if (verbose) .dynhr_inform("  No MCP constraints found in model.")
   }
 
   specs
@@ -295,11 +346,7 @@ mcp_specs_from_occbin <- function(model, verbose = FALSE) {
 
           # Try to evaluate bound_expr as a numeric
           if (!is.na(bound_expr) && nzchar(bound_expr)) {
-            bound_val <- tryCatch(
-              eval(parse(text = bound_expr),
-                   envir = as.list(model$param_values)),
-              error = function(e) NA_real_
-            )
+            bound_val <- .mcp_eval_bound(bound_expr, model$param_values)
             if (is.finite(bound_val)) bound <- bound_val
           }
           break
@@ -312,19 +359,19 @@ mcp_specs_from_occbin <- function(model, verbose = FALSE) {
 
     # Use the RELAX equation index as eq_idx for the FB residual.
     #
-    # The Fischer-Burmeister complementarity is φ(a, b) = 0 where
+    # The Fischer-Burmeister complementarity is phi(a, b) = 0 where
     #   a = x - bound  (slack for the lower bound)
     #   b = F_{eq}(y)  (residual of the model equation at eq_idx)
     #
     # For a lower bound on x (e.g. r >= r_lb):
     #   - When the constraint is SLACK (r > r_lb): the RELAX equation should
     #     hold (e.g. the standard Taylor rule F_relax = 0).  That makes
-    #     a > 0, b ≈ 0  →  φ ≈ 0 ✓
-    #   - When the constraint BINDS (r = r_lb): a = 0, b ≠ 0  →  φ = 0 ✓
+    #     a > 0, b ~ 0  ->  phi ~ 0 (ok)
+    #   - When the constraint BINDS (r = r_lb): a = 0, b != 0  ->  phi = 0 (ok)
     #
-    # If we instead used the BIND equation (e.g. r = r_lb → F_bind = r - r_lb),
-    # then b = r - r_lb = a always, so φ(a, a) = (2−√2)·a = 0 forces a = 0,
-    # i.e. r = r_lb for all periods — the explosive all-bound path (NEW-MCP1).
+    # If we instead used the BIND equation (e.g. r = r_lb -> F_bind = r - r_lb),
+    # then b = r - r_lb = a always, so phi(a, a) = (2-sqrt(2))*a = 0 forces a = 0,
+    # i.e. r = r_lb for all periods -- the explosive all-bound path (NEW-MCP1).
     re <- relax_eqs[[cn]]
     eq_idx_use <- if (!is.null(re)) re$eq_idx else be$eq_idx
 
@@ -339,7 +386,7 @@ mcp_specs_from_occbin <- function(model, verbose = FALSE) {
     )
 
     if (verbose) {
-      message(sprintf("  [bind/relax] '%s': %s %s %s",
+      .dynhr_inform(sprintf("  [bind/relax] '%s': %s %s %s",
                       cn, be$var_name, op,
                       if (is.finite(bound)) sprintf("%.6g", bound) else "?"))
     }
@@ -370,7 +417,7 @@ mcp_specs_from_occbin <- function(model, verbose = FALSE) {
 #' @export
 mcp_validate_specs <- function(model, mcp_specs, verbose = FALSE) {
   if (length(mcp_specs) == 0L) {
-    if (verbose) message("  [mcp_validate] No specs to validate.")
+    if (verbose) .dynhr_inform("  [mcp_validate] No specs to validate.")
     return(invisible(TRUE))
   }
 
@@ -410,7 +457,7 @@ mcp_validate_specs <- function(model, mcp_specs, verbose = FALSE) {
     # Check variable name consistency
     expected_name <- model$var_names[sp$var_idx]
     if (sp$var_name != expected_name) {
-      warning(sprintf(
+      .dynhr_warn(sprintf(
         "mcp_specs[[%d]]: var_name '%s' != var_names[%d] = '%s'. Using var_idx.",
         i, sp$var_name, sp$var_idx, expected_name))
       sp$var_name <- expected_name
@@ -426,14 +473,14 @@ mcp_validate_specs <- function(model, mcp_specs, verbose = FALSE) {
     if (sp$op == ">") {
       if (sp$var_name %in% var_lower) {
         bound_repr <- if (is.finite(sp$bound)) sprintf("%.6g", sp$bound) else "<expr>"
-        warning(sprintf(
+        .dynhr_warn(sprintf(
           "mcp_specs[[%d]]: var '%s' has multiple lower bounds (%s).",
           i, sp$var_name, bound_repr))
       }
       var_lower <- c(var_lower, sp$var_name)
     } else {
       if (sp$var_name %in% var_upper) {
-        warning(sprintf(
+        .dynhr_warn(sprintf(
           "mcp_specs[[%d]]: var '%s' has multiple upper bounds.", i, sp$var_name))
       }
       var_upper <- c(var_upper, sp$var_name)
@@ -441,13 +488,13 @@ mcp_validate_specs <- function(model, mcp_specs, verbose = FALSE) {
 
     # Both bounds on same variable
     if (sp$var_name %in% var_lower && sp$var_name %in% var_upper) {
-      if (verbose) message(sprintf(
+      if (verbose) .dynhr_inform(sprintf(
         "  [mcp_validate] var '%s' has both lower and upper bounds.", sp$var_name))
     }
   }
 
   if (verbose) {
-    message(sprintf("  [mcp_validate] %d specs validated (%d vars with bounds).",
+    .dynhr_inform(sprintf("  [mcp_validate] %d specs validated (%d vars with bounds).",
                     length(mcp_specs), length(unique(c(var_lower, var_upper)))))
   }
 
@@ -541,6 +588,31 @@ mcp_constraint_map <- function(mcp_specs) {
 # Bound value resolution
 # =============================================================================
 
+#' Evaluate an occbin_constraints bound expression against parameters
+#'
+#' A-SEC (0.9.4): the text comes from the .mod file, so it is evaluated in the
+#' params-seeded .mod allowlist sandbox (arithmetic + elementary maths only),
+#' never with the function frame as enclosure.  A disallowed call aborts with
+#' `dynhr_error_unsafe_mod_expression`.  Unresolvable text (not R, an unbound
+#' symbol, or a `steady_state(X)` reference, which needs a steady state this
+#' path does not have) yields `NA_real_`, as before.
+#' @noRd
+.mcp_eval_bound <- function(bound_expr, params) {
+  if (is.na(bound_expr) || !nzchar(bound_expr)) return(NA_real_)
+  ## steady_state(X) -> an unbound symbol: the rest of the expression is still
+  ## allowlist-checked, and the unbound symbol then resolves to NA.
+  bound_expr <- gsub("steady_state\\s*\\(\\s*\\w+\\s*\\)",
+                     ".dynhr_unresolved_steady_state", bound_expr, perl = TRUE)
+  v <- tryCatch(
+    .dynhr_sandbox_eval(bound_expr, .dynhr_param_eval_env(params),
+                        .dynhr_safe_fn_names,
+                        context = "the occbin_constraints bound"),
+    error = function(e) .dynhr_reraise_unsafe(e, NULL)
+  )
+  if (is.null(v) || !is.numeric(v) || length(v) != 1L) NA_real_
+  else as.numeric(v)
+}
+
 #' Resolve MCP bound values that may be expressed as parameter names
 #'
 #' Some models express bounds as parameter references (e.g., \code{r_lb})
@@ -559,6 +631,23 @@ mcp_resolve_bounds <- function(mcp_specs, model, params) {
   for (j in seq_along(mcp_specs)) {
     sp <- mcp_specs[[j]]
 
+    # A bound that is a function of parameters only (Dynare 7 `U+27C2` bounds, or
+    # an `[mcp = 'x > r_lb']` tag naming parameters) is (re-)evaluated at
+    # THIS parameter vector, so an estimated or perturbed parameter moves the
+    # bound.  A bound expression that uses a variable is left alone here.
+    if (!is.null(sp$bound_ast)) {
+      used <- ast_collect_variables(sp$bound_ast)
+      if (is.null(used) || nrow(used) == 0L) {
+        txt <- sp$bound_expr %||% ast_to_string(sp$bound_ast)
+        v <- .mcp_eval_bound(txt, params)
+        if (is.finite(v)) {
+          sp$bound <- v
+          mcp_specs[[j]] <- sp
+          next
+        }
+      }
+    }
+
     # If bound is already numeric and finite, skip
     if (is.finite(sp$bound)) next
 
@@ -567,10 +656,7 @@ mcp_resolve_bounds <- function(mcp_specs, model, params) {
         length(model$occbin_constraints) > 0L) {
       for (oc in model$occbin_constraints) {
         if (identical(oc$name, sp$name) && !is.na(oc$bound_expr)) {
-          bound_val <- tryCatch(
-            eval(parse(text = oc$bound_expr), envir = as.list(params)),
-            error = function(e) NA_real_
-          )
+          bound_val <- .mcp_eval_bound(oc$bound_expr, params)
           if (is.finite(bound_val)) {
             sp$bound <- bound_val
             mcp_specs[[j]] <- sp
@@ -584,7 +670,7 @@ mcp_resolve_bounds <- function(mcp_specs, model, params) {
   # Check for any still-unresolved bounds
   for (j in seq_along(mcp_specs)) {
     if (!is.finite(mcp_specs[[j]]$bound)) {
-      warning(sprintf(
+      .dynhr_warn(sprintf(
         "mcp_specs[[%d]] ('%s'): bound could not be resolved from model.",
         j, mcp_specs[[j]]$var_name))
     }

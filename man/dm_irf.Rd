@@ -4,26 +4,31 @@
 \alias{dm_irf}
 \title{Impulse responses from a dynhr_model}
 \usage{
-dm_irf(dm, n_periods = 40L, ...)
+dm_irf(dm, n_periods = 40L, at = c("params", "mode", "posterior_mean"), ...)
 }
 \arguments{
-\item{dm}{A \code{\link{dynhr_model}} whose `$solution` is set
+\item{dm}{A \code{\link{dynhr_model}} whose \code{$solution} is set
 (see \code{\link{dm_solve}})}
 
-\item{n_periods}{IRF horizon (default `40L`)}
+\item{n_periods}{IRF horizon (default \code{40L})}
+
+\item{at}{\code{"params"} (default), \code{"mode"} or
+\code{"posterior_mean"}: the stored solution when \code{\link{dm_solve}}
+solved it there, else the model is solved at that point (at the stored
+order, default solver settings) for this call. See \code{\link{dm_solve}}.}
 
 \item{...}{Further arguments for the underlying IRF routine
-(e.g. `shock_size`, and `pruning` at order 2).}
+(e.g. \code{shock_size}, and \code{pruning} at order 2).}
 }
 \value{
-The updated `dynhr_model`, with `$irf` set.
+The updated \code{dynhr_model}, with \code{$irf} set.
 }
 \description{
 Calls the impulse-response routine matching the order the object was
 solved at (\code{\link{compute_irfs}} at order 1,
 \code{\link{compute_irfs_order2}} at order 2,
 \code{\link{compute_irfs_order3}} at order 3) and stores the result in
-`$irf`.
+\code{$irf} (and the point in \code{$irf_at}).
 }
 \examples{
 dm <- dm_irf(dm_solve(dynhr_model(

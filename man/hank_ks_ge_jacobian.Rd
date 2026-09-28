@@ -4,17 +4,23 @@
 \alias{hank_ks_ge_jacobian}
 \title{GE sequence-space Jacobians for the Krusell-Smith model}
 \usage{
-hank_ks_ge_jacobian(ks, T_h)
+hank_ks_ge_jacobian(ks, T_h, expectations = NULL)
 }
 \arguments{
 \item{ks}{A \code{\link{hank_ks_steady}} steady state.}
 
 \item{T_h}{Integer horizon.}
+
+\item{expectations}{\code{NULL} (FIRE, default) or a household behavioural
+expectations spec (Lenney and Rosso 2026) over the inputs
+\code{c("r", "w")}, passed to \code{\link{hank_het_jacobian}}: the
+household Jacobians are replaced by their behavioural counterparts before
+the chain rule, the firm block is unchanged.}
 }
 \value{
 A list with \code{H_K}, \code{H_Z} (\code{T x T}), the household
-  Jacobians \code{J} (from \code{\link{hank_het_jacobian}}), and the firm
-  Jacobian blocks \code{Jr_K, Jr_Z, Jw_K, Jw_Z}.
+  Jacobians \code{J} (from \code{\link{hank_het_jacobian}}), the firm
+  Jacobian blocks \code{Jr_K, Jr_Z, Jw_K, Jw_Z}, and \code{expectations}.
 }
 \description{
 Assembles \code{H_K = dH/dK} and \code{H_Z = dH/dZ} of the asset-market

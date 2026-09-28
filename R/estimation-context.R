@@ -107,13 +107,18 @@
 #' @param ms_collapse  Character; GPB collapse depth for the Markov-switching
 #'   likelihood, forwarded to \code{\link{ms_kim_filter}} /
 #'   \code{\link{ms_kim_filter_struct}}: \code{"gpb2"} (default, Kim's
-#'   filter) or \code{"gpb3"} (collapse on the last TWO regimes; about
+#'   filter), \code{"gpb3"} (collapse on the last TWO regimes; about
 #'   \code{n_regimes} times the cost per period, and exact wherever GPB(2)'s
-#'   error is entirely the one-period collapse).  Meaningful only when
-#'   \code{ms_spec} or \code{ms_struct_spec} is supplied; supplying
-#'   \code{"gpb3"} without either is an error.  Diagnose the need for it with
+#'   error is entirely the one-period collapse) or \code{"imm"} (the
+#'   interacting-multiple-model filter: \code{n_regimes} Kalman steps per
+#'   period instead of \code{n_regimes^2}; it can be markedly less accurate
+#'   than \code{"gpb2"} when the regimes' state dynamics differ a lot --- see
+#'   the \emph{IMM} section of \code{\link{ms_kim_filter_struct}}).  Meaningful only when
+#'   \code{ms_spec} or \code{ms_struct_spec} is supplied; supplying a
+#'   non-default value without either is an error.
+#'   Diagnose the need for \code{"gpb3"} with
 #'   \code{ms_kim_filter(..., return_collapse_diag = TRUE)$collapse_max}.
-#' @param student_df  Positive finite scalar; degrees of freedom for the
+#' @param student_df  Finite scalar > 2; degrees of freedom for the
 #'   multivariate Student-t per-period log-likelihood.  Required when
 #'   \code{likelihood = "student_t"}, ignored otherwise.
 #' @param pruned_order  Integer, \code{2L} (default) or \code{3L}.  Selects
@@ -143,7 +148,7 @@ estimation_context <- function(
     sample_start    = NULL,
     ms_spec         = NULL,
     ms_struct_spec  = NULL,
-    ms_collapse     = c("gpb2", "gpb3"),
+    ms_collapse     = c("gpb2", "gpb3", "imm"),
     student_df      = NULL,
     pruned_order    = 2L
 ) {
@@ -180,7 +185,7 @@ estimation_context <- function(
   ## Soft warning: pkf with me_variance = 0 is technically allowed but near-
   ## singular for n_obs == n_state models.
   if (likelihood == "pkf" && isTRUE(me_variance == 0)) {
-    warning(
+    .dynhr_warn(
       "estimation_context: likelihood = \"pkf\" with me_variance = 0 may ",
       "cause near-singular F matrices when n_obs >= n_state. ",
       "Consider me_variance = 1e-8 or larger.",
@@ -194,8 +199,8 @@ estimation_context <- function(
       stop("estimation_context: likelihood = \"student_t\" requires student_df ",
            "(degrees of freedom, a positive scalar).", call. = FALSE)
     if (!is.numeric(student_df) || length(student_df) != 1L ||
-        !is.finite(student_df) || student_df <= 0)
-      stop("estimation_context: student_df must be a positive finite scalar.",
+        !is.finite(student_df) || student_df <= 2)
+      stop("estimation_context: student_df must be a finite scalar > 2.",
            call. = FALSE)
   }
 
@@ -230,7 +235,7 @@ estimation_context <- function(
   ## Validation: freq_band outside c(0,pi) with non-whittle likelihood
   if (!identical(likelihood, "whittle") &&
       (!isTRUE(all.equal(freq_band, c(0, pi))))) {
-    warning(
+    .dynhr_warn(
       "estimation_context: freq_band != c(0, pi) has no effect when ",
       "likelihood != \"whittle\".",
       call. = FALSE
@@ -393,8 +398,11 @@ print.dynhr_estimation_context <- function(x, ...) {
   ## anti-regression end-to-end assertion in test-pruned-gradient-gate.R).
   ## Any per-parameter chain failure falls back to exact FD-of-forward, so the
   ## returned gradient is never silently wrong.
+  ## A per-observable me_variance vector (H = diag(me), Kalman path only) has
+  ## no analytic gradient: the score recursions take a scalar. FD it is.
   !identical(ctx$gradient_policy, "numerical") &&
-    ctx$likelihood %in% c("gaussian", "whittle", "cumulant", "pruned")
+    ctx$likelihood %in% c("gaussian", "whittle", "cumulant", "pruned") &&
+    length(unique(as.numeric(ctx$me_variance))) <= 1L
 }
 
 
@@ -409,12 +417,15 @@ print.dynhr_estimation_context <- function(x, ...) {
 #' @param use_obc Logical; \code{TRUE} if the model has OBC/PKF constraints.
 #' @return Logical scalar.
 #' @noRd
-.ctx_is_standard_gaussian <- function(ctx, use_obc = FALSE) {
+.ctx_is_standard_gaussian <- function(ctx, use_obc = FALSE, model = NULL) {
   !isTRUE(use_obc) &&
     identical(ctx$likelihood, "gaussian") &&
     is.null(ctx$me_extra) &&
     is.null(ctx$shock_scale) &&
-    isTRUE(all.equal(ctx$freq_band, c(0, pi)))
+    isTRUE(all.equal(ctx$freq_band, c(0, pi))) &&
+    ## The per-daemon recompile path builds analytic gradients, which do not
+    ## honour observation_trends; a trended model ships the closure instead.
+    !.has_obs_trends(model)
 }
 
 
@@ -445,7 +456,7 @@ validate_context <- function(ctx) {
     env_nm <- tryCatch(environmentName(environment(fn)),
                        error = function(e) NA_character_)
     if (!is.na(env_nm) && !(env_nm %in% safe_envs)) {
-      warning(
+      .dynhr_warn(
         "validate_context: system_priors[[\"", nm, "\"]] closes over a ",
         "non-base environment ('", env_nm, "'). This may cause mirai ",
         "serialization overhead or failures. Ensure the closure only captures ",

@@ -10,7 +10,11 @@ thames_mdd(
   radius = NULL,
   quantile = 0.5,
   split = TRUE,
-  se_method = c("iid", "batch")
+  se_method = c("iid", "batch"),
+  lower = NULL,
+  upper = NULL,
+  in_support = NULL,
+  n_support = 20000L
 )
 }
 \arguments{
@@ -34,8 +38,12 @@ and evaluate the estimator on the second, then average both orderings.}
 
 \item{se_method}{Character: \code{"iid"} (default) or \code{"batch"}.
 \itemize{
-  \item \code{"iid"}: delta-method SE assuming the in-region draws are
+  \item \code{"iid"}: delta-method SE assuming the EVALUATION draws are
     approximately i.i.d. (lower bound for autocorrelated MCMC chains).
+    Computed from the variance of
+    \eqn{v_i = \mathbf{1}\{i \in A\} \exp(-\log u_i)} over all
+    \eqn{N_{\text{eval}}} draws, so it includes the truncation
+    indicator's contribution.
   \item \code{"batch"}: batch-means SE that captures autocorrelation.
     With \eqn{N_{\text{eval}}} in-region contributions
     \eqn{v_i = \mathbf{1}\{i \in A\} \exp(-\log u_i) / (N_{\text{eval}} \cdot \text{Vol}(A))}
@@ -45,7 +53,25 @@ and evaluate the estimator on the second, then average both orderings.}
     where \eqn{\bar{M}} is the vector of batch means of \eqn{v_i}.
     Honest for autocorrelated chains; use this choice for MCMC output.
 }
-The default \code{"iid"} keeps all existing tests bit-identical.}
+Both are calibrated: on i.i.d. Gaussian draws with a closed-form
+\eqn{\log Z}, the mean reported SE is within ~7% of the across-seed
+standard deviation of \code{log_mdd} (200 seeds, N = 400 and N = 2000,
+d = 2 and d = 5).}
+
+\item{lower, upper}{Optional bounds of the posterior's support \eqn{S}
+(e.g. the prior bounds): numeric, one per column of \code{draws}
+(matched by name when both are named) or a scalar recycled; \code{NULL}
+= unbounded on that side. See \strong{Support correction}.}
+
+\item{in_support}{Optional \code{function(theta)} returning \code{TRUE}
+when the named parameter vector \code{theta} is inside the support
+(e.g. the model solves / is determinate there). Evaluated only at Monte
+Carlo points that already satisfy \code{lower}/\code{upper}, so an
+expensive check should come with a smaller \code{n_support}.}
+
+\item{n_support}{Number of uniform Monte Carlo points in the ellipsoid used
+to estimate the in-support fraction (default 20000). Only used when a
+finite bound or \code{in_support} is given.}
 }
 \value{
 A named list with elements:
@@ -69,6 +95,13 @@ A named list with elements:
     \item{d}{Dimension \eqn{d}.}
     \item{n_used}{Number of draws after dropping non-finite
       \code{log_post_values}.}
+    \item{support_fraction}{Only when \code{lower}, \code{upper} or
+      \code{in_support} restricts the support: the estimated fraction
+      \eqn{\hat p} of the ellipsoid inside it (averaged over the two halves
+      when \code{split = TRUE}).}
+    \item{support_se}{Only with a support restriction: the Monte Carlo s.e.
+      of the \eqn{\log \hat p} correction (already included in
+      \code{se}).}
   }
 }
 \description{
@@ -105,11 +138,37 @@ orderings are averaged (mean on the log-reciprocal scale, before
 inverting), which reduces estimator bias at the cost of a factor-of-two
 effective sample size per half.
 
-**SE note.** The reported standard error treats the in-region draws as
-approximately i.i.d. (delta method on the Monte Carlo variance of
-\eqn{1/u_i}). For autocorrelated MCMC chains the true SE is larger; treat
-\code{se} as a lower bound in that case.
+**SE note.** The estimator is a mean over ALL \eqn{N_e} evaluation draws of
+\eqn{v_i = \mathbf{1}\{i \in A\} / u_i}, a variable that is zero outside the
+ellipsoid, so its Monte Carlo variance includes the variance of the
+TRUNCATION INDICATOR. Before 0.9.4 the \code{"iid"} SE averaged over the
+in-region draws only, dropping that term and reporting an SE roughly 2-3x
+too small (measured against the across-seed spread on i.i.d. Gaussian draws
+with a closed-form \eqn{\log Z}). Both \code{se_method} choices now estimate
+the variance of the same \eqn{N_e}-length vector.
+
+The delta method still treats the ellipsoid \eqn{(\hat\mu, \hat\Sigma, r)}
+as fixed, so the reported SE understates the truth by a further ~5% on
+i.i.d. draws; with autocorrelated MCMC output use
+\code{se_method = "batch"}, which is what \code{thames_mdd_from_chains()}
+passes by default.
 }
+\section{Support correction}{
+
+The reciprocal identity above holds with \eqn{\text{Vol}(A \cap S)} in
+place of \eqn{\text{Vol}(A)}: posterior draws never fall in the part of the
+ellipsoid outside the support \eqn{S}, so the uncorrected estimator
+over-states \eqn{\log Z} by \eqn{-\log p}, where
+\eqn{p = \text{Vol}(A \cap S)/\text{Vol}(A)}. This bias is not small next
+to the Monte Carlo error when the posterior piles up against a bound, and
+it ADDS across boundary parameters. When \code{lower}, \code{upper} or
+\code{in_support} is given, \eqn{p} is estimated by uniform Monte Carlo on
+the ellipsoid (the revised THAMES of Metodiev et al.) and
+\eqn{\log \hat p} is added to \code{log_mdd}; its delta-method s.e.
+\eqn{\sqrt{(1-\hat p)/(n\hat p)}} is added to \code{se} in quadrature.
+Without them, \eqn{p = 1} and no random numbers are drawn.
+}
+
 \examples{
 set.seed(42)
 d <- 2

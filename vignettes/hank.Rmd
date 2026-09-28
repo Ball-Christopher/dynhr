@@ -110,8 +110,8 @@ The Euler-equation residual (`hank_euler_residual(hh)`) and the exact
 aggregate-budget identity `C == r*A + Ybar` provide self-contained correctness
 checks.
 
-Two extensions to the income process live alongside this two-state (E/U)
-version: `hank_employment_income3()` adds a third, not-in-labour-force state
+Two extensions to the income process live alongside the two-state (E/U)
+`hank_employment_income()`: `hank_employment_income3()` adds a third, not-in-labour-force state
 (E/U/N) with its own job-finding/separation rates, and `hank_het_block(Tr_incidence =)`
 accepts a full `n_e x n_a` matrix so a transfer's incidence can vary by
 wealth as well as income state, not just be a flat per-state amount.
@@ -235,16 +235,24 @@ Kalman filter), the cross-sectional wealth **level**, and the cross-sectional
 
 ```{r mixture-post, purl = FALSE}
 ## `config` bundles everything shared across every posterior evaluation
-## (asset grid, income process, GE horizon, observables, shock specs, me_var,
-##  and the fixed mixture coordinates). See ?hank_mixture_joint_logpost.
-config <- list(a_grid = a_grid, Pi = inc$Pi, e = inc$e, T_h = T_h,
-               observables = "Y", betas = betas, omega = omega,
-               shock_specs = list(Z = list(rho = 0.9)), me_var = 1e-4)
+## (asset grid, income process, calibration, GE horizon, the macro
+## observables and shock specs, me_var, and the default mixture weights).
+## See ?hank_mixture_joint_logpost for the full list.
+config <- list(a_grid = a_grid, Pi = inc$Pi, e = inc$e, eis = 1,
+               alpha = 0.36, delta = 0.025, Z = mks$Z, T_h = T_h,
+               observables = "C",          # an output of hank_mixture_ks_model()
+               shock_specs = list(Z = list(rho = 0.9, sigma = 0.01)),
+               me_var = 1e-4, omega = omega)
 
-## theta here is the estimated coordinate(s) — e.g. the discount-factor spread.
+## theta is list(centre, spread): betas = c(centre - spread, centre + spread).
+## Y_C: T x 1 matrix of demeaned consumption observations (column "C").
+## m_lev_hat / level_metric: an observed wealth-LEVEL survey and its metric
+## (see ?hank_reweight_level_metric).
 lp <- function(theta)
-  hank_mixture_joint_logpost(theta, data = Y, m_lev_hat = m_lev_hat,
-                             level_metric = level_metric, config = config)
+  hank_mixture_joint_logpost(theta, data = Y_C, m_lev_hat = m_lev_hat,
+                             level_metric = level_metric,
+                             config = config)$logpost
+lp(list(centre = 0.9725, spread = 0.0125))
 ```
 
 **Choosing a posterior route.** The channels are strongly non-diagonal, and a
@@ -254,32 +262,54 @@ solve is data-independent and precomputable) or a **Laplace approximation** —
 never a diagonal RWM:
 
 ```{r mixture-route, purl = FALSE}
-## (a) exact grid, with simulation-based-calibration certification:
-emu <- hank_mixture_emulator(config)          # D-agnostic surrogate over theta
+## (a) exact grid, with simulation-based-calibration certification. The
+##     emulator precomputes the GE solve on a grid over a box of theta; its
+##     own config sizes the household problem (n_e, n_a, amax, ...; see
+##     ?hank_mixture_emulator).
+emu <- hank_mixture_emulator(box = list(centre = c(0.965, 0.980),
+                                        spread = c(0.008, 0.016)),
+                             config = emu_config)
 sbc <- hank_mixture_sbc(emu, n_rep = 200, sampler = "grid",
                         channels = c("macro", "level", "response"))
-sbc$uniformity                                # per-channel SBC rank uniformity
+sbc$uniformity                                # SBC rank-uniformity test
 
 ## (b) Laplace approximation: mode + Laplace-covariance proposal (NOT diagonal RWM):
-fit <- hank_mixture_laplace(theta0 = 0.02, config = config,
-                            data = Y, m_lev_hat = m_lev_hat,
-                            level_metric = level_metric)
-fit$mode; fit$cov
+fit <- hank_mixture_laplace(theta0 = list(centre = 0.9725, spread = 0.0125),
+                            config = config, data = Y_C,
+                            m_lev_hat = m_lev_hat, level_metric = level_metric)
+fit$mode; fit$cov                             # over par_names = c("centre", "spread")
 ```
 
 ## 7. Welfare
 
-`hank_welfare_posterior()` propagates posterior draws through a welfare
-functional (e.g. the consumption-equivalent gain of a policy) to get a posterior
-over welfare quantiles, distinguishing the interest-income and labour-income
-incidence channels across the wealth distribution:
+`hank_welfare_response()` gives each household cell's first-order
+consumption-equivalent gain from a price path, and
+`hank_mixture_welfare_pool()` pools the types into one population and splits
+the aggregate into efficiency and redistribution. `hank_welfare_posterior()`
+then propagates posterior draws through such a welfare functional to get a
+posterior over welfare statements rather than a single point value:
 
 ```{r mixture-welfare, purl = FALSE}
-draws <- fit$mode + as.numeric(chol(fit$cov)) * rnorm(1000)   # illustrative draws
-wp <- hank_welfare_posterior(draws,
-                             welfare_fn = function(theta)
-                               hank_cev(mks, dr = +0.001))     # CEV of +10bps r
-wp$quantiles
+## Per-cell CEV of a 50-quarter +10bp rise in r, pooled over the two types:
+lam  <- lapply(mks$blocks, function(b)
+          hank_welfare_response(b, r_path = rep(b$r + 0.001, 50))$lambda)
+pool <- hank_mixture_welfare_pool(mks, lam)
+pool$type_mean                        # mean CEV within each type
+pool$decompose$efficiency             # population-weighted aggregate gain
+
+## The same statement across posterior draws of (centre, spread):
+welfare_at <- function(theta) {
+  b  <- c(theta[["centre"]] - theta[["spread"]], theta[["centre"]] + theta[["spread"]])
+  mk <- hank_mixture_ks_steady(a_grid, inc$Pi, inc$e, betas = b, omega = omega,
+                               eis = 1, alpha = 0.36, delta = 0.025)
+  lam <- lapply(mk$blocks, function(bl)
+           hank_welfare_response(bl, r_path = rep(bl$r + 0.001, 50))$lambda)
+  d <- hank_mixture_welfare_pool(mk, lam)$decompose
+  c(efficiency = d$efficiency, dispersion = d$dispersion)
+}
+draws <- fit$propose(200)             # Laplace draws, columns centre / spread
+wp <- hank_welfare_posterior(draws, welfare_fn = welfare_at)
+wp$summary                            # posterior mean, sd and quantiles
 ```
 
 ## 8. Aggregate risk (Krusell-Smith)
@@ -313,8 +343,7 @@ head(simulate(fit, T_sim = 100, seed = 3))
 ```
 
 As `sigma` goes to zero the scaled generalized IRF converges to
-`hank_ks_linear_irf(ks, dZ)` at the same steady state; that limit is the gate
-in `tests/testthat/test-hank-aggregate-risk-oracle.R`.
+`hank_ks_linear_irf(ks, dZ)` at the same steady state; the package's test suite gates that limit.
 
 ## References
 

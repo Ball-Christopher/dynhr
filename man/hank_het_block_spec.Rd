@@ -4,7 +4,13 @@
 \alias{hank_het_block_spec}
 \title{Wrap a heterogeneous-agent household as a sequence-space block}
 \usage{
-hank_het_block_spec(name, block, inputs = c("r", "w"), outputs = c("A", "C"))
+hank_het_block_spec(
+  name,
+  block,
+  inputs = c("r", "w"),
+  outputs = c("A", "C"),
+  expectations = NULL
+)
 }
 \arguments{
 \item{name}{Character block name.}
@@ -19,6 +25,15 @@ for a \code{\link{hank_employment_income}} household whose job-finding
 and separation rates are produced by an upstream matching block;
 outputs a subset of \code{c("A","C")}). Validated here so a bad wiring
 fails at spec time, not inside the Jacobian dispatch.}
+
+\item{expectations}{\code{NULL} (FIRE, default) or a behavioural
+expectations spec \code{list(theta =, gamma =, type =)} as documented in
+\code{\link{hank_het_jacobian}} (Lenney and Rosso 2026); \code{theta} and
+\code{gamma} may be named by input. The block's FIRE Jacobian is
+replaced by its behavioural counterpart before GE assembly in
+\code{\link{hank_model}}, so other blocks and the GE solve are
+unchanged. Linear path only: \code{\link{hank_model_nonlinear_irf}} and
+\code{\link{hank_model_dist_irf}} refuse a model with a behavioural block.}
 }
 \value{
 An object of class \code{hank_block} (kind \code{"het"}).

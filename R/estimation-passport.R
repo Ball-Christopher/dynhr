@@ -96,7 +96,7 @@
   if (!has_diag) return(out)
   lines <- tryCatch(
     format_executive_summary(suite, model_name = model_name),
-    error = function(e) NULL)
+    error = function(e) .dynhr_reraise_bug(e, NULL))
   if (is.null(lines)) return(out)
   vline <- grep("^OVERALL VERDICT:", lines, value = TRUE)
   if (length(vline)) {

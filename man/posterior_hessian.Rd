@@ -23,7 +23,10 @@ posterior_hessian(
   t2_method = c("loop", "contract_once", "hvp_solution", "adjoint_solution"),
   check_mode = NULL,
   mode_grad_tol = NULL,
-  require_mode = FALSE
+  require_mode = FALSE,
+  power = NULL,
+  system_priors = NULL,
+  lik_init = c("auto", "stationary", "diffuse", "kappa")
 )
 }
 \arguments{
@@ -158,10 +161,35 @@ polished mode is ~4 orders of magnitude BELOW the threshold).}
 \item{require_mode}{logical (default \code{FALSE}). When \code{TRUE} and
 the \code{check_mode} guard fires, \code{stop()} instead of
 \code{warning()}.}
+
+\item{power}{Power-posterior exponent zeta in (0, 1]. \code{NULL} (default)
+resolves the \code{power_posterior} option, exactly as the
+\code{make_log_posterior*} factories do. The loglik Hessian is multiplied
+by zeta (the prior and system-prior Hessians are not), so the result is
+the curvature of the SAME tempered target the posterior closure
+evaluates. The \code{check_mode} gradient uses the same zeta.}
+
+\item{system_priors}{Optional \code{system_prior_spec}. Its log-density is a
+prior-side term of the target, so it requires \code{include_prior = TRUE};
+its Hessian is added by a second-order central-difference stencil of the
+system-prior density alone (first-order re-solves, no filter pass).}
+
+\item{lik_init}{Kalman filter \code{P0} initialisation of the likelihood
+whose curvature is requested (\code{"auto"}, the default,
+\code{"stationary"}, \code{"diffuse"} or \code{"kappa"}; as in
+\code{\link{make_log_posterior}}). The curvature kernel starts from the
+stationary (Lyapunov) \code{P0}, so it is the Hessian of that likelihood
+only where \code{lik_init} puts the stationary init in force at
+\code{dr}; otherwise (a unit root under \code{"auto"}, a root within
+\code{1e-6} of the unit circle under \code{"diffuse"}, any
+\code{"kappa"} init, or \code{"stationary"} on a unit root) the call is
+refused with class \code{dynhr_error_grad_lik_init} rather than
+returning the curvature of another likelihood. The \code{check_mode}
+gradient is built with the same \code{lik_init}.}
 }
 \value{
-n_par x n_par symmetric matrix; the loglik Hessian
-  (plus prior Hessian if \code{include_prior = TRUE}).
+n_par x n_par symmetric matrix; zeta times the loglik Hessian
+  (plus the prior and system-prior Hessians if \code{include_prior = TRUE}).
   Carries attribute \code{t1_asymmetry} (scalar) from \code{kf_loglik_hessian},
   and attribute \code{second_primitives} ("analytic" when the compiled model
   carries the \code{param_deriv = "second"} codegen, "fd" for the stencil

@@ -4,7 +4,7 @@
 \alias{hank_ks_linear_irf}
 \title{Linear GE impulse response of the Krusell-Smith model}
 \usage{
-hank_ks_linear_irf(ks, dZ, ge = NULL)
+hank_ks_linear_irf(ks, dZ, ge = NULL, expectations = NULL)
 }
 \arguments{
 \item{ks}{A \code{\link{hank_ks_steady}} steady state.}
@@ -12,6 +12,11 @@ hank_ks_linear_irf(ks, dZ, ge = NULL)
 \item{dZ}{Numeric length-\code{T} TFP shock path (deviations from \code{Z}).}
 
 \item{ge}{Optional precomputed \code{\link{hank_ks_ge_jacobian}} result.}
+
+\item{expectations}{\code{NULL} (FIRE, default) or a household behavioural
+expectations spec, forwarded to \code{\link{hank_ks_ge_jacobian}} when
+\code{ge} is \code{NULL}. With a precomputed \code{ge}, build it with the
+spec instead (passing both is an error).}
 }
 \value{
 A list of deviation paths \code{dK, dr, dw, dA} and the linear

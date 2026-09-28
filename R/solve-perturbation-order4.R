@@ -678,7 +678,7 @@ tensor_contract_4d <- function(T, M, mode) {
 
 #' Solve the deterministic fourth-order perturbation of a DSGE model
 #'
-#' Given first-, second-, and third-order decision rules from `dr3`,
+#' Given first-, second-, and third-order decision rules from \code{dr3},
 #' computes the 4th-order terms ghxxxx, ghxxxu, ghxxuu, ghxuuu, ghuuuu
 #' using Levintal (2017) compact tensor notation.
 #'
@@ -728,10 +728,9 @@ solve_perturbation_order4 <- function(model, compiled, ss, params, dr3,
   huu  <- ghuu[state_idx, , drop = FALSE]
   hxxx <- ghxxx[state_idx, , drop = FALSE]
 
-  if (n_s == 0L) {
-    if (verbose) message("No state variables; 4th-order x-terms are zero.")
-    return(.trivial_dr4(dr3))
-  }
+  ## No `n_s == 0` short-circuit: a stateless model's ghuuuu is the fourth
+  ## Taylor coefficient of its static map (y = exp(e) -> 1), not zero. The
+  ## general path below runs with empty state blocks.
 
   # System matrices
   sys <- extract_system_matrices(compiled, ss, params)
@@ -743,8 +742,8 @@ solve_perturbation_order4 <- function(model, compiled, ss, params, dr3,
   A_L <- f0 + fp %*% ghx %*% t(S)
 
   if (verbose) {
-    cat("Fourth-order perturbation (deterministic):\n")
-    cat(sprintf("  n_endo=%d  n_state=%d  n_exo=%d  ns^4=%d\n",
+    .dynhr_cat("Fourth-order perturbation (deterministic):\n")
+    .dynhr_cat(sprintf("  n_endo=%d  n_state=%d  n_exo=%d  ns^4=%d\n",
                 n, n_s, n_u, n_s^4))
   }
 
@@ -761,7 +760,7 @@ solve_perturbation_order4 <- function(model, compiled, ss, params, dr3,
   H3 <- .compute_model_hessian3_symbolic(compiled, dy_ss, params, ss)
 
   # Numerical 4th derivative
-  if (verbose) cat("  Computing 4th derivative (numerical, h=", h, ")...\n")
+  if (verbose) .dynhr_cat("  Computing 4th derivative (numerical, h=", h, ")...\n")
   F4 <- .compute_model_4th_deriv(dyn, dy_ss, params, ss, h)
 
   # Build 2nd-order and 3rd-order compound derivative matrices
@@ -781,7 +780,7 @@ solve_perturbation_order4 <- function(model, compiled, ss, params, dr3,
   # ================================================================
   # RHS for ghxxxx: Phi_xxxx (n × ns^4)
   # ================================================================
-  if (verbose) cat("  Computing Phi_xxxx forcing term...\n")
+  if (verbose) .dynhr_cat("  Computing Phi_xxxx forcing term...\n")
 
   # Direct 4th derivative: F4[T_x, T_x, T_x, T_x]
   Phi_direct <- .contract_h4(F4, T_x, T_x, T_x, T_x, n)
@@ -1273,7 +1272,7 @@ solve_perturbation_order4 <- function(model, compiled, ss, params, dr3,
   # (b) ghxx·(hxxx ⊗ hx) — 4 [2,1] arrangements
   # (c) ghxx·(hxx ⊗ hxx) — 3 [2,2] arrangements
 
-  if (verbose) cat("  Assembling Faa di Bruno RHS (all set partitions + chain rule)...\n")
+  if (verbose) .dynhr_cat("  Assembling Faa di Bruno RHS (all set partitions + chain rule)...\n")
 
   # (a) ghxxx·(hxx ⊗ hx ⊗ hx) — 3 pair-singleton arrangements
   chain_a_raw <- ghxxx %*% (hxx %x% hx %x% hx)   # n × n_s^4
@@ -1449,24 +1448,28 @@ solve_perturbation_order4 <- function(model, compiled, ss, params, dr3,
   # Analytic Faa-di-Bruno forcing assembly (validated against FD/Richardson to
   # the FD truncation floor, ~1e-7).  Replaces the old FD-forcing path which was
   # ~300-1000x slower.
-  if (verbose) cat("  Computing Phi via analytic assembler...\n")
+  if (verbose) .dynhr_cat("  Computing Phi via analytic assembler...\n")
   # Reuse extract_system_matrices()'s mapping so forcing rows align with A_L.
   # See [[eq-to-decl-consistency-invariant]].
   eq_to_decl <- sys$eq_to_decl %||% .build_eq_to_decl(model)
   res_perm   <- order(eq_to_decl)
-  phi_fd_obj <- .build_phi_analytic(dyn, dr3, ss, params, state_idx,
-                                    endo_names, exo_names, n_s, n_u, n,
-                                    order = 4L, res_perm = res_perm)
+  phi_fd_obj <- if (n_s == 0L)
+    .build_phi_analytic_nostate(dyn, dr3, ss, params, endo_names, exo_names,
+                                n_u, n, order = 4L, res_perm = res_perm)
+  else
+    .build_phi_analytic(dyn, dr3, ss, params, state_idx,
+                        endo_names, exo_names, n_s, n_u, n,
+                        order = 4L, res_perm = res_perm)
   # Convention (matching order 3): A_L·X + fp·X·hx^{⊗4} = -Phi_xxxx
   Phi_xxxx <- -phi_fd_obj$xxxx
 
   # ================================================================
   # Solve for ghxxxx
   # ================================================================
-  if (verbose) cat("  Solving for ghxxxx...\n")
+  if (verbose) .dynhr_cat("  Solving for ghxxxx...\n")
 
   if (n_s^4 > 1000L && n > 5L) {
-    warning(sprintf(
+    .dynhr_warn(sprintf(
       "4th-order system size %d x %d is large. Using compact Sylvester solve.",
       n * ns4, n * ns4))
   }
@@ -1474,7 +1477,7 @@ solve_perturbation_order4 <- function(model, compiled, ss, params, dr3,
   # Compact eigen/QZ Sylvester (iterative refinement + dense fallback); avoids
   # forming/Schur-factorising the ns^4 x ns^4 Kronecker matrix.  Falls back to
   # the dense reference solver automatically when hx is ill-conditioned.
-  if (verbose) cat("  Solving ghxxxx via compact Sylvester (n*ns^4 =", n * ns4, ").\n")
+  if (verbose) .dynhr_cat("  Solving ghxxxx via compact Sylvester (n*ns^4 =", n * ns4, ").\n")
   ghxxxx <- .solve_kron_compact(A_L, fp, hx, 4L, Phi_xxxx, verbose = verbose)
 
   # ================================================================
@@ -1482,7 +1485,7 @@ solve_perturbation_order4 <- function(model, compiled, ss, params, dr3,
   # phi_fd_obj was already computed above for the xxxx term; reuse it.
   # ================================================================
   if (n_u > 0L) {
-    if (verbose) cat("  Solving for ghxxxu, ghxxuu, ghxuuu, ghuuuu...\n")
+    if (verbose) .dynhr_cat("  Solving for ghxxxu, ghxxuu, ghxuuu, ghuuuu...\n")
     # Future-feedback term: the lead variable y_{t+1} = g(x_now, 0) depends on
     # the shock only through the state transition (x_now = hx·x + hu·u + ...),
     # so the 4th-order policy enters the mixed equations via the pure-state
@@ -1549,8 +1552,8 @@ solve_perturbation_order4 <- function(model, compiled, ss, params, dr3,
   class(dr4) <- c("DecisionRules4", "DecisionRules3", "DecisionRules2", "DecisionRules")
 
   if (verbose) {
-    cat("Fourth-order solution complete.\n")
-    cat(sprintf("  ghxxxx: %d x %d  max|.| = %.3g\n",
+    .dynhr_cat("Fourth-order solution complete.\n")
+    .dynhr_cat(sprintf("  ghxxxx: %d x %d  max|.| = %.3g\n",
                 nrow(ghxxxx), ncol(ghxxxx), max(abs(ghxxxx))))
   }
 
@@ -1563,24 +1566,50 @@ solve_perturbation_order4 <- function(model, compiled, ss, params, dr3,
 # =====================================================================
 
 # =====================================================================
-# Trivial 4th-order solution and S3 methods
+# No-state forcing helper and S3 methods
 # =====================================================================
 
-#' Trivial 4th-order solution for models with no state variables.
+#' Order-K forcing blocks for a model with NO state variables (K = 4, 5).
+#'
+#' Same output as \code{.build_phi_analytic()}, whose lead-block Faa-di-Bruno
+#' composition is restricted to the ns state input-modes and so cannot be
+#' formed at ns = 0. With no states that composition is identically zero:
+#' y_{t+1} = g(u_{t+1}, sigma) does not depend on u_t, the lag block is empty,
+#' and the compound vector is dy(u) = (current block g(u), shock block u).
+#' So DY[[k]] is the current-policy tensor Plist[[k]] on the current-period
+#' columns plus the unit shock map at k = 1 -- the Taylor expansion of the
+#' static map F(g(u), u) = 0.
 #' @noRd
-.trivial_dr4 <- function(dr3) {
-  n   <- length(dr3$endo_names)
-  n_u <- length(dr3$exo_names)
-  dr4 <- unclass(dr3)
-  dr4$ghxxxx <- matrix(0, n, 0)
-  dr4$ghxxxu <- matrix(0, n, 0)
-  dr4$ghxxuu <- matrix(0, n, 0)
-  dr4$ghxuuu <- matrix(0, n, 0)
-  dr4$ghuuuu <- matrix(0, n, n_u^4)
-  dr4$order <- 4L
-  dr4$fourth_order_method <- "trivial_no_states"
-  class(dr4) <- c("DecisionRules4", "DecisionRules3", "DecisionRules2", "DecisionRules")
-  dr4
+.build_phi_analytic_nostate <- function(dyn, dr, ss, params, endo_names,
+                                        exo_names, n_u, n, order,
+                                        res_perm = NULL) {
+  if (is.null(res_perm)) res_perm <- seq_len(n)
+  K <- order
+  pol_order <- K - 1L
+  dy_ss <- .build_dy_ss_o2(list(dynamic = dyn,
+                                model = list(varexo_names = exo_names)), ss)
+  Plist <- .build_combined_policy_derivs(dr, 0L, n_u, pol_order)
+
+  dcm <- dyn$dyn_col_map
+  DY  <- vector("list", K)
+  for (k in seq_len(K)) DY[[k]] <- matrix(0, dyn$total_cols, n_u^k)
+  for (kc in seq_len(nrow(dcm))) {
+    c  <- dcm$col[kc]
+    nm <- dcm$name[kc]
+    if (nm %in% exo_names) {
+      kk <- which(exo_names == nm)
+      if (length(kk) == 1L) DY[[1L]][c, kk] <- 1
+      next
+    }
+    j <- which(endo_names == nm)
+    if (length(j) != 1L || dcm$lead_lag[kc] != 0L) next
+    for (k in seq_len(pol_order)) DY[[k]][c, ] <- Plist[[k]][j, ]
+  }
+
+  Flist <- .build_F_triplets(dyn, dy_ss, params, ss, K)
+  Phi <- .expand_folded(.fdb_compose_folded(K, Flist, DY, n, n_u), K, n_u)
+  Phi <- Phi[res_perm, , drop = FALSE]
+  .slice_phi_blocks(Phi, K, 0L, n_u)
 }
 
 

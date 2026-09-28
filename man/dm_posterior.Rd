@@ -7,22 +7,30 @@
 dm_posterior(dm, ...)
 }
 \arguments{
-\item{dm}{A \code{\link{dynhr_model}} carrying `data` and `prior_spec`}
+\item{dm}{A \code{\link{dynhr_model}} carrying \code{data} and a prior spec}
 
-\item{...}{Further arguments for \code{\link{make_posterior}} /
-`make_log_posterior()` (e.g. `likelihood`, `order`, `lik_init`).  These
-override the values stored on the object for this call only.}
+\item{...}{Likelihood edits (see Details).}
 }
 \value{
-The updated `dynhr_model`, with `$log_post` set to the closure
-  `function(theta) list(logpost, loglik, logprior)`.
+The updated \code{dynhr_model}, with \code{$log_post} set to the closure
+  \code{function(theta) list(logpost, loglik, logprior)}.
 }
 \description{
-Re-threads the object's `model`, `data`, `prior_spec`, `obs_vars`,
-`compiled`, `me_variance` and `likelihood` into
-\code{\link{make_posterior}} and stores the returned closure in
-`$log_post`.  Arguments in `...` are merged over the likelihood arguments
-the constructor captured.
+Builds the log-posterior of the held spec with the builder
+\code{\link{run_estimation}} uses, and stores the closure in
+\code{$log_post}: the spec's likelihood fields (\code{me_variance},
+\code{lik_init}, \code{power_posterior}, ...) and the model's
+\code{heteroskedastic_shocks}, \code{filter_tunes} and
+\code{stochastic_volatility} blocks and OBC constraints are applied, so the
+closure is the runner's objective.
+}
+\details{
+Arguments in \code{...} edit the held likelihood (they are recorded in the
+returned object's spec): a likelihood field by name, or by the constructor
+argument that sets it (\code{power} is \code{power_posterior},
+\code{likelihood} is \code{type}); any other name is added to
+\code{likelihood$extra}. Such an edit clears the results computed under
+the old likelihood (see \code{\link{update.dynhr_model}}).
 }
 \examples{
 obs_vars <- c("ygr", "infl", "intr")
@@ -35,5 +43,6 @@ theta0 <- setNames(dm$prior_spec$mean, dm$prior_spec$name)
 dm$log_post(theta0)$logpost
 }
 \seealso{
-\code{\link{dynhr_model}}, \code{\link{make_posterior}}
+\code{\link{dynhr_model}}, \code{\link{likelihood_spec}},
+  \code{\link{run_estimation}}
 }

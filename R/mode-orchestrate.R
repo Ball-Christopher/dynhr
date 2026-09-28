@@ -60,7 +60,7 @@ combined_optimize <- function(fn, par, lower = -Inf, upper = Inf,
     stage <- stages[i]
     iters <- iter_alloc[i]
 
-    if (verbose) cat(sprintf("\n--- Stage %d: %s (%d iter) ---\n",
+    if (verbose) .dynhr_cat(sprintf("\n--- Stage %d: %s (%d iter) ---\n",
                              i, toupper(stage), iters))
 
     res <- switch(stage,
@@ -151,7 +151,7 @@ combined_optimize <- function(fn, par, lower = -Inf, upper = Inf,
       best_par <- res$par
     }
 
-    if (verbose) cat(sprintf("  -> logpost = %.4f (%s)\n", -best_val, res$message))
+    if (verbose) .dynhr_cat(sprintf("  -> logpost = %.4f (%s)\n", -best_val, res$message))
   }
 
   out <- list(par = best_par, value = best_val,
@@ -208,6 +208,11 @@ combined_optimize <- function(fn, par, lower = -Inf, upper = Inf,
                               verbose = TRUE,
                               record_curvature = FALSE) {
 
+  ## Name theta_init by prior_spec (0.9.4): an unnamed start used to give an
+  ## unnamed theta_mode and silently drop the prior-bound box constraints.
+  if (!is.null(prior_spec) && !is.null(prior_spec$name))
+    theta_init <- .theta_by_name(theta_init, prior_spec$name,
+                                 ".run_mode_finding", "theta_init")
   n <- length(theta_init)
   par_names <- names(theta_init)
 
@@ -226,7 +231,11 @@ combined_optimize <- function(fn, par, lower = -Inf, upper = Inf,
     lower <- ifelse(is.finite(lower), lower + eps, lower)
     upper <- ifelse(is.finite(upper), upper - eps, upper)
 
-    neg_lp <- function(theta) {
+    ## Both branches define neg_lp()/neg_gr() with the SAME formal `par`
+    ## (theta here, eta below): R CMD check flags one local name bound to
+    ## functions with different formals.
+    neg_lp <- function(par) {
+      theta <- par
       names(theta) <- par_names
       res <- log_post_fn(theta)
       if (is.list(res)) -res$logpost else -res
@@ -240,7 +249,8 @@ combined_optimize <- function(fn, par, lower = -Inf, upper = Inf,
     # to_constrained(eta) -- same argmax as theta-space, but unconstrained.
     eta_init <- transform$to_unconstrained(theta_init)
 
-    neg_lp <- function(eta) {
+    neg_lp <- function(par) {
+      eta <- par
       names(eta) <- par_names
       theta <- transform$to_constrained(eta)
       res <- log_post_fn(theta)
@@ -285,7 +295,7 @@ combined_optimize <- function(fn, par, lower = -Inf, upper = Inf,
   }
 
   lp0 <- -neg_lp(par_init)
-  if (verbose) cat(sprintf("  Initial log-posterior: %.4f\n", lp0))
+  if (verbose) .dynhr_cat(sprintf("  Initial log-posterior: %.4f\n", lp0))
 
   ## Negated-objective gradient for the L-BFGS-B stage (P2).
   ## grad_fn returns d(logpost)/d(theta) (theta-space, no Jacobian term).
@@ -300,12 +310,14 @@ combined_optimize <- function(fn, par, lower = -Inf, upper = Inf,
   neg_gr <- NULL
   if (!is.null(grad_fn)) {
     if (is.null(transform)) {
-      neg_gr <- function(theta) {
+      neg_gr <- function(par) {
+        theta <- par
         names(theta) <- par_names
         -as.numeric(grad_fn(theta))
       }
     } else {
-      neg_gr <- function(eta) {
+      neg_gr <- function(par) {
+        eta          <- par
         names(eta)   <- par_names
         theta        <- transform$to_constrained(eta)
         names(theta) <- par_names
@@ -371,12 +383,12 @@ combined_optimize <- function(fn, par, lower = -Inf, upper = Inf,
       V
     }, error = function(e) {
       if (verbose)
-        cat(sprintf("  (newrat H0 build failed: %s; using csminwel default 1e-4*I)\n",
+        .dynhr_cat(sprintf("  (newrat H0 build failed: %s; using csminwel default 1e-4*I)\n",
                     conditionMessage(e)))
-      NULL
+      .dynhr_reraise_bug(e, NULL)
     })
     if (!is.null(newrat_H0_inv) && verbose)
-      cat("  Built initial inverse-Hessian for newrat from analytic posterior Hessian.\n")
+      .dynhr_cat("  Built initial inverse-Hessian for newrat from analytic posterior Hessian.\n")
   }
 
   res <- switch(method,
@@ -450,10 +462,10 @@ combined_optimize <- function(fn, par, lower = -Inf, upper = Inf,
   }
 
   if (verbose) {
-    cat(sprintf("\n  Mode-finding complete (%s)\n", method))
-    cat(sprintf("    Log-posterior: %.4f -> %.4f (?? = %+.4f)\n",
+    .dynhr_cat(sprintf("\n  Mode-finding complete (%s)\n", method))
+    .dynhr_cat(sprintf("    Log-posterior: %.4f -> %.4f (?? = %+.4f)\n",
                 lp0, mode_logpost, mode_logpost - lp0))
-    cat(sprintf("    Iterations: %d  |  %s\n", res$iterations, res$message))
+    .dynhr_cat(sprintf("    Iterations: %d  |  %s\n", res$iterations, res$message))
   }
 
   out <- list(
@@ -502,23 +514,29 @@ combined_optimize <- function(fn, par, lower = -Inf, upper = Inf,
 #' acceptance, ZERO posterior variance -- every draw equal to the mode), where
 #' the inverse-Hessian proposal samples at 23.5\%.
 #'
-#' This helper computes the Hessian at the mode and runs it through exactly the
-#' same regularisation \code{run_mode_finding()} uses
-#' (\code{.proposal_cov_from_hessian()}: \code{.make_pd} for a non-finite or
-#' ill-conditioned Hessian, then eigen-basis capping at the prior scale). If
-#' the Hessian cannot be computed at all it falls back to the prior-variance
-#' diagonal as before -- but LOUDLY, because a silent fallback here is
-#' indistinguishable from a working sampler until someone checks the
-#' acceptance rate.
+#' This helper runs \code{run_mode_finding()}'s own Step 6
+#' (\code{build_sigma_prop()}): the Hessian at the mode through exactly the
+#' same regularisation (\code{.proposal_cov_from_hessian()}: \code{.make_pd}
+#' for a non-finite or ill-conditioned Hessian, then eigen-basis capping at
+#' the prior scale), bound-aware at a mode on a prior bound (0.9.3.130; it
+#' used to run a plain central stencil that stepped outside the support
+#' there). If the Hessian cannot be computed at all (or Step 6 fails
+#' numerically) it falls back to the prior-variance diagonal as before --
+#' but LOUDLY, because a silent fallback here is indistinguishable from a
+#' working sampler until someone checks the acceptance rate.
 #'
 #' @param log_post_fn Log-posterior closure.
 #' @param theta_mode Named mode vector.
 #' @param prior_spec Prior specification.
 #' @param verbose Print progress.
-#' @return An n_par x n_par proposal covariance with dimnames.
+#' @param grad_fn Optional theta-space gradient of the log-posterior
+#'   (\code{make_posterior_grad()}): the Hessian is then the central
+#'   difference of the gradient (2n calls), as in \code{build_sigma_prop()}.
+#' @return An n_par x n_par proposal covariance with dimnames; at a mode on a
+#'   prior bound it carries the eta-space proposal as \code{attr(, "Sigma_eta")}.
 #' @noRd
 .sampler_proposal_cov <- function(log_post_fn, theta_mode, prior_spec,
-                                  verbose = TRUE) {
+                                  verbose = TRUE, grad_fn = NULL) {
   n_par     <- length(theta_mode)
   opt_scale <- 2.38^2 / n_par
   prior_fallback <- function() {
@@ -527,24 +545,37 @@ combined_optimize <- function(fn, par, lower = -Inf, upper = Inf,
     S
   }
 
-  h    <- max(1e-4, 1e-4 * max(abs(theta_mode)))
-  hess <- tryCatch(num_hessian(log_post_fn, theta_mode, h = h),
-                   error = function(e) NULL)
-  if (is.null(hess) || !any(is.finite(hess))) {
-    warning("run_full_estimation: could not evaluate the posterior Hessian at ",
+  ## Step 6 of run_mode_finding() itself (build_sigma_prop()): the same
+  ## Hessian stencil and .proposal_cov_from_hessian() regularisation --
+  ## bit-identical to the former num_hessian() + .proposal_cov_from_hessian()
+  ## composition at an interior mode -- and, at a mode on a prior bound, the
+  ## bound-aware Hessian (one-sided, decoupled bound parameters) instead of a
+  ## stencil that leaves the support (R/mode-hessian.R). A log-posterior that
+  ## is not finite AT the mode leaves no curvature to use (the former
+  ## "all-non-finite Hessian" case); it and a numerical failure anywhere in
+  ## Step 6 take the loud prior fallback, a bug-class error surfaces.
+  bsp <- tryCatch({
+    lp0 <- log_post_fn(theta_mode)
+    lp0 <- if (is.list(lp0)) lp0$logpost else lp0
+    if (length(lp0) == 1L && is.finite(lp0))
+      build_sigma_prop(log_post_fn, theta_mode, prior_spec, verbose = verbose,
+                       return_V = TRUE, grad_fn = grad_fn)
+  }, error = function(e) .dynhr_reraise_bug(e, NULL))
+  if (is.null(bsp) || is.null(bsp$Sigma)) {
+    .dynhr_warn("run_full_estimation: could not evaluate the posterior Hessian at ",
             "the mode, so the RWMH proposal falls back to the PRIOR variances. ",
             "That is only a sensible proposal when the prior and posterior are ",
             "on a similar scale; on a well-identified posterior it can freeze ",
             "the chain (acceptance ~0). Check `acceptance_rate`, and supply a ",
-            "proposal covariance explicitly (mcmc(..., Sigma_prop = )) if it ",
+            "proposal covariance explicitly (dynhr_mcmc(..., Sigma_prop = )) if it ",
             "is low.", call. = FALSE)
     return(prior_fallback())
   }
 
-  S <- tryCatch(
-    .proposal_cov_from_hessian(hess, prior_spec, theta_mode, verbose)$Sigma,
-    error = function(e) NULL)
-  if (is.null(S)) return(prior_fallback())
+  S <- bsp$Sigma
   dimnames(S) <- list(names(theta_mode), names(theta_mode))
+  ## Bound mode only: the eta-space proposal, as proposal_cov(method = "full")
+  ## carries it (the estimate runner samples in theta-space and ignores it).
+  if (!is.null(bsp$Sigma_eta)) attr(S, "Sigma_eta") <- bsp$Sigma_eta
   S
 }

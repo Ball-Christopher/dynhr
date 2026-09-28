@@ -50,7 +50,7 @@ Builds a sampler-agnostic state pack: everything a Metropolis-type
 sampler needs to continue a chain \emph{exactly} where it stopped. Use
 with \code{\link{mcmc_chain_save}} / \code{\link{mcmc_chain_restore}}
 from inside your own sampler loop; the built-in samplers get the same
-behaviour through \code{\link{mcmc}}'s \code{checkpoint_dir} argument.
+behaviour through \code{\link{dynhr_mcmc}}'s \code{checkpoint_dir} argument.
 }
 \section{The resume contract}{
 
@@ -69,5 +69,5 @@ continuation.
 
 \seealso{
 \code{\link{mcmc_chain_save}}, \code{\link{mcmc_chain_restore}},
-  \code{\link{mcmc_chain_extend}}, \code{\link{mcmc}}
+  \code{\link{mcmc_chain_extend}}, \code{\link{dynhr_mcmc}}
 }

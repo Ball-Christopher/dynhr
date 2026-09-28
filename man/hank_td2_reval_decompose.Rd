@@ -38,7 +38,7 @@ A list with \code{paths} (a data frame: \code{C_full},
   illiquid group and channel, with the group boundaries as attributes).
 }
 \description{
-The anti-conflation instrument (briefs/19 sections 9.6-9.7): runs the SAME
+The anti-conflation instrument: runs the SAME
 household block through \code{\link{hank_td2_nonlinear}} on three
 illiquid-return paths -- the FULL path, a caller-supplied CASH-FLOW-ONLY
 counterfactual (price frozen; e.g. the dividend-yield component for equity,

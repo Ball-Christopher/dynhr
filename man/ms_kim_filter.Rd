@@ -16,7 +16,7 @@ ms_kim_filter(
   return_state_path = FALSE,
   return_collapse_diag = FALSE,
   lik_init = c("auto", "stationary", "kappa"),
-  collapse = c("gpb2", "gpb3")
+  collapse = c("gpb2", "gpb3", "imm")
 )
 }
 \arguments{
@@ -70,21 +70,39 @@ yet supported for the MS filter; models with true unit roots should use
 state covariance (Kim & Nelson 1999); see \code{.ms_init_P0}.}
 
 \item{collapse}{Character; the GPB collapse depth.  \code{"gpb2"}
-(default, and bit-identical to every release before this argument
-existed) is Kim's filter: it keeps \eqn{h} Gaussians, collapsing
-\eqn{h^2 \to h} each period on the LAST regime.  \code{"gpb3"} keeps
-\eqn{h^2} Gaussians indexed by the last TWO regimes
-\eqn{(s_{t-1}, s_t)}, collapsing \eqn{h^3 \to h^2}; it costs about
-\eqn{h} times as much per period and is exact whenever GPB(2)'s error
-is entirely due to the one-period collapse.  Use it when
-\code{collapse_max} from a \code{"gpb2"} run is O(1) nats or more (see
-the \emph{Collapse quality} section).  \code{return_state_path} is
-supported under \code{"gpb3"}, but the state path then carries the
-\eqn{h^2} pair-indexed components, which the Kim SMOOTHERS route to
-their own PAIR-INDEXED backward pass (F4-D): an adjoint per pair
-collapsed with the \eqn{h^3} smoothed joint
-\eqn{\Pr[s_{t-2}, s_{t-1}, s_t \mid y_{1:T}]}, whose weights come from
-\code{cell_filt}.}
+  (default, and bit-identical to every release before this argument
+  existed) is Kim's filter: it keeps \eqn{h} Gaussians, collapsing
+  \eqn{h^2 \to h} each period on the LAST regime.  \code{"gpb3"} keeps
+  \eqn{h^2} Gaussians indexed by the last TWO regimes
+  \eqn{(s_{t-1}, s_t)}, collapsing \eqn{h^3 \to h^2}; it costs about
+  \eqn{h} times as much per period and is exact whenever GPB(2)'s error
+  is entirely due to the one-period collapse.  Use it when
+  \code{collapse_max} from a \code{"gpb2"} run is O(1) nats or more (see
+  the \emph{Collapse quality} section).  \code{return_state_path} is
+  supported under \code{"gpb3"}, but the state path then carries the
+  \eqn{h^2} pair-indexed components, which the Kim SMOOTHERS route to
+  their own PAIR-INDEXED backward pass (F4-D): an adjoint per pair
+  collapsed with the \eqn{h^3} smoothed joint
+  \eqn{\Pr[s_{t-2}, s_{t-1}, s_t \mid y_{1:T}]}, whose weights come from
+  \code{cell_filt}.
+
+  \code{"imm"} is the interacting-multiple-model filter (Blom and
+  Bar-Shalom 1988; the RISE default, Maih, Hashimzade, Kirsanov and
+  Kirsanova 2026, sec. 4.1): it MIXES the \eqn{h} filtered components
+  with the backward weights
+  \eqn{\Pr[s_{t-1} = i \mid s_t = j, y_{1:t-1}]} into one prior per
+  destination regime BEFORE the update and runs \eqn{h} Kalman steps per
+  period instead of GPB(2)'s \eqn{h^2}.  Period 1 is scored exactly (on
+  the unmixed per-regime initial priors, as GPB(2) does), mixing starts
+  at \eqn{t = 2}.  It is exact for one regime, identical regimes and
+  \eqn{P = I}; under genuine switching its log-likelihood error against
+  the exact all-regime-path enumeration is of the same order as
+  GPB(2)'s (see the \emph{IMM} section).  Under \code{"imm"}
+  \code{collapse_diag[t]} is the one-step cost of the MIXING (the period
+  contribution scored on the \eqn{h} unmixed components, minus IMM's), so
+  it is 0 at \eqn{t = 1}; \code{return_state_path} adds \code{mix_filt}
+  (\eqn{h \times h \times T} mixing weights) and is consumed by
+  \code{ms_kim_smoother(collapse = "imm")}.}
 }
 \value{
 A list with:
@@ -115,9 +133,11 @@ identical across regimes; only the per-regime shock covariance differs.
 \code{me_variance} is the variance of a genuine i.i.d. observation noise
 \eqn{u_t \sim N(0, \code{me\_variance} \cdot I)} appended to the
 measurement equation,
-\deqn{y_t = d_i + Z_i s_{t-1} + D_j \varepsilon_t + u_t ,}
-so it enters BOTH the innovation covariance
-\eqn{F_{ij} = Z P_i Z' + HH_j + \code{me\_variance} I} AND the Joseph
+\deqn{y_t = d_j + Z_j s_{t-1} + D_j \varepsilon_t + u_t ,}
+(\eqn{j = s_t}; the blocks are common to all regimes in this filter and
+regime-specific in \code{\link{ms_kim_filter_struct}}), so it enters BOTH
+the innovation covariance
+\eqn{F_{ij} = Z_j P_i Z_j' + HH_j + \code{me\_variance} I} AND the Joseph
 covariance update, which carries the extra \eqn{K_{ij} (\code{me\_variance}
 I) K_{ij}'} term.  The resulting log-likelihood is the exact
 joint-Gaussian likelihood of that model (verified against an
@@ -156,42 +176,85 @@ the per-path covariances go singular, which is exactly the regime in which
 the collapse fails.  \code{collapse_max} is \eqn{\max_t |collapse\_diag[t]|}.
 
 The collapse error is normally negligible, but it is NOT bounded.  On the
-\code{rbc} two-structural-regime fixture with \code{n_obs = n_exo = 1} and
-\code{me_variance = 0} the model is EXACTLY identified, so the per-path
-covariances collapse toward singular.  Over 96 switching draws the filter
+\code{rbc} two-structural-regime fixtures of
+\code{tests/testthat/test-ms-filter-exact.R} and
+\code{tests/testthat/test-ms-gpb3.R} (\code{n_obs = n_exo = 1},
+\code{me_variance = 0}, \eqn{T = 8}, 96 switching draws each over
+\eqn{P} = 0.9 / 0.9 and 0.6 / 0.7 and both regime orderings) the filter
 matches the exact all-path-enumeration log-likelihood to a median of
-3e-4 nats, but on one draw (seed 11) it misses by 48 nats --- while a full
-GPB(3) reproduces the exact value on that same draw to \code{1e-15}.  That
-contrast is the proof that the \eqn{h^2 \to h} collapse, and not the
-recursion, is the entire source of the error.  Raising \code{me_variance}
-off zero relieves the degeneracy: on that draw the GPB(2)-vs-GPB(3) gap
-falls from 48 nats to 5.6 at \code{me_variance = 1e-2} and to 0.01 at
-\code{1e-1}.  (Those three GPB(2)-vs-GPB(3) figures were measured before
-F3-A made \code{me_variance} true measurement error; the qualitative
-point --- adding observation noise relieves the degeneracy --- is
-unchanged.  See the \emph{Measurement error} section.)
+0.0034 nats (worst 0.12) when the regimes differ in \code{alpha} 0.33 /
+0.36, and to a median of 0.0006 nats when they differ in \code{alpha}
+0.33 / 0.5 --- but there the worst draw misses by 3.6 nats.  On one such
+draw (\eqn{P} = 0.6 / 0.7, regime order reversed, seed 31) GPB(2) misses
+by 3.07 nats while a full GPB(3) reproduces the exact value to
+\code{4e-15}.  That contrast is the proof that the \eqn{h^2 \to h}
+collapse, and not the recursion, is the source of the error; the
+diagnostic reports 2.87 nats of it, exactly the loss of the period where
+it happens.  (Figures measured 2026-09-25 under the structural law with
+its regime steady-state intercepts, see \emph{The law} in
+\code{\link{ms_kim_filter_struct}}.  The 48- and 23-nat breakdowns quoted
+by earlier releases were artefacts of the previous-regime measurement law
+and of the missing intercepts.)
 
-Practical rule: \code{collapse_max} below ~0.1 nats means the collapse is
-harmless on that sample.  If it runs to O(1) nats or more, treat the
-log-likelihood as unreliable --- re-run with \code{collapse = "gpb3"}, add
-measurement error, or observe fewer series than the model has shocks ---
-rather than trusting the number.
+Practical rule: \code{collapse_max} below ~0.1 nats means the ONE-STEP
+collapse cost is harmless on that sample.  If it runs to O(1) nats or
+more, treat the log-likelihood as unreliable --- re-run with
+\code{collapse = "gpb3"}, add measurement error, or observe fewer series
+than the model has shocks --- rather than trusting the number.  A small
+value is NO guarantee: the statistic defers the collapse by ONE period
+only, so a loss that builds up over several collapses can escape it.  On
+the \code{alpha} 0.33 / 0.6 fixture (\eqn{P} = 0.9 / 0.9, regime order
+reversed, seed 6) GPB(2) misses the exact value by 4.15 nats with
+\code{collapse_max} 0.0012 (pinned in
+\code{tests/testthat/test-ms-filter-exact.R} as a known limitation).
 
-\code{collapse = "gpb3"} is that fix, at \eqn{h}x the cost: it keeps the
-\eqn{h^2} components indexed by \eqn{(s_{t-1}, s_t)} and collapses
-\eqn{h^3 \to h^2}.  On the seed-11 breakdown above it reproduces the exact
-enumeration likelihood to \code{4e-16} where GPB(2) is 48 nats off, and
-over the whole 96-case seed scan its worst error is \code{3e-14} against
-GPB(2)'s 48 (its filtered regime probabilities likewise land within
-\code{7e-16} of the exact posterior, where GPB(2) is 0.91 away on that
-draw).  Under \code{"gpb3"} \code{collapse_diag} keeps its meaning ---
-defer THIS filter's collapse by one period and rescore --- so it becomes
-the GPB(4)-vs-GPB(3) gap, and it is \code{2e-14} on that same draw, which
-is what says GPB(3) has CONVERGED here rather than merely improved.
-Measured cost at \eqn{T = 300}, \eqn{h = 2}: 1.9x (structural filter),
-1.2x (reduced-form).  See \code{tests/testthat/test-ms-gpb3.R}.
+\code{collapse = "gpb3"} is the usual remedy, at \eqn{h}x the cost: it
+keeps the \eqn{h^2} components indexed by \eqn{(s_{t-1}, s_t)} and
+collapses \eqn{h^3 \to h^2}.  On the seed-31 breakdown above it is exact
+to \code{4e-15} where GPB(2) is 3.07 nats off, and its own
+\code{collapse_diag} --- now the GPB(4)-vs-GPB(3) gap --- is
+\code{2e-16} there.  It is much better in the bulk but not in the tail:
+over the 96 \code{alpha} 0.33 / 0.5 draws its median error is
+\code{1.6e-7} nats against GPB(2)'s \code{5.8e-4}, but its worst is 2.92
+against 3.60, and on the seed-6 draw above it is worse than GPB(2) (6.6
+nats; its own diagnostic does flag that, 6.4).  Measured cost at
+\eqn{T = 300}, \eqn{h = 2}: 1.9x (structural filter), 1.2x
+(reduced-form).  See \code{tests/testthat/test-ms-gpb3.R}.
 }
 
+\section{IMM}{
+
+\code{collapse = "imm"} keeps \eqn{h} Gaussians like GPB(2) but collapses
+BEFORE the measurement update instead of after it, so each period costs
+\eqn{h} Kalman steps (GPB(2): \eqn{h^2}).  Measured on the
+\code{rbc2shock} fixture of \code{tests/testthat/test-fix-0925-imm.R}
+(two observables, two shocks, regime scales \code{(1, 0.5)} and
+\code{(3, 2)}, \eqn{T = 7}, ten draws): absolute log-likelihood errors
+against the exact enumeration of 6e-5 to 5e-3 nats for IMM, against 2e-5
+to 5e-3 for GPB(2) and 3e-5 to 4e-3 for GPB(3); filtered regime
+probabilities within 4e-4 of the exact posterior for all three.  The
+textbook recursion would also mix the per-regime INITIAL priors at
+\eqn{t = 1}; on that fixture this alone cost 0.48 nats, which is why
+period 1 is scored exactly.  The structural filter
+(\code{\link{ms_kim_filter_struct}}) runs the same recursion with
+regime-specific blocks; see its \emph{IMM} section for its accuracy.
+}
+
+\references{
+Blom, H. A. P. and Bar-Shalom, Y. (1988). The interacting
+  multiple model algorithm for systems with Markovian switching
+  coefficients. \emph{IEEE Transactions on Automatic Control} 33(8),
+  780-783.
+
+  Hashimzade, N., Kirsanov, O., Kirsanova, T. and Maih, J. (2026).
+  Filtering and smoothing in state-space models with multiple regimes.
+  \emph{Journal of Business & Economic Statistics},
+  doi:10.1080/07350015.2026.2656466 (arXiv 2402.08051).
+
+  Maih, J., Hashimzade, N., Kirsanov, O. and Kirsanova, T. (2026).
+  Markov-switching DSGE modeling in RISE. University of Glasgow working
+  paper 2026-01, sec. 4.1.
+}
 \seealso{
 \code{\link{ms_kim_smoother}}, \code{\link{ms_irf}}
 }

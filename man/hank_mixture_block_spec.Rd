@@ -9,7 +9,8 @@ hank_mixture_block_spec(
   blocks,
   omega,
   inputs = c("r", "w"),
-  outputs = c("A", "C")
+  outputs = c("A", "C"),
+  expectations = NULL
 )
 }
 \arguments{
@@ -25,6 +26,10 @@ non-negative, summing to 1.}
 \item{inputs, outputs}{Character vectors; must be supported by
 \code{\link{hank_mixture_jacobian}} (inputs a subset of
 \code{c("r","w")}, outputs a subset of \code{c("A","C")}).}
+
+\item{expectations}{\code{NULL} (FIRE, default) or a behavioural
+expectations spec, applied to the mixture block's Jacobian; see
+\code{\link{hank_het_block_spec}} and \code{\link{hank_het_jacobian}}.}
 }
 \value{
 An object of class \code{hank_block} (kind \code{"het_mixture"}),

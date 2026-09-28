@@ -31,38 +31,38 @@ solve_perturbation_order3(
 \item{verbose}{Print progress}
 
 \item{solver_method}{Deprecated and ignored (retained for back-compat). The
-order-3 Kronecker system now uses the shared `.solve_kron_compact` solver
+order-3 Kronecker system now uses the shared \code{.solve_kron_compact} solver
 (the same one orders 4/5 use), which self-selects an eigenbasis fast path
 or a robust real-Schur dense fallback; there is no longer a user choice.}
 
-\item{backend}{Computation backend: `"auto"` selects `"fd"` for
-tractable model sizes (when eligible) and `"symbolic"` otherwise;
-`"symbolic"` uses the Faà di Bruno chain-rule expansion; `"fd"` uses
+\item{backend}{Computation backend: \code{"auto"} selects \code{"fd"} for
+tractable model sizes (when eligible) and \code{"symbolic"} otherwise;
+\code{"symbolic"} uses the Faà di Bruno chain-rule expansion; \code{"fd"} uses
 a finite-difference oracle (requires single-period leads/lags and no
 AUX variables).}
 
-\item{sparse}{Logical or `NULL` (default). Controls the ghxxx Kronecker
-solve. `FALSE` uses the default dense-eligible `.solve_kron_compact`
+\item{sparse}{Logical or \code{NULL} (default). Controls the ghxxx Kronecker
+solve. \code{FALSE} uses the default dense-eligible \code{.solve_kron_compact}
 solver (eigenbasis fast path + dense real-Schur fallback) — unchanged
-numerical output. `TRUE` uses the memory-light complex-Schur Kronecker
-Bartels–Stewart solver `.solve_kron_compact_sparse`, which never
+numerical output. \code{TRUE} uses the memory-light complex-Schur Kronecker
+Bartels–Stewart solver \code{.solve_kron_compact_sparse}, which never
 materialises the ns^3 × ns^3 Kronecker matrix and so breaks the dense
 order-3 wall on high-dimensional-but-sparse state blocks (e.g. the
-emitted finite HANK, n_s approx. 32). `NULL` (auto) turns the sparse route on
-automatically once `n_state^3` exceeds `sparse_threshold`. The sparse
+emitted finite HANK, n_s approx. 32). \code{NULL} (auto) turns the sparse route on
+automatically once \code{n_state^3} exceeds \code{sparse_threshold}. The sparse
 route is bit-parity to the dense path on well-conditioned models and
 residual-verified (with dense fallback) otherwise.}
 
-\item{sparse_threshold}{Integer. When `sparse = NULL`, the sparse ghxxx
-solve is used iff `n_state^3 >= sparse_threshold` (default 8000, i.e.
-n_state >= 20). Ignored when `sparse` is `TRUE`/`FALSE`.}
+\item{sparse_threshold}{Integer. When \code{sparse = NULL}, the sparse ghxxx
+solve is used iff \code{n_state^3 >= sparse_threshold} (default 8000, i.e.
+n_state >= 20). Ignored when \code{sparse} is \code{TRUE}/\code{FALSE}.}
 }
 \value{
 A DecisionRules3 object extending DecisionRules2 with fields
   ghxxx, ghxxu, ghxuu, ghuuu (and all lower-order fields preserved)
 }
 \description{
-Given the first-/second-order decision rules in `dr2`, computes the
+Given the first-/second-order decision rules in \code{dr2}, computes the
 third-order terms ghxxx, ghxxu, ghxuu, ghuuu.  Does NOT compute the
 sigma-correction terms (ghxss, ghuss, ghsss) -- those terms (which
 capture time-varying risk premia and the third-cumulant correction)

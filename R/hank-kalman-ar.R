@@ -201,7 +201,7 @@
   if (!length(bad)) return(invisible(NULL))
   nm <- names(lev)[bad]
   if (is.null(nm) || any(!nzchar(nm))) nm <- paste0("shock ", bad)
-  warning(caller, ": |rho|^T_h = ",
+  .dynhr_warn(caller, ": |rho|^T_h = ",
           paste(sprintf("%.2e (%s)", lev[bad], nm), collapse = ", "),
           " exceeds ", format(tol),
           " -- the sequence-space Theta is terminal-boundary contaminated at",

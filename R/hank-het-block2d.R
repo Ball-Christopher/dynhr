@@ -65,7 +65,7 @@ hank_forward_operator2d <- function(sol, b_grid, a_grid, Pi) {
 #' (\code{\link{hank_het2d_jacobian}}) and nonlinear transition
 #' (\code{\link{hank_td2d_nonlinear}}) need.  This is the household for the
 #' wealthy hand-to-mouth calibrations the smooth convex cost cannot reach
-#' (briefs/19, F21/F22): the fixed cost generates INACTION, and the
+#' -- the fixed cost generates INACTION, and the
 #' KiwiSaver-style contribution \code{phi_contrib} keeps the illiquid
 #' participation trap closed (F26 -- without an inflow the stationary
 #' distribution is initial-condition-dependent; the constructor verifies
@@ -125,7 +125,7 @@ hank_het2d_block <- function(b_grid, a_grid, Pi, e, beta, eis, rb, ra, w,
                          k_max = k_max, tol = tol, maxit = maxit,
                          phi_contrib = phi_contrib)
   if (!hh$converged)
-    warning("hank_het2d_block: household solve did not converge at steady state")
+    .dynhr_warn("hank_het2d_block: household solve did not converge at steady state")
 
   Lam <- hank_forward_operator2d(hh, b_grid, a_grid, Pi)
   sd  <- hank_stationary_dist(Lam, tol = dist_tol, maxit = dist_maxit)
@@ -142,7 +142,7 @@ hank_het2d_block <- function(b_grid, a_grid, Pi, e, beta, eis, rb, ra, w,
   }
   gap2 <- max(abs(sd$d - d2))
   if (gap2 > two_start_tol)
-    warning("hank_het2d_block: stationary distributions from two different ",
+    .dynhr_warn("hank_het2d_block: stationary distributions from two different ",
             "starts disagree by ", format(gap2), " -- the F26 participation ",
             "trap is open at this calibration (near-multiple invariant ",
             "sets). Raise 'phi_contrib' or reduce 'F_adj'; aggregates below ",

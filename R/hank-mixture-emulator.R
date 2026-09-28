@@ -37,7 +37,7 @@
 
 #' Bracket-and-weight a single coordinate against a sorted 1-D grid
 #'
-#' Direct generalization of the research scratch's `.bw`: clamps queries
+#' Direct generalization of the research scratch's \code{.bw}: clamps queries
 #' outside the grid to the boundary node (weight 1 on that node), otherwise
 #' returns the bracketing pair of grid indices and the linear weight on the
 #' LOWER index.
@@ -54,23 +54,23 @@
 }
 
 
-#' `d`-dimensional multilinear interpolation of a stored per-node array
+#' \code{d}-dimensional multilinear interpolation of a stored per-node array
 #'
-#' Generalizes `.bw` + `emu_slice` (bilinear, `d = 2`) to an arbitrary number
-#' of GE-coupled coordinates: sums over the `2^d` corners of the bracketing
+#' Generalizes \code{.bw} + \code{emu_slice} (bilinear, \code{d = 2}) to an arbitrary number
+#' of GE-coupled coordinates: sums over the \code{2^d} corners of the bracketing
 #' hyper-rectangle with the product of per-axis weights.
 #'
 #' @param axis_grids Named list, one sorted numeric grid vector per coordinate
-#'   (in `names(box)` order).
-#' @param A An array whose first `d = length(axis_grids)` dimensions index the
-#'   tensor-grid nodes (in the SAME axis order as `axis_grids`) and whose
+#'   (in \code{names(box)} order).
+#' @param A An array whose first \code{d = length(axis_grids)} dimensions index the
+#'   tensor-grid nodes (in the SAME axis order as \code{axis_grids}) and whose
 #'   remaining ("tail") dimensions are the stored field's own shape (e.g. a
-#'   `T_h x n_obs` `Theta` matrix, or a length-`K` vector).
-#' @param theta_vec Named numeric length-`d` query point (in `axis_grids`
-#'   order; `names(theta_vec)` are not required, only position is used, but
+#'   \code{T_h x n_obs} \code{Theta} matrix, or a length-\code{K} vector).
+#' @param theta_vec Named numeric length-\code{d} query point (in \code{axis_grids}
+#'   order; \code{names(theta_vec)} are not required, only position is used, but
 #'   callers pass named vectors for clarity).
 #'
-#' @return The interpolated tail-shaped value: a numeric vector if `A` has one
+#' @return The interpolated tail-shaped value: a numeric vector if \code{A} has one
 #'   tail dimension, else an array of the tail dimensions.
 #' @keywords internal
 .hank_emu_multilinear <- function(axis_grids, A, theta_vec) {
@@ -103,17 +103,17 @@
 }
 
 
-#' Simple base-R Latin-hypercube design in `[0, 1]^d`
+#' Simple base-R Latin-hypercube design in \code{[0, 1]^d}
 #'
-#' A classic stratified LHS: each coordinate's `[0, 1]` range is split into
-#' `n` equal strata, one point drawn uniformly within each stratum, and the
+#' A classic stratified LHS: each coordinate's \code{[0, 1]} range is split into
+#' \code{n} equal strata, one point drawn uniformly within each stratum, and the
 #' per-coordinate strata orderings independently permuted (so every 1-D
 #' marginal is a jittered equal-stratification and no package dependency is
 #' needed for this one design step).
 #'
 #' @param n Integer number of design points.
 #' @param d Integer number of coordinates.
-#' @return An `n x d` matrix in `[0, 1]^d`.
+#' @return An \code{n x d} matrix in \code{[0, 1]^d}.
 #' @keywords internal
 .hank_emu_lhs <- function(n, d) {
   n <- as.integer(n)
@@ -126,7 +126,7 @@
 }
 
 
-#' Thin-plate-spline RBF radial basis function `phi(r) = r^2 log(r)`, `phi(0) = 0`
+#' Thin-plate-spline RBF radial basis function \code{phi(r) = r^2 log(r)}, \code{phi(0) = 0}
 #' @keywords internal
 .hank_emu_tps <- function(r) {
   out <- numeric(length(r))
@@ -138,15 +138,15 @@
 
 #' Fit a thin-plate-spline RBF interpolant (with linear tail) on normalized nodes
 #'
-#' Solves the saddle-point system once at BUILD time; the fitted `(W, C)`
+#' Solves the saddle-point system once at BUILD time; the fitted \code{(W, C)}
 #' weight matrices are data-independent of any later query.
 #'
-#' @param Xn `n x d` matrix of NORMALIZED (box-mapped to `[0,1]`) node
+#' @param Xn \code{n x d} matrix of NORMALIZED (box-mapped to \code{[0,1]}) node
 #'   coordinates.
-#' @param Y `n x m` matrix of stacked node values (`m` = flattened field
+#' @param Y \code{n x m} matrix of stacked node values (\code{m} = flattened field
 #'   length).
-#' @return A list with `W` (`n x m`), `C` (`(d+1) x m`), `Xn` (echoed back for
-#'   prediction), and `ridge` (the diagonal ridge actually added, `0` if the
+#' @return A list with \code{W} (\code{n x m}), \code{C} (\code{(d+1) x m}), \code{Xn} (echoed back for
+#'   prediction), and \code{ridge} (the diagonal ridge actually added, \code{0} if the
 #'   system solved without one).
 #' @keywords internal
 .hank_emu_rbf_fit <- function(Xn, Y) {
@@ -175,9 +175,9 @@
 
 
 #' Predict a fitted thin-plate-spline RBF interpolant at normalized query points
-#' @param fit A `.hank_emu_rbf_fit()` return value.
-#' @param xq Numeric length-`d` normalized query point.
-#' @return Numeric length-`m` predicted (flattened) field value.
+#' @param fit A \code{.hank_emu_rbf_fit()} return value.
+#' @param xq Numeric length-\code{d} normalized query point.
+#' @return Numeric length-\code{m} predicted (flattened) field value.
 #' @keywords internal
 .hank_emu_rbf_predict <- function(fit, xq) {
   dvec <- sqrt(rowSums(sweep(fit$Xn, 2, xq, `-`)^2))
@@ -188,12 +188,12 @@
 
 ## ---- rebuild a KF state space from an interpolated Theta (single shock "Z")
 
-#' Rebuild a `dsge_ss` state space from an interpolated `Theta` (`q x n_obs`)
+#' Rebuild a \code{dsge_ss} state space from an interpolated \code{Theta} (\code{q x n_obs})
 #'
-#' Reproduces `hank_state_space`'s single-shock ("Z"), lagged-timing,
+#' Reproduces \code{hank_state_space}'s single-shock ("Z"), lagged-timing,
 #' block-shift-register construction EXACTLY, copied from the research
-#' scratch's `mk_ss` (`wave3_lib.R`) -- the interpolated `Theta` plays the role
-#' the direct GE solve's `Theta_list[["Z"]]` would.
+#' scratch's \code{mk_ss} (\code{wave3_lib.R}) -- the interpolated \code{Theta} plays the role
+#' the direct GE solve's \code{Theta_list[["Z"]]} would.
 #' @keywords internal
 .hank_emu_mk_ss <- function(emu, Theta_mat) {
   cfg <- emu$config
@@ -224,72 +224,72 @@
 #' Precomputes the data-independent general-equilibrium/Jacobian pieces of a
 #' 2-type discount-factor mixture (steady state, macro state-space MA
 #' coefficients, distribution-reweighting response) on a DESIGN of theta
-#' points covering `box`, and returns an interpolator object. The design is
-#' \strong{D-agnostic}: `box` is a named list of length-2 numeric ranges, one
+#' points covering \code{box}, and returns an interpolator object. The design is
+#' \strong{D-agnostic}: \code{box} is a named list of length-2 numeric ranges, one
 #' per GE-coupled coordinate, and every piece of interpolation/design code
-#' below is written for a general `d = length(box)` (currently the natural
-#' choices are a subset of `c("centre", "spread", "omega1")`, but nothing here
-#' hard-codes `d = 2`).
+#' below is written for a general \code{d = length(box)} (currently the natural
+#' choices are a subset of \code{c("centre", "spread", "omega1")}, but nothing here
+#' hard-codes \code{d = 2}).
 #'
-#' \strong{theta -> economics map}: `betas = c(centre - spread, centre +
-#' spread)`; `omega = c(theta$omega1, 1 - theta$omega1)` if `"omega1" %in%
-#' names(box)`, else the fixed `config$omega` (default `c(0.5, 0.5)`).
+#' \strong{theta -> economics map}: \code{betas = c(centre - spread, centre +
+#' spread)}; \code{omega = c(theta$omega1, 1 - theta$omega1)} if `"omega1" %in%
+#' names(box)`, else the fixed \code{config$omega} (default \code{c(0.5, 0.5)}).
 #'
-#' \strong{Per-node solve} (mirrors the research scratch's `snap_precompute.R`
-#' `one()`): steady state (\code{\link{hank_mixture_ks_steady}}) -> GE model
+#' \strong{Per-node solve} (mirrors the research scratch's \code{snap_precompute.R}
+#' \code{one()}): steady state (\code{\link{hank_mixture_ks_steady}}) -> GE model
 #' (\code{\link{hank_mixture_ks_model}}) -> truncated-MA state space
-#' (\code{\link{hank_state_space}}, whose `Theta_list[["Z"]]` is stored) ->
+#' (\code{\link{hank_state_space}}, whose \code{Theta_list[["Z"]]} is stored) ->
 #' per-type blocks (\code{\link{hank_mixture_blocks}}) -> stationary
-#' distribution `D0` (\code{\link{hank_mixture_dist}}) -> distribution
-#' Jacobian `JD` (\code{\link{hank_mixture_dist_jacobian}}) -> single-date
-#' snapshot reweighting response `dD_snap`
+#' distribution \code{D0} (\code{\link{hank_mixture_dist}}) -> distribution
+#' Jacobian \code{JD} (\code{\link{hank_mixture_dist_jacobian}}) -> single-date
+#' snapshot reweighting response \code{dD_snap}
 #' (\code{\link{hank_dist_response_snapshot}}).
 #'
-#' \strong{Projected reweighting pieces}: the raw per-cell `dD_snap` does not
+#' \strong{Projected reweighting pieces}: the raw per-cell \code{dD_snap} does not
 #' interpolate cleanly (see the file section comment in R/hank-reweighting.R),
-#' so only its projection onto a FIXED reference basis `B_ref`
+#' so only its projection onto a FIXED reference basis \code{B_ref}
 #' (\code{\link{hank_reweight_functional_basis}}, built once at the node
 #' nearest the box centre) is stored and interpolated: `gref = t(B_ref) \%*\%
-#' dD_snap` (length `K`), `m1 = t(B_ref) \%*\% D0` (length `K`), `M2D0 =
-#' t(B_ref) \%*\% (D0 * B_ref)` (`K x K`), `M2dD = t(B_ref) \%*\% (dD_snap *
-#' B_ref)` (`K x K`) -- exactly the research scratch's `build_proj_grid`.
+#' dD_snap` (length \code{K}), `m1 = t(B_ref) \%*\% D0` (length \code{K}), `M2D0 =
+#' t(B_ref) \%*\% (D0 * B_ref)` (\code{K x K}), `M2dD = t(B_ref) \%*\% (dD_snap *
+#' B_ref)` (\code{K x K}) -- exactly the research scratch's \code{build_proj_grid}.
 #'
-#' @param box Named list of length-2 numeric `c(lo, hi)` ranges, one per
+#' @param box Named list of length-2 numeric \code{c(lo, hi)} ranges, one per
 #'   GE-coupled coordinate, e.g. \code{list(centre = c(0.920, 0.940), spread =
-#'   c(0.008, 0.016))}. `d = length(box)` is arbitrary.
-#' @param config Fixed HANK configuration list with: `n_e, n_a, amax, alpha,
-#'   delta, Z, eis, T_h` (household/GE sizing and calibration); `shock_specs`
-#'   (named list, one `list(rho, sigma)` per exogenous macro shock, e.g.
-#'   \code{list(Z = list(rho = 0.9, sigma = 0.007))}); `observables` (character
-#'   vector, e.g. \code{c("C", "K")}); `rw_shock` (named list, one
-#'   length-`T_h` reweighting shock path per input, e.g. \code{list(r = 0.01 *
-#'   0.8^(seq_len(T_h) - 1))}); `t_star` (integer output date for the snapshot
-#'   reweighting); `N_ref` (reference survey size, used only to document the
-#'   design's intended scale -- the SBC harness passes its own `N`); `degree`
-#'   (basis degree, default 8); `tail_trim` (default 0); `omega` (default
-#'   `c(0.5, 0.5)`, used whenever `"omega1"` is not a `box` coordinate).
-#' @param design `"grid"` (default surrogate `"multilinear"`): a tensor
-#'   product of `n_grid` equally-spaced points per coordinate (`n_grid^d`
-#'   nodes total). `"scatter"` (default surrogate `"rbf"`): `n_scatter`
+#'   c(0.008, 0.016))}. \code{d = length(box)} is arbitrary.
+#' @param config Fixed HANK configuration list with: \code{n_e, n_a, amax, alpha,
+#'   delta, Z, eis, T_h} (household/GE sizing and calibration); \code{shock_specs}
+#'   (named list, one \code{list(rho, sigma)} per exogenous macro shock, e.g.
+#'   \code{list(Z = list(rho = 0.9, sigma = 0.007))}); \code{observables} (character
+#'   vector, e.g. \code{c("C", "K")}); \code{rw_shock} (named list, one
+#'   length-\code{T_h} reweighting shock path per input, e.g. \code{list(r = 0.01 *
+#'   0.8^(seq_len(T_h) - 1))}); \code{t_star} (integer output date for the snapshot
+#'   reweighting); \code{N_ref} (reference survey size, used only to document the
+#'   design's intended scale -- the SBC harness passes its own \code{N}); \code{degree}
+#'   (basis degree, default 8); \code{tail_trim} (default 0); \code{omega} (default
+#'   \code{c(0.5, 0.5)}, used whenever \code{"omega1"} is not a \code{box} coordinate).
+#' @param design \code{"grid"} (default surrogate \code{"multilinear"}): a tensor
+#'   product of \code{n_grid} equally-spaced points per coordinate (\code{n_grid^d}
+#'   nodes total). \code{"scatter"} (default surrogate \code{"rbf"}): \code{n_scatter}
 #'   Latin-hypercube points in the box.
-#' @param n_grid Integer points per axis for `design = "grid"`.
-#' @param n_scatter Integer total design points for `design = "scatter"`
+#' @param n_grid Integer points per axis for \code{design = "grid"}.
+#' @param n_scatter Integer total design points for \code{design = "scatter"}
 #'   (required in that case).
-#' @param surrogate `"multilinear"` or `"rbf"`; `NULL` (default) picks
-#'   `"multilinear"` for `design = "grid"` and `"rbf"` for `design =
-#'   "scatter"`. `"multilinear"` REQUIRES `design = "grid"`.
-#' @param seed RNG seed for the `"scatter"` Latin-hypercube design.
+#' @param surrogate \code{"multilinear"} or \code{"rbf"}; \code{NULL} (default) picks
+#'   \code{"multilinear"} for \code{design = "grid"} and \code{"rbf"} for \code{design =
+#'   "scatter"}. \code{"multilinear"} REQUIRES \code{design = "grid"}.
+#' @param seed RNG seed for the \code{"scatter"} Latin-hypercube design.
 #'
-#' @return An object of class `"hank_mixture_emulator"`: a list with `box`,
-#'   `config`, `design` (`"grid"`/`"scatter"`), `surrogate`, `nodes` (`n x d`
-#'   matrix of node coordinates in natural units, `colnames = names(box)`),
-#'   `axis_grids` (named list of per-axis grids, only set for `design =
-#'   "grid"`), `B_ref` (`n_cell x degree`), `a_cell`, `K` (`= ncol(B_ref)`),
-#'   `Theta` (array: leading node dimension(s) + `T_h x n_obs` tail),
-#'   `gref`, `m1` (each: leading node dimension(s) + length-`K` tail), `M2D0`,
-#'   `M2dD` (each: leading node dimension(s) + `K x K` tail), `r`, `w` (each:
-#'   an array over nodes), and (for `surrogate = "rbf"`) `rbf_fits` (named
-#'   list of `.hank_emu_rbf_fit()` results, one per stored field).
+#' @return An object of class \code{"hank_mixture_emulator"}: a list with \code{box},
+#'   \code{config}, \code{design} (\code{"grid"}/\code{"scatter"}), \code{surrogate}, \code{nodes} (\code{n x d}
+#'   matrix of node coordinates in natural units, \code{colnames = names(box)}),
+#'   \code{axis_grids} (named list of per-axis grids, only set for \code{design =
+#'   "grid"}), \code{B_ref} (\code{n_cell x degree}), \code{a_cell}, \code{K} (\code{= ncol(B_ref)}),
+#'   \code{Theta} (array: leading node dimension(s) + \code{T_h x n_obs} tail),
+#'   \code{gref}, \code{m1} (each: leading node dimension(s) + length-\code{K} tail), \code{M2D0},
+#'   \code{M2dD} (each: leading node dimension(s) + \code{K x K} tail), \code{r}, \code{w} (each:
+#'   an array over nodes), and (for \code{surrogate = "rbf"}) \code{rbf_fits} (named
+#'   list of \code{.hank_emu_rbf_fit()} results, one per stored field).
 #' @export
 hank_mixture_emulator <- function(box, config, design = c("grid", "scatter"),
                                    n_grid = 5L, n_scatter = NULL,
@@ -318,7 +318,7 @@ hank_mixture_emulator <- function(box, config, design = c("grid", "scatter"),
     colnames(nodes) <- nm
     node_dim <- unname(vapply(axis_grids, length, integer(1)))
   } else {
-    set.seed(seed)
+    .local_seed(seed)  # caller's RNG stream restored on exit (C1)
     unit <- .hank_emu_lhs(n_scatter, d)
     nodes <- do.call(cbind, lapply(seq_len(d), function(k) {
       rng <- box[[nm[k]]]; rng[1L] + unit[, k] * (rng[2L] - rng[1L])
@@ -421,19 +421,19 @@ hank_mixture_emulator <- function(box, config, design = c("grid", "scatter"),
 }
 
 
-#' Interpolate a stored per-node field of a `hank_mixture_emulator` at a query theta
+#' Interpolate a stored per-node field of a \code{hank_mixture_emulator} at a query theta
 #'
-#' Internal dispatcher between the two surrogate backends: `"multilinear"`
-#' (tensor-grid `d`-dimensional linear interpolation, generalizing the
-#' research scratch's `.bw`/`emu_slice`) and `"rbf"` (thin-plate-spline with a
+#' Internal dispatcher between the two surrogate backends: \code{"multilinear"}
+#' (tensor-grid \code{d}-dimensional linear interpolation, generalizing the
+#' research scratch's \code{.bw}/\code{emu_slice}) and \code{"rbf"} (thin-plate-spline with a
 #' linear tail, on box-normalized coordinates).
 #'
 #' @param emu A \code{\link{hank_mixture_emulator}}.
-#' @param theta_vec Named numeric length-`d` query point (or a list with
-#'   `names(emu$box)` entries), in `names(emu$box)` order.
-#' @param field One of `"Theta"`, `"gref"`, `"m1"`, `"M2D0"`, `"M2dD"`.
+#' @param theta_vec Named numeric length-\code{d} query point (or a list with
+#'   \code{names(emu$box)} entries), in \code{names(emu$box)} order.
+#' @param field One of \code{"Theta"}, \code{"gref"}, \code{"m1"}, \code{"M2D0"}, \code{"M2dD"}.
 #' @return The interpolated field value, same shape as one node's slice of
-#'   `emu[[field]]` (dropping the leading node dimension(s)).
+#'   \code{emu[[field]]} (dropping the leading node dimension(s)).
 #' @keywords internal
 .emu_interp <- function(emu, theta_vec, field) {
   nm <- names(emu$box)
@@ -455,15 +455,15 @@ hank_mixture_emulator <- function(box, config, design = c("grid", "scatter"),
 
 #' Emulated macro state space at a query theta
 #'
-#' Interpolates the emulator's stored `Theta` field at `theta` and rebuilds a
-#' `dsge_ss` state space from it (\code{\link{.hank_emu_mk_ss}}, reproducing
+#' Interpolates the emulator's stored \code{Theta} field at \code{theta} and rebuilds a
+#' \code{dsge_ss} state space from it (\code{\link{.hank_emu_mk_ss}}, reproducing
 #' \code{\link{hank_state_space}}'s single-shock shift-register construction
 #' EXACTLY).
 #'
 #' @param emu A \code{\link{hank_mixture_emulator}}.
-#' @param theta Named list or length-`d` named numeric in `names(emu$box)`
+#' @param theta Named list or length-\code{d} named numeric in \code{names(emu$box)}
 #'   order.
-#' @return A `dsge_ss` object (see \code{\link{hank_kalman_loglik}}).
+#' @return A \code{dsge_ss} object (see \code{\link{hank_kalman_loglik}}).
 #' @export
 hank_emulator_state_space <- function(emu, theta) {
   Theta_mat <- .emu_interp(emu, theta, "Theta")
@@ -473,34 +473,34 @@ hank_emulator_state_space <- function(emu, theta) {
 
 #' Emulated B_ref-projected reweighting mean at a query theta
 #'
-#' `rw_scale * ` the interpolated `gref` field: the B_ref-projected
-#' model-implied reweighting mean at `theta`, for reweighting shock size
-#' `rw_scale` (the emulator itself stores `gref` at the UNIT `config$rw_shock`
-#' path; `rw_scale` rescales it, matching the research scratch's
-#' `RW_SCALE * emu_slice(G, GP$gref, cc, ss)` usage).
+#' \code{rw_scale * } the interpolated \code{gref} field: the B_ref-projected
+#' model-implied reweighting mean at \code{theta}, for reweighting shock size
+#' \code{rw_scale} (the emulator itself stores \code{gref} at the UNIT \code{config$rw_shock}
+#' path; \code{rw_scale} rescales it, matching the research scratch's
+#' \code{RW_SCALE * emu_slice(G, GP$gref, cc, ss)} usage).
 #'
 #' @inheritParams hank_emulator_state_space
 #' @param rw_scale Scalar multiplier on the reweighting shock size.
-#' @return Length-`emu$K` numeric vector.
+#' @return Length-\code{emu$K} numeric vector.
 #' @export
 hank_emulator_reweight_mean <- function(emu, theta, rw_scale) {
   rw_scale * .emu_interp(emu, theta, "gref")
 }
 
 
-#' Emulated `K x K` covariance of the projected net reweighting at a query theta
+#' Emulated \code{K x K} covariance of the projected net reweighting at a query theta
 #'
-#' Rebuilds the covariance of `t(B_ref) (Dhat1 - Dhat0)` (two independent
-#' size-`N` multinomial cross-sections, pre- and post-shock) from the
-#' interpolated projected pieces `m1, M2D0, M2dD`, EXACTLY as the research
-#' scratch's `emu_sigma`: with `D1 = D0 + rw_scale * dD_snap`,
+#' Rebuilds the covariance of \code{t(B_ref) (Dhat1 - Dhat0)} (two independent
+#' size-\code{N} multinomial cross-sections, pre- and post-shock) from the
+#' interpolated projected pieces \code{m1, M2D0, M2dD}, EXACTLY as the research
+#' scratch's \code{emu_sigma}: with \code{D1 = D0 + rw_scale * dD_snap},
 #' \code{covD0 = M2D0 - m1 m1^T}, \code{covD1 = (M2D0 + rw_scale * M2dD) -
 #' m1_D1 m1_D1^T} (\code{m1_D1 = m1 + rw_scale * gref}), \code{Sigma = (covD0 +
 #' covD1) / N}.
 #'
 #' @inheritParams hank_emulator_reweight_mean
 #' @param N Sample size of EACH of the two cross-sections.
-#' @return A `emu$K x emu$K` numeric covariance matrix.
+#' @return A \code{emu$K x emu$K} numeric covariance matrix.
 #' @export
 hank_emulator_metric <- function(emu, theta, rw_scale, N) {
   m1   <- .emu_interp(emu, theta, "m1")
@@ -516,7 +516,7 @@ hank_emulator_metric <- function(emu, theta, rw_scale, N) {
 
 #' Emulated B_ref-projected stationary-distribution (LEVEL) mean at a query theta
 #'
-#' The interpolated `m1` field: the B_ref-projection `t(B_ref) D0(theta)` of the
+#' The interpolated \code{m1} field: the B_ref-projection \code{t(B_ref) D0(theta)} of the
 #' candidate mixture's STATIONARY wealth distribution. This is the model mean of
 #' the LEVEL cross-section observable -- a single stationary wealth survey, as
 #' opposed to the price-shock reweighting RESPONSE
@@ -527,7 +527,7 @@ hank_emulator_metric <- function(emu, theta, rw_scale, N) {
 #' -- see \code{\link{hank_mixture_sbc}}'s \code{channels} argument and Details.
 #'
 #' @inheritParams hank_emulator_state_space
-#' @return Length-`emu$K` numeric vector.
+#' @return Length-\code{emu$K} numeric vector.
 #' @seealso \code{\link{hank_emulator_level_metric}}, \code{\link{hank_emulator_reweight_mean}}
 #' @export
 hank_emulator_level_mean <- function(emu, theta) {
@@ -535,20 +535,20 @@ hank_emulator_level_mean <- function(emu, theta) {
 }
 
 
-#' Emulated `K x K` covariance of a projected stationary (LEVEL) wealth survey
+#' Emulated \code{K x K} covariance of a projected stationary (LEVEL) wealth survey
 #'
-#' The covariance of `t(B_ref) Dhat` for a SINGLE size-`N` multinomial
-#' cross-section `Dhat` drawn from the stationary distribution `D0(theta)`,
-#' rebuilt from the interpolated projected pieces `m1, M2D0`:
+#' The covariance of \code{t(B_ref) Dhat} for a SINGLE size-\code{N} multinomial
+#' cross-section \code{Dhat} drawn from the stationary distribution \code{D0(theta)},
+#' rebuilt from the interpolated projected pieces \code{m1, M2D0}:
 #' \deqn{\Sigma_L = cov_{D0}(B\_ref) / N = (M2D0 - m1\, m1^T) / N.}
 #' This is the LEVEL-observable analogue of \code{\link{hank_emulator_metric}}
 #' (which is the RESPONSE observable's covariance of a DIFFERENCE of two
 #' cross-sections); the level uses only one survey, hence the single
-#' `cov_D0` term.
+#' \code{cov_D0} term.
 #'
 #' @inheritParams hank_emulator_state_space
 #' @param N Sample size of the stationary cross-section.
-#' @return A `emu$K x emu$K` numeric covariance matrix.
+#' @return A \code{emu$K x emu$K} numeric covariance matrix.
 #' @seealso \code{\link{hank_emulator_level_mean}}, \code{\link{hank_emulator_metric}}
 #' @export
 hank_emulator_level_metric <- function(emu, theta, N) {
@@ -565,32 +565,32 @@ hank_emulator_level_metric <- function(emu, theta, N) {
 
 #' Direct (non-emulated) GE-solve DGP truth for the SBC harness
 #'
-#' Mirrors the research scratch's `snap_sbc.R` `direct_truth()`: a fresh
-#' mixture GE steady-state solve at `theta*` (NOT read off the emulator, so
+#' Mirrors the research scratch's \code{snap_sbc.R} \code{direct_truth()}: a fresh
+#' mixture GE steady-state solve at \code{theta*} (NOT read off the emulator, so
 #' the emulator does not mark its own homework), the truth stationary
-#' distribution `D0`, and the GENUINE NONLINEAR post-shock snapshot
-#' cross-section `D1` at `t_star` (\code{\link{hank_mixture_td_nonlinear}}, no
+#' distribution \code{D0}, and the GENUINE NONLINEAR post-shock snapshot
+#' cross-section \code{D1} at \code{t_star} (\code{\link{hank_mixture_td_nonlinear}}, no
 #' linear-response clipping).
 #'
-#' @param theta_star Named list with `centre`, `spread` (and `omega1` if it is
-#'   a `box` coordinate).
-#' @param emu A \code{\link{hank_mixture_emulator}} (used only for its `box`
-#'   coordinate names, `config`, and shared household primitives via
-#'   `emu$a_cell`/`emu$config`).
+#' @param theta_star Named list with \code{centre}, \code{spread} (and \code{omega1} if it is
+#'   a \code{box} coordinate).
+#' @param emu A \code{\link{hank_mixture_emulator}} (used only for its \code{box}
+#'   coordinate names, \code{config}, and shared household primitives via
+#'   \code{emu$a_cell}/\code{emu$config}).
 #' @param inc,ag Shared income process / asset grid (as built inside
 #'   \code{\link{hank_mixture_emulator}}; passed in so the SBC harness builds
 #'   them once, not once per replication).
 #' @param rw_scale Reweighting shock-size multiplier: the direct-truth price
-#'   path is `r_path = r + rw_scale * config$rw_shock$r` (passed explicitly
-#'   rather than read off `emu$config`, so a caller's `rw_scale` argument to
+#'   path is \code{r_path = r + rw_scale * config$rw_shock$r} (passed explicitly
+#'   rather than read off \code{emu$config}, so a caller's \code{rw_scale} argument to
 #'   \code{\link{hank_mixture_sbc}} cannot silently diverge from the DGP's own
 #'   shock size).
 #' @param need_D1 Logical: whether to compute the nonlinear post-shock snapshot
-#'   `D1` (needed only when the `"response"` channel is active). When `FALSE`
+#'   \code{D1} (needed only when the \code{"response"} channel is active). When \code{FALSE}
 #'   (e.g. a macro + level-only SBC) the extra \code{\link{hank_mixture_td_nonlinear}}
-#'   solve is skipped and `D1` is `NULL`.
-#' @return A list with `ss_dir` (`dsge_ss`), `D0`, `D1` (length-`n_cell` or
-#'   `NULL` when `need_D1 = FALSE`), `r`, `w`.
+#'   solve is skipped and \code{D1} is \code{NULL}.
+#' @return A list with \code{ss_dir} (\code{dsge_ss}), \code{D0}, \code{D1} (length-\code{n_cell} or
+#'   \code{NULL} when \code{need_D1 = FALSE}), \code{r}, \code{w}.
 #' @keywords internal
 .hank_sbc_direct_truth <- function(theta_star, emu, inc, ag, rw_scale, need_D1 = TRUE) {
   cfg <- emu$config
@@ -617,10 +617,10 @@ hank_emulator_level_metric <- function(emu, theta, N) {
 }
 
 
-#' Simulate a macro series from a `dsge_ss` state space (single-shock MA form)
+#' Simulate a macro series from a \code{dsge_ss} state space (single-shock MA form)
 #'
-#' Mirrors the research scratch's `sim_Y` (`wave3_lib.R`): draws iid `N(0,
-#' sigma_Z^2)` innovations, forms the truncated-MA observation path, adds iid
+#' Mirrors the research scratch's \code{sim_Y} (\code{wave3_lib.R}): draws iid \code{N(0,
+#' sigma_Z^2)} innovations, forms the truncated-MA observation path, adds iid
 #' measurement error, and demeans.
 #' @keywords internal
 .hank_sbc_sim_Y <- function(ss_obj, T_data, me_variance, sigma_Z, obs_vars) {
@@ -664,117 +664,117 @@ hank_emulator_level_metric <- function(emu, theta, N) {
 #' Simulation-based calibration of the joint emulated estimator
 #'
 #' Runs simulation-based calibration (posterior rank-uniformity) of the joint
-#' emulated mixture-HANK estimator, using `emu` (a
+#' emulated mixture-HANK estimator, using \code{emu} (a
 #' \code{\link{hank_mixture_emulator}}) for every POSTERIOR evaluation but the
 #' DIRECT (non-emulated) GE solve for every DGP truth (\code{
 #' \link{.hank_sbc_direct_truth}}) -- so the emulator is never asked to mark
-#' its own homework. Mirrors the research scratch's `snap_sbc.R`.
+#' its own homework. Mirrors the research scratch's \code{snap_sbc.R}.
 #'
-#' \strong{Observable channels}: `channels` selects which data sources enter
+#' \strong{Observable channels}: \code{channels} selects which data sources enter
 #' the likelihood, any non-empty subset of
 #' \describe{
-#'   \item{`"macro"`}{the aggregate time series `Y` filtered through the
+#'   \item{\code{"macro"}}{the aggregate time series \code{Y} filtered through the
 #'     structural Kalman filter (\code{\link{hank_kalman_loglik}}) -- informative
 #'     mainly about the mixture CENTRE.}
-#'   \item{`"level"`}{a single stationary wealth cross-section
+#'   \item{\code{"level"}}{a single stationary wealth cross-section
 #'     (\code{\link{hank_emulator_level_mean}}) -- the discount-factor SPREAD
 #'     reshapes the stationary distribution strongly, so this is the SHARP
 #'     spread identifier (the Krusell-Smith / \dQuote{beta-heterogeneity <->
 #'     wealth inequality} channel).}
-#'   \item{`"response"`}{the price-shock net reweighting between two dated
+#'   \item{\code{"response"}}{the price-shock net reweighting between two dated
 #'     cross-sections (\code{\link{hank_emulator_reweight_mean}}) -- ROBUST (it
 #'     differences out fixed cross-sectional heterogeneity) but, at a realistic
 #'     survey size and shock, it also differences most of the level's spread
 #'     signal away and is nearly uninformative about the spread; kept for
 #'     completeness and as the original brief-17 observable.}
 #' }
-#' The default `c("macro", "response")` reproduces the joint estimator of
-#' \code{\link{hank_mixture_joint_logpost}}; `c("macro", "level")` is the
+#' The default \code{c("macro", "response")} reproduces the joint estimator of
+#' \code{\link{hank_mixture_joint_logpost}}; \code{c("macro", "level")} is the
 #' recommended combination for sharply identifying BOTH the centre (macro) and
-#' the spread (level). When `"response"` is not among `channels`, the
+#' the spread (level). When \code{"response"} is not among \code{channels}, the
 #' per-replication nonlinear post-shock snapshot solve is skipped.
 #'
-#' \strong{Prior / truth draws}: `theta*` is drawn per replication from a
+#' \strong{Prior / truth draws}: \code{theta*} is drawn per replication from a
 #' DISCRETE uniform over the posterior evaluation grid's own nodes (rather
-#' than a continuous uniform over `box`), so that the exact-randomized
+#' than a continuous uniform over \code{box}), so that the exact-randomized
 #' probability-integral-transform (PIT) used for the rank statistic (step 4
 #' below) is EXACT with no additional between-node apportionment -- matching
 #' the research scratch's convention of drawing truth on the same fine grid
 #' the posterior is evaluated over.
 #'
 #' \strong{Fixed reference measurement-error variance}: one reference macro
-#' series is simulated at the box centre with `set.seed(T_data_seed)`, and
-#' `me_var = (me_frac * min(per-column sd))^2` is fixed from it and shared
+#' series is simulated at the box centre with \code{set.seed(T_data_seed)}, and
+#' \code{me_var = (me_frac * min(per-column sd))^2} is fixed from it and shared
 #' (not truth-dependent) across every replication.
 #'
-#' \strong{Per-replication steps} (`set.seed(seed + rep)`): (1) direct-GE DGP
-#' truth at `theta*` (nonlinear snapshot `D1`, no clipping); (2) simulate a
-#' macro series `Y` from the truth state space, and draw two independent
-#' size-`N` multinomial cross-sections `Dhat0, Dhat1` from `D0, D1`, forming
-#' the observed projected reweighting `m_hat = t(B_ref) (Dhat1 - Dhat0)`; (3)
-#' build ONE `B_ref`-basis reweighting covariance for this replication from the
-#' TRUTH `(D0, D1)` the DGP already computed (`rw_metric = "fixed_truth"`, the
-#' default and orchestrator-certified choice): `Sigma = (cov_D0(B_ref) +
-#' cov_D1(B_ref)) / N`, matching the shipped
+#' \strong{Per-replication steps} (\code{set.seed(seed + rep)}): (1) direct-GE DGP
+#' truth at \code{theta*} (nonlinear snapshot \code{D1}, no clipping); (2) simulate a
+#' macro series \code{Y} from the truth state space, and draw two independent
+#' size-\code{N} multinomial cross-sections \code{Dhat0, Dhat1} from \code{D0, D1}, forming
+#' the observed projected reweighting \code{m_hat = t(B_ref) (Dhat1 - Dhat0)}; (3)
+#' build ONE \code{B_ref}-basis reweighting covariance for this replication from the
+#' TRUTH \code{(D0, D1)} the DGP already computed (\code{rw_metric = "fixed_truth"}, the
+#' default and orchestrator-certified choice): \code{Sigma = (cov_D0(B_ref) +
+#' cov_D1(B_ref)) / N}, matching the shipped
 #' \code{\link{hank_mixture_joint_logpost}}/\code{\link{hank_reweight_functional_metric}}
 #' convention of a metric fixed across candidate thetas within one evaluation.
 #' Because this covariance does NOT vary across eval nodes within a
 #' replication, its log-determinant is an additive constant that cancels
-#' exactly under the softmax normalization in step (5) -- so `ll_rw` is the
-#' plain quadratic form with no log-det term, `-0.5 * t(d_k) Sigma^-1 d_k`,
-#' `d_k = m_hat - rw_scale * gref_emu(theta_k)`. The alternative `rw_metric =
-#' "emulated_varying"` (a THETA-VARYING emulator-interpolated covariance,
+#' exactly under the softmax normalization in step (5) -- so \code{ll_rw} is the
+#' plain quadratic form with no log-det term, \code{-0.5 * t(d_k) Sigma^-1 d_k},
+#' \code{d_k = m_hat - rw_scale * gref_emu(theta_k)}. The alternative \code{rw_metric =
+#' "emulated_varying"} (a THETA-VARYING emulator-interpolated covariance,
 #' \code{\link{hank_emulator_metric}}, WITH its log-determinant term, since
 #' there it does vary across eval nodes and does not cancel) is kept as an
 #' option but is not the certified default; (4) evaluate the joint
-#' log-posterior over every eval-grid node: `loglik_macro + loglik_rw`; (5)
+#' log-posterior over every eval-grid node: \code{loglik_macro + loglik_rw}; (5)
 #' normalize to a joint posterior pmf and compute, per coordinate, the
-#' exact-randomized PIT and its floor-`L_ranks` integer rank; (6) record
+#' exact-randomized PIT and its floor-\code{L_ranks} integer rank; (6) record
 #' posterior means and concentration.
 #'
 #' @param emu A \code{\link{hank_mixture_emulator}}.
 #' @param n_rep Integer number of SBC replications.
 #' @param prior Currently only the DEFAULT is implemented: a discrete uniform
 #'   over the posterior evaluation grid's nodes (see Details). Reserved for a
-#'   future `list(rsample = , in_support = )` user-supplied prior.
-#' @param sampler Currently only `"grid"` is implemented: a `d`-dimensional
-#'   tensor grid of `n_eval` points per axis over `emu$box`. This is
+#'   future \code{list(rsample = , in_support = )} user-supplied prior.
+#' @param sampler Currently only \code{"grid"} is implemented: a \code{d}-dimensional
+#'   tensor grid of \code{n_eval} points per axis over \code{emu$box}. This is
 #'   deliberate, not a stub: the mixture posterior is a tilted, strongly
 #'   anisotropic ridge (see \code{\link{hank_mixture_joint_logpost}}) on which
 #'   a diagonal-metric random-walk sampler fails, so the exact grid is the
 #'   recommended route for this posterior class. For a non-grid posterior draw,
 #'   seed a curvature-aware sampler from \code{\link{hank_mixture_laplace}}
 #'   (mode + Laplace covariance) rather than a diagonal RWM.
-#' @param channels Character subset of `c("macro", "level", "response")`
+#' @param channels Character subset of \code{c("macro", "level", "response")}
 #'   selecting the observable channels combined in the likelihood (see the
-#'   Observable channels section). Default `c("macro", "response")`.
+#'   Observable channels section). Default \code{c("macro", "response")}.
 #' @param n_eval Integer points per axis for the posterior evaluation grid
-#'   (`n_eval^d` total nodes).
-#' @param N Survey cross-section sample size (each of `Dhat0`, `Dhat1`).
+#'   (\code{n_eval^d} total nodes).
+#' @param N Survey cross-section sample size (each of \code{Dhat0}, \code{Dhat1}).
 #' @param T_data Integer macro time-series length.
 #' @param me_frac Fraction of the reference series' own per-column standard
-#'   deviation used to set the shared, truth-independent `me_var` (see
+#'   deviation used to set the shared, truth-independent \code{me_var} (see
 #'   Details).
 #' @param rw_scale Reweighting shock-size multiplier (as in
 #'   \code{\link{hank_emulator_reweight_mean}}); also used to build the
-#'   direct-truth nonlinear snapshot's price path (`r_path = r + rw_scale *
-#'   rw_shock$r`). Default `0.005` (50bps): orchestrator-verified to calibrate
-#'   (a smaller `0.003` leaves the reweighting channel too weak).
+#'   direct-truth nonlinear snapshot's price path (\code{r_path = r + rw_scale *
+#'   rw_shock$r}). Default \code{0.005} (50bps): orchestrator-verified to calibrate
+#'   (a smaller \code{0.003} leaves the reweighting channel too weak).
 #' @param T_data_seed Seed for the fixed reference measurement-error series.
-#' @param seed Base seed; replication `rep` uses `seed + rep`.
+#' @param seed Base seed; replication \code{rep} uses \code{seed + rep}.
 #' @param L_ranks Integer rank resolution: ranks are integers in
-#'   `0..L_ranks-1`.
-#' @param rw_metric `"fixed_truth"` (default; orchestrator-certified: one
-#'   per-replication covariance built from the DGP's own truth `(D0, D1)`, no
-#'   log-det term) or `"emulated_varying"` (theta-varying emulated covariance
+#'   \code{0..L_ranks-1}.
+#' @param rw_metric \code{"fixed_truth"} (default; orchestrator-certified: one
+#'   per-replication covariance built from the DGP's own truth \code{(D0, D1)}, no
+#'   log-det term) or \code{"emulated_varying"} (theta-varying emulated covariance
 #'   WITH its log-determinant term) -- see Details.
 #'
-#' @return An object of class `c("hank_mixture_sbc", "dynhr_sbc")`: a list
-#'   with `pit` (`n_rep x d`, continuous), `ranks` (`n_rep x d` integer,
-#'   `colnames = names(emu$box)`), `truth` (`n_rep x d`), `post_mean` (`n_rep x
-#'   d`), `post_conc` (length-`n_rep`, `1 / sum(post^2)`), `uniformity`
-#'   (\code{sbc_uniformity_test} on `ranks`), and `n_rep, box, sampler,
-#'   channels, N, T_data, rw_scale, me_var, rw_metric`.
+#' @return An object of class \code{c("hank_mixture_sbc", "dynhr_sbc")}: a list
+#'   with \code{pit} (\code{n_rep x d}, continuous), \code{ranks} (\code{n_rep x d} integer,
+#'   \code{colnames = names(emu$box)}), \code{truth} (\code{n_rep x d}), \code{post_mean} (\code{n_rep x
+#'   d}), \code{post_conc} (length-\code{n_rep}, \code{1 / sum(post^2)}), \code{uniformity}
+#'   (\code{sbc_uniformity_test} on \code{ranks}), and \code{n_rep, box, sampler,
+#'   channels, N, T_data, rw_scale, me_var, rw_metric}.
 #' @seealso \code{\link{hank_mixture_emulator}}, \code{\link{hank_emulator_level_mean}},
 #'   \code{sbc_uniformity_test}
 #' @export
@@ -823,7 +823,7 @@ hank_mixture_sbc <- function(emu, n_rep, prior = NULL, sampler = "grid",
   ## ---- fixed reference measurement-error variance (truth-independent) -----
   ME_VAR <- 0
   if (use_macro) {
-    set.seed(T_data_seed)
+    .local_seed(T_data_seed)  # caller's RNG stream restored on exit (C1)
     centre_target <- vapply(nm, function(n) mean(box[[n]]), numeric(1))
     ss_ref <- hank_emulator_state_space(emu, setNames(as.list(centre_target), nm))
     Y_ref <- .hank_sbc_sim_Y(ss_ref, T_data, me_variance = 0, sigma_Z = cfg$shock_specs$Z$sigma,
@@ -854,6 +854,9 @@ hank_mixture_sbc <- function(emu, n_rep, prior = NULL, sampler = "grid",
   ## B_ref-basis functional covariance of a single projected size-N survey.
   cov_D <- function(D) crossprod(emu$B_ref, D * emu$B_ref) - tcrossprod(crossprod(emu$B_ref, D))
 
+  ## Each rep re-seeds (seed + rep) in this frame; restore the caller's RNG
+  ## stream when hank_mixture_sbc() exits (C1).
+  .local_seed(seed)
   for (rep in seq_len(n_rep)) {
     set.seed(seed + rep)
 
@@ -959,7 +962,7 @@ hank_mixture_sbc <- function(emu, n_rep, prior = NULL, sampler = "grid",
 }
 
 
-#' Print method for `hank_mixture_sbc`
+#' Print method for \code{hank_mixture_sbc}
 #'
 #' Summarizes recovery correlation per coordinate and the
 #' \code{sbc_uniformity_test} verdict.

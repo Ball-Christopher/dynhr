@@ -21,7 +21,8 @@ fd_safe_hessian(
 return non-finite (or a large penalty, see \code{penalty_tol}) for
 infeasible \code{theta}, not error -- but the routine also tolerates
 \code{fn} raising an error at infeasible points (caught and treated as
-non-finite).}
+non-finite). A programming error inside \code{fn} (subscript out of
+bounds, object not found, unused argument, ...) is re-raised instead.}
 
 \item{theta}{Named numeric vector, the point to differentiate at.}
 

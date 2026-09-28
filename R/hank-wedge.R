@@ -58,12 +58,11 @@
   }
   c_pol_raw <- c_pol
   if (!is.null(coh_extra) && any(c_pol_raw <= tiny))
-    .hank_egm_warn_once(
-      "coh_extra_floor_wedge",
-      "hank_egm (wedge): a transition-path evaluation with a matrix ",
+    .dynhr_warn("hank_egm (wedge): a transition-path evaluation with a matrix ",
       "'Tr_incidence' (Tier 2) drove cash-on-hand to the EGM tiny-floor ",
       "(1e-12) region at some (e, a) point. This warning fires at most ",
-      "once per session.")
+      "once per session.",
+    once = TRUE, key = "coh_extra_floor_wedge")
   c_pol <- pmax(c_pol_raw, tiny)
   uc <- c_pol^(-1 / eis)
   Va <- matrix(1 + r_state, n_e, n_a, byrow = TRUE) * uc   # envelope, state rate

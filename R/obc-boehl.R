@@ -1,37 +1,53 @@
 ## R/obc-boehl.R
 ## --------------------------------------------------------------------------
-## Boehl (2022) complementarity-based OBC simulation solver.
+## Boehl (2022) / OccBin piecewise-linear OBC path solver.
 ##
 ## Provides:
 ##   boehl_simulate()            -- forward simulation under a fixed regime path
 ##   boehl_fb_residual()         -- Fischer-Burmeister complementarity residuals
-##   boehl_spell_trajectory()    -- state trajectory under full binding spell
 ##   boehl_end_of_spell_gap()    -- end-of-spell consistency check (scalar)
 ##   boehl_find_spell_duration() -- bisection root-finder: scalar k_star
 ##   boehl_solve_regime_path()   -- main solver; dispatches to spell-duration
 ##                                  fast path (single_spell=TRUE) or iterative
 ##   compute_irfs_obc()          -- OBC-aware IRF computation (obc_solver arg)
 ##
+## THE PIECEWISE-LINEAR SOLUTION (fixed 2026-09-25, W48)
+##
+##   A regime path is simulated with TIME-VARYING rules from the backward
+##   recursion of .obc_pwl_rules() (R/obc-binding.R): the rule of a binding
+##   period depends on the regimes ahead of it, and a slack period that
+##   anticipates a later binding period does not follow the slack rule.  The
+##   per-regime policies of obc_ensure_policy() assume the NEXT period is
+##   slack, so simulating a spell of 2+ periods with them solved every period
+##   but the last with the wrong expectation.
+##
+##   A regime path is accepted when it reproduces itself on the CONSTRAINED
+##   path (.obc_pwl_check()): slack periods satisfy every bound, binding
+##   periods have a multiplier of the right sign.  The old search flagged a
+##   constraint only when the SLACK policy violated it, so a bound violated
+##   only because another constraint binds was never imposed.
+##
+##   Shock sequences are surprises (Dynare occbin_solver): at each period with
+##   a non-zero shock the expected regime path is re-solved from the current
+##   state.  With one shock in period 1 (an IRF) the result is the exact
+##   perfect-foresight piecewise-linear path.
+##
 ## TWO SOLVER PATHS
 ##
 ##   Iterative (single_spell = FALSE, default)
-##     Replaces guess-and-verify with complementarity iteration on simulation.
-##     O(n_iter × T) cost.  Handles arbitrary regime patterns: multi-spell,
-##     staggered multi-constraint.  Typically 2–5 iterations.
+##     OccBin guess-and-verify on the constrained path.  Handles arbitrary
+##     regime patterns: multi-spell, staggered and interacting constraints.
 ##
 ##   Spell-duration root-finder (single_spell = TRUE) — Boehl 2022 §3
-##     Parameterises the regime path by a single scalar k (spell length).
-##     Pre-computes the full binding-regime state trajectory in one pass (O(T)),
-##     then finds k_star via bisection (O(log T) evaluations, each O(1)).
-##     Total cost: O(T + log T) ≈ O(T) vs O(n_iter × T) for the iterative path.
-##
+##     Parameterises the regime path by a single scalar k (spell length) and
+##     bisects for the shortest k whose end-of-spell gap is non-negative.
 ##     Assumption: exactly one contiguous binding block [1, k_star] followed
-##     by permanent slack.  Valid for standard ZLB / ELB IRFs where the shock
-##     hits at t=1 and the constraint relaxes monotonically.  Falls back to the
-##     iterative solver if single_spell = FALSE.
+##     by permanent slack.  converged = FALSE when the resulting path is not
+##     an equilibrium (the assumption fails).
 ##
 ## Reference: Boehl G. (2022) "Efficient solution and computation of models
 ##   with occasionally binding constraints." J. Econ. Dyn. Control 143, 104495.
+##   Guerrieri L. & Iacoviello M. (2015) "OccBin". J. Monet. Econ. 70, 22-38.
 ## --------------------------------------------------------------------------
 
 
@@ -41,52 +57,31 @@
 
 #' Forward simulation of an OBC model under a fixed regime path
 #'
-#' Simulates the model from an initial state (default: zero) for T periods,
-#' using per-regime policy matrices from regime_cache.  Returns the full
-#' endogenous variable paths and the state trajectory needed by the
-#' boehl_fb_residual() binding check.
+#' Simulates the model from an initial state (default: zero) for T periods
+#' under the piecewise-linear rules of \code{regime_path}: period t follows
+#' the rule obtained by the backward recursion over the regimes of periods
+#' t, t+1, ..., slack after the last binding period (see
+#' \code{.obc_pwl_rules()}).  Shocks are surprises.
 #'
-#' State equation:  s_t = TT_r * s_{t-1} + RR_r * eps_t + c_state_r
-#' Endo equation:   y_t = ghx_r * s_{t-1} + ghu_r * eps_t + c_full_r
+#' Endo equation:  y_t = ghx_t * s_{t-1} + ghu_t * eps_t + c_t
 #'
 #' @param shock_seq    n_exo x T numeric matrix of structural shocks
-#' @param dr_slack     Slack-regime DecisionRules (provides endo_names,
-#'                     state_idx, and dimensions)
-#' @param regime_cache R environment of per-regime policies built by
-#'                     obc_ensure_policy() (keys: character regime index)
+#' @param dr_slack     Slack-regime DecisionRules (unused; kept for the
+#'                     interface -- the cache carries the system)
+#' @param regime_cache R environment seeded by obc_ensure_policy()
 #' @param regime_path  Integer vector (length T): bitfield regime per period
 #'                     (0 = all slack; bit j = 1 means spec j binds)
 #' @param state_init   Numeric vector (length n_state) initial state;
 #'                     NULL or omitted → zero initial state
 #' @return List with:
 #'   $paths  -- n_endo x T matrix (rownames = endo variable names)
-#'   $states -- n_state x T matrix: s_t AFTER applying the period-t policy
+#'   $states -- n_state x T matrix: s_t AFTER applying the period-t rule
 #' @noRd
 boehl_simulate <- function(shock_seq, dr_slack, regime_cache, regime_path,
                             state_init = NULL) {
-  n_T     <- ncol(shock_seq)
-  n_endo  <- nrow(dr_slack$ghx)
-  si      <- dr_slack$state_idx
-  n_state <- length(si)
-
-  paths  <- matrix(NA_real_, n_endo, n_T)
-  states <- matrix(NA_real_, n_state, n_T)
-  rownames(paths) <- dr_slack$endo_names
-
-  s <- if (!is.null(state_init) && length(state_init) == n_state)
-         as.numeric(state_init)
-       else numeric(n_state)
-
-  for (t in seq_len(n_T)) {
-    pol <- get(as.character(regime_path[t]), envir = regime_cache, inherits = FALSE)
-    eps <- shock_seq[, t]
-
-    paths[, t]  <- drop(pol$dr$ghx %*% s) + drop(pol$dr$ghu %*% eps) + pol$c_full
-    s           <- drop(pol$TT  %*% s) + drop(pol$RR  %*% eps) + pol$c_state
-    states[, t] <- s
-  }
-
-  list(paths = paths, states = states)
+  ctx   <- .obc_pwl_cache_context(regime_cache)
+  rules <- .obc_pwl_rules(ctx, regime_path)
+  .obc_pwl_forward(ctx, rules, shock_seq, state_init)
 }
 
 
@@ -94,66 +89,28 @@ boehl_simulate <- function(shock_seq, dr_slack, regime_cache, regime_path,
 # Fischer-Burmeister complementarity residual
 # =============================================================================
 
-#' Compute Fischer-Burmeister complementarity residuals
+#' Fischer-Burmeister complementarity residuals of a regime path
 #'
 #' For each period t and constraint j evaluates
-#'   φ(a_jt, b_jt) = a_jt + b_jt - sqrt(a_jt^2 + b_jt^2)
-#' where:
-#'   a_jt = max(0, ±(bound_j - x_j^slack(t)))  -- shadow-multiplier proxy
-#'   b_jt = max(0, ±(x_j(t)  - bound_j))       -- constraint-slack proxy
-#' with sign convention adjusted for lower ">=" vs upper "<=" bounds.
+#'   phi(a_jt, b_jt) = a_jt + b_jt - sqrt(a_jt^2 + b_jt^2)
+#' with b_jt = sgn_j (x_j(t) - bound_j) the slack of the bound on the
+#' simulated path and a_jt = sgn_j F_j(t) the multiplier (residual of the
+#' tagged equation on the path, with E_t y_{t+1}); sgn_j = +1 for a lower
+#' bound, -1 for an upper bound.  phi = 0 iff a >= 0, b >= 0 and ab = 0: at
+#' an equilibrium regime path every entry is zero to rounding.
 #'
-#' φ = 0 iff the complementarity condition holds: (a >= 0 AND b >= 0 AND ab = 0).
-#' At a converged regime path, |φ_jt| is at most O(machine epsilon) for all
-#' (t, j) because the simulation exactly pins binding variables at the bound.
-#'
-#' @param states    n_state x T matrix: state trajectory from boehl_simulate()
-#' @param shock_seq n_exo x T matrix of structural shocks
-#' @param paths     n_endo x T matrix: simulated endo paths from boehl_simulate()
-#' @param specs     OBC spec list (from obc_parse_tags / obc_collect_specs)
-#' @param dr_slack  Slack-regime DecisionRules
-#' @return n_spec x T numeric matrix of FB residuals (zero at convergence)
+#' @param sim          List from boehl_simulate() under regime_path
+#' @param shock_seq    n_exo x T matrix of structural shocks
+#' @param regime_cache R environment seeded by obc_ensure_policy()
+#' @param regime_path  Integer vector (length T): the simulated regime path
+#' @param state_init   Initial state (NULL = zero)
+#' @return n_spec x T numeric matrix of FB residuals (zero at a solution)
 #' @noRd
-boehl_fb_residual <- function(states, shock_seq, paths, specs, dr_slack) {
-  n_T     <- ncol(shock_seq)
-  n_spec  <- length(specs)
-  n_state <- nrow(states)
-  phi     <- matrix(NA_real_, n_spec, n_T)
-  s_prev  <- numeric(n_state)
-
-  for (t in seq_len(n_T)) {
-    eps <- shock_seq[, t]
-
-    for (j in seq_len(n_spec)) {
-      s <- specs[[j]]
-
-      # Slack-policy prediction of x_j at period t
-      x_slack <- sum(dr_slack$ghx[s$var_idx, ] * s_prev) +
-                 sum(dr_slack$ghu[s$var_idx, ] * eps)
-
-      # Current simulated value (= bound when binding, free when slack)
-      x_cur <- paths[s$var_idx, t]
-
-      if (s$op == ">") {
-        # Lower bound: want x_j >= bound.
-        #   a = max(0, bound - x_slack)  > 0 when slack policy would violate
-        #   b = max(0, x_cur  - bound)   > 0 when not at bound (slack regime)
-        a_jt <- max(0, s$bound - x_slack)
-        b_jt <- max(0, x_cur  - s$bound)
-      } else {
-        # Upper bound: want x_j <= bound.
-        #   a = max(0, x_slack - bound)  > 0 when slack policy would violate
-        #   b = max(0, bound   - x_cur)  > 0 when not at bound (slack regime)
-        a_jt <- max(0, x_slack - s$bound)
-        b_jt <- max(0, s$bound - x_cur)
-      }
-
-      phi[j, t] <- a_jt + b_jt - sqrt(a_jt^2 + b_jt^2)
-    }
-    s_prev <- states[, t]
-  }
-
-  phi
+boehl_fb_residual <- function(sim, shock_seq, regime_cache, regime_path,
+                              state_init = NULL) {
+  ctx   <- .obc_pwl_cache_context(regime_cache)
+  rules <- .obc_pwl_rules(ctx, regime_path)
+  .obc_pwl_check(ctx, rules, sim, shock_seq, regime_path, state_init)$phi
 }
 
 
@@ -161,138 +118,85 @@ boehl_fb_residual <- function(states, shock_seq, paths, specs, dr_slack) {
 # Spell-duration root-finder (Boehl 2022 §3)
 # =============================================================================
 
-#' Accumulate the model state under a fixed binding regime for T periods
+#' End-of-spell consistency gap for a candidate spell length k
 #'
-#' Computes s_t for t = 0, 1, ..., T by applying the binding-regime policy
-#' recursively (one forward pass):
-#'   s_t = TT_b * s_{t-1} + RR_b * eps_t + c_state_b
+#' The candidate regime path binds \code{spell_regime} in periods 1..k and is
+#' slack afterwards; it is simulated with its time-varying rules.  The gap is
 #'
-#' The result is an n_state x (T+1) matrix: column 1 holds s_0 (= state_init),
-#' column t+1 holds s_t.  All T+1 states are returned so that
-#' boehl_end_of_spell_gap() can evaluate any k ∈ {0, ..., T} in O(1).
+#'   min_j sign_j * (x_j(k+1) - bound_j)
 #'
-#' @param shock_seq   n_exo x T numeric matrix of structural shocks
-#' @param pol_bind    Binding-regime policy entry from obc_ensure_policy()
-#'                    (list with $TT, $RR, $c_state)
-#' @param state_init  Numeric vector (length n_state) initial state;
-#'                    NULL → zero initial state
-#' @return n_state x (T+1) numeric matrix; column k+1 = s_k
-#' @noRd
-boehl_spell_trajectory <- function(shock_seq, pol_bind, state_init = NULL) {
-  n_T     <- ncol(shock_seq)
-  n_state <- nrow(pol_bind$TT)
-
-  states        <- matrix(NA_real_, n_state, n_T + 1L)
-  s             <- if (!is.null(state_init) && length(state_init) == n_state)
-                     as.numeric(state_init)
-                   else numeric(n_state)
-  states[, 1L]  <- s   # s_0
-
-  for (t in seq_len(n_T)) {
-    s            <- drop(pol_bind$TT %*% s) +
-                    drop(pol_bind$RR %*% shock_seq[, t]) +
-                    pol_bind$c_state
-    states[, t + 1L] <- s
-  }
-  states
-}
-
-
-#' Evaluate the end-of-spell consistency gap at period k
+#' on that path: positive iff every constraint is slack in period k+1, so the
+#' spell can end at k.  For k = T, x(T+1) is the slack rule at s_T.
 #'
-#' After k periods of binding the model state is s_k (column k+1 of
-#' states_bind).  The gap measures whether the slack policy at period k+1
-#' satisfies ALL constraints simultaneously:
-#'
-#'   gap_j(k) = sign_j * (x_j^slack(k+1; s_k, eps_{k+1}) - bound_j)
-#'
-#' where sign_j = +1 for lower bounds (op ">") and −1 for upper bounds (op "<").
-#' gap_j > 0 means constraint j would be slack under the slack policy at k+1.
-#'
-#' Returns min_j gap_j(k): positive iff ALL constraints are slack at k+1
-#' (spell can end at k); negative iff at least one still binds (spell continues).
-#'
-#' For k = T, eps_{k+1} is taken as zero (terminal check beyond the sample).
-#'
-#' @param k            Integer spell length to evaluate (0 ≤ k ≤ T)
-#' @param states_bind  n_state x (T+1) matrix from boehl_spell_trajectory()
+#' @param k            Integer spell length (0 <= k <= T)
+#' @param ctx          Context from .obc_pwl_context()
+#' @param spell_regime Integer bitfield binding during the spell
 #' @param shock_seq    n_exo x T shock matrix
-#' @param specs        OBC spec list
-#' @param dr_slack     Slack-regime DecisionRules
+#' @param state_init   Initial state (NULL = zero)
 #' @return Scalar minimum gap (positive = all slack at k+1)
 #' @noRd
-boehl_end_of_spell_gap <- function(k, states_bind, shock_seq, specs, dr_slack) {
+boehl_end_of_spell_gap <- function(k, ctx, spell_regime, shock_seq,
+                                   state_init = NULL) {
   n_T <- ncol(shock_seq)
-  s_k <- states_bind[, k + 1L]                  # state after k binding periods
-
-  # Shock at k+1; zero beyond the sample horizon
-  eps_next <- if (k < n_T) shock_seq[, k + 1L] else numeric(nrow(shock_seq))
-
-  min(vapply(specs, function(s) {
-    x_slack <- sum(dr_slack$ghx[s$var_idx, ] * s_k) +
-               sum(dr_slack$ghu[s$var_idx, ] * eps_next)
-    if (s$op == ">") x_slack - s$bound else s$bound - x_slack
-  }, numeric(1)))
+  rp  <- c(rep(as.integer(spell_regime), k), integer(n_T - k))
+  sim <- .obc_pwl_forward(ctx, .obc_pwl_rules(ctx, rp), shock_seq, state_init)
+  x_next <- if (k < n_T) sim$paths[, k + 1L]
+            else drop(ctx$ghx %*% sim$states[, n_T])
+  min(ctx$sgn * (x_next[ctx$var] - ctx$bnd))
 }
 
 
 #' Find the spell duration k_star via bisection (Boehl 2022 §3)
 #'
 #' For an IRF with a single binding spell [1, k_star] the end-of-spell gap
-#' f(k) = boehl_end_of_spell_gap(k, ...) is monotone non-decreasing in k
-#' (for well-behaved DSGE models the constraint relaxes over time after a shock).
-#' Bisection finds k_star = min{k : f(k) ≥ 0} in ⌈log₂(T)⌉ evaluations.
+#' f(k) = boehl_end_of_spell_gap(k, ...) is taken to be monotone
+#' non-decreasing in k.  Bisection finds k_star = min{k : f(k) >= 0} in
+#' ceiling(log2(T)) evaluations; each evaluation simulates the candidate path
+#' with its own time-varying rules.
 #'
 #' Special cases:
-#'   f(0) ≥ 0: no binding at all → k_star = 0 (all slack)
+#'   f(0) >= 0: no binding at all → k_star = 0 (all slack)
 #'   f(T) < 0: binding through the end of sample → k_star = T
 #'
-#' Cost: one O(T) trajectory pre-computation, then O(log T) O(1) gap queries.
-#'
-#' @param shock_seq   n_exo x T shock matrix (unit shock at t=1 for IRF)
-#' @param pol_bind    Binding-regime policy entry from obc_ensure_policy()
-#' @param specs       OBC spec list
-#' @param dr_slack    Slack-regime DecisionRules
-#' @param state_init  Numeric vector (length n_state) initial state; NULL = zero
+#' @param shock_seq    n_exo x T shock matrix (unit shock at t=1 for IRF)
+#' @param ctx          Context from .obc_pwl_context()
+#' @param spell_regime Integer bitfield binding during the spell
+#' @param state_init   Numeric vector (length n_state) initial state; NULL = zero
 #' @return Named list:
-#'   $k_star         -- integer spell length (0 = all slack, T = binding throughout)
-#'   $states_bind    -- n_state x (T+1) trajectory (reusable for boehl_simulate)
-#'   $gap_at_kstar   -- scalar gap value at k_star (should be ≥ 0)
+#'   $k_star       -- integer spell length (0 = all slack, T = binding throughout)
+#'   $gap_at_kstar -- scalar gap value at k_star (should be >= 0)
+#'   $n_bisect     -- integer: bisection steps taken
 #' @noRd
-boehl_find_spell_duration <- function(shock_seq, pol_bind, specs, dr_slack,
+boehl_find_spell_duration <- function(shock_seq, ctx, spell_regime,
                                        state_init = NULL) {
-  n_T         <- ncol(shock_seq)
-  states_bind <- boehl_spell_trajectory(shock_seq, pol_bind, state_init)
+  n_T <- ncol(shock_seq)
+  gap <- function(k)
+    boehl_end_of_spell_gap(k, ctx, spell_regime, shock_seq, state_init)
 
-  # k=0: no binding periods at all
-  if (boehl_end_of_spell_gap(0L, states_bind, shock_seq, specs, dr_slack) >= 0) {
-    return(list(k_star = 0L, states_bind = states_bind, gap_at_kstar = 0))
-  }
+  g0 <- gap(0L)
+  if (g0 >= 0)
+    return(list(k_star = 0L, gap_at_kstar = g0, n_bisect = 0L))
+  gap_T <- gap(n_T)
+  if (gap_T < 0)
+    return(list(k_star = n_T, gap_at_kstar = gap_T, n_bisect = 0L))
 
-  # k=T: still binding at the sample horizon
-  gap_T <- boehl_end_of_spell_gap(n_T, states_bind, shock_seq, specs, dr_slack)
-  if (gap_T < 0) {
-    return(list(k_star = n_T, states_bind = states_bind, gap_at_kstar = gap_T))
-  }
-
-  # Bisection: find smallest k in [1, T] such that f(k) >= 0.
   # Invariant: f(lo) < 0, f(hi) >= 0.
   lo <- 0L
   hi <- n_T
-
+  n_bisect <- 0L
+  g_hi <- gap_T
   while (hi - lo > 1L) {
+    n_bisect <- n_bisect + 1L
     mid <- (lo + hi) %/% 2L
-    if (boehl_end_of_spell_gap(mid, states_bind, shock_seq, specs, dr_slack) < 0)
+    g_mid <- gap(mid)
+    if (g_mid < 0) {
       lo <- mid
-    else
+    } else {
       hi <- mid
+      g_hi <- g_mid
+    }
   }
-
-  list(
-    k_star      = hi,
-    states_bind = states_bind,
-    gap_at_kstar = boehl_end_of_spell_gap(hi, states_bind, shock_seq, specs, dr_slack)
-  )
+  list(k_star = hi, gap_at_kstar = g_hi, n_bisect = n_bisect)
 }
 
 
@@ -300,53 +204,71 @@ boehl_find_spell_duration <- function(shock_seq, pol_bind, specs, dr_slack,
 # Main solver (iterative path + spell-duration fast path)
 # =============================================================================
 
-#' Boehl (2022) OBC simulation solver
+#' Boehl (2022) / OccBin OBC path solver
 #'
-#' Finds the binding/slack regime path for a given deterministic shock sequence.
+#' Finds the binding/slack regime path and the piecewise-linear path for a
+#' deterministic shock sequence.  A regime path is simulated with the
+#' time-varying rules of the OccBin backward recursion (the rule of a period
+#' depends on the regimes ahead of it) and accepted when it reproduces itself
+#' on the constrained path: every slack period satisfies every bound and
+#' every binding period has a multiplier of the right sign (the residual F =
+#' lhs - rhs of the constraint's tagged equation, F >= 0 at a lower bound, F
+#' <= 0 at an upper bound, as in Dynare's MCP convention and
+#' \code{\link{pf_newton_solve}}).
+#'
+#' Shocks are surprises: at period 1 and at every period with a non-zero
+#' shock the regime path expected from then on is re-solved from the current
+#' state (Dynare's \code{occbin_solver}).  With a single shock in period 1
+#' the result is the exact perfect-foresight piecewise-linear path (slack
+#' after the horizon \code{ncol(shock_seq)}).
+#'
 #' Two dispatch paths:
 #'
-#' \strong{single_spell = FALSE} (default): iterative complementarity path.
-#'   At each iteration the model is forward-simulated, the slack-policy
-#'   prediction at every period determines which constraints bind, and the
-#'   regime path is updated.  Repeats until the path stabilises.  Handles
-#'   multi-spell, staggered, and multi-constraint scenarios.
+#' \strong{single_spell = FALSE} (default): OccBin guess-and-verify.  Starting
+#'   from \code{regime_path_init} (all slack by default), every period is
+#'   re-checked on the constrained path and the regime path updated until it
+#'   reproduces itself.  Handles multi-spell, staggered and interacting
+#'   constraints (a bound violated only because another one binds).
 #'
 #' \strong{single_spell = TRUE}: spell-duration root-finder (Boehl 2022 §3).
 #'   Parameterises the regime path as a single contiguous block [1, k_star]
-#'   followed by permanent slack.  Pre-computes the full binding-regime state
-#'   trajectory in one pass, then bisects for k_star in O(log T) steps.
-#'   Cost: O(T + log T) vs O(n_iter × T) for the iterative path.
-#'   Assumption: the shock hits at t=1 and the constraint relaxes
-#'   monotonically — the standard IRF convention.  Intended for single-spell
-#'   ZLB / ELB IRF analysis.  spell_regime controls which constraint bitfield
-#'   is active during the binding block (default: all specs simultaneously).
+#'   of \code{spell_regime} followed by permanent slack and bisects for
+#'   k_star.  Intended for single-spell ZLB / ELB IRFs; \code{converged} is
+#'   FALSE when the resulting path is not an equilibrium.
 #'
 #' @param shock_seq        n_exo x T numeric matrix of structural shocks
 #' @param dr_slack         Slack-regime DecisionRules (from solve_perturbation)
 #' @param sys              System matrices (from extract_system_matrices_fast)
 #' @param specs            OBC spec list (from obc_parse_tags / obc_collect_specs)
-#' @param obs_idx          Integer vector: observable positions in endo vector.
-#'                         NULL → all endo indices (safe for simulation-only use)
-#' @param single_spell     Logical: use the O(T + log T) spell-duration fast path
+#' @param obs_idx          Unused (kept for interface compatibility).
+#' @param single_spell     Logical: use the spell-duration fast path
 #'                         (default FALSE → iterative path)
 #' @param spell_regime     Integer bitfield active during the binding spell;
 #'                         used only when single_spell = TRUE.
 #'                         NULL → 2^n_spec - 1 (all specs bind simultaneously)
-#' @param max_iter         Maximum outer iterations for the iterative path (ignored
-#'                         when single_spell = TRUE; default 50L)
-#' @param tol              FB-norm tolerance; also used as the end-of-spell gap
-#'                         tolerance when single_spell = TRUE (default 1e-8)
-#' @param regime_path_init Integer vector (length T) for warm-starting the
+#' @param max_iter         Maximum guess-and-verify iterations per re-solve
+#'                         (ignored when single_spell = TRUE; default 50L)
+#' @param tol              Relative complementarity tolerance (default 1e-8):
+#'                         a bound is violated when the slack
+#'                         \eqn{s (x - b)} is below \eqn{-tol (|x| + |b|)}, a
+#'                         multiplier (the residual of the tagged equation)
+#'                         has the wrong sign when below -tol times the sum of
+#'                         the absolute terms of that residual.  Scale-free:
+#'                         rescaling the model's units leaves the regimes
+#'                         unchanged (an absolute tolerance before W78,
+#'                         2026-09).
+#' @param regime_path_init Integer vector (length T) warm start for the
 #'                         iterative path; ignored when single_spell = TRUE
-#' @param state_init       Numeric vector (length n_state) initial model state;
-#'                         NULL → zero initial state (standard IRF convention)
+#' @param state_init       Numeric vector (length n_state) initial model state
+#'                         (deviations); NULL → zero initial state
 #' @return Named list with:
 #'   $regime_path -- integer vector (length T): final bitfield regime per period
-#'   $paths       -- n_endo x T matrix of simulated endogenous variable paths
-#'   $fb_norm     -- scalar: FB residual norm (iterative) or end-of-spell gap
-#'                   magnitude (spell-duration)
+#'   $paths       -- n_endo x T matrix of simulated paths (deviations)
+#'   $fb_norm     -- scalar: Fischer-Burmeister residual norm of the returned
+#'                   path (zero to rounding at an equilibrium)
 #'   $converged   -- logical
-#'   $n_iter      -- integer: iterations (iterative) or bisection steps (spell)
+#'   $n_iter      -- integer: guess-and-verify iterations (the largest
+#'                   over the re-solves) or bisection steps (spell)
 #' @export
 boehl_solve_regime_path <- function(shock_seq, dr_slack, sys, specs,
                                      obs_idx          = NULL,
@@ -358,114 +280,48 @@ boehl_solve_regime_path <- function(shock_seq, dr_slack, sys, specs,
                                      state_init       = NULL) {
   n_T    <- ncol(shock_seq)
   n_spec <- length(specs)
-
-  if (is.null(obs_idx)) obs_idx <- seq_len(nrow(dr_slack$ghx))
-
-  # Lazy policy cache — always seed with the slack policy
-  regime_cache <- new.env(parent = emptyenv(), hash = TRUE)
-  obc_ensure_policy(0L, regime_cache, sys, dr_slack, specs, obs_idx)
+  ctx    <- .obc_pwl_context(sys, dr_slack, specs)
 
   # ------------------------------------------------------------------
   # FAST PATH: spell-duration root-finder (Boehl 2022 §3)
   # ------------------------------------------------------------------
   if (single_spell) {
-    # Determine which regime bitfield is active during the binding spell.
-    # Default: all n_spec specs bind simultaneously = 2^n_spec - 1.
     if (is.null(spell_regime))
       spell_regime <- 2L^n_spec - 1L
+    spell_regime <- as.integer(spell_regime)
 
-    # Build the binding policy for spell_regime (lazy)
-    obc_ensure_policy(as.integer(spell_regime), regime_cache,
-                      sys, dr_slack, specs, obs_idx)
-    pol_bind <- get(as.character(spell_regime), envir = regime_cache,
-                    inherits = FALSE)
-
-    # Find k_star via bisection
-    spell <- boehl_find_spell_duration(shock_seq, pol_bind, specs, dr_slack,
+    spell  <- boehl_find_spell_duration(shock_seq, ctx, spell_regime,
                                         state_init = state_init)
     k_star <- spell$k_star
+    regime_path <- c(rep(spell_regime, k_star), integer(n_T - k_star))
 
-    # Construct regime path: binding for periods 1..k_star, slack thereafter
-    regime_path <- c(rep(as.integer(spell_regime), k_star),
-                     integer(n_T - k_star))
-
-    # Forward simulate under this regime path
-    sim <- boehl_simulate(shock_seq, dr_slack, regime_cache, regime_path,
-                          state_init = state_init)
+    rules <- .obc_pwl_rules(ctx, regime_path)
+    sim   <- .obc_pwl_forward(ctx, rules, shock_seq, state_init)
+    chk   <- .obc_pwl_check(ctx, rules, sim, shock_seq, regime_path,
+                            state_init, tol)
 
     return(list(
       regime_path = regime_path,
       paths       = sim$paths,
-      fb_norm     = abs(spell$gap_at_kstar),
-      converged   = spell$gap_at_kstar >= -tol,
-      n_iter      = ceiling(log2(max(n_T, 1L)))  # bisection steps taken
+      fb_norm     = sqrt(sum(chk$phi^2)),
+      converged   = identical(chk$regime_path, regime_path),
+      n_iter      = spell$n_bisect
     ))
   }
 
   # ------------------------------------------------------------------
-  # ITERATIVE PATH: complementarity iteration
+  # ITERATIVE PATH: OccBin guess-and-verify, re-solved at each surprise
   # ------------------------------------------------------------------
-  regime_path <- if (!is.null(regime_path_init) &&
-                     length(regime_path_init) == n_T)
-                   as.integer(regime_path_init)
-                 else integer(n_T)
-
-  for (r in unique(regime_path[regime_path != 0L])) {
-    if (!exists(as.character(r), envir = regime_cache, inherits = FALSE))
-      obc_ensure_policy(r, regime_cache, sys, dr_slack, specs, obs_idx)
-  }
-
-  n_state <- length(dr_slack$state_idx)
-  sim     <- NULL
-
-  for (iter in seq_len(max_iter)) {
-    sim <- boehl_simulate(shock_seq, dr_slack, regime_cache, regime_path,
-                          state_init = state_init)
-
-    new_regime <- integer(n_T)
-    s_prev     <- if (!is.null(state_init) && length(state_init) == n_state)
-                    as.numeric(state_init)
-                  else numeric(n_state)
-
-    for (t in seq_len(n_T)) {
-      eps <- shock_seq[, t]
-      bind_flags <- vapply(specs, function(s) {
-        x_slack <- sum(dr_slack$ghx[s$var_idx, ] * s_prev) +
-                   sum(dr_slack$ghu[s$var_idx, ] * eps)
-        if (s$op == ">") x_slack < s$bound else x_slack > s$bound
-      }, logical(1))
-      new_regime[t] <- obc_regime_idx(bind_flags)
-      s_prev        <- sim$states[, t]
-    }
-
-    for (r in unique(new_regime[new_regime != 0L])) {
-      if (!exists(as.character(r), envir = regime_cache, inherits = FALSE))
-        obc_ensure_policy(r, regime_cache, sys, dr_slack, specs, obs_idx)
-    }
-
-    if (identical(new_regime, regime_path)) {
-      phi     <- boehl_fb_residual(sim$states, shock_seq, sim$paths, specs, dr_slack)
-      fb_norm <- sqrt(sum(phi^2))
-      return(list(
-        regime_path = regime_path,
-        paths       = sim$paths,
-        fb_norm     = fb_norm,
-        converged   = TRUE,
-        n_iter      = iter
-      ))
-    }
-
-    regime_path <- new_regime
-  }
-
-  phi     <- boehl_fb_residual(sim$states, shock_seq, sim$paths, specs, dr_slack)
-  fb_norm <- sqrt(sum(phi^2))
+  inner <- function(ctx, e, s, ini)
+    .obc_pwl_solve(ctx, e, s, ini, max_iter = max_iter, tol = tol)
+  res <- .obc_pwl_solve_surprise(ctx, shock_seq, state_init,
+                                 regime_path_init, inner)
   list(
-    regime_path = regime_path,
-    paths       = sim$paths,
-    fb_norm     = fb_norm,
-    converged   = FALSE,
-    n_iter      = max_iter
+    regime_path = res$regime_path,
+    paths       = res$paths,
+    fb_norm     = sqrt(sum(res$phi^2)),
+    converged   = res$converged,
+    n_iter      = res$n_iter
   )
 }
 
@@ -485,15 +341,14 @@ boehl_solve_regime_path <- function(shock_seq, dr_slack, sys, specs,
 #' Four solver options:
 #' \describe{
 #'   \item{\code{"boehl"}}{Spell-duration fast path (single_spell = TRUE).
-#'     O(T + log T) cost per shock.  Valid when the binding spell is a single
-#'     contiguous block starting at t=1 — the standard IRF assumption.}
-#'   \item{\code{"occbin"}}{Iterative complementarity solver (single_spell = FALSE).
-#'     O(n_iter × T) cost per shock.  Handles multi-spell, multi-constraint,
-#'     and escape-and-rebind scenarios.}
-#'   \item{\code{"lcp"}}{LCP-Newton solver (solve_obc_lcp).
-#'     Builds a T*n_spec × T*n_spec finite-difference Jacobian and takes Newton
-#'     steps on the stacked FB system.  Handles multi-spell and coupled-regime
-#'     scenarios where the iterative path may cycle.}
+#'     Bisection over the spell length.  Valid when the binding spell is a
+#'     single contiguous block starting at t=1; \code{converged} is FALSE
+#'     otherwise.}
+#'   \item{\code{"occbin"}}{OccBin guess-and-verify (single_spell = FALSE).
+#'     Handles multi-spell, multi-constraint, and escape-and-rebind
+#'     scenarios.}
+#'   \item{\code{"lcp"}}{LCP solver (\code{\link{solve_obc_lcp}}, Lemke on
+#'     the stacked multiplier LCP).  Same equilibrium as \code{"occbin"}.}
 #'   \item{\code{"mcp"}}{MCP semi-smooth Newton solver (\code{\link{mcp_solve_path}}).
 #'     Uses the Fischer-Burmeister FB reformulation on the full nonlinear model.
 #'     Works for both linear and nonlinear models.  On linear models, matches

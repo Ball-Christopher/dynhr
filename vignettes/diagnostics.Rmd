@@ -31,20 +31,20 @@ across the stages of the workflow:
 | Pre-flight | D0 (static equation-system rank) | Before solving |
 | Pre-estimation | D1–D4, D19–D26, D37, Expectations | Before drawing from the posterior |
 | MCMC quality | D5–D7 | After sampling |
-| Post-estimation fit | D8–D18, D41 | After sampling |
+| Post-estimation fit | D8–D18, D40, D41 | After sampling |
 | OBC identification | D27, D31–D32 | After OBC model setup |
 | Regime-switching | D28 | After Markov-switching specification |
-| Data-driven constraints | D29 | When external data moments are available |
+| Data-driven constraints | D29 (INFO) | Stock–Wright S test of data vs model moments, with the model-implied moment covariance; identification *strength* is D20's job, not D29's |
 | Arbitrary-precision | D30 | For high-precision rank validation |
 | Deep-parameter checks | D33–D36 | When deep primitives carry reduced-form images |
-| Standalone (not orchestrated) | D38–D40 | Ad-hoc curvature / stability investigation |
+| Standalone (not orchestrated) | D38, D39 | Ad-hoc curvature / stability investigation |
 | Model comparison | Bayes factor, parent comparison | When comparing two models |
 
 The stages added after the original D1–D30 core:
 
 | # | Reached via | What it checks |
 |---|-------------|----------------|
-| D0 | `run_diagnostics(model = )` | Static equation-system rank — a redundant-equation pre-flight, before the model is ever solved |
+| D0 | `run_diagnostics(model = )` | Static equation-system rank — a redundant-equation pre-flight, before the model is ever solved.  Since 0.9.4 the two failure modes are separated (Dynare's `model_diagnostics.m` logic): a **unit root** in the static system, found by an eigenvalue test, is a legitimate model property and badges **WARN**; a genuinely **redundant equation** is a **FAIL**. |
 | D31 | `run_diagnostics(obc_specs = )` | OBC scenario comparison: perfect-foresight paths with and without the constraint imposed |
 | D32 | `run_diagnostics(obc_specs = )` | OBC binding summary: when, and for how long, each constraint bound |
 | D33 | `run_diagnostics(model = )` | Structural-vs-reduced-form gap ("borrowed identification") for each deep primitive that declares a `@dynhr:deep` reduced-form image |
@@ -52,15 +52,16 @@ The stages added after the original D1–D30 core:
 | D35 | `run_diagnostics(loglik_contrib_fn = , theta_mode = )` | Misspecification softness via the sandwich / information-matrix equality |
 | D36 | `run_diagnostics(loglik_full_fn = , params = )` | Calibration deepness: is each *fixed* deep parameter data-consistent? |
 | D37 | `run_diagnostics(abcd_solve_fn = )` | Dynamic identification rank condition (Komunjer & Ng 2011), with a minimal-realisation pre-check |
-| D38 | `diag_sloppiness()` | Posterior-curvature sloppiness spectrum (Gutenkunst et al. 2007) — eigenvalues of the negative log-posterior Hessian |
-| D39 | `diag_stability_map()` | Blanchard–Kahn feasibility mapping over prior draws (Ratto 2008 Monte-Carlo filtering) |
-| D40 | `diag_near_unit_root()` | Near-unit-root proximity and eigenvalue-sensitivity attribution |
-| D41 | `kf_innovation_diagnostics()`, or `run_diagnostics()` when `dr`, `data` and `obs_names` are all supplied | Kalman-innovation whiteness: per-observable variance and first-autocorrelation z-statistics, plus a joint portmanteau summary |
+| D38 | `diag_sloppiness()` | Posterior-curvature sloppiness spectrum — eigenvalues of the negative log-posterior Hessian, read against Gutenkunst et al.'s (2007) 6-decade "sloppy" convention.  Needs an **analytic** Hessian: a finite-difference Hessian's own noise floor sits well inside six decades, so the smallest eigenvalues would be measuring the differencing step, not the model. |
+| D39 | `diag_stability_map()` | Blanchard–Kahn feasibility mapping over prior draws (Ratto 2008 Monte-Carlo filtering).  Standalone: it samples the prior and re-solves, so it is a deliberate, expensive exercise rather than part of every run. |
+| D40 | `diag_near_unit_root()`, and — new in 0.9.4 — wired into `run_diagnostics()` whenever `dr` (and `n_obs`) are available | Near-unit-root proximity and eigenvalue-sensitivity attribution.  A **near**-unit root is a legitimate modelling choice, not an error, so it badges **WARN**; a root **at or outside** the unit circle is a **FAIL**.  The `halflife_frac = 0.25` threshold (a root counts as near-unit when its half-life exceeds a quarter of the sample) is a **package choice** with no literature source. |
+| D41 | `kf_innovation_diagnostics()`, or `run_diagnostics()` when `dr`, `data` and `obs_names` are all supplied | Kalman-innovation whiteness: per-observable z-statistics for the **mean** (null 0), the **variance** (null 1, kurtosis-robust sd `sqrt((kappa − 1)/T)` since 0.9.4 — the Gaussian `sqrt(2/T)` over-rejects badly on fat-tailed innovations, by a factor of 2 at `kappa = 9`) and the **lag-1 autocorrelation** (null 0).  Harvey's / Durbin–Koopman's H(h) heteroskedasticity test — a different null, variance *drift* across the sample — is **not** implemented, so a variance that is right on average but drifts will still pass. |
 
-`run_diagnostics()` wires D0–D37 and D41 and skips any stage whose inputs are
-absent.  D38, D39 and D40 are exported as standalone functions instead — they
+`run_diagnostics()` wires D0–D37, D40 and D41 and skips any stage whose inputs
+are absent.  D38 and D39 are exported as standalone functions instead — they
 need only a model plus a parameter vector, so they are useful long before there
-is a posterior to orchestrate around.
+is a posterior to orchestrate around, and both are expensive enough that
+running them on every suite pass would not pay.
 
 Every diagnostic returns a `dynhr_diagnostic` object with a standardised
 shape:
@@ -68,11 +69,23 @@ shape:
 ```r
 list(
   pass    = TRUE / FALSE / NA,   # NA means "informational only"
+  warn    = TRUE / FALSE,        # 0.9.4: PASS but worth a look
   summary = "text description",
   result  = <diagnostic-specific data>,
   plots   = list(...)            # ggplot2 objects, if any
 )
 ```
+
+There are now **four** badge levels, not three:
+
+| Badge | Fields | Meaning |
+|-------|--------|---------|
+| **PASS** | `pass = TRUE`, `warn = FALSE` | The check is satisfied. |
+| **WARN** | `pass = TRUE`, `warn = TRUE` | Satisfied, but with a caveat a reader should see — a modelling choice that is legitimate yet consequential (a near-unit root, a rare regime, an elasticity past tolerance). WARN never blocks; it is a PASS that says "look here". |
+| **FAIL** | `pass = FALSE` | The check is violated. |
+| **INFO** | `pass = NA` | Not evaluated, or reported without a pass/fail line. |
+
+The report, passport and LLM summaries all render WARN distinctly from PASS.
 
 `run_diagnostics()` runs all of them conditionally — skipping those whose
 required inputs are absent — and returns a named list of class
@@ -96,7 +109,7 @@ diags <- run_diagnostics(
   draws            = chains$chain,
   chains_list      = list(chains$chain),   # for Gelman-Rubin
   irf              = irfs,
-  vd               = moms$variance_decomposition,
+  vd               = moms$var_decomp,
   hd               = hd,           # from historical_decomposition()
   shocks           = shocks,       # smoothed shocks
   obs_names        = colnames(Y),
@@ -116,7 +129,7 @@ print(diags)
 ```
 
 The console output shows one line per diagnostic with a `[PASS]`,
-`[FAIL]`, or `[INFO]` badge plus a truncated summary.
+`[WARN]`, `[FAIL]` or `[INFO]` badge plus a truncated summary.
 
 ---
 
@@ -194,16 +207,16 @@ Add expectations to any `.mod` file:
 // @dynhr:end
 ```
 
-Run it directly:
+Run it directly. The shipped `rbc.mod` declares two `param_range`
+expectations (on `rho_a` and `sigma_a`):
 
 ```{r expectations-direct, eval = TRUE, purl = FALSE}
 library(dynhr)
-mod_path <- system.file("extdata", "models", "nk_demo.mod", package = "dynhr")
-model_nk <- parse_mod(mod_path, verbose = FALSE)
+mod_path  <- system.file("extdata", "models", "rbc.mod", package = "dynhr")
+model_rbc <- parse_mod(mod_path, verbose = FALSE)
 
-# Check param_range expectations with calibrated values
-theta_calib <- c(rho_R = 0.85, rho_g = 0.70, rho_z = 0.65)
-exp_result  <- diag_expectations(model_nk, params = theta_calib)
+# Check the param_range expectations at the calibrated values
+exp_result <- diag_expectations(model_rbc, params = model_rbc$param_values)
 cat(exp_result$summary, "\n")
 ```
 
@@ -217,17 +230,29 @@ cat(exp_result$summary, "\n")
 cat(diags$d5$summary)
 ```
 
-Computes the Gelman–Rubin potential scale reduction factor (R̂) and
-effective sample size (ESS) for each parameter.  The diagnostic
-**passes** when `max(R̂) < 1.05` and `min(ESS) > 100`.
+Computes the rank-normalised split-R̂ and the bulk and tail effective sample
+sizes for each parameter.  Since 0.9.4 the thresholds follow Vehtari et al.
+(2021):
+
+| Statistic | Threshold | Badge |
+|-----------|-----------|-------|
+| R̂ | > 1.01 | **WARN** |
+| R̂ | ≥ 1.05 | **FAIL** |
+| bulk **or** tail ESS | < 100 × `max(n_chains, 2)` | **WARN** |
+
+R̂ > 1.01 is the modern bar — the old 1.1 (and even 1.05) rule is now known to
+pass visibly non-converged chains.  Vehtari et al. require **both** the bulk
+and the tail ESS to exceed the threshold, so the ESS rule fires when
+**either** one is short: a healthy bulk ESS says nothing about the tails, which
+is where the quantiles and credible-interval endpoints come from (a single
+chain is split in half, so the one-chain threshold is 200).  It has no FAIL
+tier: a short ESS means the Monte Carlo error is large, which is a reason to
+run longer, not evidence that the chain is wrong.  The flat `min(ESS) > 100`
+rule that ignored the chain count is gone.
 
 Plots (if `ggplot2` is installed):
 - Trace plots for each parameter
 - R̂ bar chart
-
-**Rule of thumb:**
-- R̂ > 1.1: chain mixing is poor — increase draws or run more warmup
-- ESS < 50: proposal scale is too large or the posterior is highly correlated
 
 ### D6 — Posterior vs prior
 
@@ -249,7 +274,8 @@ comparison.
 cat(diags$d7$summary)
 ```
 
-If `find_mode()` was run with `n_starts > 1`, D7 checks whether all
+If `run_mode_finding()` was run with `n_starts > 1` (its multi-start
+result passed as `mode_multistart`), D7 checks whether all
 starting points converged to the same mode.  Dispersion in modal log-posterior
 values greater than 2 natural-log units suggests a multimodal posterior.
 
@@ -263,18 +289,27 @@ values greater than 2 natural-log units suggests a multimodal posterior.
 cat(diags$d8$summary)
 ```
 
-Checks that each IRF benchmark declared in the `@dynhr:benchmarks`
-block of the `.mod` file is met.  For example:
+Checks the model's impulse responses against stylised benchmarks passed as
+the `benchmarks =` argument (a named list of specifications — the
+`@dynhr:benchmarks` metadata block is *not* read by D8).  Each benchmark
+names a `shock` (a vector of candidate names; the first present in the IRF
+collection is used), a target `variable`, and an expected `direction`.
 
-```
-// @dynhr:benchmarks
-// mp_output: shock="eps_R", variable="y", horizon=4, sign="negative",
-//            description="Monetary contraction depresses output"
-// @dynhr:end
-```
+Since 0.9.4 **the shipped defaults are sign-only over horizons 1–8**:
+`peak_horizon` and `peak_range` are `NULL`.  Peak *timing* is an estimated
+output of a model, not an a priori restriction — the familiar CEE (2005)
+4–8 quarter output trough is produced by habit formation, investment
+adjustment costs and price indexation, and a frictionless three-equation NK
+model peaks on impact without being misspecified.  Magnitude ranges are opt-in
+too: responses are to a one-standard-deviation shock in the model's own units,
+so no fixed default range is commensurable.  Pass
+`benchmarks = dynhr:::d8_hump_benchmarks()` to restore the pre-0.9.4 timing
+windows for a model that *does* have those frictions.
 
-Returns **PASS** when all declared benchmarks are satisfied; lists the
-failing ones otherwise.
+A wrong sign (or a non-finite IRF) is a **FAIL**; a correct sign with peak
+magnitude or timing outside an explicitly supplied range is a **FLAG**.  The
+gate is `n_fail == 0` and `n_flag <= 25%` of the benchmarks actually checked;
+it is `NA` (INFO) when no benchmark matched the IRF's shocks and variables.
 
 ### D9 — Moment matching
 
@@ -282,11 +317,30 @@ failing ones otherwise.
 cat(diags$d9$summary)
 ```
 
-Compares theoretical moments (standard deviations, cross-correlations,
-autocorrelations) from the model at the posterior mode against empirical
-moments from the data.  Reports the ratio of model SD to data SD for
-each observable — ratios outside [0.5, 2.0] flag a systematic fit
-problem.
+Compares theoretical moments from the model at the evaluation point against
+sample moments from the data.  Only the **standard deviations** carry the
+badge: it PASSes when at least 70% of the observables with a finite model/data
+SD ratio have that ratio in [0.5, 2].  Autocorrelations and cross-correlations
+are reported alongside but are informational.
+
+Two 0.9.4 refinements:
+
+* **Measurement error is added to the model SD.**  The data SD is the SD of
+  what was observed, `y = y* + u`, so the like-for-like model quantity is
+  `sqrt(Var(y*) + Var(u))`.  `compute_moments()` returns the state-space SD
+  only, so until 0.9.4 every ratio was biased down — most for the observables
+  carrying the most ME.  The posterior path passes the estimation's ME
+  variances automatically; supply them by hand with `me_var =`.  `sd_table`
+  reports both `model_sd` (with ME) and `model_sd_state` (without).
+* **A posterior-predictive band (INFO).**  When posterior draws and a
+  re-solve/simulate closure are available, D9 also reports a 90% interval of
+  the SD of a `T`-length path simulated at posterior draws, and whether the
+  observed data SD falls inside it — Faust & Gupta (2012) / Herbst &
+  Schorfheide (2016, ch. 6).  That interval carries both parameter uncertainty
+  and finite-sample sampling variation, which the factor-of-2 rule ignores.
+  It is deliberately *not* an analytic Bartlett band: macro series are short
+  and persistent, exactly where asymptotic SEs for SDs are least reliable.
+  The band never moves the badge.
 
 ### D10 — Variance decomposition
 
@@ -340,21 +394,37 @@ realtime_decomposition(model, dr, data = Y, obs_vars = obs,
 cat(diags$d12$summary)
 ```
 
-Checks distributional properties of smoothed shocks: are they roughly
-serially uncorrelated (Ljung–Box test) and normally distributed
-(Shapiro–Wilk test)?  Persistent or fat-tailed shocks suggest model
-misspecification.
+Standardises the smoothed shocks by their own per-period smoother SD (the
+law-of-total-variance shrinkage `Sigma_e - Var(eps|Y)`, Durbin & Koopman 2012
+sec. 4.5) and gates, Bonferroni-corrected, on four tests: **mean = 0** and
+**variance = 1** (Newey–West t-tests), **normality** (Jarque–Bera) and an
+**outlier count** against Binomial(T, 2Φ(−thr)).
+
+**Ljung–Box is computed and reported but deliberately NOT gated.**
+Standardised smoothed disturbances are Harvey & Koopman's (1992) *auxiliary
+residuals*, and that paper's central caveat is that they are serially
+correlated even under a correctly specified model with known parameters — the
+smoother's shrinkage induces it.  In a 3-shock/1-observable toy model the test
+rejects 64–98% of the time at a nominal 5%.  That is a structural property,
+not a finite-sample size distortion, so recalibrating the null would not fix
+it.  Test serial correlation on the one-step *innovations* instead — which is
+exactly what D41 does.
 
 ### D13 — Cross-equation restrictions
 
-D13 compares the DSGE-implied VAR coefficients (derived via Yule–Walker
-from the state-space representation) against an unrestricted OLS VAR on
-the same data.  The diagnostic reports the Frobenius norm of the
-difference between DSGE and OLS coefficient matrices and computes a
-Wald-type test p-value.  A low p-value suggests the model's
-cross-equation restrictions are rejected by the data.
+D13 compares the DSGE-implied VAR coefficients (derived via Yule–Walker from
+the state-space representation) against an unrestricted OLS VAR on the same
+data.  It reports the Frobenius norm of the difference between the DSGE and
+OLS coefficient matrices and a Wald test of the restrictions.  A low p-value
+says the data reject the model's cross-equation restrictions.
 
-**Inputs required:** `dr`, `data`, `obs_names`.
+Since 0.9.4 the Wald statistic accepts `me_var`, the estimation's
+measurement-error variances (passed automatically on the posterior path): a
+DSGE-implied VAR compared against a VAR fitted to data that contain
+measurement error is not a like-for-like comparison, and omitting the ME
+inflates the rejection rate.
+
+**Inputs required:** `dr`, `data`, `obs_names` (plus `sigma_e` / `model`).
 
 ### D14 — Bayes factor model comparison
 
@@ -364,13 +434,20 @@ models_list <- list(
   baseline  = list(log_ml = chains_baseline$log_marginal_lik),
   augmented = list(log_ml = chains_augmented$log_marginal_lik)
 )
-d14 <- d14_bayes_factor(models_list)
+d14 <- dynhr:::d14_bayes_factor(models_list)
 cat(d14$summary)
 ```
 
-Computes log Bayes factors between all pairs in `models_list`.  SMC
-provides the log marginal likelihood `log p(Y | M)` directly; for RWMH
-chains, use the Harmonic Mean estimator (with caution).
+Computes log Bayes factors between all pairs in `models_list`.  SMC provides
+the log marginal likelihood `log p(Y | M)` directly; for RWMH chains, use the
+Harmonic Mean estimator (with caution).
+
+Each entry may carry an optional `log_marglik_se`, the standard error of its
+log marginal likelihood estimate.  When the winner's lead over the runner-up
+is **within 2 SE**, D14 reports **INFO** instead of declaring a winner: a
+log-ML estimate from SMC or a bridge sampler has real Monte Carlo error, and a
+Bayes factor inside it is noise, not evidence.  The Kass–Raftery
+interpretation bands below are unchanged.
 
 | log₁₀ BF | Interpretation |
 |----------|----------------|
@@ -381,11 +458,29 @@ chains, use the Harmonic Mean estimator (with caution).
 
 ### D15 — DSGE-VAR tightness
 
-D15 searches over a grid of hyperparameter λ (the tightness of the
-model prior relative to the unrestricted VAR) and computes the optimal
-λ* that maximises the log marginal likelihood.  Returns the optimal
-tightness, marginal likelihoods across the grid, and a comparison of
-DSGE-VAR coefficients vs the unrestricted OLS VAR.
+D15 searches over a grid of the hyperparameter λ (the tightness of the DSGE
+prior relative to the unrestricted VAR, in Del Negro & Schorfheide 2004 units:
+λ·T dummy observations) and reports the λ\* that maximises the exact log
+marginal likelihood, the marginal likelihood across the grid, and a comparison
+of the DSGE-VAR coefficients against the unrestricted OLS VAR.  Values below
+`lambda_min = (k + n)/T` are improper and are dropped.
+
+Two 0.9.4 changes:
+
+* **λ = Inf is a first-class grid point** and is in the default grid.  There
+  the restrictions bind exactly and the DSGE-VAR collapses to the VAR(p)
+  *implied by* the DSGE state space (Φ\* = Γ\_XX⁻¹Γ\_XY with a zero intercept,
+  residual covariance Σ\_u\*), so the marginal likelihood is just that fixed
+  Gaussian VAR's own likelihood.  Del Negro, Schorfheide, Smets & Wouters
+  (2007) use it as the "DSGE" endpoint of the λ sweep, against `lambda_min` as
+  the unrestricted-VAR endpoint.
+* **The data are demeaned by the model steady state** (`demean =
+  "steady_state"`, the default).  DS04's dummy-observation prior pins the VAR
+  intercept at zero, so the implied unconditional mean *is* the DSGE steady
+  state; until 0.9.4 the orchestrator handed D15 raw level series against a
+  zero-centred prior.  **This differs from Dynare**, whose `prefilter` option
+  demeans with the *sample* mean; set `demean = "sample"` to reproduce a
+  Dynare DSGE-VAR workflow.
 
 **Inputs required:** `dr`, `data`, `obs_names`.
 
@@ -398,7 +493,7 @@ results_sub <- list(
   first_half  = chains$chain[1:n_mid, ],
   second_half = chains$chain[(n_mid+1):nrow(chains$chain), ]
 )
-d16 <- d16_subsample_stability(chains$chain, results_sub, param_names)
+d16 <- dynhr:::d16_subsample_stability(chains$chain, results_sub, param_names)
 cat(d16$summary)
 ```
 
@@ -409,7 +504,7 @@ one posterior standard deviation across subsamples.
 ### D17 — Narrative identification
 
 ```{r d17, purl = FALSE}
-d17 <- d17_narrative_identification(hd, shocks, episodes = model$metadata$narratives)
+d17 <- dynhr:::d17_narrative_identification(hd, shocks, episodes = model$metadata$narratives)
 cat(d17$summary)
 ```
 
@@ -427,8 +522,9 @@ D18 consumes `ramsey_result` when available (for example from
 - discounted unconditional welfare
 - welfare gap relative to steady state
 
-If no Ramsey output is provided, D18 remains informational and explains how to
-enable the welfare check.
+If no Ramsey output is provided, D18 stays **INFO** (`pass = NA`) and says how
+to enable the welfare check — it is never a FAIL for a model that simply has
+no Ramsey problem attached.
 
 ---
 
@@ -524,10 +620,15 @@ higher-order information versus first-order moments alone.
 cat(diags$d26$summary)
 ```
 
-Screens all calibrated (non-estimated) parameters for their influence on
-the model moments, using Morris one-at-a-time screening.  Parameters with
-high sensitivity should be closely scrutinised or moved to the estimated
-set; parameters with negligible sensitivity can be safely calibrated.
+Screens all calibrated (non-estimated) parameters for their influence on the
+model moments.  Parameters with high sensitivity should be scrutinised or
+moved to the estimated set; parameters with negligible sensitivity can be
+safely calibrated.
+
+Badging: an **elasticity past the tolerance** is a **WARN**, not a FAIL — a
+calibrated parameter the moments respond strongly to is a modelling decision
+worth flagging, not an error.  A FAIL is reserved for an actual loss of
+identification.
 
 ### D27 — OBC identification
 
@@ -537,8 +638,14 @@ cat(diags$d27$summary)
 
 Assesses identification across OBC slack and binding regimes.  Builds
 regime-specific Jacobians and computes per-regime identification strength.
-Parameters that are well identified in one regime but not another may
-require regime-specific priors or data splits.
+Parameters that are well identified in one regime but not another may require
+regime-specific priors or data splits.
+
+A **rare regime** — one whose ergodic frequency falls below the threshold, so
+the data carry little information about the parameters it identifies — badges
+**WARN**, not FAIL: a constraint that rarely binds is a property of the model
+and the sample, not a defect.  The 0.05 frequency threshold is a **package
+choice** with no literature source.
 
 **Inputs required:** `obc_specs` (a list of OBC specification objects).
 
@@ -559,11 +666,16 @@ assessment.
 cat(diags$d29$summary)
 ```
 
-Implements the Lanne & Luoto (2017) approach: compares model-implied
-identification constraints against data-driven constraints derived from
-a HAC (Newey–West) covariance matrix of the data moments.  Parameters
-that are identified by the data but constrained by the model (or vice
-versa) are flagged.
+Implements the Lanne & Luoto (2017) approach: a J-type S-test of the
+over-identifying restrictions, comparing the model-implied moments at θ
+against the sample moments.  Since 0.9.4 the weighting matrix Ω is the
+**model-implied** long-run moment covariance at θ (not a HAC estimate off the
+data), and the S-test is reported as **INFO** rather than gating a badge — its
+finite-sample calibration in a short DSGE sample does not support a pass/fail
+line — **`pass` is always `NA`** for D29, whatever the S statistic comes out
+at; read the statistic and its p-value, not a badge.  The per-parameter
+"strength" table that used to sit here has been dropped; use **D20**, which
+owns identification strength.
 
 ### D30 — Arbitrary-precision rank checks
 
@@ -572,8 +684,8 @@ cat(diags$d30$summary)
 ```
 
 Recomputes the SVD-based rank of the moment Jacobian at elevated
-precision using either the **Rmpfr** package (preferred) or **JuliaCall**
-(fallback).  Default precision is 128 bits (~38 decimal digits).  A rank
+precision using the **Rmpfr** package (`d30_backend = "auto"` or
+`"Rmpfr"`; `"base"` reports the double-precision baseline only).  Default precision is 128 bits (~38 decimal digits).  A rank
 that increases at high precision suggests near-rank deficiency that may
 be masked by floating-point rounding at standard double precision.
 
@@ -612,18 +724,22 @@ The OBC diagnostic section summarises binding episodes from a solved
 OBC path:
 
 ```{r obc, eval = FALSE, purl = FALSE}
-obc_diag <- d_obc_binding_summary(
-  regime_path      = occbin_result$regimes,
-  constraint_names = c("zlb"),
-  var_paths        = occbin_result$paths,
-  var_names        = model$var_names
+## occbin_result: a Boehl / OccBin solver result (bitfield regime_path,
+## n_endo x T paths); specs: the model's OBC specs (names, variables, bounds)
+obc_diag <- dynhr:::d32_obc_binding_summary(
+  regime_path = occbin_result$regime_path,
+  obc_specs   = specs,
+  var_paths   = occbin_result$paths,
+  var_names   = model$var_names
 )
-cat(obc_diag$summary)
+obc_diag$result$per_constraint   # frequency, spells, mean/max spell length
 ```
 
-This is informational (`[INFO]`) when called via `run_diagnostics()`
-without explicit OBC simulation data; pass OBC results directly for
-a full binding-episodes analysis.
+The regime path is a bitfield (bit `b-1` set means constraint `b` binds),
+so periods where several constraints bind count towards each of them. D32
+is always informational (`[INFO]`). Inside `run_diagnostics()` it has no
+simulated path, so it summarises the regime path of a one-standard-deviation
+impulse to the first shock.
 
 ---
 
@@ -678,12 +794,15 @@ are also supported via `format_llm_report()`.
 
 ## 7  Running individual diagnostics
 
-Every diagnostic is also callable directly for targeted inspection:
+Every diagnostic is also callable directly for targeted inspection. Apart
+from the exported helpers above (D19, D38-D41, `diag_*()`), the individual
+`dN_*()` functions are internal, so reach them with `dynhr:::`; their
+interfaces are less stable than `run_diagnostics()`:
 
 ```{r individual, purl = FALSE}
 # Run only D5 (convergence) and D8 (IRF plausibility)
-d5 <- d5_mcmc_convergence(chains$chain, param_names, chains_list = list(chains$chain))
-d8 <- d8_irf_plausibility(irfs)
+d5 <- dynhr:::d5_mcmc_convergence(chains$chain, param_names, chains_list = list(chains$chain))
+d8 <- dynhr:::d8_irf_plausibility(irfs)
 
 cat("D5:", d5$summary, "\n")
 cat("D8:", d8$summary, "\n")

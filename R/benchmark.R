@@ -233,6 +233,12 @@ dynhr_benchmark <- function(cores = NULL,
                             model = "sw2007",
                             seed = 20260730L,
                             progress = FALSE) {
+  ## Own the message epoch for this run: repeat-suppressed warnings
+  ## (`.dynhr_warn(once = TRUE)`) are keyed within it and re-arm for the
+  ## next run, and the close reports what it suppressed. A nested call
+  ## inherits this epoch rather than opening a second one.
+  .dynhr_run_epoch <- .dynhr_epoch("dynhr_benchmark")
+  on.exit(.dynhr_close_epoch(.dynhr_run_epoch), add = TRUE)
   if (!is.null(cores)) {
     if (!is.numeric(cores) || !length(cores) || any(!is.finite(cores)) ||
         any(cores < 1) || any(cores != as.integer(cores)))
@@ -255,15 +261,15 @@ dynhr_benchmark <- function(cores = NULL,
   model <- match.arg(model, "sw2007")
 
   sys <- dynhr_system_info()
-  message("dynhr_benchmark: building the ", model, " workload ...")
+  .dynhr_inform("dynhr_benchmark: building the ", model, " workload ...")
   p <- .bench_problem(model)
-  message(sprintf("  %d parameters, %d observables, %d periods; logpost = %.6f",
+  .dynhr_inform(sprintf("  %d parameters, %d observables, %d periods; logpost = %.6f",
                   p$n_par, p$n_obs, p$n_periods, p$logpost0))
 
   ## Pilot: a single serial chain, used ONLY to size n_draws. Timed separately
   ## from the sweep so its cost never enters a reported throughput.
   pilot_draws <- 300L
-  message("dynhr_benchmark: pilot (", pilot_draws, " serial draws) ...")
+  .dynhr_inform("dynhr_benchmark: pilot (", pilot_draws, " serial draws) ...")
   t0 <- proc.time()[["elapsed"]]
   pilot <- rwmh(p$log_post_fn, p$theta0, p$Sigma_prop,
                 n_draws = pilot_draws, n_burn = 0L, verbose = FALSE)
@@ -271,7 +277,7 @@ dynhr_benchmark <- function(cores = NULL,
   per_draw <- pilot_sec / pilot_draws
   if (is.null(n_draws))
     n_draws <- max(200L, as.integer(ceiling(seconds_per_setting / per_draw)))
-  message(sprintf("  %.3f ms/draw serial -> %d draws per chain (~%.0f s/setting)",
+  .dynhr_inform(sprintf("  %.3f ms/draw serial -> %d draws per chain (~%.0f s/setting)",
                   per_draw * 1000, n_draws, n_draws * per_draw))
 
   ## run_mcmc_mirai reports via cat(), not message(), so it needs capturing
@@ -312,12 +318,16 @@ dynhr_benchmark <- function(cores = NULL,
     ## draw count. Without it the sweep charges high-k settings for daemon
     ## startup and reports a scaling defect that is really a fixed cost.
     ov <- run_one(k, 25L)$sec
-    message(sprintf("dynhr_benchmark: %2d core(s) ...", k))
+    .dynhr_inform(sprintf("dynhr_benchmark: %2d core(s) ...", k))
     r <- run_one(k, n_draws)
     total <- as.numeric(k) * n_draws
-    acc <- tryCatch(mean(vapply(r$out$chain_stats,
-                                function(s) s$accept_rate %||% NA_real_, 0),
-                         na.rm = TRUE), error = function(e) NA_real_)
+    ## chain_stats is a data.frame (one row per chain); the old
+    ## vapply(chain_stats, function(s) s$accept_rate) iterated its COLUMNS, so
+    ## every call failed on `$` of an atomic vector and a catch-all handler
+    ## turned that into NA -- the acceptance rate was always reported as NA.
+    cs  <- r$out$chain_stats
+    acc <- if (is.data.frame(cs) && "accept_rate" %in% names(cs))
+      mean(cs$accept_rate, na.rm = TRUE) else NA_real_
     ## Overhead-adjusted throughput is reported ONLY when the sampling actually
     ## dominates the fixed pool cost. Dividing by a near-zero (or negative)
     ## `sec - ov` is not a sharper measurement, it is a divide-by-zero wearing a
@@ -365,7 +375,7 @@ dynhr_benchmark <- function(cores = NULL,
       us_per_draw = 1e6 * r$sec / total,
       chain_spread = spread,
       accept_rate = acc)
-    message(sprintf("    %.1f draws/s (%.1f adj), %.1f us/draw%s",
+    .dynhr_inform(sprintf("    %.1f draws/s (%.1f adj), %.1f us/draw%s",
                     res[[i]]$draws_per_sec, res[[i]]$draws_per_sec_adj,
                     res[[i]]$us_per_draw,
                     if (is.na(spread)) "" else
@@ -377,7 +387,7 @@ dynhr_benchmark <- function(cores = NULL,
   ## measurements and call the difference scaling.
   basis <- if (anyNA(out$draws_per_sec_adj)) "raw" else "adjusted"
   if (basis == "raw")
-    warning("dynhr_benchmark: pool overhead is not negligible at every core ",
+    .dynhr_warn("dynhr_benchmark: pool overhead is not negligible at every core ",
             "count, so speedup is computed from RAW throughput and is ",
             "pessimistic at high core counts. Raise `n_draws` or ",
             "`seconds_per_setting` for a clean scaling curve.", call. = FALSE)

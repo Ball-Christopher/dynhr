@@ -240,13 +240,13 @@ match_irfs <- function(model,
     ## Re-solve steady state (handles SS-block params) then perturbation.
     ss <- tryCatch(
       solve_steady_state(model, compiled, params, verbose = FALSE),
-      error = function(e) NULL)
+      error = function(e) .dynhr_reraise_bug(e, NULL))
     if (is.null(ss) || !isTRUE(ss$converged)) return(NULL)
 
     dr <- tryCatch(
       solve_perturbation(model, compiled, ss, params,
                          order = order, verbose = FALSE),
-      error = function(e) NULL)
+      error = function(e) .dynhr_reraise_bug(e, NULL))
     if (is.null(dr) || !isTRUE(dr$bk_satisfied)) return(NULL)
 
     ## Stationarity guard: Blanchard-Kahn only flags explosive *forward-
@@ -267,7 +267,7 @@ match_irfs <- function(model,
       } else {
         compute_irfs_order2(dr, model, n_periods = n_periods, params = params)
       }
-    }, error = function(e) NULL)
+    }, error = function(e) .dynhr_reraise_bug(e, NULL))
     if (is.null(irfs)) return(NULL)
 
     sh <- shock %||% names(irfs)[1L]
@@ -281,13 +281,13 @@ match_irfs <- function(model,
   obj <- function(theta) {
     g <- .model_irf(theta)
     if (is.null(g) || anyNA(g) || any(!is.finite(g))) {
-      if (verbose) cat(sprintf("  obj = %.6g  [penalty]\n", penalty))
+      if (verbose) .dynhr_cat(sprintf("  obj = %.6g  [penalty]\n", penalty))
       return(penalty)
     }
     d <- g - tgt
     val <- sum(W * d * d)
     if (!is.finite(val)) val <- penalty
-    if (verbose) cat(sprintf("  obj = %.6g\n", val))
+    if (verbose) .dynhr_cat(sprintf("  obj = %.6g\n", val))
     val
   }
 

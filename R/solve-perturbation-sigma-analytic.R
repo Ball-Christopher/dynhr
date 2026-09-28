@@ -92,9 +92,13 @@
   # Iterate only the SORTED (canonical) state/shock tuples: one mp() call per
   # distinct entry, vectorized matrix-index assignment over its permutations.
   # Bit-identical output (same values scattered to the same array cells).
-  st4 <- .sorted_multiindices(ns, 4L)
-  st3 <- .sorted_multiindices(ns, 3L)
-  st2 <- .sorted_multiindices(ns, 2L)
+  # A stateless model (ns = 0) has no mixed state-shock block at all; and
+  # .sorted_multiindices(0, m) is malformed (its `start:p` recursion counts
+  # DOWN 1:0), so it must not be called -- use empty index sets instead.
+  no_idx <- function(m) matrix(integer(0), 0L, m)
+  st4 <- if (ns > 0L) .sorted_multiindices(ns, 4L) else no_idx(4L)
+  st3 <- if (ns > 0L) .sorted_multiindices(ns, 3L) else no_idx(3L)
+  st2 <- if (ns > 0L) .sorted_multiindices(ns, 2L) else no_idx(2L)
   ut4 <- if (nu > 0L) .sorted_multiindices(nu, 4L) else NULL
   ut3 <- if (nu > 0L) .sorted_multiindices(nu, 3L) else NULL
   ut2 <- if (nu > 0L) .sorted_multiindices(nu, 2L) else NULL
@@ -306,8 +310,7 @@
                                   K, res_perm) {
   qa <- ns + nu + 1L; sig_A <- qa
   rp <- ns + 1L + nu                       # w-modes
-  sig_w <- ns + 1L                          # w: sigma
-  e_w   <- if (nu > 0L) (ns + 2L):(ns + 1L + nu) else integer(0)  # w: shocks
+  # w-modes: x (1..ns), sigma (ns+1), e (ns+2..rp; the t+1 shock, lead block only)
 
   GFULL_d  <- .build_GFULL_dense(dr, ns, nu, n, K)
 
@@ -346,8 +349,16 @@
   for (kc in seq_len(nrow(dcm))) {
     c  <- dcm$col[kc]; nm <- dcm$name[kc]; ll <- dcm$lead_lag[kc]
     if (nm %in% exo_names) {
-      l <- which(exo_names == nm)
-      if (length(l) == 1L) DY[[1L]][c, e_w[l]] <- 1
+      # The dynamic-residual shock columns hold the CURRENT shock u_t (the
+      # parser turns every exogenous lead/lag into an AUX endogenous, so
+      # lead_lag is always 0 here).  A sigma-correction term g_{x^k sigma^2m}
+      # is a derivative of the policy at u_t = 0: u_t is a policy ARGUMENT,
+      # not the random future shock.  The e w-modes are the t+1 shock, which
+      # enters ONLY through the lead block (GLEAD's shock-arguments), so the
+      # shock columns stay identically zero in every DY[[k]].  (Mapping them
+      # to e_w -- the pre-0.9.3.41 behaviour -- made u_t = sigma*eps_{t+1}
+      # and folded E[eps^2], E[eps^4] into every F_uu.. term: y = exp(e)
+      # got ghss2 = 3 s^4 although the policy has no sigma dependence.)
       next
     }
     j <- which(endo_names == nm); if (length(j) != 1L) next

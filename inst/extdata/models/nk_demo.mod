@@ -94,12 +94,12 @@ varobs ygr infl intr;
 
 estimated_params;
 // name,        distribution,  p1,    p2,    lower, upper
-  kappa,        beta_pdf,      0.10,  0.05,  0.001, 0.95;
-  phi_pi,       normal_pdf,    1.50,  0.25,  1.010, 4.00;
-  phi_y,        normal_pdf,    0.25,  0.10,  0.000, 2.00;
-  rho_r,        beta_pdf,      0.75,  0.10,  0.010, 0.99;
-  rho_g,        beta_pdf,      0.85,  0.08,  0.010, 0.99;
-  rho_u,        beta_pdf,      0.50,  0.15,  0.010, 0.99;
+  kappa, 0.10, 0.001, 0.95, beta_pdf, 0.10, 0.05;
+  phi_pi, 1.50, 1.010, 4.00, normal_pdf, 1.50, 0.25;
+  phi_y, 0.25, 0.000, 2.00, normal_pdf, 0.25, 0.10;
+  rho_r, 0.75, 0.010, 0.99, beta_pdf, 0.75, 0.10;
+  rho_g, 0.85, 0.010, 0.99, beta_pdf, 0.85, 0.08;
+  rho_u, 0.50, 0.010, 0.99, beta_pdf, 0.50, 0.15;
   stderr e_g,   inv_gamma_pdf, 0.30,  2.00;
   stderr e_u,   inv_gamma_pdf, 0.15,  2.00;
   stderr e_m,   inv_gamma_pdf, 0.20,  2.00;

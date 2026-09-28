@@ -32,6 +32,6 @@ back$sweep
 }
 \seealso{
 \code{\link{mcmc_chain_state}}, \code{\link{mcmc_chain_restore}},
-  \code{\link{mcmc_chain_extend}}, \code{\link{mcmc}} (whose
+  \code{\link{mcmc_chain_extend}}, \code{\link{dynhr_mcmc}} (whose
   \code{checkpoint_dir} / \code{resume} arguments use this contract)
 }

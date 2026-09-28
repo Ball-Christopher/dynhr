@@ -1,101 +1,190 @@
 ## R/pskf-smoother.R
 ## --------------------------------------------------------------------------
-## PSKF smoother: CSN backward pass on the CSN forward-pass moments.
-##
-## NOT exact-on-paper: the nu-shift backward update below keeps Gamma and
-## Delta fixed at their filtered values (the full GMTrede smoothed CSN
-## enlarges the skew dimension each backward step).  Measured residual vs
-## the dense-grid oracle: 4.7e-4 mean gap at alpha=2 (T=3, no pruning) —
-## ~10x tighter than the 4.7e-3 two-moment Gaussian-RTS gap, but a
-## first-order approximation, not the exact recursion.
+## PSKF smoother: exact CSN posterior moments from the CSN forward pass.
 ##
 ## Reference: Guljanov, Mutschler & Trede (2026), "Pruned Skewed Kalman Filter
 ##   and Smoother with Application to DSGE Models," JEDC Vol. 187 (Dynare WP
 ##   #78). Reference implementation: github.com/gguljanov/pruned-skewed-kalman.
 ##
-## IMPLEMENTATION (method = "csn"):
-##   Step 1 (forward): run .pskf_filter(store_path=TRUE) to store the full
-##     per-period CSN state distributions
-##     (mu_{t|t}, Sigma_{t|t}, Gamma_{t|t}, nu_{t|t}, Delta_{t|t})
-##     and predicted distributions (mu_{t+1|t}, Sigma_{t+1|t}, ...).
+## IMPLEMENTATION (method = "csn", W71 2026-09-26):
+##   Step 1 (forward): .pskf_filter(store_path = TRUE) stores the per-period
+##     filtered / predicted CSN parameters and, per period, which rows of the
+##     pre-prune skew stack survived dim_red4_r (keep_path).
+##   Step 2 (Gaussian part): standard RTS on (mu, Sigma) gives the moments
+##     (s_G, P_G) of x_t | Y_{1:T} with the skew truncations dropped.
+##   Step 3 (exact skew correction): every skew latent is a Gaussian variable
+##     truncated at nu; the filter's time-T CSN says the latents U_T it
+##     retains satisfy W = U_T - E[U_T | Y] >= nu_T with W ~ N(0, V_T).
+##     Therefore, for every t,
+##       E[x_t | Y]   = s_G,t + C_t g_T,   Var(x_t | Y) = P_G,t + C_t H_T C_t',
+##     C_t = Cov(x_t, U_T | Y) (Gaussian part), (g_T, H_T) the gradient and
+##     Hessian of log Phi_q(z; 0, V_T) at z = -nu_T. C_t is propagated by an
+##     RTS pass on the augmented state (x_t, U_t) -- see pskf_smoother().
+##   Exact given the filter's retained latents; when dim_red4_r prunes, the
+##   smoother inherits the pruned filter's approximation (measured in
+##   tests/testthat/test-fix-0926-pskf-exact-smoother.R).
 ##
-##   Step 2 (backward): Rauch-Tung-Striebel (RTS) backward pass.
-##     Gaussian part: standard RTS gives smoothed (mu_{t|T}, Sigma_{t|T}).
-##     CSN part: backward update of nu (Guljanov et al. 2026, Section 3.3):
-##       nu_{t|T} = nu_{t|t} - Gamma_{t|t} G_t (mu_{t+1|T} - mu_{t+1|t})
-##       Gamma_{t|T} = Gamma_{t|t}   (unchanged -- only nu shifts backward)
-##       Delta_{t|T} = Delta_{t|t}   (unchanged)
-##     Initialise at t=T: (Gamma_{T|T}, nu_{T|T}, Delta_{T|T}) from the filter.
+##   History: the pre-W71 backward pass shifted nu only (Gamma / Delta held
+##   at their filtered values) -- first-order, ignoring latents born after t;
+##   off an importance-sampled exact posterior by ~0.3 posterior sd at t < T
+##   on a 2-state / 2-shock fixture (W70). Its smoothed / filtered
+##   covariances were the Gaussian-part covariances; they are now the exact
+##   CSN posterior covariances.
 ##
-##   Step 3 (CSN mean correction): the true smoothed mean is
-##       E[x_{t|T}] = mu_{t|T} + Sigma_{t|T} Gamma_{t|T}' h
-##     where h is the q-dimensional normal hazard rate evaluated at -nu_{t|T}
-##     w.r.t. the smoothed CSN covariance D_{t|T} = Delta_{t|T} + Gamma_{t|T} Sigma_{t|T} Gamma_{t|T}'.
-##     The hazard rate h satisfies h_i = [D^{-1} phi_q(-nu; 0, D)]_i / Phi_q(-nu; 0, D).
-##     For q=1: h = phi(nu/sqrt(D)) / (sqrt(D) * Phi(-nu/sqrt(D))) (Mills ratio).
-##     For q>1: we use logcdf_ME_r (same as the filter) to compute Phi_q, and
-##              finite differences on nu to approximate h_i numerically.
-##
-##   When Gamma is all-zero (pure Gaussian), the hazard rate is zero and the CSN
-##   correction vanishes -- exact Gaussian RTS (method = "gaussian" also does this).
+##   When Gamma is all-zero (pure Gaussian), the correction vanishes -- exact
+##   Gaussian RTS (method = "gaussian" also does this).
 ##
 ## METHOD = "gaussian" (legacy):
-##   The v1 Option-B smoother: Gaussian RTS backward pass on the CSN
-##   forward-pass moments WITHOUT propagating or applying the CSN skewness
-##   correction. Exact at alpha=0; approximate at alpha != 0 (mean gap ~4.7e-3
-##   for alpha=2). Kept for backward compatibility and as a cheap baseline.
+##   Gaussian RTS backward pass on the CSN forward-pass moments WITHOUT the
+##   CSN skewness correction (means and covariances are the Gaussian part).
+##   Exact at alpha=0; approximate at alpha != 0 (mean gap ~4.7e-3 for
+##   alpha=2). Kept as a cheap baseline.
 ##
 ## Entry point: pskf_smoother()
 ## --------------------------------------------------------------------------
 
 
 ## ---------------------------------------------------------------------------
-## .csn_hazard_rate
+## .csn_logcdf_derivs / .csn_hazard_rate
 ##
-## Compute the q-dimensional normal hazard rate vector:
-##   h(-nu; 0, D) = D^{-1} phi_q(-nu; 0, D) / Phi_q(-nu; 0, D)
+## Analytic gradient (and optionally Hessian) of L(z) = log Phi_q(z; 0, V).
+## With phi_i the N(0, V_ii) density at z_i and Phi_{q-1}(i) the conditional
+## CDF of the other coordinates given coordinate i at z_i,
+##   dL/dz_i = phi_i(z_i) Phi_{q-1}(z_{-i} - V_{-i,i} z_i / V_ii;
+##                                   V_{-i,-i} - V_{-i,i} V_{i,-i} / V_ii) / Phi_q
+## (exact; for q = 2 the conditional CDF is a univariate pnorm). Second
+## derivatives of Phi_q: for i != j
+##   d2 Phi / dz_i dz_j = phi_2(z_i, z_j; V_{ij,ij}) Phi_{q-2}(conditional on i, j)
+## and, differentiating dPhi/dz_i through both its arguments,
+##   d2 Phi / dz_i^2 = -(z_i / V_ii) dPhi/dz_i
+##                     - sum_{k != i} (V_ki / V_ii) d2 Phi / dz_i dz_k,
+## so Hess L = (Hess Phi) / Phi - g g'. Every Phi_m is logcdf_ME_r(), the
+## filter's evaluator (exact pnorm / log-scale quadrature for m <= 2, the C++
+## lattice evaluator mvn_logcdf_cpp for 3 <= m <= miwa_qmax -- W75; Miwa(128)
+## / checked Miwa before -- Mendell-Elston beyond).
+## miwa_qmax defaults to 7 here
+## (the filter's likelihood path uses 5): these calls are made once per
+## period by the smoother, the C++ evaluator costs ~3 ms at dim 6 and
+## ~10 ms at dim 7 on PSKF calls (it raises the lattice size until the error
+## estimate meets max(1e-5, 1e-7 |log p|); Miwa(128) was ~12 ms at dim 7),
+## and
+## Mendell-Elston is badly wrong in the orthant tails that skewed posteriors
+## live in (a q = 6 unpruned fixture put ME-based smoothed means hundreds of
+## MCSE off an exact posterior).
 ##
-## This is the gradient of log Phi_q with respect to nu, evaluated at -nu.
-## For q = 1: exact via Mills ratio.
-## For q >= 2: numerical gradient via centered finite differences on nu,
-##   using logcdf_ME_r for Phi_q evaluation.  Step size h = 1e-5.
+## The former q >= 2 branch of .csn_hazard_rate was a central finite
+## difference with an ABSOLUTE step 1e-5 (its comment claimed the step
+## scaled with sqrt(D_ii)): at a latent scale sd(D_ii) ~ 1e-5 the step is one
+## sd and the "gradient" is garbage.
 ##
-## Returns: numeric(q) hazard rate vector.
+## Uses: the truncated-normal moments of W ~ N(0, V) conditioned on W >= nu
+## (the CSN latent representation) are E[W | .] = V g and
+## Var(W | .) = V + V H V, with g, H the gradient / Hessian at z = -nu.
+## Returns list(g = numeric(q), H = q x q matrix or NULL).
+#' @noRd
+.csn_logcdf_derivs <- function(z, V, hessian = FALSE, miwa_qmax = 7L) {
+  q <- length(z)
+  if (q == 0L)
+    return(list(g = numeric(0), H = if (hessian) matrix(0, 0L, 0L)))
+  V <- as.matrix(V)
+  z <- as.numeric(z)
+
+  if (q == 1L) {
+    s  <- sqrt(max(V[1L, 1L], .Machine$double.eps))
+    a  <- z / s
+    r  <- exp(dnorm(a, log = TRUE) - pnorm(a, log.p = TRUE))  # Mills: phi/Phi
+    g  <- r / s
+    H  <- if (hessian) matrix(-r * (a + r) / s^2, 1L, 1L)
+    return(list(g = g, H = H))
+  }
+
+  L0 <- logcdf_ME_r(z, V, miwa_qmax = miwa_qmax)
+  sd <- sqrt(diag(V))
+  g  <- numeric(q)
+  for (i in seq_len(q)) {
+    mi <- z[-i] - V[-i, i] / V[i, i] * z[i]
+    Si <- V[-i, -i, drop = FALSE] -
+          V[-i, i, drop = FALSE] %*% V[i, -i, drop = FALSE] / V[i, i]
+    Si <- 0.5 * (Si + t(Si))
+    g[i] <- exp(dnorm(z[i], 0, sd[i], log = TRUE) + logcdf_ME_r(mi, Si, miwa_qmax = miwa_qmax) - L0)
+  }
+  if (!hessian) return(list(g = g, H = NULL))
+
+  ## A = (Hess Phi) / Phi
+  A <- matrix(0, q, q)
+  for (i in seq_len(q - 1L)) {
+    for (j in (i + 1L):q) {
+      ij  <- c(i, j)
+      Vij <- V[ij, ij]
+      zij <- z[ij]
+      det_ij <- Vij[1L, 1L] * Vij[2L, 2L] - Vij[1L, 2L]^2
+      Vij_inv <- matrix(c(Vij[2L, 2L], -Vij[1L, 2L], -Vij[1L, 2L], Vij[1L, 1L]),
+                        2L, 2L) / det_ij
+      lphi2 <- -log(2 * pi) - 0.5 * log(det_ij) -
+               0.5 * sum(zij * (Vij_inv %*% zij))
+      if (q > 2L) {
+        B  <- V[-ij, ij, drop = FALSE] %*% Vij_inv
+        mc <- z[-ij] - as.numeric(B %*% zij)
+        Sc <- V[-ij, -ij, drop = FALSE] - B %*% V[ij, -ij, drop = FALSE]
+        Sc <- 0.5 * (Sc + t(Sc))
+        lc <- logcdf_ME_r(mc, Sc, miwa_qmax = miwa_qmax)
+      } else {
+        lc <- 0
+      }
+      A[i, j] <- A[j, i] <- exp(lphi2 + lc - L0)
+    }
+  }
+  for (i in seq_len(q)) {
+    A[i, i] <- -(z[i] / V[i, i]) * g[i] - sum(V[-i, i] / V[i, i] * A[i, -i])
+  }
+  H <- A - tcrossprod(g)
+  list(g = g, H = 0.5 * (H + t(H)))
+}
+
+## Hazard-rate vector h = d/dz log Phi_q(z; 0, D) at z = -nu (the CSN mean
+## offset of the latent is D h); kept as the entry point used by the
+## filtered/smoothed mean corrections.
 #' @noRd
 .csn_hazard_rate <- function(nu, D) {
-  q <- length(nu)
-  if (q == 0L) return(numeric(0))
+  .csn_logcdf_derivs(-as.numeric(nu), D)$g
+}
 
-  D <- as.matrix(D)
-  nu <- as.numeric(nu)
 
-  ## q = 1: exact Mills ratio
-  if (q == 1L) {
-    d_sd <- sqrt(max(D[1L, 1L], .Machine$double.eps))
-    z    <- -nu[1L] / d_sd             # standardised argument
-    lp   <- pnorm(z, log.p = TRUE)    # log Phi(-nu / sqrt(D))
-    lph  <- dnorm(z, log = TRUE) - log(d_sd)  # log phi(-nu; 0, D) = log N(-nu; 0, D)
-    ## h = phi / Phi  (both evaluated at -nu)
-    return(exp(lph - lp))
+## ---------------------------------------------------------------------------
+## .pskf_csn_derivs_checked
+##
+## (g, H) of log Phi_q(z; 0, D) at z = -nu (.csn_logcdf_derivs), refusing
+## non-finite values. The pre-W70 call sites wrapped the hazard in
+## tryCatch(error = function(e) rep(0, q)), which would have silently dropped
+## the whole skewness correction (returning the Gaussian-part mean) on any
+## failure. A non-finite hazard is an explicit classed error instead.
+#' @noRd
+.pskf_csn_derivs_checked <- function(nu, D, t, what) {
+  dv <- .csn_logcdf_derivs(-as.numeric(nu), D, hessian = TRUE)
+  if (!all(is.finite(dv$g)) || !all(is.finite(dv$H))) {
+    .dynhr_abort(
+      "pskf_smoother(): non-finite CSN hazard rate for the ", what,
+      " state at t = ", t, " (skew dimension q = ", length(nu), ").",
+      class = "dynhr_pskf_smoother_error")
   }
+  dv
+}
 
-  ## q >= 2: numerical gradient of log Phi_q(-nu; 0, D) w.r.t. nu_i
-  ## h_i = d/d(nu_i) log Phi_q(-nu; 0, D) = -d/d(x_i) log Phi_q(x; 0, D)|_{x=-nu}
-  ## Use centered finite difference with h = 1e-5 * sqrt(D_ii)
-  h_vec <- numeric(q)
-  lp0   <- logcdf_ME_r(-nu, D)   # log Phi_q(-nu; 0, D)
-
-  fd_step <- 1e-5
-  for (i in seq_len(q)) {
-    nu_p <- nu;  nu_p[i] <- nu_p[i] + fd_step
-    nu_m <- nu;  nu_m[i] <- nu_m[i] - fd_step
-    lp_p <- logcdf_ME_r(-nu_p, D)
-    lp_m <- logcdf_ME_r(-nu_m, D)
-    ## h_i = d/d(nu_i) log Phi_q(-nu; 0, D) = [lp_m - lp_p] / (2 * fd_step)
-    ## because d/d(nu_i) (-nu) = -1 => d/dnu lp = -d/dx lp evaluated at x=-nu
-    h_vec[i] <- (lp_m - lp_p) / (2 * fd_step)
-  }
-  h_vec
+## Exact mean / covariance offsets of x ~ CSN(mu, Sigma, Gamma, nu, Delta)
+## relative to its Gaussian part N(mu, Sigma): with D = Delta + Gamma Sigma
+## Gamma' and (g, H) the gradient / Hessian of log Phi_q(z; 0, D) at -nu,
+##   E[x] - mu = Sigma Gamma' g,   Var(x) - Sigma = Sigma Gamma' H Gamma Sigma.
+## NULL when q = 0 (no correction).
+#' @noRd
+.pskf_csn_moment_correction <- function(Sigma, Gamma, nu, Delta, t, what) {
+  if (nrow(Gamma) == 0L) return(NULL)
+  Sigma <- 0.5 * (Sigma + t(Sigma))
+  D  <- Delta + Gamma %*% Sigma %*% t(Gamma)
+  D  <- 0.5 * (D + t(D))
+  dv <- .pskf_csn_derivs_checked(nu, D, t, what)
+  SG <- Sigma %*% t(Gamma)
+  V  <- SG %*% dv$H %*% t(SG)
+  list(mean = as.numeric(SG %*% dv$g), cov = 0.5 * (V + t(V)))
 }
 
 
@@ -106,12 +195,9 @@
 ## pass to produce smoothed state estimates.
 ##
 ## Two methods:
-##   method = "csn"     -- CSN backward recursion (default); propagates the
-##                         CSN nu parameter backward (first-order: Gamma/Delta
-##                         held at filtered values) and applies the hazard-rate
-##                         mean correction. Reduces to Gaussian RTS at alpha=0
-##                         (exact, tolerance 1e-10); ~4.7e-4 mean gap vs the
-##                         grid oracle at alpha=2.
+##   method = "csn"     -- exact CSN posterior means AND covariances (given
+##                         the filter's retained skew latents; see the file
+##                         header). Reduces to Gaussian RTS at alpha=0.
 ##   method = "gaussian" -- Gaussian RTS backward pass only; no CSN skewness
 ##                         correction. Legacy v1 method; preserved for backward
 ##                         compatibility and as a cheap baseline.
@@ -136,10 +222,12 @@
 ##   method    "csn" (default) or "gaussian". See above.
 ##
 ## Returns: list(
-##   smoothed_means  T x n_state matrix of smoothed state means.
-##   smoothed_covs   n_state x n_state x T array of smoothed covariances.
-##   filtered_means  T x n_state matrix of filtered state means.
-##   filtered_covs   n_state x n_state x T array of filtered covariances.
+##   smoothed_means  T x n_state matrix of E[x_t | Y_{1:T}].
+##   smoothed_covs   n_state x n_state x T array of Var(x_t | Y_{1:T})
+##                   (method = "gaussian": the Gaussian-part covariances).
+##   filtered_means  T x n_state matrix of E[x_t | Y_{1:t}].
+##   filtered_covs   n_state x n_state x T array of Var(x_t | Y_{1:t})
+##                   (method = "gaussian": the Gaussian-part covariances).
 ##   loglik          scalar log p(y_{1:T}) from the PSKF forward pass.
 ## )
 ##
@@ -176,8 +264,34 @@ pskf_smoother <- function(Y, TT, ZZ, mu_eta, Sigma_eta, Gamma_eta, nu_eta,
     Sigma_eps = Sigma_eps,
     cut_tol   = cut_tol,
     max_q     = max_q,
+    ## pruning compensation with the deterministic Phi evaluator up to dim 7
+    ## (the pre-prune stack at the default max_q = 5 with two skew shocks;
+    ## dims 3-7: the C++ lattice evaluator, see logcdf_ME_r). The backward
+    ## pass carries the compensation (lambda_path) to earlier periods, where
+    ## the former likelihood-path ME evaluation (dim > 2) was measured up to
+    ## 2.4 posterior sd off (see .csn_mean_offset). Cost: ~3 ms at dim 6,
+    ## ~10 ms at dim 7 on PSKF calls -- hence the cap. When a connected Phi
+    ## block of dimension 6-7 occurs, the returned loglik can differ slightly
+    ## from .pskf_filter()'s default (offset_miwa_qmax = 5: ME there).
+    offset_miwa_qmax = 7L,
     store_path = TRUE
   )
+
+  ## An infeasible forward pass (non-stationary TT: no Lyapunov initial
+  ## covariance; or data with zero density under a degenerate innovation
+  ## covariance, e.g. a noise-free observable of a zero-variance state that
+  ## does not equal its prediction) returns ll = -Inf with a missing or
+  ## truncated path. There is no filtered distribution to smooth, so say so
+  ## rather than failing on a NULL path.
+  if (!is.finite(fwd$ll)) {
+    .dynhr_abort(
+      "pskf_smoother(): the PSKF forward pass is infeasible (loglik = -Inf): ",
+      "either TT has no stationary initial covariance, or the data have zero ",
+      "density under a singular innovation covariance ZZ Sigma_pred ZZ' + ",
+      "Sigma_eps (a linearly dependent / exactly predictable noise-free ",
+      "observable that the data contradict).",
+      class = "dynhr_pskf_smoother_error")
+  }
 
   loglik          <- fwd$ll
   mu_pred_path    <- fwd$mu_pred_path
@@ -187,23 +301,18 @@ pskf_smoother <- function(Y, TT, ZZ, mu_eta, Sigma_eta, Gamma_eta, nu_eta,
   Gamma_filt_path <- fwd$Gamma_filt_path
   nu_filt_path    <- fwd$nu_filt_path
   Delta_filt_path <- fwd$Delta_filt_path
+  Gamma_pred_path <- fwd$Gamma_pred_path
+  Delta_pred_path <- fwd$Delta_pred_path
+  keep_path       <- fwd$keep_path
+  lambda_path     <- fwd$lambda_path
 
   ## ---- Gaussian RTS backward pass ------------------------------------------
-  ## Allocate output arrays
+  ## Gaussian part of the posterior: moments of x_t | Y_{1:T} with the skew
+  ## truncations dropped.
   s_smooth <- matrix(0, n_T, n_state)   # smoothed means (T x n_state)
   P_smooth <- array(0, dim = c(n_state, n_state, n_T))
-
-  ## Allocate CSN path arrays for smoothed skewness (method="csn")
-  Gamma_smooth_path <- vector("list", n_T)
-  nu_smooth_path    <- vector("list", n_T)
-  Delta_smooth_path <- vector("list", n_T)
-
-  ## Initialise smoother at t = T: smoothed == filtered
-  s_smooth[n_T, ]  <- mu_filt_path[[n_T]]
+  s_smooth[n_T, ]   <- mu_filt_path[[n_T]]
   P_smooth[, , n_T] <- Sigma_filt_path[[n_T]]
-  Gamma_smooth_path[[n_T]] <- Gamma_filt_path[[n_T]]
-  nu_smooth_path[[n_T]]    <- nu_filt_path[[n_T]]
-  Delta_smooth_path[[n_T]] <- Delta_filt_path[[n_T]]
 
   ## Backward sweep: t = T-1 down to 1 (empty when n_T == 1)
   for (step in seq_len(n_T - 1L)) {
@@ -214,22 +323,30 @@ pskf_smoother <- function(Y, TT, ZZ, mu_eta, Sigma_eta, Gamma_eta, nu_eta,
     mu_p    <- mu_pred_path[[t + 1L]]
     Sigma_p <- Sigma_pred_path[[t + 1L]]
 
-    ## RTS gain: G_t = Sigma_f TT' Sigma_p^{-1}
-    ## Solve for G' instead of inverting Sigma_p directly (more stable)
+    ## RTS gain: G_t = Cov(x_t, x_{t+1} | Y_{1:t}) Var(x_{t+1} | Y_{1:t})^+
+    ##                 = Sigma_f TT' Sigma_p^+.
+    ## Sigma_p = Sigma_{t+1|t} is routinely SINGULAR here, for the same reasons
+    ## as in the filter's prediction step (see .pskf_filter): the
+    ## contemporaneous order-1 state carries observables that are exact linear
+    ## functions of states and shocks, noise-free observation makes state
+    ## directions known exactly (an AR(2) observed without error knows its
+    ## lagged state), and the order-2 state carries Kronecker duplicates. For
+    ## the genuine joint Gaussian (x_t, x_{t+1}) | Y_{1:t} the cross-covariance
+    ## Sigma_f TT' annihilates null(Sigma_p) (a null direction v has
+    ## Var(v' x_{t+1}) = 0, hence Sigma_f TT' v = Cov(x_t, v' x_{t+1}) = 0),
+    ## i.e. its rows lie in range(Sigma_p), so the Moore-Penrose
+    ## pseudoinverse gives the EXACT conditional mean and covariance:
+    ## G_t Sigma_p G_t' = Sigma_f TT' Sigma_p^+ TT Sigma_f, the exact Schur
+    ## complement.
+    ## The former `solve(Sigma_p + 1e-10 I)` was not exact: it is an
+    ## ABSOLUTE jitter, so every eigen-direction lambda of Sigma_p got the
+    ## relative gain error 1e-10 / lambda -- 1e-6 at DSGE scale (shock
+    ## stderr 0.01, lambda ~ 1e-4), O(1) at stderr 1e-5 -- and its SVD
+    ## fallback (reached through tryCatch only when solve() errored) used yet
+    ## another rank rule. Same scale-free rank rule as the filter
+    ## (.csn_sym_pinv).
     Sigma_p_sym <- 0.5 * (Sigma_p + t(Sigma_p))   # enforce symmetry
-    Sigma_p_reg <- Sigma_p_sym + 1e-10 * diag(n_state)  # small regularisation
-    TT_Sf <- TT %*% Sigma_f                        # TT Sigma_f
-    G_t <- tryCatch(
-      t(solve(Sigma_p_reg, TT_Sf)),                # = Sigma_f TT' Sigma_p^{-1}
-      error = function(e) {
-        ## Fallback: pseudo-inverse via SVD
-        sv <- svd(Sigma_p_sym)
-        tol <- max(sv$d) * .Machine$double.eps * n_state
-        d_inv <- ifelse(sv$d > tol, 1 / sv$d, 0)
-        ## G_t = Sigma_f TT' (Sigma_p^{-1})
-        Sigma_f %*% t(TT) %*% (sv$u %*% diag(d_inv, n_state) %*% t(sv$v))
-      }
-    )
+    G_t <- Sigma_f %*% t(TT) %*% .csn_sym_pinv(Sigma_p_sym)
 
     ## Gaussian smoother update (mean and covariance)
     s_smooth[t, ] <- mu_f + as.numeric(G_t %*% (s_smooth[t + 1L, ] - mu_p))
@@ -239,101 +356,122 @@ pskf_smoother <- function(Y, TT, ZZ, mu_eta, Sigma_eta, Gamma_eta, nu_eta,
 
     ## Enforce symmetry of smoothed covariance
     P_smooth[, , t] <- 0.5 * (P_smooth[, , t] + t(P_smooth[, , t]))
-
-    ## CSN backward update of nu (method = "csn"):
-    ## nu_{t|T} = nu_{t|t} - Gamma_{t|t} G_t (mu_{t+1|T} - mu_{t+1|t})
-    ## Gamma and Delta are unchanged (the shift is a mean-shift, not a new
-    ## skewness direction; the CSN correction is via the new nu in the
-    ## hazard rate calculation below).
-    ##
-    ## Reference: Guljanov, Mutschler & Trede (2026), Section 3.3, eqs (3.14)-(3.19).
-    ## Physical intuition: the backward correction mu_{t+1|T} - mu_{t+1|t} adds
-    ## information about x_{t+1} that shifts the effective nu just as the
-    ## forward innovation does in the filter update (nu_{t|t} = nu_pred - G_skew v_t).
-    Gamma_filt_t  <- Gamma_filt_path[[t]]
-    nu_filt_t     <- nu_filt_path[[t]]
-    Delta_filt_t  <- Delta_filt_path[[t]]
-
-    q_filt <- nrow(Gamma_filt_t)
-    if (method == "csn" && q_filt > 0L) {
-      ## Backward mean correction vector: d_t = mu_{t+1|T}^{RTS} - mu_{t+1|t}
-      d_t    <- s_smooth[t + 1L, ] - as.numeric(mu_p)
-      ## nu shift: Gamma_{t|t} G_t d_t  (q_filt-vector)
-      nu_shift <- as.numeric(Gamma_filt_t %*% (G_t %*% d_t))
-      nu_smooth_path[[t]]    <- nu_filt_t - nu_shift
-      Gamma_smooth_path[[t]] <- Gamma_filt_t
-      Delta_smooth_path[[t]] <- Delta_filt_t
-    } else {
-      ## Pure Gaussian (alpha=0) or Gaussian method: no CSN correction
-      nu_smooth_path[[t]]    <- nu_filt_t
-      Gamma_smooth_path[[t]] <- Gamma_filt_t
-      Delta_smooth_path[[t]] <- Delta_filt_t
-    }
   }
 
-  ## ---- Apply CSN mean correction (method = "csn") --------------------------
-  ## The Gaussian RTS smoothed mean mu_{t|T} is just the Gaussian part.
-  ## The true smoothed mean of the CSN distribution is:
-  ##   E[x_{t|T}] = mu_{t|T} + Sigma_{t|T} Gamma_{t|T}' h(-nu_{t|T}; 0, D_{t|T})
-  ## where D_{t|T} = Delta_{t|T} + Gamma_{t|T} Sigma_{t|T} Gamma_{t|T}'  and
-  ## h is the q-dimensional normal hazard rate vector.
-
-  if (method == "csn") {
-    for (t in seq_len(n_T)) {
-      Gamma_s <- Gamma_smooth_path[[t]]
-      q_s     <- nrow(Gamma_s)
-
-      if (q_s == 0L) next   # pure Gaussian: no correction
-
-      nu_s    <- nu_smooth_path[[t]]
-      Delta_s <- Delta_smooth_path[[t]]
-      P_s     <- P_smooth[, , t]
-      P_s_sym <- 0.5 * (P_s + t(P_s))
-
-      ## D_{t|T} = Delta_{t|T} + Gamma_{t|T} Sigma_{t|T} Gamma_{t|T}'
-      D_s     <- Delta_s + Gamma_s %*% P_s_sym %*% t(Gamma_s)
-      D_s     <- 0.5 * (D_s + t(D_s))   # enforce symmetry
-
-      ## Hazard rate vector h = h(-nu_s; 0, D_s)
-      h_vec <- tryCatch(
-        .csn_hazard_rate(nu_s, D_s),
-        error = function(e) rep(0, q_s)
-      )
-
-      ## CSN mean correction: Sigma_{t|T} Gamma_{t|T}' h
-      correction <- as.numeric(P_s_sym %*% t(Gamma_s) %*% h_vec)
-      s_smooth[t, ] <- s_smooth[t, ] + correction
-    }
-  }
-
-  ## Collect filtered means / covariances into tidy arrays for the caller.
-  ## For method="csn": apply the CSN hazard-rate correction to the filtered means
-  ## too, so filtered_means[t, ] = E[x_t | Y_{1:t}] (true posterior mean).
-  ## This ensures smoothed_means == filtered_means at T=1 (invariant: the
-  ## T=1 smoothed distribution IS the filtered distribution).
+  ## Filtered moments (Gaussian part; the CSN correction is added below).
   s_filt <- matrix(0, n_T, n_state)
   P_filt <- array(0, dim = c(n_state, n_state, n_T))
   for (t in seq_len(n_T)) {
     s_filt[t, ]   <- mu_filt_path[[t]]
     P_filt[, , t] <- Sigma_filt_path[[t]]
   }
+
   if (method == "csn") {
+    ## ---- Exact CSN correction ----------------------------------------------
+    ## Latent representation: every skew-normal shock row carries a Gaussian
+    ## latent u = Gamma_eta (eta - mu_eta) + e, e ~ N(0, Delta_eta), and the
+    ## CSN law is the Gaussian law conditioned on u >= nu_eta. The filter's
+    ## period-T law x_T | Y ~ CSN(mu_T, Sigma_T, Gamma_T, nu_T, Delta_T) is
+    ## exactly this statement for the latents U_T it retains: in the Gaussian
+    ## part, W = U_T - E[U_T | Y] ~ N(0, V_T), V_T = Delta_T + Gamma_T
+    ## Sigma_T Gamma_T', and the truncation is W >= nu_T. Writing
+    ## x_t = s_G,t + B W + (independent of W) with B V_T = C_t =
+    ## Cov(x_t, U_T | Y), and using E[W | W >= nu_T] = V_T g_T and
+    ## Var(W | W >= nu_T) = V_T + V_T H_T V_T ((g_T, H_T) = gradient / Hessian
+    ## of log Phi_q(z; 0, V_T) at z = -nu_T, .csn_logcdf_derivs), for EVERY t
+    ##   E[x_t | Y]   = s_G,t + C_t g_T,
+    ##   Var(x_t | Y) = P_G,t + C_t H_T C_t'.
+    ## At t = T, C_T = Sigma_T Gamma_T' (the filtered CSN moments).
+    ##
+    ## C_t: RTS on the AUGMENTED Gaussian state z_t = (x_t, U_t), U_t the
+    ## latents retained at t. z is Markov (z_{t+1} = F z_t + independent
+    ## noise; F keeps the surviving old latents, keep_path), so
+    ##   Cov(z_t, U_T | Y) = J_t Cov(z_{t+1}, U_T | Y),
+    ##   J_t = Cov(z_t, z_{t+1} | Y_{1:t}) Var(z_{t+1} | Y_{1:t})^+,
+    ## with every block available from the filter's paths:
+    ##   Var(z_t | Y_{1:t}) = [Sigma_t, Sigma_t Gamma_t'; Gamma_t Sigma_t, V_t],
+    ##   Cov(z_t, x_{t+1})  = Var(z_t)[, x] TT',
+    ##   Cov(z_t, u)        = Var(z_t)[, k] for a surviving old latent k,
+    ##                        0 for a latent born at t + 1.
+    ## The pseudoinverse is exact for the same reason as the RTS gain above
+    ## (cross-covariance rows lie in the range of the joint covariance).
     for (t in seq_len(n_T)) {
-      Gamma_f <- Gamma_filt_path[[t]]
-      q_f     <- nrow(Gamma_f)
-      if (q_f == 0L) next
-      nu_f    <- nu_filt_path[[t]]
-      Delta_f <- Delta_filt_path[[t]]
-      P_f     <- P_filt[, , t]
-      P_f_sym <- 0.5 * (P_f + t(P_f))
-      D_f     <- Delta_f + Gamma_f %*% P_f_sym %*% t(Gamma_f)
-      D_f     <- 0.5 * (D_f + t(D_f))
-      h_vec_f <- tryCatch(
-        .csn_hazard_rate(nu_f, D_f),
-        error = function(e) rep(0, q_f)
-      )
-      s_filt[t, ] <- s_filt[t, ] +
-        as.numeric(P_f_sym %*% t(Gamma_f) %*% h_vec_f)
+      corr <- .pskf_csn_moment_correction(
+        P_filt[, , t], Gamma_filt_path[[t]], nu_filt_path[[t]],
+        Delta_filt_path[[t]], t, "filtered")
+      if (is.null(corr)) next
+      s_filt[t, ]   <- s_filt[t, ] + corr$mean
+      P_filt[, , t] <- P_filt[, , t] + corr$cov
+    }
+
+    ## PRUNING. When dim_red4_r cuts latents at t + 1, the filter replaces
+    ## their truncation by a first-moment shift of x_{t+1}:
+    ## mu_shift = Cov(x_{t+1}, W) lambda_{t+1} (W the pre-prune stack
+    ## [U_t; u_{t+1}], lambda its latent-space cut compensation). The model
+    ## this approximation describes is "W's mean is shifted by
+    ## Var(W) lambda", which also shifts every z_t correlated with W. The
+    ## Gaussian RTS pass above treats mu_shift as an exogenous input to
+    ## x_{t+1} and so reproduces that model for every period >= t + 1 (the
+    ## data after t see W only through x_{t+1}), but not before: there the
+    ## missing term is Cov(z_t, W | Y_{1:t}) lambda (only the OLD latents of
+    ## W, the columns of Var(z_t | Y_{1:t}) at U_t, are correlated with z_t),
+    ## carried further back by the same augmented gains J_t as the U_T term
+    ## (Cov(z_t, z_s | Y_{1:s}) = J_t ... J_{s-1} Var(z_s | Y_{1:s})). So the
+    ## total mean correction of z_t is the vector
+    ##   v_t = J_t v_{t+1} + Var(z_t | Y_{1:t})[, U_t] lambda_{t+1}[old],
+    ##   v_T = Cov(z_T, U_T | Y) g_T.
+    ## With no cut this is exactly M_t g_T. The cut term is exact for the
+    ## pruned filter's own approximating model (not for the true posterior);
+    ## its variance effect is not added (smoothed covariances then carry the
+    ## U_T term only).
+    q_T   <- nrow(Gamma_filt_path[[n_T]])
+    Sig_T <- Sigma_filt_path[[n_T]]
+    Gam_T <- Gamma_filt_path[[n_T]]
+    V_T   <- Delta_filt_path[[n_T]] + Gam_T %*% Sig_T %*% t(Gam_T)
+    V_T   <- 0.5 * (V_T + t(V_T))
+    ## M = Cov(z_t, U_T | Y), rows z_t = (x_t, U_t); v = mean correction of z_t
+    M <- rbind(Sig_T %*% t(Gam_T), V_T)
+    if (q_T > 0L) {
+      dv <- .pskf_csn_derivs_checked(nu_filt_path[[n_T]], V_T, n_T,
+                                     "smoothed")
+      v  <- as.numeric(M %*% dv$g)
+    } else {
+      v  <- rep(0, n_state)
+    }
+    for (t in n_T:1L) {
+      if (t < n_T) {
+        Sig_t <- Sigma_filt_path[[t]]
+        Gam_t <- Gamma_filt_path[[t]]
+        q_t   <- nrow(Gam_t)
+        V_t   <- Delta_filt_path[[t]] + Gam_t %*% Sig_t %*% t(Gam_t)
+        Pz_t  <- rbind(cbind(Sig_t, Sig_t %*% t(Gam_t)),
+                       cbind(Gam_t %*% Sig_t, V_t))
+        Sig_p <- Sigma_pred_path[[t + 1L]]
+        Gam_p <- Gamma_pred_path[[t + 1L]]
+        V_p   <- Delta_pred_path[[t + 1L]] + Gam_p %*% Sig_p %*% t(Gam_p)
+        Pz_p  <- rbind(cbind(Sig_p, Sig_p %*% t(Gam_p)),
+                       cbind(Gam_p %*% Sig_p, V_p))
+        Pz_p  <- 0.5 * (Pz_p + t(Pz_p))
+        keep  <- keep_path[[t + 1L]]
+        old   <- keep <= q_t
+        C_u   <- matrix(0, n_state + q_t, length(keep))
+        C_u[, old] <- Pz_t[, n_state + keep[old], drop = FALSE]
+        C_z   <- cbind(Pz_t[, seq_len(n_state), drop = FALSE] %*% t(TT), C_u)
+        J_t   <- C_z %*% .csn_sym_pinv(Pz_p)
+        M     <- J_t %*% M
+        v     <- as.numeric(J_t %*% v)
+        lam   <- lambda_path[[t + 1L]]
+        if (q_t > 0L && length(lam) > 0L && any(lam[seq_len(q_t)] != 0)) {
+          v <- v + as.numeric(Pz_t[, n_state + seq_len(q_t), drop = FALSE] %*%
+                              lam[seq_len(q_t)])
+        }
+      }
+      s_smooth[t, ] <- s_smooth[t, ] + v[seq_len(n_state)]
+      if (q_T > 0L) {
+        C_t  <- M[seq_len(n_state), , drop = FALSE]
+        P_st <- P_smooth[, , t] + C_t %*% dv$H %*% t(C_t)
+        P_smooth[, , t] <- 0.5 * (P_st + t(P_st))
+      }
     }
   }
 

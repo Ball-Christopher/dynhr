@@ -51,7 +51,7 @@ parse_mod_metadata <- function(path) {
   end_idx   <- which(grepl("@dynhr-model-end", lines))
 
   if (length(start_idx) == 0 || length(end_idx) == 0) {
-    message(sprintf("  No @dynhr-model block in %s", basename(path)))
+    .dynhr_inform(sprintf("  No @dynhr-model block in %s", basename(path)))
     return(NULL)
   }
 
@@ -148,7 +148,7 @@ check_mod_metadata <- function(model, meta, warn = TRUE) {
   if (warn && !is.null(result) && any(!result$ok)) {
     bad <- result[!result$ok, ]
     for (i in seq_len(nrow(bad))) {
-      warning(sprintf(
+      .dynhr_warn(sprintf(
         "Metadata mismatch in '%s': %s expected=%s found=%s",
         meta$file %||% "?", bad$check[i], bad$expected[i], bad$found[i]
       ))

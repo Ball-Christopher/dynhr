@@ -2,11 +2,11 @@
 % Please edit documentation in R/hank-mixture-emulator.R
 \name{.hank_emu_tps}
 \alias{.hank_emu_tps}
-\title{Thin-plate-spline RBF radial basis function `phi(r) = r^2 log(r)`, `phi(0) = 0`}
+\title{Thin-plate-spline RBF radial basis function \code{phi(r) = r^2 log(r)}, \code{phi(0) = 0}}
 \usage{
 .hank_emu_tps(r)
 }
 \description{
-Thin-plate-spline RBF radial basis function `phi(r) = r^2 log(r)`, `phi(0) = 0`
+Thin-plate-spline RBF radial basis function \code{phi(r) = r^2 log(r)}, \code{phi(0) = 0}
 }
 \keyword{internal}

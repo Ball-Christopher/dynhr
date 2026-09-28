@@ -322,7 +322,7 @@ hank_sam_reiter_statespace <- function(x, input_derivs, rho_zm,
   }
   sr <- max(Mod(eigen(Tmat, only.values = TRUE)$values))
   if (drop_dist_coord && sr >= 1 - 1e-10)
-    warning(sprintf(paste0("hank_sam_reiter_statespace(): spectral radius ",
+    .dynhr_warn(sprintf(paste0("hank_sam_reiter_statespace(): spectral radius ",
                            "%.8f >= 1 after dropping the distribution ",
                            "coordinate -- state space is not stationary."), sr))
 

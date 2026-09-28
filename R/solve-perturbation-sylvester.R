@@ -120,7 +120,7 @@
 
   # QZ must be available; otherwise use the dense reference solver.
   if (!requireNamespace("QZ", quietly = TRUE)) {
-    if (verbose) cat("  QZ unavailable; using dense Schur solver.\n")
+    if (verbose) .dynhr_cat("  QZ unavailable; using dense Schur solver.\n")
     return(dense())
   }
 
@@ -138,7 +138,7 @@
   if (is.null(V_inv) ||
       !all(is.finite(as.numeric(rbind(Re(V_inv), Im(V_inv))))) ||
       kappa(V)^k > cond_tol) {
-    if (verbose) cat(sprintf(
+    if (verbose) .dynhr_cat(sprintf(
       "  kappa(V)^k = %.2e exceeds %.2e; using dense Schur solver.\n",
       kappa(V)^k, cond_tol))
     return(dense())
@@ -148,7 +148,7 @@
   # Force complex so S, T are strictly upper triangular (no 2×2 blocks).
   qzr <- tryCatch(QZ::qz(A_L + 0i, fp + 0i), error = function(e) NULL)
   if (is.null(qzr)) {
-    if (verbose) cat("  Complex QZ failed; using dense Schur solver.\n")
+    if (verbose) .dynhr_cat("  Complex QZ failed; using dense Schur solver.\n")
     return(dense())
   }
   S <- qzr$S; T <- qzr$T; Q <- qzr$Q; Z <- qzr$Z
@@ -195,7 +195,7 @@
   }
 
   if (r_best > accept_tol * scale) {
-    if (verbose) cat(sprintf(
+    if (verbose) .dynhr_cat(sprintf(
       "  compact residual %.2e > accept %.2e; using dense Schur solver.\n",
       r_best, accept_tol * scale))
     return(dense())
@@ -276,14 +276,14 @@
   dense <- function() .solve_kron_direct(A_L, fp, hx, k, RHS)
 
   if (!requireNamespace("QZ", quietly = TRUE)) {
-    if (verbose) cat("  QZ unavailable; using dense Schur solver.\n")
+    if (verbose) .dynhr_cat("  QZ unavailable; using dense Schur solver.\n")
     return(dense())
   }
 
   # Complex Schur of the small state matrix: hx = Q T Q^H, T strictly upper-tri.
   sc <- tryCatch(QZ::qz(hx + 0i), error = function(e) NULL)
   if (is.null(sc) || is.null(sc$T) || is.null(sc$Q)) {
-    if (verbose) cat("  complex Schur (QZ) failed; using dense Schur solver.\n")
+    if (verbose) .dynhr_cat("  complex Schur (QZ) failed; using dense Schur solver.\n")
     return(dense())
   }
   Tm <- sc$T
@@ -366,7 +366,7 @@
   }
 
   if (r_best > accept_tol * scale) {
-    if (verbose) cat(sprintf(
+    if (verbose) .dynhr_cat(sprintf(
       "  sparse residual %.2e > accept %.2e; using dense Schur solver.\n",
       r_best, accept_tol * scale))
     return(dense())

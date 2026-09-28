@@ -8,7 +8,8 @@
 ## arXiv:1804.06788.
 ##
 ## LAYER 1 (pure statistics, individually testable):
-##   .sbc_ranks()        -- rank statistic for one replication (Talts eq. 1)
+##   .sbc_ranks()        -- rank statistic for one replication (Talts eq. 1);
+##                          exported thin wrapper: sbc_ranks()
 ##   sbc_uniformity_test() -- chi-squared GOF test of rank uniformity
 ##   .sbc_rank_hist_plot() -- rank-histogram facet plot with the 99% band
 ##
@@ -189,6 +190,56 @@ sbc_draws_from_dime <- function(dime_result, L_target) {
   ranks
 }
 
+#' SBC rank statistic for one replication (public helper)
+#'
+#' Computes the simulation-based calibration rank of the "true" parameter
+#' draw among the (thinned) posterior draws of one replication (Talts et al.
+#' 2018, eq. 1): for each parameter \eqn{j},
+#' \deqn{r_j = \sum_{l=1}^{L} 1[\theta^{(l)}_j < \tilde\theta_j],}{r_j = sum_l 1[theta_j^(l) < theta_tilde_j],}
+#' where \eqn{\theta^{(l)}}{theta^(l)}, \eqn{l = 1, \ldots, L}{l = 1, ..., L},
+#' are the thinned draws. Ties are not counted. This is the rank used by
+#' \code{\link{dynhr_sbc}}; it is exported for bespoke SBC harnesses that
+#' run their own sampler, and is intended to be paired with
+#' \code{\link{sbc_uniformity_test}}.
+#'
+#' \strong{Rank support.} The draws are thinned as
+#' \code{draws_mat[seq.int(1L, nrow(draws_mat), by = thin), ]}, so the number
+#' of thinned draws is
+#' \code{L = length(seq.int(1L, nrow(draws_mat), by = thin))}
+#' (for a kept chain of \code{n_keep} rows,
+#' \code{L = length(seq.int(1L, n_keep, by = thin))}), and every rank lies
+#' in \code{0:L} -- that is \code{L + 1} possible values, not \code{L}.
+#' This \code{L} is exactly what \code{sbc_uniformity_test(L = )} expects.
+#' Note that \code{floor(n_keep / thin)} can be one less than \code{L} (for
+#' example \code{n_keep = 4000}, \code{thin = 63} gives \code{L = 64} but
+#' \code{floor(n_keep / thin) = 63}); passing the smaller value makes
+#' \code{sbc_uniformity_test} stop as soon as the top rank appears.
+#'
+#' @param theta_tilde Fully named numeric vector: the "true" parameter draw
+#'   (from the prior) used to simulate this replication's data.
+#' @param draws_mat Numeric matrix of posterior draws, one row per draw, with
+#'   column names that include (in any order) \code{names(theta_tilde)}.
+#' @param thin Positive integer thinning interval (default \code{1L}, no
+#'   thinning).
+#' @return Named integer vector, one rank per element of \code{theta_tilde}
+#'   (same names), each in \code{0:L} with
+#'   \code{L = length(seq.int(1L, nrow(draws_mat), by = thin))}.
+#' @seealso \code{\link{sbc_uniformity_test}}, \code{\link{dynhr_sbc}}
+#' @references Talts, S., Betancourt, M., Simpson, D., Vehtari, A. and
+#'   Gelman, A. (2018). Validating Bayesian inference algorithms with
+#'   simulation-based calibration. arXiv:1804.06788.
+#' @examples
+#' set.seed(1)
+#' draws <- cbind(a = rnorm(100), b = rnorm(100))
+#' r <- sbc_ranks(c(a = 0, b = 1), draws, thin = 3L)
+#' L <- length(seq.int(1L, nrow(draws), by = 3L))   # 34 thinned draws
+#' r                                                # each rank in 0:L
+#' all(r >= 0L & r <= L)
+#' @export
+sbc_ranks <- function(theta_tilde, draws_mat, thin = 1L) {
+  .sbc_ranks(theta_tilde, draws_mat, thin = thin)
+}
+
 
 ## ===========================================================================
 ## LAYER 1: uniformity test
@@ -198,8 +249,8 @@ sbc_draws_from_dime <- function(dime_result, L_target) {
 #' shift/tail-asymmetry/saturation diagnostics
 #'
 #' For each parameter (column of \code{ranks_mat}), bins the ranks into
-#' \code{n_bins} bins via \code{floor(rank * n_bins / (L' + 1))} (so each
-#' rank in \code{0:L'} maps to a bin in \code{0:(n_bins - 1)}), and runs a
+#' \code{n_bins} bins via \code{floor(rank * n_bins / (L + 1))} (so each
+#' rank in \code{0:L} maps to a bin in \code{0:(n_bins - 1)}), and runs a
 #' chi-squared goodness-of-fit test against the (exact, generally unequal --
 #' see "Bin-count exactness" below) expected counts under uniformity.
 #'
@@ -228,19 +279,19 @@ sbc_draws_from_dime <- function(dime_result, L_target) {
 #' the chi-squared test, applied per-parameter, can miss when looking only at
 #' p-values.
 #'
-#' \strong{Bin-count exactness.} Ranks live on \code{0:L'} (\code{L' + 1}
-#' distinct integer values); when \code{L' + 1} is not divisible by
-#' \code{n_bins}, the \code{floor(rank * n_bins / (L' + 1))} binning gives
-#' bins unequal *integer* coverage (e.g. \code{L' = 160}, \code{n_bins = 9}
+#' \strong{Bin-count exactness.} Ranks live on \code{0:L} (\code{L + 1}
+#' distinct integer values); when \code{L + 1} is not divisible by
+#' \code{n_bins}, the \code{floor(rank * n_bins / (L + 1))} binning gives
+#' bins unequal *integer* coverage (e.g. \code{L = 160}, \code{n_bins = 9}
 #' gives 8 bins of width 18 and one of width 17). The expected per-bin count
 #' under uniformity is computed EXACTLY from this integer partition
-#' (\code{n_repl * (bin width) / (L' + 1)}), not the naive \code{n_repl /
+#' (\code{n_repl * (bin width) / (L + 1)}), not the naive \code{n_repl /
 #' n_bins}.
 #'
 #' \strong{Diagnostics (per parameter).}
 #' \describe{
-#'   \item{\code{mean_rank_z}}{\code{z = (mean(rank)/L' - 0.5) *
-#'     sqrt(12 * n_repl)}. Under uniformity, \code{rank/L'} has mean 0.5 and
+#'   \item{\code{mean_rank_z}}{\code{z = (mean(rank)/L - 0.5) *
+#'     sqrt(12 * n_repl)}. Under uniformity, \code{rank/L} has mean 0.5 and
 #'     variance \code{1/12}, so this is (asymptotically) a standard normal
 #'     statistic sensitive to a SHIFTED posterior (elevated or depressed mean
 #'     rank) -- a signature the chi-squared statistic, which only sees
@@ -252,8 +303,8 @@ sbc_draws_from_dime <- function(dime_result, L_target) {
 #'     a symmetric U-shape (both tails inflated) gives \code{z ~ 0} even
 #'     though the chi-squared statistic flags it.}
 #'   \item{\code{extreme_frac}}{Fraction of ranks exactly equal to 0 or
-#'     \code{L'} -- saturated ranks, a symptom of chain ESS much smaller than
-#'     \code{L'} (ESS << L collapses the rank distribution onto the
+#'     \code{L} -- saturated ranks, a symptom of chain ESS much smaller than
+#'     \code{L} (ESS << L collapses the rank distribution onto the
 #'     endpoints).}
 #' }
 #'
@@ -267,7 +318,7 @@ sbc_draws_from_dime <- function(dime_result, L_target) {
 #' P2c motivation above), while still flagging anything the chi-squared alone
 #' would have caught. \code{"insufficient"} (new) if the input carries no
 #' usable rank-uniformity signal: either every observed rank is identical
-#' (\code{L' == 0}, e.g. a single posterior draw or too few replications to
+#' (\code{L == 0}, e.g. a single posterior draw or too few replications to
 #' see any spread) or every parameter's chi-squared test degenerated to
 #' \code{NA} (e.g. \code{n_bins} finer than the number of distinct integer
 #' ranks). This never crashes -- it degrades gracefully instead of leaking
@@ -276,10 +327,14 @@ sbc_draws_from_dime <- function(dime_result, L_target) {
 #'
 #' @param ranks_mat \code{n_repl x d} integer matrix of SBC ranks (one row
 #'   per replication, one column per parameter), each entry in
-#'   \code{0:L'}. Column names are taken as parameter names.
-#' @param L Integer: the TRUE rank support \code{L'} (ranks live in
-#'   \code{0:L}), e.g. the harness's actual kept-draw count
-#'   (\code{thin_L}/\code{L_effective}). \code{NULL} (default) falls back to
+#'   \code{0:L}. Column names are taken as parameter names.
+#' @param L Integer: the TRUE rank support \code{L} (ranks live in
+#'   \code{0:L}), i.e. the number of thinned posterior draws each rank was
+#'   computed from. For ranks from \code{\link{sbc_ranks}} on a kept chain of
+#'   \code{n_keep} rows thinned by \code{thin} this is
+#'   \code{L = length(seq.int(1L, n_keep, by = thin))} (not
+#'   \code{floor(n_keep / thin)}, which can be one smaller, and not that
+#'   count minus one). \code{NULL} (default) falls back to
 #'   \code{max(ranks_mat)} with a warning -- inferring the support from the
 #'   OBSERVED ranks is WRONG whenever the top rank never appears by chance
 #'   (e.g. no replication's kept draws all landed above theta*), which
@@ -290,9 +345,10 @@ sbc_draws_from_dime <- function(dime_result, L_target) {
 #'   choice, \code{min(20, floor(n_repl / 5))}, with a floor of 2.
 #' @param draws     Optional: a list of per-replication chain matrices (or a
 #'   single representative \code{n_draws x d} chain matrix) used ONLY to
-#'   estimate per-parameter chain ESS via \code{.effective_sample_size()}
-#'   (initial-positive-sequence estimator). When supplied, \code{$ess} is
-#'   populated and the print method warns if \code{ess < 5 * L'} ("ranks are
+#'   estimate per-parameter split-chain ESS via the package's Vehtari et al.
+#'   (2021) estimator (Geyer initial positive + monotone sequence, computed on
+#'   the split chain). When supplied, \code{$ess} is
+#'   populated and the print method warns if \code{ess < 5 * L} ("ranks are
 #'   noise-dominated"). Default \code{NULL} (no ESS diagnostic).
 #' @return A list with class \code{"dynhr_sbc_uniformity"}:
 #'   \describe{
@@ -310,7 +366,26 @@ sbc_draws_from_dime <- function(dime_result, L_target) {
 #'     \item{ess}{Named numeric vector of per-parameter chain ESS, or
 #'       \code{NULL} if \code{draws} was not supplied.}
 #'   }
-#' @noRd
+#'
+#' \strong{Use in bespoke harnesses.} This is the verdict step of
+#' \code{\link{dynhr_sbc}}, exported so that SBC studies that run their own
+#' prior draw / simulate / sample loop can reuse it: compute one row of
+#' ranks per replication with \code{\link{sbc_ranks}}, stack them into
+#' \code{ranks_mat}, and pass the true support
+#' \code{L = length(seq.int(1L, n_keep, by = thin))}.
+#' @seealso \code{\link{sbc_ranks}}, \code{\link{dynhr_sbc}}
+#' @references Talts, S., Betancourt, M., Simpson, D., Vehtari, A. and
+#'   Gelman, A. (2018). Validating Bayesian inference algorithms with
+#'   simulation-based calibration. arXiv:1804.06788.
+#' @examples
+#' set.seed(42)
+#' L <- 63L                                  # ranks live in 0:63
+#' ranks <- cbind(a = sample.int(L + 1L, 200, replace = TRUE) - 1L,  # uniform
+#'                b = rbinom(200, L, 0.2))                           # shifted
+#' u <- sbc_uniformity_test(ranks, L = L, n_bins = 8L)
+#' u$table[, c("parameter", "p_value", "mean_rank_z")]
+#' u$verdict
+#' @export
 sbc_uniformity_test <- function(ranks_mat, L = NULL, n_bins = NULL, draws = NULL) {
   if (is.null(dim(ranks_mat))) ranks_mat <- matrix(ranks_mat, ncol = 1)
   n_repl <- nrow(ranks_mat)
@@ -337,7 +412,7 @@ sbc_uniformity_test <- function(ranks_mat, L = NULL, n_bins = NULL, draws = NULL
   ## miscalibration signal. Callers that know their harness's rank support
   ## (thin_L / L_effective / the kept-draw count) should pass it via `L`.
   if (is.null(L)) {
-    warning("sbc_uniformity_test: `L` (true rank support) not supplied -- ",
+    .dynhr_warn("sbc_uniformity_test: `L` (true rank support) not supplied -- ",
             "inferring L = max(ranks_mat) from the OBSERVED ranks. This is ",
             "WRONG whenever the top rank never appears by chance (no ",
             "replication's kept draws happened to land above theta*), which ",
@@ -492,7 +567,11 @@ sbc_uniformity_test <- function(ranks_mat, L = NULL, n_bins = NULL, draws = NULL
       cn <- colnames(ch)
       vapply(seq_len(d), function(j) {
         col <- if (!is.null(cn) && par_names[j] %in% cn) ch[, par_names[j]] else ch[, j]
-        .effective_sample_size(as.numeric(col))
+        ## A5: split-chain ESS via the package's single Vehtari et al. (2021)
+        ## estimator. The old `.effective_sample_size()` counted lag 0 in the
+        ## first Geyer pair, capping ESS at N/3 even for iid draws -- which
+        ## made the "ranks are noise-dominated" warning fire ~3x too eagerly.
+        .d5_ess_basic(.d5_split(matrix(as.numeric(col), ncol = 1L)))
       }, numeric(1))
     }, numeric(d))
     ess <- if (is.matrix(ess_mat)) rowMeans(ess_mat) else mean(ess_mat)
@@ -693,18 +772,28 @@ print.dynhr_sbc_uniformity <- function(x, ...) {
   params <- .apply_theta_to_params(model, theta_tilde)
 
   ## ---- Step 2: solve the model at theta_tilde ---------------------------
+  ## A solver ERROR is kept (as the condition object) so the replication's
+  ## failure reason carries its message: a bare "did not converge" made a
+  ## genuine bug indistinguishable from a prior draw outside the solving
+  ## region (dynhr_sbc() now reports every reason, see .sbc_report_failures).
   ss <- tryCatch(
     solve_steady(compiled, params, endo_names = model$var_names,
                  exo_names = model$varexo_names, verbose = FALSE),
-    error = function(e) NULL
+    error = function(e) e
   )
+  if (inherits(ss, "error"))
+    return(list(ok = FALSE, reason = paste0("steady-state solve error: ",
+                                            conditionMessage(ss))))
   if (is.null(ss) || !isTRUE(ss$converged))
     return(list(ok = FALSE, reason = "steady state did not converge"))
 
   dr <- tryCatch(
     solve_perturbation(model, compiled, ss$values, params, verbose = FALSE),
-    error = function(e) NULL
+    error = function(e) e
   )
+  if (inherits(dr, "error"))
+    return(list(ok = FALSE, reason = paste0("perturbation solve error: ",
+                                            conditionMessage(dr))))
   if (is.null(dr) || !isTRUE(dr$bk_satisfied))
     return(list(ok = FALSE, reason = "perturbation solve failed or BK violated"))
 
@@ -767,8 +856,11 @@ print.dynhr_sbc_uniformity <- function(x, ...) {
     dr2 <- tryCatch(
       solve_perturbation_order2(model, compiled, ss$values, params,
                                  dr, Sigma_e = Sigma_e, verbose = FALSE),
-      error = function(e) NULL
+      error = function(e) e
     )
+    if (inherits(dr2, "error"))
+      return(list(ok = FALSE, reason = paste0("order-2 perturbation solve error: ",
+                                              conditionMessage(dr2))))
     if (is.null(dr2))
       return(list(ok = FALSE, reason = "order-2 perturbation solve failed"))
 
@@ -777,8 +869,11 @@ print.dynhr_sbc_uniformity <- function(x, ...) {
     sim_full <- tryCatch(
       simulate_model_order2(dr2, n_periods = T_obs, model = model,
                              burn_in = presample),
-      error = function(e) NULL
+      error = function(e) e
     )
+    if (inherits(sim_full, "error"))
+      return(list(ok = FALSE, reason = paste0("order-2 simulation error: ",
+                                              conditionMessage(sim_full))))
     if (is.null(sim_full))
       return(list(ok = FALSE, reason = "order-2 simulation failed"))
 
@@ -802,44 +897,21 @@ print.dynhr_sbc_uniformity <- function(x, ...) {
       ## diagonals carried entirely by the seed Sigma_e), so the DGP and the
       ## likelihood are consistent for correlated + skewed shocks (no refusal).
       ##
-      ## Stochastic representation: draw [e; U] jointly Gaussian, keep draws with
-      ## U >= 0 componentwise.  Joint covariance:
-      ##   Cov = [[Sigma_e,         Sigma_e Gamma_e'],
-      ##          [Gamma_e Sigma_e, I + Gamma_e Sigma_e Gamma_e']].
-      ## The realized marginal mean is subtracted so E[e] = 0 (preserves SS).
-      ## When Sigma_e is diagonal this reduces to the old per-shock independent
-      ## draw e_i = sigma_i(delta_i|z_i| + sqrt(1-delta_i^2)w_i).
+      ## 0.9.4 (latent L2): the sampler itself now lives in ONE place,
+      ## `.draw_csn_shocks()` (R/stochsimul-monolith.R), shared with
+      ## simulate_model() -- the two used to carry byte-equivalent copies of the
+      ## conditioning representation, and a change to one could silently
+      ## desynchronise the SBC DGP from the simulator.  It draws the whole
+      ## n_total x n_exo block in one vectorised over-draw (the old code ran a
+      ## 64-draw rejection loop per period) and applies the same closed-form
+      ## mean shift the filter uses, so the DGP data level is exactly where the
+      ## filter places its steady state.
       sigma_e <- sqrt(diag(Sigma_e))          # length n_exo
       alpha_e <- .get_shock_skewness(model, exo, params)  # length n_exo (named)
-      Gamma_e <- diag(alpha_e / sigma_e, nrow = n_exo)    # n_exo x n_exo
-      SG_t      <- Sigma_e %*% t(Gamma_e)                 # Sigma_e Gamma_e'
-      M_U       <- diag(n_exo) + Gamma_e %*% Sigma_e %*% t(Gamma_e)  # Cov(U)
-      Joint_cov <- rbind(cbind(Sigma_e, SG_t),
-                         cbind(t(SG_t), M_U))             # 2 n_exo x 2 n_exo
-      Joint_cov <- 0.5 * (Joint_cov + t(Joint_cov))
-      L_joint   <- chol(Joint_cov + diag(1e-12, 2 * n_exo))  # upper-tri factor
-      .draw_joint_csn <- function(n_draws) {
-        Zc   <- matrix(stats::rnorm(n_draws * 2 * n_exo), n_draws, 2 * n_exo) %*%
-                  L_joint
-        e_d  <- Zc[, seq_len(n_exo),         drop = FALSE]
-        U_d  <- Zc[, n_exo + seq_len(n_exo), drop = FALSE]
-        keep <- apply(U_d, 1L, function(u) all(u >= 0))
-        e_d[keep, , drop = FALSE]
-      }
-      ## Mean shift: use the SAME closed-form correction the likelihood applies
-      ## in .get_csn_shock_params (mu_eta = -RR (sigma_i delta_i sqrt(2/pi))).
-      ## This keeps the DGP data level EXACTLY consistent with where the filter
-      ## places its steady state, regardless of rho.  (The realized joint-CSN
-      ## marginal mean differs slightly from this closed form at rho != 0, but
-      ## both DGP and likelihood use the identical closed-form shift, so the
-      ## level is consistent -- which is what the SBC rank distribution needs.)
-      delta_e <- alpha_e / sqrt(1 + alpha_e^2)
-      mu_e    <- sigma_e * delta_e * sqrt(2 / pi)   # length n_exo
+      e_draws <- .draw_csn_shocks(n_total, Sigma_e, alpha_e, sigma_e)
 
       for (t in seq_len(n_total)) {
-        e_one <- .draw_joint_csn(64L)
-        while (nrow(e_one) < 1L) e_one <- .draw_joint_csn(64L)
-        e_t   <- as.numeric(e_one[1L, ]) - mu_e   # zero-mean joint CSN draw
+        e_t <- e_draws[t, ]
 
         if (t > presample) {
           y_t <- as.numeric(ZZ %*% s) + as.numeric(DD %*% e_t) + d_obs
@@ -879,15 +951,17 @@ print.dynhr_sbc_uniformity <- function(x, ...) {
   ## the correctly-specified case for kf_innovation_diagnostics(), and the
   ## unit-root guard above (is_unit_root) already establishes lik_init =
   ## "stationary" is valid, so no further routing check is needed here.
-  ## Failures caught internally (never propagated as a replication failure):
-  ## this is a diagnostic add-on, not a gate on SBC itself.
+  ## Numerical failures are caught internally (never propagated as a
+  ## replication failure): this is a diagnostic add-on, not a gate on SBC
+  ## itself. A programming error is re-raised rather than silently shrinking
+  ## $innovation_summary$n_replications_checked.
   innovation_diagnostics <- NULL
   if (isTRUE(innovation_check)) {
     innovation_diagnostics <- tryCatch(
       kf_innovation_diagnostics(Y, dr = dr, model = model, params = params,
                                 obs_vars = obs_vars, lik_init = "stationary",
                                 me_variance = me_variance),
-      error = function(e) NULL
+      error = function(e) .dynhr_reraise_bug(e, NULL)
     )
   }
 
@@ -904,8 +978,19 @@ print.dynhr_sbc_uniformity <- function(x, ...) {
   d      <- length(theta0)  ## parameter dimension (used by DIME walker count)
 
   lp0 <- log_post_fn(theta0)
-  if (!is.finite(lp0$logpost))
-    return(list(ok = FALSE, reason = "log-posterior at theta_tilde is non-finite"))
+  if (!is.finite(lp0$logpost)) {
+    ## Name the component that failed (no draw-specific numbers, so equal
+    ## reasons group in the summary): a non-finite loglik at the DGP's own
+    ## parameters is a likelihood failure -- set
+    ## dynhr_set_options(debug_kf_errors = TRUE) to re-raise a caught filter
+    ## error -- a non-finite logprior a prior-support failure.
+    bad <- c(loglik   = !isTRUE(is.finite(lp0$loglik)),
+             logprior = !isTRUE(is.finite(lp0$logprior)))
+    return(list(ok = FALSE, reason = paste0(
+      "log-posterior at theta_tilde is non-finite",
+      if (any(bad)) paste0(" (non-finite ", paste(names(bad)[bad], collapse = " and "),
+                           ")") else "")))
+  }
 
   prior_sd <- prior_spec$std
   names(prior_sd) <- prior_spec$name
@@ -1031,7 +1116,10 @@ print.dynhr_sbc_uniformity <- function(x, ...) {
         model      = model, data = Y, prior_spec = prior_spec,
         obs_vars   = obs_vars, compiled = compiled, me_variance = me_variance,
         likelihood = likelihood,
-        freq_band  = list(...)$freq_band %||% c(0, pi))
+        freq_band  = list(...)$freq_band %||% c(0, pi),
+        ## the init of log_post_fn above: without it the sampler moved on the
+        ## gradient of the "auto" likelihood under lik_init = "diffuse"/"kappa"
+        lik_init   = lik_init)
     } else NULL
 
     mcmc <- if (sampler == "hmc") {
@@ -1078,6 +1166,17 @@ print.dynhr_sbc_uniformity <- function(x, ...) {
 #' conditional on the region of the prior where the model solves -- this is
 #' the practical scope of SBC for nonlinear DSGE models, and is reported
 #' explicitly via \code{n_failed} / \code{n_replications}.
+#'
+#' \strong{Failure reporting.} Every failed replication's reason is kept in
+#' \code{$failures} (including the error message when the failure was an R
+#' error: a solver error, or -- on the parallel path -- any error raised
+#' inside the replication, e.g. by the sampler or the gradient). When some
+#' replications fail, \code{dynhr_sbc()} warns (class
+#' \code{dynhr_warning_sbc_failures}) with the distinct reasons and their
+#' counts; when ALL replications fail it stops (class
+#' \code{dynhr_error_sbc_all_failed}), since there are no ranks to test. On
+#' the serial path (\code{n_cores = NULL}) an R error raised by the sampler
+#' or likelihood step is not caught: it stops \code{dynhr_sbc()} directly.
 #'
 #' \strong{Unit-root models.} If the model's state-transition matrix has an
 #' eigenvalue with modulus \code{>= 1 - 1e-6} (i.e.
@@ -1179,8 +1278,13 @@ print.dynhr_sbc_uniformity <- function(x, ...) {
 #'   \describe{
 #'     \item{ranks}{\code{n_ok x d} integer matrix of SBC ranks (one row per
 #'       successful replication).}
-#'     \item{n_failed}{Number of replications skipped because the model did
-#'       not solve at the prior draw.}
+#'     \item{n_failed}{Number of failed (skipped) replications -- e.g. the
+#'       model did not solve at the prior draw, or the log-posterior was
+#'       non-finite there.}
+#'     \item{failures}{data.frame with one row per failed replication:
+#'       \code{rep} (replication index) and \code{reason} (character, with
+#'       the error message when the failure was an R error). Zero rows when
+#'       every replication succeeded.}
 #'     \item{n_replications}{The requested number of replications.}
 #'     \item{L_effective}{Number of thinned posterior draws per
 #'       replication.}
@@ -1221,6 +1325,12 @@ dynhr_sbc <- function(model, obs_vars, T_obs = 100L, n_replications = 50L,
                       ctx = NULL,
                       innovation_check = FALSE,
                       ...) {
+  ## Own the message epoch for this run: repeat-suppressed warnings
+  ## (`.dynhr_warn(once = TRUE)`) are keyed within it and re-arm for the
+  ## next run, and the close reports what it suppressed. A nested call
+  ## inherits this epoch rather than opening a second one.
+  .dynhr_run_epoch <- .dynhr_epoch("dynhr_sbc")
+  on.exit(.dynhr_close_epoch(.dynhr_run_epoch), add = TRUE)
   ## Unpack ctx when provided -- overrides individual args.
   ## tpf_options from ctx are merged into ... for the .sbc_one_replication call.
   if (!is.null(ctx) && inherits(ctx, "dynhr_estimation_context")) {
@@ -1268,13 +1378,13 @@ dynhr_sbc <- function(model, obs_vars, T_obs = 100L, n_replications = 50L,
   n_replications <- as.integer(n_replications)
 
   if (verbose)
-    cat(sprintf("Running SBC: %d replications, T_obs = %d, %d parameter(s)\n",
+    .dynhr_cat(sprintf("Running SBC: %d replications, T_obs = %d, %d parameter(s)\n",
                 n_replications, T_obs, d))
 
   ## -- parallel path -------------------------------------------------------
   if (!is.null(n_cores)) {
     if (isTRUE(innovation_check) && verbose)
-      cat("Note: innovation_check is only supported on the serial path ",
+      .dynhr_cat("Note: innovation_check is only supported on the serial path ",
           "(n_cores = NULL); ignored for this parallel run.\n", sep = "")
     raw_list <- run_sbc_mirai(
       model            = model,
@@ -1301,16 +1411,24 @@ dynhr_sbc <- function(model, obs_vars, T_obs = 100L, n_replications = 50L,
     ranks_list  <- vector("list", n_replications)
     n_failed    <- 0L
     L_effective <- NULL
+    fail_rep    <- integer(0)
+    fail_reason <- character(0)
     for (i in seq_len(n_replications)) {
-      res <- raw_list[[i]]
+      ## A replication that raised an R error on its daemon arrives as a
+      ## mirai error VALUE (class "miraiError", not a list and not an R
+      ## "error" condition); normalise it so its message is kept as the
+      ## reason instead of reading as an anonymous $ok = NULL failure.
+      res <- .sbc_normalise_result(raw_list[[i]])
       if (isTRUE(res$ok)) {
         ranks_list[[i]] <- res$ranks
         if (is.null(L_effective)) L_effective <- res$L_effective
-        if (verbose) cat(sprintf("  [%d/%d] ok\n", i, n_replications))
+        if (verbose) .dynhr_cat(sprintf("  [%d/%d] ok\n", i, n_replications))
       } else {
         n_failed <- n_failed + 1L
+        fail_rep    <- c(fail_rep, i)
+        fail_reason <- c(fail_reason, res$reason)
         if (verbose)
-          cat(sprintf("  [%d/%d] failed: %s\n", i, n_replications, res$reason))
+          .dynhr_cat(sprintf("  [%d/%d] failed: %s\n", i, n_replications, res$reason))
       }
     }
     ## jump to assembly below
@@ -1321,6 +1439,8 @@ dynhr_sbc <- function(model, obs_vars, T_obs = 100L, n_replications = 50L,
     ranks_list  <- vector("list", n_replications)
     n_failed    <- 0L
     L_effective <- NULL
+    fail_rep    <- integer(0)
+    fail_reason <- character(0)
     innov_list  <- if (isTRUE(innovation_check)) vector("list", n_replications) else NULL
 
     ## Merge ctx$tpf_options (if set) into the dots for .sbc_one_replication.
@@ -1330,6 +1450,9 @@ dynhr_sbc <- function(model, obs_vars, T_obs = 100L, n_replications = 50L,
       list(...)
     }
 
+    ## .sbc_one_replication() re-seeds (seed + i) in this process; restore the
+    ## caller's RNG stream when dynhr_sbc() exits (C1).
+    .local_seed(seed)
     for (i in seq_len(n_replications)) {
       rep_seed <- seed + i
       res <- do.call(.sbc_one_replication, c(
@@ -1345,20 +1468,33 @@ dynhr_sbc <- function(model, obs_vars, T_obs = 100L, n_replications = 50L,
         ),
         .sbc_extra_args
       ))
+      res <- .sbc_normalise_result(res)
 
       if (isTRUE(res$ok)) {
         ranks_list[[i]] <- res$ranks
         if (is.null(L_effective)) L_effective <- res$L_effective
         if (isTRUE(innovation_check)) innov_list[[i]] <- res$innovation_diagnostics
         if (verbose)
-          cat(sprintf("  [%d/%d] ok\n", i, n_replications))
+          .dynhr_cat(sprintf("  [%d/%d] ok\n", i, n_replications))
       } else {
         n_failed <- n_failed + 1L
+        fail_rep    <- c(fail_rep, i)
+        fail_reason <- c(fail_reason, res$reason)
         if (verbose)
-          cat(sprintf("  [%d/%d] failed: %s\n", i, n_replications, res$reason))
+          .dynhr_cat(sprintf("  [%d/%d] failed: %s\n", i, n_replications, res$reason))
       }
     }
   }
+
+  ## Failed replications are EXCLUDED from the ranks, so the calibration check
+  ## is conditional on the rest. Keep every reason, warn with a per-reason
+  ## count, and abort when nothing survived: 200/200 failed replications used
+  ## to return a result with an empty uniformity table and no message
+  ## (0.9.3.84's NUTS x Whittle gradient crash went unnoticed that way).
+  failures <- data.frame(rep = as.integer(fail_rep),
+                         reason = as.character(fail_reason),
+                         stringsAsFactors = FALSE)
+  .sbc_report_failures(failures, n_replications)
 
   ok <- !vapply(ranks_list, is.null, logical(1))
   ranks <- if (any(ok)) {
@@ -1392,6 +1528,7 @@ dynhr_sbc <- function(model, obs_vars, T_obs = 100L, n_replications = 50L,
   out <- list(
     ranks          = ranks,
     n_failed       = n_failed,
+    failures       = failures,
     n_replications = n_replications,
     L_effective    = L_effective %||% NA_integer_,
     uniformity     = uniformity,
@@ -1517,11 +1654,18 @@ sbc_matrix_result <- function(sbc_results = NULL, out_path = "inst/extdata/sbc_m
        "AR(1) battery 2026-06-27: calibrated, min p=0.616, 0/50 failed (50 reps, seed 42)")
   static <- .set(static, "hmc",  "gaussian_kf", "certified",
        "AR(1) battery 2026-06-27 (POST dual-averaging fix, commit 2acbd67): calibrated, min p=0.290, 0/50 failed -- was 8.5e-48 (frozen chain) pre-fix (50 reps, seed 42)")
-  ## chees stays to-certify: the AR(1) cert was attempted but abandoned (~3h),
-  ## and controlled experiments show a slow-mixing weakness on the ill-conditioned
-  ## (near-unit-root) replications that this fixture stresses. See the GAP note.
-  static <- .set(static, "chees", "gaussian_kf", "to-certify",
-       "AR(1) 50-rep cert attempted 2026-06-27 but KILLED at ~3h -- the cost is the per-eval Kalman/diffuse-filter on near-unit-root prior draws (~= hmc 2.6h), NOT the sampler. Controlled synthetic Gaussians instead show chees is SLOW-MIXING (converges to truth, NOT biased) on ill-conditioned correlated posteriors: its ChEES trajectory adaptation under-shoots (L~5 vs optimal ~sqrt(kappa)=32 at kappa=1e3; big-axis variance 0.58/0.69/0.77 at n=1.5k/6k/24k vs truth 1.0; NUTS reaches 2% in 6k). GAP: the AR(1) battery is both too slow AND stresses exactly chees's weak region, so a clean cert needs a cheaper / better-conditioned fixture or tuned chees adaptation; prefer NUTS for near-unit-root/stiff posteriors. Evidence: .claude/orchestration/chees-slow-mixing-2026-06-27.md")
+  ## Re-certification 2026-09-25..27 on the corrected mass adaptation
+  ## (0.9.3.50) and the Whittle x0.5 / 2pi fix (0.9.3.35), frozen 0.9.3.87
+  ## build, AR(1) rho ~ beta(0.7, 0.1), sig_x ~ inv_gamma(0.5, 0.3),
+  ## n_draws 1000 / n_burn 500 / thin 4 (Whittle: 500 / 300), run by
+  ## replication/sbc_recert_2026-09-25/. chees, abandoned in 2026-06 at ~3 h,
+  ## completed in batched runs (7.6 h) and is calibrated.
+  static <- .set(static, "hmc", "gaussian_kf", "certified",
+       "AR(1) re-cert 2026-09-25 (0.9.3.87, post mass-adaptation fix): calibrated, min p=0.510, 0/200 failed (T=100, 200 reps, seed 9804); was min p=0.290 on 50 reps 2026-06-27")
+  static <- .set(static, "nuts", "gaussian_kf", "certified",
+       "AR(1) re-cert 2026-09-25 (0.9.3.87, post mass-adaptation fix): calibrated, min p=0.707, 0/200 failed (T=100, 200 reps, seed 9802); Tier A weekly CI")
+  static <- .set(static, "chees", "gaussian_kf", "certified",
+       "AR(1) cert 2026-09-27 (0.9.3.87, corrected mass adaptation): calibrated, min p=0.441, 0/200 failed (T=100, 200 reps, seed 9803; 7.6 h in 17 batches). The 2026-06-27 attempt was killed at ~3 h by the per-eval filter cost on near-unit-root prior draws, not the sampler. chees is slow-mixing (not biased) on ill-conditioned CORRELATED posteriors (trajectory adaptation under-shoots: L~6 vs sqrt(kappa)=32 at kappa=1e3) but mixed best of the gradient samplers on the 68-param NZSIM re-measure (min bulk ESS 132 vs NUTS lowrank 88); model-dependent -- compare against NUTS (see vignette(\"sbc-matrix\"))")
   static <- .set(static, "rwmh", "tpf", "characterized",
        "AR1 order=2 battery; 2026-06-13 local run: sig p = 1e-4 (rho calibrated); pre-existing; N-sweep DONE (bias -1.50->-0.24 nat over N=250..5000; N=5000 intractable ~10h; characterized as finite-N variance bias, not an implementation bug)")
   ## whittle is asymptotically approximate -> never gated; the four originally-run
@@ -1531,7 +1675,7 @@ sbc_matrix_result <- function(sbc_results = NULL, out_path = "inst/extdata/sbc_m
   static <- .set(static, "smc",  "whittle", "characterized", .wn)
   static <- .set(static, "dime", "whittle", "characterized", .wn)
   static <- .set(static, "nuts", "whittle", "characterized",
-       "AR1 NUTS + analytic whittle gradient; T=200; seed=801; debiased Whittle still miscalibrated (min p < 1e-4) -- posterior width, not location; characterized like the other whittle rows")
+       "AR1 NUTS + analytic whittle gradient, re-run 2026-09-27 after the Whittle x0.5 / 2pi fix (0.9.3.35) and the gradient slot fix (0.9.3.84): calibrated at T=200, min p=0.346, 0/100 failed (100 reps, seed 9801, 0.9.3.87). The pre-fix run was miscalibrated (min p < 1e-4, posterior width). Whittle stays characterized (asymptotically approximate; not gated) -- the calibration is fixture-specific")
   for (s in c("hmc", "mala", "chees"))
     static <- .set(static, s, "whittle", "to-certify",
          "analytic whittle gradient wired; battery cell not yet run (whittle approximate -> characterized, not gated, once run)")
@@ -1566,7 +1710,7 @@ sbc_matrix_result <- function(sbc_results = NULL, out_path = "inst/extdata/sbc_m
   if (!is.null(out_path)) {
     dir.create(dirname(out_path), recursive = TRUE, showWarnings = FALSE)
     saveRDS(static, out_path)
-    message("sbc_matrix_result: wrote ", out_path)
+    .dynhr_inform("sbc_matrix_result: wrote ", out_path)
   }
 
   invisible(static)
@@ -1579,6 +1723,10 @@ print.dynhr_sbc <- function(x, ...) {
   cat("Simulation-Based Calibration (Talts et al. 2018)\n")
   cat(strrep("-", 60), "\n")
   cat(sprintf("Replications: %d (failed: %d)\n", x$n_replications, x$n_failed))
+  if (NROW(x$failures) > 0L) {
+    cat("Failed replications by reason (count x reason; see x$failures):\n")
+    cat(paste0(.sbc_failure_summary(x$failures), "\n"), sep = "")
+  }
   cat(sprintf("Posterior draws per replication (thinned): %s\n",
               if (is.na(x$L_effective)) "NA" else as.character(x$L_effective)))
 
@@ -1591,6 +1739,70 @@ print.dynhr_sbc <- function(x, ...) {
   cat("(see x$plot for the rank histograms)\n")
 
   invisible(x)
+}
+
+
+## Normalise one raw replication result to list(ok = , reason = , ...).
+## Serial results are already lists; the parallel path can also deliver a
+## mirai error VALUE ("miraiError" / "errorValue": a character string with the
+## message in attr "message" -- NOT an R "error" condition, and `$ok` on it is
+## NULL), which previously counted as a failure with an EMPTY reason.
+#' @noRd
+.sbc_normalise_result <- function(res) {
+  if (inherits(res, "errorValue")) {
+    msg <- attr(res, "message", exact = TRUE)
+    if (is.null(msg)) msg <- paste(as.character(unclass(res)), collapse = " ")
+    return(list(ok = FALSE,
+                reason = paste0("R error in replication: ", msg)))
+  }
+  if (inherits(res, "error"))
+    return(list(ok = FALSE,
+                reason = paste0("R error in replication: ", conditionMessage(res))))
+  if (!is.list(res))
+    return(list(ok = FALSE, reason = paste0(
+      "unrecognised replication result of class '",
+      paste(class(res), collapse = "/"), "'")))
+  if (isTRUE(res$ok)) return(res)
+  reason <- res$reason
+  if (!is.character(reason) || length(reason) != 1L || is.na(reason) ||
+      !nzchar(reason))
+    reason <- "replication returned ok = FALSE without a reason"
+  res$ok <- FALSE
+  res$reason <- reason
+  res
+}
+
+## "count x reason" lines, most frequent first; long reasons are truncated
+## here only (x$failures keeps the full text).
+#' @noRd
+.sbc_failure_summary <- function(failures) {
+  if (NROW(failures) == 0L) return(character(0))
+  tab <- table(failures$reason)
+  tab <- tab[order(-as.integer(tab), names(tab))]
+  rsn <- names(tab)
+  long <- nchar(rsn) > 300L
+  rsn[long] <- paste0(substr(rsn[long], 1L, 297L), "...")
+  sprintf("  %d x %s", as.integer(tab), rsn)
+}
+
+## Warn (some failed) or abort (all failed) with the per-reason summary.
+#' @noRd
+.sbc_report_failures <- function(failures, n_replications) {
+  n_failed <- NROW(failures)
+  if (n_failed == 0L) return(invisible(NULL))
+  lines <- paste(.sbc_failure_summary(failures), collapse = "\n")
+  if (n_failed >= n_replications)
+    .dynhr_abort("dynhr_sbc: all ", n_replications, " replication(s) failed, ",
+                 "so there are no ranks to test. Failure reasons ",
+                 "(count x reason):\n", lines,
+                 class = "dynhr_error_sbc_all_failed")
+  .dynhr_warn("dynhr_sbc: ", n_failed, " of ", n_replications,
+              " replication(s) failed and were excluded from the ranks (the ",
+              "calibration check is conditional on the rest). Failure reasons ",
+              "(count x reason):\n", lines,
+              "\nSee $failures for the per-replication list.",
+              class = "dynhr_warning_sbc_failures")
+  invisible(NULL)
 }
 
 

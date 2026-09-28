@@ -2,31 +2,131 @@
 % Please edit documentation in R/hank-diagnostics.R
 \name{hank_determinacy}
 \alias{hank_determinacy}
-\title{Sequence-space determinacy / well-posedness of a HANK model}
+\title{Sequence-space determinacy of a HANK model (winding-number criterion)}
 \usage{
-hank_determinacy(model, tol = 1e-10)
+hank_determinacy(
+  model,
+  tol = 1e-10,
+  tau = NULL,
+  n_grid = 4096L,
+  boundary_tol = 1e-08
+)
 }
 \arguments{
-\item{model}{A \code{\link{hank_model}}.}
+\item{model}{A \code{\link{hank_model}} (anything with a square stacked
+\code{H_U}; \code{T_h} and \code{unknowns} are read when present,
+otherwise one unknown with \code{T_h = nrow(H_U)} is assumed).}
 
-\item{tol}{Reciprocal-condition threshold below which \code{H_U} is flagged
-ill-conditioned (default 1e-10).}
+\item{tol}{Reciprocal-condition threshold below which the truncated
+\code{H_U} is flagged numerically singular (default 1e-10). It no longer
+decides \code{determinate} on its own: it only separates
+\code{"determinate"} from \code{"singular_index_zero"} when \eqn{w = 0}.}
+
+\item{tau}{Optional 0-based interior date at which the symbol is read
+(default \code{floor((T_h - 1) / 2)}).}
+
+\item{n_grid}{Integer: initial number of unit-circle points (default
+4096; raised to exceed \eqn{4\tau} and doubled adaptively).}
+
+\item{boundary_tol}{Relative floor for \eqn{\min |\det j_X|} below which the
+symbol is treated as vanishing on the circle (default 1e-8).}
 }
 \value{
-A list with \code{rcond} (reciprocal condition number), \code{cond},
-  \code{min_sv}/\code{max_sv} (extreme singular values), \code{determinate}
-  (logical: \code{rcond >= tol}), and a \code{message}.
+A list with the headline \code{determinate} (logical, from the
+  winding number -- see above), \code{status}, \code{winding} (integer, or
+  \code{NA} on the boundary), \code{index} (\eqn{= -w}),
+  \code{min_abs_det}/\code{max_abs_det} over the circle, \code{converged},
+  \code{symbol_discrepancy} (\eqn{\sup_z \|\hat j^{(\tau)} -
+  \hat j^{(\tau_2)}\|_F} relative to \eqn{\sup_z \|\hat j^{(\tau)}\|_F}), \code{symbol_tail} (largest
+  \eqn{|j_k|} in the outer tenth of the band, relative), \code{tau},
+  \code{n_grid} (final), \code{symbol} (\code{n x n x (2 tau + 1)} array of
+  the blocks \eqn{j_k}, \eqn{k = -\tau..\tau}); the numerical-conditioning
+  fields of the truncated \code{H_U}: \code{rcond}, \code{cond},
+  \code{min_sv}/\code{max_sv}, \code{well_conditioned}
+  (\code{rcond >= tol}); and a \code{message}.
 }
 \description{
-Reports the conditioning of the GE Jacobian \code{H_U}.  A well-posed
-(locally determinate) linear rational-expectations equilibrium requires
-\code{H_U} to be invertible; a near-singular \code{H_U} means
-\code{\link{hank_model_irf}} would return an unreliable solution.
+Decides local determinacy of the linearized general equilibrium by the
+winding-number criterion of Auclert, Rognlie and Straub ("Determinacy and
+Existence in the Sequence Space", Prop. 1; ARS below) as extended to
+the stacked (matrix-valued) GE Jacobian by Rion (Dynare WP 88, Prop. 7):
+the untruncated stacked Jacobian \eqn{\tilde J_X} is block quasi-Toeplitz,
+\eqn{\tilde J_X = T(j_X) + C}, and when \eqn{\det j_X(z) \neq 0} on the unit
+circle it is Fredholm with
+\deqn{\dim\ker \tilde J_X - \mathrm{codim\,ran}\, \tilde J_X =
+  -\,\mathrm{wind}(\det j_X).}
+The conditioning of the TRUNCATED \code{H_U} alone cannot decide this: a
+\code{T x T} corner may be perfectly well conditioned while the infinite
+system is indeterminate (e.g. a Taylor rule with \code{phi < 1}).
+}
+\details{
+\strong{Symbol.} Conventions follow both papers: \eqn{j_k = \lim_s
+J_{s+k,s}} (date-\eqn{t} response to a date-\eqn{s} movement,
+\eqn{k = t - s}) and \eqn{j(z) = \sum_k j_k z^k}, so the lag operator has
+symbol \eqn{z} (winding \eqn{+1}) and the lead operator \eqn{z^{-1}}
+(winding \eqn{-1}). For every (target, unknown) block of \code{H_U} the
+coefficients are read at an interior date \eqn{\tau} (0-based) as in ARS
+(2023 version, Sec. 5.1): \eqn{j_k = J_{\tau+k,\tau}} for \eqn{k \le 0} (column
+\eqn{\tau}, anticipation) and \eqn{j_k = J_{\tau,\tau-k}} for \eqn{k \ge 0}
+(row \eqn{\tau}, propagation). Every entry used lies in the leading
+\eqn{(\tau+1)\times(\tau+1)} corner, far from the truncation artefacts
+that composing truncated Jacobians leaves near date \code{T_h}. The default
+is \eqn{\tau = \lfloor (T_h-1)/2 \rfloor}; a second estimate from
+\eqn{\tau_2 = \lfloor 2\tau/3 \rfloor} is used as a convergence
+diagnostic (\code{symbol_discrepancy}).
+
+\strong{Winding.} \eqn{\det j_X} is evaluated (FFT) on \code{n_grid}
+counter-clockwise roots of unity; the winding number is the sum of the
+principal-value phase increments over \eqn{2\pi} (unwrapped arg). The grid
+is doubled (up to \eqn{2^{16}}) until no phase step exceeds \eqn{\pi/4}.
+
+\strong{Classification} (\code{status}):
+\describe{
+  \item{\code{"determinate"}}{\eqn{w = 0} and the truncated \code{H_U} is
+    numerically nonsingular: the index is zero and the kernel is trivial,
+    so a unique bounded response exists. \eqn{w = 0} is the generic
+    certificate (invertible on an open dense set; Rion Prop. 7 item 3).}
+  \item{\code{"indeterminate"}}{\eqn{w < 0}: at least \eqn{-w} independent
+    square-summable solutions of the homogeneous system -- the bounded
+    response is not unique.}
+  \item{\code{"nonexistence"}}{\eqn{w > 0}: the range has codimension at
+    least \eqn{w}; for some forcings no bounded response exists (whether
+    THIS model's shocks hit an unreachable direction is a separate check,
+    Rion Prop. 8).}
+  \item{\code{"singular_index_zero"}}{\eqn{w = 0} but \code{H_U} is
+    numerically singular (\code{rcond < tol}): the non-generic index-zero
+    case with a nontrivial kernel, which couples indeterminacy with
+    non-existence (Rion, discussion after Prop. 8).}
+  \item{\code{"boundary"}}{\eqn{\det j_X} vanishes on the unit circle
+    (\code{min_abs_det <= boundary_tol * max_abs_det}): the operator is not
+    Fredholm and \code{winding} is \code{NA}.}
+}
+\code{determinate} is \code{TRUE} only for \code{"determinate"}.
+
+\strong{Convergence.} Rion (Prop. 10) shows the verdict read off an
+approximate symbol is exact once the approximation error stays below the
+determinant floor \eqn{\min_{|z|=1} |\det j_X|} (the curves cannot be
+pulled across the origin). \code{converged} applies that argument between
+the two readings: it is \code{TRUE} when
+\eqn{|\det \hat j^{(\tau_2)}(z) - \det \hat j^{(\tau)}(z)| <
+|\det \hat j^{(\tau)}(z)|} at every grid point, which by Rouche's theorem
+forces both readings to wind identically. \code{FALSE} means the symbol has
+not visibly converged relative to the determinant floor: increase
+\code{T_h}. It does not change \code{determinate}.
 }
 \examples{
 inc <- hank_income_rouwenhorst(0.9, 0.7, 3)
 ag  <- hank_asset_grid(60, 40, 0)
 nk  <- hank_nk_hank(ag, inc$Pi, inc$e, beta = 0.96, eis = 1,
                     r_ss = 0.005, phi = 1.5, kappa = 0.1, T_h = 80)
-hank_determinacy(nk$model)$determinate
+d <- hank_determinacy(nk$model)
+d$determinate
+d$winding
+}
+\references{
+Auclert, A., Rognlie, M., Straub, L. (2023; cited by Rion as 2025).
+Determinacy and Existence in the Sequence Space. Working paper.
+
+Rion, N. (2026). Rich Heterogeneity in Dynare 7: A Practical Description.
+Dynare Working Paper 88.
 }

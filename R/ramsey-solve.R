@@ -68,7 +68,7 @@ ramsey_solve <- function(aug_model,
   }
 
   if (verbose) {
-    cat(sprintf("[ramsey_solve] Compiling augmented model (%d vars, %d eqs)...\n",
+    .dynhr_cat(sprintf("[ramsey_solve] Compiling augmented model (%d vars, %d eqs)...\n",
                 length(aug_model$var_names), length(aug_model$equations)))
   }
 
@@ -102,7 +102,7 @@ ramsey_solve <- function(aug_model,
 
   # ---- 4. Run perturbation ----
   if (verbose) {
-    cat(sprintf("[ramsey_solve] Running perturbation at order %d...\n", order))
+    .dynhr_cat(sprintf("[ramsey_solve] Running perturbation at order %d...\n", order))
   }
 
   dr <- solve_perturbation(aug_model, aug_compiled, ss, params,
@@ -187,12 +187,12 @@ ramsey_solve <- function(aug_model,
   }
 
   if (verbose && !is.null(ev)) {
-    cat(sprintf("  BK check: %d unstable eig / %d forward vars in aug system -> %s\n",
+    .dynhr_cat(sprintf("  BK check: %d unstable eig / %d forward vars in aug system -> %s\n",
                 n_unstable, aug_model$n_forward,
                 if (isTRUE(bk_ok)) "OK" else if (isFALSE(bk_ok)) "FAIL" else "N/A"))
     if (isFALSE(bk_ok)) {
-      cat(sprintf("    WARNING: Blanchard-Kahn condition not satisfied!\n"))
-      cat(sprintf("    Augmented system: %d forward-looking variables, %d unstable eigenvalues.\n",
+      .dynhr_cat(sprintf("    WARNING: Blanchard-Kahn condition not satisfied!\n"))
+      .dynhr_cat(sprintf("    Augmented system: %d forward-looking variables, %d unstable eigenvalues.\n",
                   aug_model$n_forward, n_unstable))
     }
   }

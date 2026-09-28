@@ -32,14 +32,14 @@
 .resolve_order2 <- function(model, compiled, params_perturbed, dr_template) {
   ss <- tryCatch(
     solve_steady_state(model, compiled, params_perturbed, verbose = FALSE),
-    error = function(e) NULL
+    error = function(e) .dynhr_reraise_bug(e, NULL)
   )
   if (is.null(ss) || !isTRUE(ss$converged)) return(NULL)
 
   dr2 <- tryCatch(
     solve_perturbation(model, compiled, ss$values, params_perturbed,
                        order = 2L, verbose = FALSE),
-    error = function(e) NULL
+    error = function(e) .dynhr_reraise_bug(e, NULL)
   )
   if (is.null(dr2) || !isTRUE(dr2$bk_satisfied)) return(NULL)
 
@@ -116,7 +116,7 @@
   if (any(orders >= 3L) && dr_order >= 2L) {
     c3_result <- tryCatch(
       compute_third_cumulant(dr2, model, params),
-      error = function(e) NULL
+      error = function(e) .dynhr_reraise_bug(e, NULL)
     )
     if (is.null(c3_result)) return(NULL)
     # Mirror .cumulant_loglik EXACTLY: project rows AND (j,k) columns onto the
@@ -130,7 +130,7 @@
   if (any(orders >= 4L) && dr_order >= 2L) {
     c4_result <- tryCatch(
       compute_fourth_cumulant(dr2, model, params),
-      error = function(e) NULL
+      error = function(e) .dynhr_reraise_bug(e, NULL)
     )
     if (is.null(c4_result)) return(NULL)
     # Mirror .cumulant_loglik EXACTLY: project rows AND (j,k,l) columns onto
@@ -240,7 +240,7 @@ cumulant_loglik_grad <- function(model, compiled, dr, params, param_names,
   m_base <- suppressWarnings(
     .build_moment_vector(dr, model, params, obs_vars, orders, me_variance))
   if (is.null(m_base)) {
-    warning("cumulant_loglik_grad: base moment vector is NULL / non-finite")
+    .dynhr_warn("cumulant_loglik_grad: base moment vector is NULL / non-finite")
     return(setNames(rep(NA_real_, length(param_names)), param_names))
   }
 
@@ -472,7 +472,7 @@ cumulant_loglik_grad <- function(model, compiled, dr, params, param_names,
     bar_c3_obs[obs_idx, .c3_obs_col_index(obs_idx, n_endo)] <- b3_full
     rev3 <- tryCatch(
       .compute_third_cumulant_adjoint(dr, model, params, bar_c3_obs),
-      error = function(e) NULL)
+      error = function(e) .dynhr_reraise_bug(e, NULL))
     if (is.null(rev3)) return(na_out)
     bar_ghx  <- bar_ghx  + rev3$bar_ghx
     bar_ghu  <- bar_ghu  + rev3$bar_ghu
@@ -521,7 +521,7 @@ cumulant_loglik_grad <- function(model, compiled, dr, params, param_names,
         G_ZZ = bar_ghx[, seq_len(n_s), drop = FALSE],
         G_DD = bar_ghu,
         g_d  = as.numeric(bar_ys))),
-    error = function(e) NULL)
+    error = function(e) .dynhr_reraise_bug(e, NULL))
 
   ## ---- 5. Order-2 channel: ghxx/ghxu/ghuu/ghss -> structural params -------
   o2 <- tryCatch(
@@ -529,7 +529,7 @@ cumulant_loglik_grad <- function(model, compiled, dr, params, param_names,
       model, compiled, dr, params, param_names,
       bars = list(bar_ghxx = bar_ghxx, bar_ghxu = bar_ghxu,
                   bar_ghuu = bar_ghuu, bar_ghss = bar_ghss)),
-    error = function(e) NULL)
+    error = function(e) .dynhr_reraise_bug(e, NULL))
 
   ## ---- 6. Sigma_e direct channel (per-parameter d(Sigma_e)) ---------------
   ## The cumulant moments depend on Sigma_e directly (not only through the
@@ -592,7 +592,7 @@ cumulant_loglik_grad <- function(model, compiled, dr, params, param_names,
   m_base <- suppressWarnings(
     .build_moment_vector(dr, model, params, obs_vars, orders, me_variance))
   if (is.null(m_base)) {
-    warning(".cumulant_loglik_grad_implicit: base moment vector NULL/non-finite")
+    .dynhr_warn(".cumulant_loglik_grad_implicit: base moment vector NULL/non-finite")
     return(setNames(rep(NA_real_, np), param_names))
   }
 
@@ -626,13 +626,13 @@ cumulant_loglik_grad <- function(model, compiled, dr, params, param_names,
     solution_derivatives_order2(model, compiled, dr, params, param_names,
                                  h_rel = h_rel, h_hess = max(h_rel * 100, 1e-4)),
     error = function(e) {
-      warning(sprintf(".cumulant_loglik_grad_implicit: solution_derivatives_order2 failed: %s",
+      .dynhr_warn(sprintf(".cumulant_loglik_grad_implicit: solution_derivatives_order2 failed: %s",
                       conditionMessage(e)))
       NULL
     }
   )
   if (is.null(o2d)) {
-    warning(".cumulant_loglik_grad_implicit: falling back fully to FD route")
+    .dynhr_warn(".cumulant_loglik_grad_implicit: falling back fully to FD route")
     return(cumulant_loglik_grad(model, compiled, dr, params, param_names,
                                  obs_vars, data, orders = orders,
                                  me_variance = me_variance, h_rel = h_rel,
@@ -671,11 +671,11 @@ cumulant_loglik_grad <- function(model, compiled, dr, params, param_names,
   if (has_34 && c3_active) {
     c3_base <- tryCatch(
       compute_third_cumulant(dr, model, params),
-      error = function(e) NULL
+      error = function(e) .dynhr_reraise_bug(e, NULL)
     )
     c4_base <- tryCatch(
       compute_fourth_cumulant(dr, model, params),
-      error = function(e) NULL
+      error = function(e) .dynhr_reraise_bug(e, NULL)
     )
     if (!is.null(c3_base) && !is.null(c4_base)) {
       cd34 <- tryCatch(
@@ -694,7 +694,7 @@ cumulant_loglik_grad <- function(model, compiled, dr, params, param_names,
           h_rel        = h_rel
         ),
         error = function(e) {
-          warning(sprintf(".cumulant_loglik_grad_implicit: cumulant_moment_derivs_3_4 failed: %s",
+          .dynhr_warn(sprintf(".cumulant_loglik_grad_implicit: cumulant_moment_derivs_3_4 failed: %s",
                           conditionMessage(e)))
           NULL
         }
@@ -789,5 +789,106 @@ cumulant_loglik_grad <- function(model, compiled, dr, params, param_names,
     grad[k] <- sum(delta_base * dm) * T_obs / n_moments
   }
 
+  grad
+}
+
+
+# ============================================================================
+# Exact gradient for cumulant orders within 1:2 on the FIRST-ORDER rule (W68)
+# ============================================================================
+
+#' Exact gradient of the cumulant log-likelihood for orders within 1:2.
+#'
+#' Without an order-3/4 cumulant, make_log_posterior_cumulant() solves the
+#' bare FIRST-ORDER rule and matches only the observable mean (the steady
+#' state ys) and covariance
+#'   Sigma_y = G Sigma_x G' + H Sigma_e H' (+ me I),
+#'   Sigma_x = hx Sigma_x hx' + hu Sigma_e hu'.
+#' Both are differentiated exactly: dys/dG/dH from ONE solution_derivatives()
+#' call (shared factorization, all parameters), d(Sigma_e) from the caller
+#' (the .dSigma_e_fd convention of make_posterior_grad), and d(Sigma_x) from
+#' the derivative Lyapunov equation
+#'   dSigma_x = hx dSigma_x hx' + dhx Sigma_x hx' + hx Sigma_x dhx'
+#'              + dhu Sigma_e hu' + hu Sigma_e dhu' + hu dSigma_e hu'.
+#' The identity-weighted loglik is -T/(2p) ||m_hat - m(theta)||^2, so its
+#' gradient is (T/p) (m_hat - m)' dm/dtheta. The order-2-rule paths
+#' (.cumulant_loglik_grad_implicit / _adjoint) need a DecisionRules2 and so
+#' never served this case: it used to take per-parameter FD of the forward.
+#'
+#' @param dr First-order decision rule (the forward's rule for these orders).
+#' @param dSigma_e_list Named list (by param_names) of n_exo x n_exo
+#'   d(Sigma_e)/dtheta matrices; a missing entry is taken as zero.
+#' @return Named numeric vector; NA where a block is unavailable (the caller
+#'   then falls back to FD of the forward for that parameter).
+#' @noRd
+.cumulant_loglik_grad_order1 <- function(model, compiled, dr, params,
+                                         param_names, obs_vars, data,
+                                         orders = 1:2, me_variance = 0,
+                                         dSigma_e_list = NULL) {
+  np <- length(param_names)
+  grad <- setNames(rep(NA_real_, np), param_names)
+  if (!length(orders) || !all(orders %in% 1:2) ||
+      .dr_perturbation_order(dr) >= 2L)
+    return(grad)
+
+  T_obs <- nrow(data)
+  sc <- sample_cumulants(.cumulant_subset_obs(data, obs_vars),
+                         max_order = max(orders))
+
+  endo    <- dr$endo_names
+  si      <- dr$state_idx
+  n_exo   <- length(dr$exo_names)
+  obs_idx <- match(obs_vars, endo)
+  ## Same Sigma_e compute_moments() (the forward's covariance) uses.
+  Sigma_e <- if (!is.null(dr$Sigma_e) &&
+                 all(dim(dr$Sigma_e) == c(n_exo, n_exo))) dr$Sigma_e
+             else .get_shock_cov(model, dr$exo_names, params)
+  G  <- dr$ghx; H <- dr$ghu
+  hx <- G[si, , drop = FALSE]; hu <- H[si, , drop = FALSE]
+  Sx <- if (length(si)) .state_covariance(hx, hu, Sigma_e) else matrix(0, 0, 0)
+  Sy <- G %*% Sx %*% t(G) + H %*% Sigma_e %*% t(H)
+  Sy_o <- Sy[obs_idx, obs_idx, drop = FALSE]
+  if (me_variance > 0) diag(Sy_o) <- diag(Sy_o) + me_variance
+
+  m_mod <- numeric(0); m_emp <- numeric(0)
+  if (1L %in% orders) {
+    m_mod <- c(m_mod, dr$ys[obs_vars])
+    m_emp <- c(m_emp, sc$mean[obs_vars])
+  }
+  if (2L %in% orders) {
+    m_mod <- c(m_mod, as.numeric(Sy_o))
+    m_emp <- c(m_emp, as.numeric(sc$var_cov[obs_vars, obs_vars, drop = FALSE]))
+  }
+  if (!all(is.finite(m_mod)) || !all(is.finite(Sx))) return(grad)
+  delta <- as.numeric(m_emp - m_mod)
+  n_mom <- length(delta)
+
+  sd <- solution_derivatives(model, compiled, dr, params, param_names,
+                             obs_vars = endo)
+  zero_Se <- matrix(0, n_exo, n_exo)
+  for (k in seq_len(np)) {
+    nm <- param_names[k]
+    d  <- sd$derivs[[nm]]
+    if (is.null(d) || !isTRUE(d$ok)) next
+    dSe <- dSigma_e_list[[nm]] %||% zero_Se
+    dG  <- d$dG; dH <- d$dH
+    dm  <- numeric(0)
+    if (1L %in% orders) dm <- c(dm, d$dys[obs_vars])
+    if (2L %in% orders) {
+      dSx <- if (length(si)) {
+        dhx <- dG[si, , drop = FALSE]; dhu <- dH[si, , drop = FALSE]
+        rhs <- dhx %*% Sx %*% t(hx) + hx %*% Sx %*% t(dhx) +
+               dhu %*% Sigma_e %*% t(hu) + hu %*% Sigma_e %*% t(dhu) +
+               hu %*% dSe %*% t(hu)
+        solve_lyapunov(hx, (rhs + t(rhs)) / 2)
+      } else matrix(0, 0, 0)
+      dSy <- dG %*% Sx %*% t(G) + G %*% dSx %*% t(G) + G %*% Sx %*% t(dG) +
+             dH %*% Sigma_e %*% t(H) + H %*% dSe %*% t(H) +
+             H %*% Sigma_e %*% t(dH)
+      dm <- c(dm, as.numeric(dSy[obs_idx, obs_idx, drop = FALSE]))
+    }
+    if (length(dm) != n_mom || !all(is.finite(dm))) next
+    grad[k] <- sum(delta * dm) * T_obs / n_mom
+  }
   grad
 }

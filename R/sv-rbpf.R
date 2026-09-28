@@ -120,7 +120,7 @@
     ## stale (and Armadillo buffers leaked) on exactly the runs a user asked
     ## to be strict. Warning here costs nothing and is longjmp-safe.
     if (isTRUE(as.integer(res$fail_period) > 0L))
-      warning(sprintf(
+      .dynhr_warn(sprintf(
         paste0("sv_rbpf_loglik: all %d particles failed at period %d ",
                "(non-PD forecast covariance or non-finite likelihood for ",
                "every particle) -- returning -Inf. This may indicate ",
@@ -267,6 +267,12 @@ make_log_posterior_sv_rbpf <- function(model, data, prior_spec, obs_vars,
          "Declare a stochastic_volatility block or pass one via the ",
          "'stochastic_volatility' argument.", call. = FALSE)
 
+  ## A per-observable vector: refused with a classed error; an all-equal
+  ## vector is the scalar.
+  if (length(me_variance) > 1L)
+    me_variance <- .kf_me_variance(me_variance, obs_vars,
+                                   "make_log_posterior_sv_rbpf",
+                                   allow_vector = FALSE)
   if (!is.numeric(me_variance) || length(me_variance) != 1L ||
       !is.finite(me_variance) || me_variance < 0)
     stop("make_log_posterior_sv_rbpf: 'me_variance' must be a non-negative ",
@@ -289,7 +295,7 @@ make_log_posterior_sv_rbpf <- function(model, data, prior_spec, obs_vars,
   ## the pseudo-marginal invariance of pmmh(). Warn; the default seed = NULL is
   ## correct. (Mirrors the TPF seed convention.)
   if (!is.null(seed))
-    warning("make_log_posterior_sv_rbpf: a non-NULL 'seed' makes the RB-PF ",
+    .dynhr_warn("make_log_posterior_sv_rbpf: a non-NULL 'seed' makes the RB-PF ",
             "deterministic across evaluations (marginal-likelihood variance = 0). ",
             "This is fine for a one-off likelihood value but BREAKS pmmh() ",
             "pseudo-marginal validity -- use seed = NULL (the default) for MCMC.",
@@ -332,7 +338,7 @@ make_log_posterior_sv_rbpf <- function(model, data, prior_spec, obs_vars,
       if (is.character(hyper)) return(NULL)   # domain-infeasible hyperparams
 
       P0 <- tryCatch(kf_stationary_init(TT, RR, Sigma_e),
-                     error = function(e) NULL)
+                     error = function(e) .dynhr_reraise_bug(e, NULL))
       if (is.null(P0) || !all(is.finite(P0))) return(NULL)
 
       Y <- if (nrow(data) != n_obs) t(data) else data
@@ -341,7 +347,7 @@ make_log_posterior_sv_rbpf <- function(model, data, prior_spec, obs_vars,
         .sv_rbpf_loglik(Y, TT, ZZ, RR, DD, Sigma_e, d, P0,
                         sv_idx, hyper, length(exo), n_particles,
                         me_diag = me_diag),
-        error = function(e) -Inf)
+        error = function(e) .dynhr_reraise_bug(e, -Inf))
       if (!is.finite(loglik)) return(NULL)
       list(loglik = loglik)
     },

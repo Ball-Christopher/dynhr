@@ -51,18 +51,32 @@ m$var_names
 
 The `var` keyword also accepts:
 
-- **`var(log)`** — marks a variable as log-transformed (Dynare
-  `loglinear` convention); the name is still parsed without the `(log)`:
+- **`var(log)`** — Dynare 6+ semantics.  `var(log) c;` declares `c`
+  and also creates the endogenous variable `LOG_c`: every `c` in the
+  model block (any timing, `#` locals included) is replaced by
+  `exp(LOG_c)` and the equation `c = exp(LOG_c);` is appended, so the
+  perturbation is taken in `LOG_c` while `c` stays available.  A
+  `steady_state_model` that assigns `c` gets `LOG_c = log(c);` appended,
+  and `initval`/`endval`/`histval` values of `c` carry over as logs.
+  `model$log_vars` maps each declared name to its `LOG_` variable:
 
 ```{r var-log}
-m_log <- suppressWarnings(parse_mod("
-  var c(log) y;
+m_log <- parse_mod("
+  var(log) c;
+  var y;
   varexo e;
-  parameters b; b = 0.99;
-  model; c = b*c(+1) + e; y = c; end;
-"))
-m_log$var_names   # c and y, without the (log) suffix
+  parameters b; b = 0.5;
+  model; c = exp(b*log(c(-1)) + e); y = c; end;
+  steady_state_model; c = 1; y = 1; end;
+")
+m_log$var_names   # c, y, then LOG_c
+m_log$log_vars
 ```
+
+  At first order the level rows of the decision rule are the same as
+  without `var(log)`; `LOG_c` carries the log-linear rule, and at
+  higher orders the approximation is taken in logs.  A declared name
+  `LOG_c` clashes and is an error.
 
 - **LaTeX labels** — `var c $c$ y;` attaches a display label; ignored
   by the parser but preserved for downstream renderers.
@@ -109,8 +123,10 @@ parameters: `sigma = 1 / (1 - alpha);`.
 ### 1.5  `predetermined_variables`
 
 Variables declared `predetermined` are beginning-of-period stocks.
-dynhr shifts their timing by -1 in the equation ASTs so that writing
-`k` in the model means `k(-1)` in standard Dynare timing.
+dynhr shifts their timing by -1 so that writing `k` in the model means
+`k(-1)` in standard Dynare timing.  As in Dynare's preprocessor, the
+shift is applied to the model-block text (`#` locals included) before
+`EXPECTATION` and the auxiliary lead/lag variables are built.
 
 ```{r predet}
 m_pre <- suppressWarnings(parse_mod("
@@ -232,6 +248,26 @@ This is one of the most commonly overlooked features: you do **not**
 need to inline `#` intermediates before loading into dynhr.  They are
 supported natively.
 
+As in Dynare 7, a local may be used with a lead or a lag.  `r_real(-1)`
+stands for the definition of `r_real` with every variable shifted back
+one period (`i(-1) - pi` below), and leads or lags beyond one period
+that this creates get auxiliary variables like any other:
+
+```{r model-local-timing}
+m_lt <- parse_mod("
+  var y i pi;
+  varexo e;
+  parameters phi; phi = 1.5;
+  model;
+    # r_real = i - pi(+1);
+    y = 0.9*y(-1) - 0.1*r_real(-1) + e;
+    pi = 0.99*pi(+1) + 0.1*y;
+    i = phi*pi;
+  end;
+")
+dynhr:::ast_to_string(m_lt$equations[[1]]$rhs)
+```
+
 ### 2.5  Equation tags
 
 Equations can carry a tag in square brackets immediately before the
@@ -267,9 +303,9 @@ fns <- c(
   "sinh, cosh, tanh",
   "max, min",
   "normcdf, normpdf, erf, erfc",
-  "diff, adl",
+  "diff(expr) -- expr - expr(-1), expanded inline (adl() is not a Dynare 7 operator and is an error)",
   "STEADY_STATE() / steady_state()",
-  "EXPECTATION()"
+  "EXPECTATION(k)(expr) -- expectation of expr on the period t+k information set (Dynare semantics, via an auxiliary variable)"
 )
 cat(paste(fns, collapse = "\n"))
 ```
@@ -406,6 +442,89 @@ dynhr merges multiple `shocks` blocks (later block wins per shock).
 applying its own entries.  A warning is emitted when two blocks define
 conflicting values for the same shock.
 
+### 5.4  Deterministic scenarios: `periods`/`values` and `shock_paths`
+
+A `shocks` block stanza `var x; periods 1:3; values 0.1;` stores a
+deterministic path in `model$det_shocks` (one row per period).  Dynare
+7's `shock_paths` block is parsed into the same structure, with the
+values at the terminal period `end` going to `model$endval`.  Values
+are expressions evaluated period by period, in stanza order, exactly
+as Dynare does: `self.x(-1)` is the value just set for the previous
+period, `self.z` another shock's current value, `initval.x` the
+`initval` value, and parameters are used by name.  A range ending at
+`end` needs the simulation length from
+`perfect_foresight_setup(periods = T)`; dates need its
+`first_simulation_period`.
+
+```{r shock-paths}
+m_sp <- parse_mod("
+  var y;
+  varexo x;
+  parameters rho; rho = 0.5;
+  model; y = rho*y(-1) + x + 0.01*y(+1); end;
+  initval; x = 0.2; end;
+  shock_paths;
+    var x;
+    periods 1, 2:4, 6:end;
+    values initval.x*1.05, self.x(-1)*1.05, 0.3;
+  end;
+  perfect_foresight_setup(periods = 8);
+")
+m_sp$det_shocks
+m_sp$endval
+```
+
+Not implemented (each an error, never a silent approximation):
+database scopes (`db.foo`), the `prev.` / `learnt_in(...)` scopes and
+`learnt_in` other than 1 (expectation errors), and combining
+`shock_paths` with an `endval` block or deterministic `shocks` periods,
+which Dynare forbids.  `write_mod()` writes the scenario back as a
+`shock_paths` block with explicit periods and values.
+
+#### Controlled paths: `perfect_foresight_controlled_paths`
+
+Dynare 7's `perfect_foresight_controlled_paths` block (and the same
+`exogenize` / `endogenize` stanzas inside a `shock_paths` block) imposes
+the path of an endogenous variable over given periods and solves for
+the path of a chosen shock instead, so the stacked system stays square.
+Each stanza is `exogenize VAR; periods ...; values ...; endogenize
+SHOCK;`; periods are integers, ranges or dates (not `end`), values are
+numbers or parameter expressions (plus `initval.` inside `shock_paths`,
+never `self.`).  The parser stores one row per controlled period in
+`model$controlled_paths`, and `perfect_foresight_solve()` uses it by
+default: in those periods the Newton unknown and Jacobian column of the
+endogenous variable are swapped for the shock's, as in Dynare's
+`controlled_paths_substitute_stacked_jacobian.m`.  The solved shocks are
+returned in `$exo_path`.  A variable exogenized twice, or a shock
+endogenized twice, in one period is an error, as is endogenizing a shock
+in a period where it also has a deterministic value; only `learnt_in = 1`
+is implemented.
+
+```{r controlled-paths}
+m_cp <- parse_mod("
+  var y c;
+  varexo e u;
+  parameters rho a; rho = 0.5; a = 0.3;
+  model;
+    y = rho*y(-1) + e;
+    c = a*c(+1) + y + u;
+  end;
+  perfect_foresight_controlled_paths;
+    exogenize y;
+    periods 1:2, 3;
+    values 0.5, 0.2;
+    endogenize e;
+  end;
+  perfect_foresight_setup(periods = 20);
+")
+m_cp$controlled_paths
+cm_cp <- compile_model(m_cp, verbose = FALSE)
+z <- c(y = 0, c = 0)
+pf <- perfect_foresight_solve(cm_cp, y0 = z, y_terminal = z, n_periods = 20)
+pf$Y[1:4, ]
+pf$exo_path[1:4, ]      # e = y - rho * y(-1) in periods 1-3
+```
+
 ---
 
 ## 6  `estimated_params` block
@@ -424,6 +543,28 @@ end;
 ```
 
 The parsed table is in `model$estimated_params`.
+
+For every shape, `P1` and `P2` (the two numbers after the shape) are the
+prior **mean** and **standard deviation**, as in Dynare. This includes
+`uniform_pdf`: `x, uniform_pdf, 0.5, 0.2;` is a uniform with mean 0.5 and
+standard deviation 0.2, i.e. on `[0.5 - sqrt(3)*0.2, 0.5 + sqrt(3)*0.2]`
+(Dynare's `uniform_specification()`). To give a uniform's **bounds**, leave
+`P1`/`P2` empty and put the bounds in `P3`/`P4`:
+
+```
+estimated_params;
+  x, uniform_pdf, , , 0, 1;             // uniform on [0, 1]
+  y, 0.5, 0, 1, uniform_pdf, , , 0, 1;  // same, long form with INITVAL, LB, UB
+end;
+```
+
+`uniform_pdf, 0, 1` is therefore **not** the unit interval (it is mean 0, sd 1,
+i.e. `[-1.73, 1.73]`). `extract_prior_spec()` warns
+(`dynhr_warning_uniform_parameterisation`) when a mean/sd uniform row looks
+like it was meant as bounds -- `P2 > P1 >= 0`, a calibrated/initial value
+inside `[P1, P2]` but outside the implied support, or a support below 0 for a
+`stderr` or outside `[-1, 1]` for a `corr`. Rows written with `P3`/`P4` never
+warn.
 
 `estimated_params_init` (with optional `use_calibration`) is also
 supported and stored in `model$estimated_params_init`.
@@ -478,9 +619,15 @@ or a `@#define`-d array variable.  Supports `@{expr}` interpolation
 including arithmetic on the loop index (e.g. `x@{j-1}`).  Nested
 loops are supported.
 
-### 7.3  `@#if` / `@#else` / `@#endif`
+As in Dynare 6+, `@#for` also unpacks tuples (`@#for (i, c) in
+[(1, "H"), (2, "F")]`), takes a `when` filter (`@#for k in 1:6 when
+mod(k, 3) == 0`) and a stepped range (`1:2:7`).
 
-Conditional inclusion based on a macro-language expression:
+### 7.3  `@#if` / `@#elseif` / `@#else` / `@#endif`
+
+Conditional inclusion based on a macro-language expression.  Any
+number of `@#elseif COND` clauses may follow `@#if`, `@#ifdef` or
+`@#ifndef`; the first true branch is taken:
 
 ```{r macro-if}
 txt_flag <- function(flag) paste(
@@ -499,6 +646,25 @@ m_on  <- parse_mod(txt_flag(1L))
 m_off <- parse_mod(txt_flag(0L))
 dynhr:::ast_to_string(m_on$equations[[1]]$rhs)   # AR(1)
 dynhr:::ast_to_string(m_off$equations[[1]]$rhs)  # just e
+```
+
+```{r macro-elseif}
+txt_mode <- function(mode) paste(
+  sprintf('@#define mode = "%s"', mode),
+  '@#define y = "y_" + mode',          # string concatenation
+  "var @{y}; varexo e; parameters r; r = 0.5;",
+  "model;",
+  '@#if mode == "ar"',
+  "@{y} = r*@{y}(-1) + e;",
+  '@#elseif mode == "ma"',
+  "@{y} = e + r*e(-1);",
+  "@#else",
+  "@{y} = e;",
+  "@#endif",
+  "end;",
+  sep = "\n"
+)
+parse_mod(txt_mode("ma"))$var_names[1]   # y_ma
 ```
 
 ### 7.4  `@#ifdef` / `@#ifndef`
@@ -532,20 +698,49 @@ file are visible after the `@#include`.
 @#include "helper_equations.inc"
 ```
 
+The file name may also be a string-valued macro expression
+(`@#include FILE`), and `@#includepath "dir"` adds a directory that is
+searched after the including file's own.
+
 ### 7.6  `@{expr}` interpolation
 
 Inside any non-directive line (including declaration blocks and
 equation bodies), `@{expr}` is replaced by the evaluated macro
 expression.  Arithmetic on the loop index is supported:
 `p@{j-1}_fwrd`.  Quoted string elements have their quotes stripped
-when spliced into identifiers.
+when spliced into identifiers.  Booleans are spliced as `true`/`false`,
+arrays as `[a, b]` and tuples as `(a, b)`, as Dynare prints them.
 
-### 7.7  What is NOT supported in the macro language
+### 7.7  Macro expressions
 
-- **`@#elseif`** — rewrite as nested `@#if`/`@#else`.
-- **`@#echo` / `@#error`** — silently dropped (no structural effect).
-- Any other unrecognised `@#` directive causes an **immediate error**
-  rather than silent omission.
+Macro expressions follow the Dynare 6/7 macro language (checked
+against the Dynare 7.1 preprocessor's `savemacro` output):
+
+- values: reals, strings, booleans (`true`/`false`), arrays `[a, b]`,
+  tuples `(a, b)`, and functions `@#define f(x) = 2*x + 1`;
+  `@#define NAME` with no value is `true`;
+- operators: `+ - * / ^`, comparisons, `&& || !`, `in`, ranges `A:B`
+  and `A:S:B`; `+` concatenates strings and arrays, `|` / `&` / `-` are
+  union / intersection / difference of arrays, `*` and `^` build
+  cartesian products;
+- comprehensions `[x^2 for x in 1:5 when mod(x, 2) == 1]`, casts
+  `(bool)`, `(real)`, `(string)`, `(tuple)`, `(array)`, and indexing
+  `v[2]`, `v[[1, 3]]`, `v[2:3]` (also on strings);
+- functions `length`, `isempty`, `isboolean`, `isreal`, `isstring`,
+  `istuple`, `isarray`, `defined`, `exp`, `ln`, `log`, `log10`, the
+  trigonometric functions, `sqrt`, `cbrt`, `sign`, `floor`, `ceil`,
+  `trunc`, `round`, `erf`, `erfc`, `gamma`, `lgamma`, `sum`, `mod`,
+  `max`, `min`, `normpdf`, `normcdf`.
+
+Directive lines may end in a `//` comment.  `@#error` aborts when it is
+reached in a taken branch; `@#echo` and `@#echomacrovars` are ignored.
+The expressions are evaluated by dynhr's own interpreter, never as R
+code.  One deliberate difference: a non-integer real is spliced with the
+fewest digits that read back as the same double (`1/3` gives
+`0.3333333333333333`), where Dynare prints 15 significant digits.
+
+Any unrecognised `@#` directive causes an **immediate error** rather
+than silent omission.
 
 ---
 
@@ -571,7 +766,38 @@ end;
 
 Parsed into `model$occbin_constraints`.
 
-### 9.2  MCP equation tags
+### 9.2  Complementarity conditions and MCP equation tags
+
+Dynare 7 writes a complementarity condition after its equation,
+separated by the perpendicular symbol `⟂` (U+27C2) or the ASCII `_|_`.
+Both bounds may be given at once, and a bound may be any function of
+parameters:
+
+```{r complementarity}
+m_cc <- parse_mod("
+  var mu i y;
+  varexo e;
+  parameters alpha; alpha = 0.5;
+  model;
+    mu = 0 _|_ 0 < i < 1 + 2*alpha;
+    i = 1.5*y + mu;
+    y = 0.9*y(-1) + e;
+  end;
+")
+m_cc$equations[[1]]$complementarity
+sapply(mcp_parse_tags(m_cc), function(s) c(s$op, s$bound))
+```
+
+The constrained side must be a bare endogenous variable and the bounds
+may not contain any variable (as in Dynare's preprocessor); `x > L`,
+`L < x`, `x < U`, `U > x`, `L < x < U` and `U > x > L` are accepted,
+with `>=` / `<=` meaning the same.  A two-sided condition gives one
+lower and one upper MCP spec on the same equation, and bounds that are
+functions of parameters are re-evaluated at the parameter vector the
+solver is called with.  `write_mod()` writes the condition back with
+`_|_`.
+
+The older tag form is still accepted (Dynare 7 deprecates it):
 
 ```
 model;
@@ -602,7 +828,128 @@ The following command keywords are extracted (stored in
 `perfect_foresight_setup`, `perfect_foresight_solver`,
 `extended_path`, `simul`.
 
-### 9.5  `verbatim` blocks
+Options are split on top-level commas only, so a list value is read
+whole: `discretionary_policy(instruments=(i,tau), planner_discount=0.99)`
+gives `options$instruments == c("i", "tau")`, `irf_shocks=(e,u)` a
+character vector, `bandpass_filter=[6 32]` or
+`conditional_variance_decomposition=(1:4)` a numeric vector; a MATLAB
+cell such as `optim=('MaxIter',200)` is kept as its text.
+`discretionary_policy(model)` takes its instruments and discount from
+the `discretionary_policy` command, and `osr()` its planner discount
+from the `osr` command.  With a `planner_objective` and no
+`optim_weights` block, `osr()` minimises Dynare 7's welfare loss
+`-E[W] = -(U + 0.5 * sum(U_yy * Var(y))) / (1 - planner_discount)`
+(see `?osr`).
+
+### 9.4b  `ramsey_constraints` block
+
+```
+ramsey_model(instruments=(i), planner_discount=0.99);
+ramsey_constraints;
+  i > 0;
+end;
+```
+
+Bounds a variable of the Ramsey problem by a parameter expression
+(`>`/`>=` lower, `<`/`<=` upper).  As in Dynare 7, each bound is
+complementary to the Ramsey first-order condition with respect to its
+variable and is used in perfect foresight: `ramsey_obc_pf()` imposes it
+(in a binding period the FOC is replaced by `i = 0`), reproducing
+`perfect_foresight_solver(lmmcp)`.  Stochastic Ramsey solutions ignore
+it, as Dynare's do.  Stored in `model$ramsey_constraints`.
+
+### 9.5  `observation_trends` block
+
+Adds a deterministic linear trend to the measurement equation of an
+observed variable, exactly as Dynare does:
+
+```
+varobs dy pinfobs;
+observation_trends;
+  dy (ctrend/100);
+end;
+estimation(datafile = data, first_obs = 71);
+```
+
+With this block the filter and smoother compare observation `t` (the
+`t`-th row of the data you pass) with
+`ys[dy] + (ctrend/100) * (first_obs + t - 1)`: the trend index of the
+first data row is `estimation(first_obs = ...)` when present, 1
+otherwise, so pass the data starting at row `first_obs` as Dynare
+does.  The slope may be any expression in declared parameters and is
+re-evaluated at every parameter vector, so an estimated slope moves the
+likelihood.  An entry for a variable that is not in `varobs`, a slope
+that uses anything but parameters, or a date-valued `first_obs` is an
+error.  Stored in `model$observation_trends` (`$trends`, `$first_obs`)
+and honoured by `kalman_filter()`, `kalman_smoother()` and the Gaussian
+`make_log_posterior()`.
+
+```{r obs-trends}
+m_ot <- parse_mod("
+  var y; varexo e; parameters rho g; rho = 0.5; g = 0.02;
+  model; y = rho*y(-1) + e; end;
+  shocks; var e; stderr 1; end;
+  varobs y;
+  observation_trends; y (g); end;
+")
+m_ot$observation_trends
+```
+
+**`deterministic_trends`** has the same entry syntax but may name any
+declared endogenous variable.  It is stored in
+`model$deterministic_trends`; each entry for an observed variable (every
+entry when there is no `varobs`) is a trend of that observable exactly as
+if it were in `observation_trends` (it is merged into
+`model$observation_trends`).  A variable in both blocks is an error.
+Dynare 7.1 itself stores the block in `options_.deterministic_trend_coeffs`,
+which none of its routines reads, and its driver fails on the statement.
+
+### 9.5a  Nonstationary models: `trend_var` and `var(deflator=)`
+
+A model may be written in trending variables, as in Dynare:
+
+- `trend_var(growth_factor = G) A;` declares a trend variable with
+  `A_t = G_t * A_{t-1}`; `log_trend_var(log_growth_factor = g) LA;` an
+  additive one, `LA_t = g_t + LA_{t-1}`.  `G` may use parameters and
+  endogenous variables (not other trend variables).
+- `var(deflator = D) Y;` declares `Y` as trending with the
+  multiplicative trend `D` (an expression in trend variables, endogenous
+  variables and parameters, e.g. `A` or `A^2`); `var(log_deflator = D) Y;`
+  with the additive trend `D`.
+
+`parse_mod()` rewrites the model into its stationary form the way
+Dynare's preprocessor does (right after the `predetermined_variables`
+re-timing): `Y(k)` becomes `Y(k)*D(k)` (`Y(k)+D(k)`), a trend variable at a
+lead or lag becomes `A*G(+1)*...*G(+k)` or `A/(G*G(-1)*...*G(-k+1))`
+(sums for an additive trend), and every trend variable then becomes 1
+(additive: 0).  So **every declared name is the detrended variable**:
+the steady state, `steady_state_model`, `initval` and the decision rule
+are those of the stationary model, exactly as in Dynare.  The rewrite is
+valid only on a balanced growth path; an equation that still depends on
+the level of a trend after detrending is an error of class
+`dynhr_error_unbalanced_growth`.  The declarations are kept in
+`model$nonstationary`; `write_mod()` writes the detrended model and does
+not re-declare the trends.
+
+```{r nonstationary}
+m_ns <- parse_mod("
+  parameters alpha beta delta gA;
+  alpha = 0.33; beta = 0.99; delta = 0.025; gA = 1.005;
+  trend_var(growth_factor = gA) A;
+  var(deflator = A) Y C K;
+  var z; varexo e;
+  model;
+    Y = exp(z)*K(-1)^alpha*A^(1-alpha);
+    K = (1-delta)*K(-1) + Y - C;
+    1/C = beta/C(+1)*(alpha*Y(+1)/K + 1 - delta);
+    z = 0.9*z(-1) + e;
+  end;
+")
+## the detrended capital accumulation: K = (1-delta)*K(-1)/gA + Y - C
+dynhr:::ast_to_string(m_ns$equations[[2]]$rhs)
+```
+
+### 9.6  `verbatim` blocks
 
 `verbatim; ... end;` blocks contain raw R code that is evaluated into
 an environment whose scalar bindings seed parameter values.  This lets
@@ -610,7 +957,7 @@ you compute parameters programmatically (e.g. from matrix steady-state
 computations) without exposing the intermediate objects as declared
 parameters.
 
-### 9.6  dynhr-specific metadata blocks
+### 9.7  dynhr-specific metadata blocks
 
 `// @dynhr:expectations`, `@dynhr:benchmarks`,
 `@dynhr:variable_labels`, `@dynhr:shock_categories`,
@@ -623,30 +970,38 @@ are plain `//` comments so Dynare ignores them.  See
 
 ## 10  Not currently supported
 
-The following Dynare constructs are **not** parsed or executed by
-dynhr.  Using them will not crash `parse_mod()` — the unrecognised
-block or option is silently ignored — unless noted otherwise.
+The following Dynare constructs are **not**, or only partly, parsed
+or executed by dynhr.  Using them does not crash `parse_mod()` unless
+noted otherwise.  (`deterministic_trends`, `trend_var` and
+`var(deflator=...)`, once stripped with a warning, are implemented: see
+§9.5 and §9.5a.)
 
 | Construct | Status |
 |-----------|--------|
 | `model_local_variable` block (distinct from `#` inside model) | Not parsed |
 | `external_function` declarations | Not parsed |
 | `load_mh_file`, `mh_recover` in estimation | Not executed |
-| `shock_groups` | Not parsed |
-| `heteroskedastic_shocks` scaling (dynhr extension) | Parsed; dynhr-only |
+| `heteroskedastic_shocks` | `scales` parsed, with Dynare's period semantics: an integer period indexes the dataset (sample period = `p - first_obs + 1`), a date (`2020Q1`, Dynare 7) is resolved against a date-valued `estimation(first_obs=)`; a date with no date index is a `dynhr_error_mod_date_unresolved` error. The `values` statement is not supported |
+| `shock_paths` `database` scopes, `learnt_in` other than 1 | Errors; see §5.4 |
 | `filter_tunes` block (dynhr extension) | Parsed; dynhr-only |
-| `@#elseif` in macros | Errors loudly — rewrite as nested `@#if` |
 | Dynare `use_dll` compilation | Ignored |
 | `datafile =` in `estimation(...)` | Option parsed, file loaded by estimation engine |
 | `global_initialization` block | Not parsed |
+| `trend_var` / `log_trend_var` with a growth factor that uses a trend variable (I(2) trends) | Error |
+| `adl()` | Error: not an operator of Dynare 7 (the 7.1 preprocessor rejects it too) — write the lags out |
+
+`model_replace`, `model_remove` and `var_remove` (Dynare 6+) are
+implemented with Dynare's semantics: `model_remove('eq1', key =
+'value');` removes the tagged equations, and a variable whose defining
+equation was removed becomes exogenous if the model still uses it
+(dropped otherwise); `model_replace('eq1'); ... end;` swaps the tagged
+equations for new ones appended at the end of the model; `var_remove
+a b;` removes declared symbols.  See `?parse_mod`.
 
 **External `*_steadystate.m` files**: Dynare models that compute
 parameter values in an external `<name>_steadystate.m` file will
 produce a warning listing the unset parameters.  Use
 `inject_params(model, named_vec)` to supply them from R.
-
-**`@#elseif`** causes an explicit error rather than silent behaviour —
-this is intentional so that a missing branch is not silently wrong.
 
 ---
 
@@ -667,7 +1022,7 @@ exercise the supported syntax:
 Every shipped model carries a provenance row in
 `inst/extdata/models/MODELS_SOURCE.md`.
 
-Other models named in this vignette — `fs2000.mod`, `caldara_rp.mod`,
+Other models named in the vignettes — `fs2000.mod`, `caldara_rp.mod`,
 `kpr1988.mod`, `nk_canonical.mod`, `nk_hs2016.mod`, `aikman_3obc.mod`,
 `nz_base_nonlinear.mod` — are development fixtures the parser is tested
 against. They are **not** shipped: several are third-party files whose

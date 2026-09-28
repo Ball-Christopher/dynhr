@@ -2,15 +2,20 @@
 % Please edit documentation in R/diag-pre-d40-near-unit-root.R
 \name{diag_near_unit_root}
 \alias{diag_near_unit_root}
-\title{D40. Near-unit-root proximity and eigenvalue-sensitivity attribution}
+\title{D40. Near-unit-root check on the state transition}
 \usage{
 diag_near_unit_root(
   model,
   compiled = NULL,
   theta = NULL,
   params = NULL,
+  dr = NULL,
+  n_obs = NULL,
   param_names = NULL,
   h = 1e-05,
+  unit_tol = 1e-06,
+  halflife_frac = 0.25,
+  meta = NULL,
   ...
 )
 }
@@ -18,17 +23,39 @@ diag_near_unit_root(
 \item{model}{A \code{dynhr_mod} object (output of \code{parse_mod}).}
 
 \item{compiled}{A \code{dynhr_compiled} (output of
-\code{compile_model}).  Required for re-solves.}
+\code{compile_model}).  Required for solving and for the parameter
+sensitivities; may be \code{NULL} when \code{dr} is supplied (then the
+sensitivities are skipped).}
 
-\item{theta}{Named numeric vector of parameter values.  If \code{NULL},
-uses \code{model$param_values}.}
+\item{theta}{Named numeric vector of parameter values.  If
+\code{NULL}, uses \code{model$param_values}.}
 
 \item{params}{Alias for \code{theta} (either may be supplied).}
 
+\item{dr}{Optional first-order decision rule
+(\code{solve_perturbation()} output) at \code{theta}; skips the baseline
+solve.}
+
+\item{n_obs}{Sample length \eqn{T} used for the half-life criterion.
+\code{NULL} (default) disables the \code{near_unit} class.}
+
 \item{param_names}{Character vector selecting which parameters to
-differentiate.  Defaults to all names in \code{theta}.}
+differentiate.  Defaults to all names in \code{theta};
+\code{character(0)} skips the sensitivities.}
 
 \item{h}{Finite-difference step size (default \code{1e-5}).}
+
+\item{unit_tol}{Tolerance for an exact unit root (default \code{1e-6},
+matching \code{kalman_filter()} and the D41 skip rule).}
+
+\item{halflife_frac}{A root is \code{near_unit} when its half-life exceeds
+this fraction of \code{n_obs} (default \code{0.25}).  \strong{0.25 is a
+package choice with no literature source}: no paper or toolbox defines a
+half-life-versus-sample-length adequacy cutoff.  It is a heuristic for
+"this root takes a sizeable share of the sample to decay"; adjust it
+freely.}
+
+\item{meta}{Optional \code{diag_meta()} object for plot captions.}
 
 \item{...}{Unused; reserved for future arguments.}
 }
@@ -36,46 +63,86 @@ differentiate.  Defaults to all names in \code{theta}.}
 A \code{dynhr_diagnostic} list (see \code{.make_result}) with
   \code{$result} containing:
   \itemize{
-    \item \code{spectral_radius}  -- numeric scalar
-    \item \code{distance_to_unit} -- numeric scalar (1 - spectral_radius)
-    \item \code{critical_eigenvalue} -- complex scalar
-    \item \code{param_sensitivity}  -- data.frame (param, d_rhomax_dparam)
-    \item \code{equation_attribution} -- list or NULL
+    \item \code{roots} -- data.frame (one row per state root: \code{re},
+      \code{im}, \code{modulus}, \code{half_life}, \code{class}), sorted by
+      decreasing modulus
+    \item \code{spectral_radius}, \code{distance_to_unit}
+      (\code{1 - spectral_radius}), \code{critical_eigenvalue}
+    \item \code{half_life} -- half-life of the dominant root (periods)
+    \item \code{n_obs}, \code{halflife_frac}, \code{unit_tol},
+      \code{modulus_threshold} (\code{NA} without \code{n_obs})
+    \item \code{n_unit}, \code{n_explosive}, \code{n_near_unit}
+    \item \code{stationary_p0_valid} -- \code{FALSE} iff some root has
+      \eqn{|\lambda| > 1 - } \code{unit_tol} (the D41 skip rule)
+    \item \code{state_participation} -- data.frame (\code{state},
+      \code{participation}) for the dominant root
+    \item \code{param_sensitivity} -- data.frame (\code{param},
+      \code{d_rhomax_dparam}) sorted by decreasing absolute value
   }
+  and \code{$plots$roots} (complex plane) plus, when any sensitivity is
+  finite, \code{$plots$sensitivity}.
 }
 \description{
-Solves the model at a given parameter vector \code{theta} and reports:
-\describe{
-  \item{\code{spectral_radius}}{Modulus of the eigenvalue closest to the
-    unit circle from inside (max |lambda| over stable roots, i.e. the spectral
-    radius of \code{ghx}).}
-  \item{\code{distance_to_unit}}{1 - spectral_radius.  Near zero = near
-    unit root = highly persistent / close to determinacy boundary.}
-  \item{\code{critical_eigenvalue}}{The complex eigenvalue achieving the
-    spectral radius.}
-  \item{\code{param_sensitivity}}{data.frame with columns \code{param}
-    and \code{d_rhomax_dparam}, sorted descending by \code{|d_rhomax_dparam|}.
-    Shows which parameters push the critical root toward the unit circle.}
-  \item{\code{equation_attribution}}{Best-effort list: maps sensitivity
-    back to model equations via the structural Jacobian column norms.  May
-    be \code{NULL} with a note if equation info is unavailable.}
+Solves the model at \code{theta} (or takes a supplied decision rule) and
+inspects the eigenvalues of the first-order state transition
+\code{TT = ghx[state_idx, ]} -- the matrix the Kalman filter propagates and
+whose Lyapunov equation gives the stationary initial covariance \code{P0}.
+Roots are judged by their MODULUS (so a complex pair counts as persistent
+when \eqn{|\lambda|} is near 1, whatever its real part).
 }
-}
-\section{Algorithm}{
+\section{Classification}{
 
-\enumerate{
-  \item Solve the model at \code{theta} (steady state + first-order
-    perturbation). Extract \code{ghx} — the state-to-state transition
-    matrix.
-  \item Compute eigenvalues of \code{ghx}.  The spectral radius is
-    \code{rho_max = max(Mod(eigen(ghx)))}.  The critical eigenvalue is the
-    one achieving this maximum.
-  \item For each parameter in \code{param_names}, compute
-    \eqn{d\rho_{\max} / d\theta_i} by central finite differences: re-solve
-    the model at \code{theta ± h}, recompute \code{rho_max}, difference.
-  \item (Best-effort) Attribute via the static Jacobian: the columns of
-    \code{f_zero} corresponding to the critical eigenvector's state
-    variables carry the dominant equation-level structural dependence.
+Each root \eqn{\lambda} is given a half-life
+\eqn{h = \log(0.5) / \log|\lambda|} periods (0 for \eqn{\lambda = 0},
+\code{Inf} for \eqn{|\lambda| \ge 1}) and a class:
+\describe{
+  \item{\code{explosive}}{\eqn{|\lambda| > 1 + } \code{unit_tol}: no stable
+    solution along this direction.}
+  \item{\code{unit}}{\eqn{|\lambda| \ge 1 - } \code{unit_tol}.  This is the
+    same cut \code{kalman_filter(lik_init = "auto")} uses before trying the
+    Lyapunov solve, and the cut \code{run_all_diagnostics()} uses to skip
+    D41.  The stationary \code{P0} and unconditional moments are not
+    defined (or not usable); the filter takes the exact-diffuse path and
+    moment-based diagnostics are invalid.}
+  \item{\code{near_unit}}{stationary but
+    \eqn{h >} \code{halflife_frac * n_obs}: the root takes a sizeable share
+    of the sample to decay, so the stationary \code{P0} is a very wide
+    prior on the initial state and sample moments are poor estimates of
+    the model's unconditional moments.  A root of 0.995 (h = 138) is
+    near-unit at \code{n_obs = 200} but not at \code{n_obs = 20000}.  The
+    equivalent modulus threshold is
+    \eqn{0.5^{1 / (\mathrm{halflife\_frac} \cdot n_{obs})}}.}
+  \item{\code{stationary}}{everything else.}
+}
+Badge: FAIL if any root is \code{explosive} or \code{unit} (the stationary
+\code{P0} and the unconditional moments do not exist, so the moment-based
+diagnostics downstream are invalid); \strong{WARN} if the worst root is only
+\code{near_unit}; PASS otherwise.  Without \code{n_obs} the near-unit class
+cannot be assigned: the badge is then FAIL for unit/explosive roots and
+INFO otherwise.
+
+Near-unit is WARN, not FAIL, because long persistence is a legitimate model
+feature, not a defect: Dynare (\code{qz_criterium},
+\code{model_diagnostics}) and IRIS both route a persistent/unit-root system
+to a diffuse-initialisation branch rather than rejecting it, and the
+econometric response to a local-to-unity root is non-standard inference, not
+a different model.  What changes is how you should filter and how much to
+trust long-run responses -- exactly what a soft badge is for.
+}
+
+\section{Attribution}{
+
+\describe{
+  \item{State participation}{For the dominant root with right eigenvector
+    \eqn{w} and left eigenvector \eqn{v}, the participation factor of
+    state \eqn{k} is \eqn{|v_k w_k| / \sum_j |v_j w_j|}
+    (small-signal-stability convention); it says which state variables the
+    persistent mode lives in.  For a complex pair the value is the same for
+    both members.}
+  \item{Parameter sensitivity}{\eqn{d\rho_{\max}/d\theta_i} by central
+    finite differences (step \code{h}), re-solving the model at
+    \eqn{\theta \pm h e_i}.  \code{NA} when a re-solve fails or violates
+    Blanchard-Kahn, or when \code{compiled} is not supplied.}
 }
 }
 

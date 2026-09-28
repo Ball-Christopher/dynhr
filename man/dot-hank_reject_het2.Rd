@@ -32,8 +32,8 @@ Not decorative.  The non-inheriting class protects the entry points that
 type-check, but several do not: \code{hank_sam_reiter_linearize()} guards
 with \code{!inherits(block, "hank_het_block") && is.null(block$Pi_fn)} --
 an AND, so a two-asset block that HAS a \code{Pi_fn} sails past the class
-test and dies downstream.  Reiter is exactly the path
-\code{briefs/19-twoasset-hank-scope.md} section 7 defers, so a future caller
+test and dies downstream.  Reiter is a path the two-asset
+block deliberately does not implement, so a future caller
 reaching for it must be told it does not exist rather than shown a shape
 error.
 }

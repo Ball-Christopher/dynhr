@@ -125,7 +125,7 @@ bayesian_conditional_forecast <- function(
                      exo_names  = model$varexo_names,
                      verbose    = FALSE)
       ),
-      error = function(e) NULL
+      error = function(e) .dynhr_reraise_bug(e, NULL)
     )
     if (is.null(ss_k) || !isTRUE(ss_k$converged)) {
       n_fail <- n_fail + 1L
@@ -136,7 +136,7 @@ bayesian_conditional_forecast <- function(
       suppressWarnings(
         solve_perturbation(m_work, compiled, ss_k$values, pv, verbose = FALSE)
       ),
-      error = function(e) NULL
+      error = function(e) .dynhr_reraise_bug(e, NULL)
     )
     if (is.null(dr_k) || !isTRUE(dr_k$bk_satisfied)) {
       n_fail <- n_fail + 1L
@@ -152,7 +152,7 @@ bayesian_conditional_forecast <- function(
                              obs_vars = obs_vars,
                              ...)
       ),
-      error   = function(e) NULL,
+      error   = function(e) .dynhr_reraise_bug(e, NULL),
       warning = function(w) {
         ## Re-try silently: some shock-scale warnings are non-fatal
         tryCatch(
@@ -163,7 +163,7 @@ bayesian_conditional_forecast <- function(
                                  obs_vars = obs_vars,
                                  ...)
           ),
-          error = function(e2) NULL
+          error = function(e2) .dynhr_reraise_bug(e2, NULL)
         )
       }
     )

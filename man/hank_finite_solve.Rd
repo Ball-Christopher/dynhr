@@ -69,8 +69,7 @@ initval baked into the .mod) -> the order-appropriate
 \code{stoch_simul()} itself is order-1-only, so orders 2/3 MUST go through
 \code{compile_model(max_order = k)} followed by the explicit
 \code{solve_perturbation() -> solve_perturbation_order2(dr1=) ->
-solve_perturbation_order3(dr2=)} chain (see
-\code{.claude/orchestration/truncation/m5_orders23_SCOPE.md}).
+solve_perturbation_order3(dr2=)} chain.
 
 Order 3 requires the SPARSE Kronecker route (\code{sparse = TRUE}): the
 emitted system's DENSE third-order solve (\code{ghxxx}) is a documented cost

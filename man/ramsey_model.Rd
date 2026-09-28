@@ -43,7 +43,11 @@ approximation). When \code{method = "nn1"}, delegates to
 \item{discount}{Discount factor for the Lagrangian used to derive
 the FOCs.  May be a character string naming a model parameter (applied
 symbolically, e.g. \code{"beta"}), a numeric value, or \code{NULL}
-(default) to auto-detect a parameter named \code{"beta"} or \code{"betta"}.
+(default) to take the \code{.mod}'s \code{ramsey_model(planner_discount =
+...)} (or \code{ramsey_policy(planner_discount = ...)}) option, else to
+auto-detect a parameter named \code{"beta"} or \code{"betta"}.  If none
+of these exists the call errors (class \code{dynhr_error_no_discount});
+there is no silent 0.99 default.
 This must match the model's structural discount factor; the augmented
 decision rules are wrong otherwise (see \code{\link{ramsey_augment_mod}}).}
 

@@ -277,7 +277,7 @@ hank_resolve_threads <- function(threads = NULL, ncores = NULL) {
   key <- paste0(threads, "|", source)
   if (identical(.hank_thread_report$last, key)) return(invisible(NULL))
   .hank_thread_report$last <- key
-  message("dynhr: HANK compiled kernel using ", threads,
+  .dynhr_inform("dynhr: HANK compiled kernel using ", threads,
           " thread", if (threads == 1L) "" else "s", " [", source, "]")
   invisible(NULL)
 }
@@ -548,7 +548,7 @@ hank_egm3_solve <- function(d_grid, f_grid, a_grid, y, Pi, rd, rf, ra,
       if(last_status!=1L||!isTRUE(auto_relax)||relax_used<=.relax_floor()) break
       relax_used<-max(.relax_floor(),relax_used/2)
       retries<-retries+1L
-      message("hank_egm3_solve: the endogenous-grid safeguard fired after ",
+      .dynhr_inform("hank_egm3_solve: the endogenous-grid safeguard fired after ",
               ans$iterations," iterations at relax = ",
               format(relax_used*2,digits=3),". This is an OVERSHOOT of the ",
               "update, not a bad starting point -- damping traces a different ",

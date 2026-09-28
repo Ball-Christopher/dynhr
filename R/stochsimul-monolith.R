@@ -20,43 +20,43 @@
 ## evaluated against change. Caching the parse tree (keyed on the literal
 ## string) removes a per-draw parse() that showed up hot in profiling. eval()
 ## still runs every call against the current parameter environment.
+##
+## A-SEC (0.9.4): this cache is a security choke point (see the note above
+## `.ssm_expr_cache` in steady-monolith.R).  An expression is AST-checked
+## against the .mod allowlist when it is first inserted, so a model built
+## programmatically -- which never went through parse_shocks_block()'s sandbox
+## -- still cannot smuggle `file.create()` into a variance expression.  The
+## check aborts with `dynhr_error_unsafe_mod_expression`; callers that map
+## ordinary evaluation errors to NA must re-raise that class.  `envir` should
+## be a child of `.dynhr_mod_sandbox_parent()` (see `.dynhr_param_eval_env`).
 .dynhr_expr_cache <- new.env(parent = emptyenv())
 
 .eval_cached_expr <- function(expr_str, envir) {
   ex <- .dynhr_expr_cache[[expr_str]]
   if (is.null(ex)) {
     ex <- parse(text = expr_str)
+    .dynhr_check_mod_expr(ex, expr_str, "the shocks-block expression")
     .dynhr_expr_cache[[expr_str]] <- ex
   }
   eval(ex, envir = envir)
 }
 
-## Memoized shock-name -> core stripping (eps_/e_ prefix and trailing _).
-## Depends only on the shock name, never on parameter values, so it is safe to
-## cache across MCMC draws; replaces three sub() regex calls per shock per call.
-.dynhr_shock_core_cache <- new.env(parent = emptyenv())
-
-.shock_core <- function(nm) {
-  core <- .dynhr_shock_core_cache[[nm]]
-  if (is.null(core)) {
-    core <- sub("^eps_", "", nm)
-    core <- sub("^e_",   "", core)
-    core <- sub("_$",    "", core)   # strip trailing "_" (e.g. eps_pref_ -> "pref")
-    .dynhr_shock_core_cache[[nm]] <- core
-  }
-  core
+## Parameter environment for re-evaluating shocks-block *_expr text: the
+## params bound in a child of the session allowlist sandbox (never baseenv()).
+.dynhr_param_eval_env <- function(params) {
+  list2env(as.list(params), parent = .dynhr_mod_sandbox_parent())
 }
 
 .get_shock_stderr <- function(model, exo_names, params = NULL) {
   stderr <- setNames(rep(0, length(exo_names)), exo_names)
   if (is.null(params)) params <- model$param_values
 
-  ## Eval environment from parameters, built lazily: models that resolve every
-  ## shock via the param-name path (Priority 2) never need it, so we skip the
-  ## per-call list2env entirely for them.
+  ## Eval environment from parameters, built lazily: models whose shocks are
+  ## all resolved by Priority 0 (estimated shock-named params) or have no
+  ## *_expr never need it, so we skip the per-call list2env for them.
   penv <- NULL
   get_penv <- function() {
-    if (is.null(penv)) penv <<- list2env(as.list(params), parent = baseenv())
+    if (is.null(penv)) penv <<- .dynhr_param_eval_env(params)
     penv
   }
 
@@ -96,7 +96,7 @@
         row <- sv[idx[1], ]
         safe_eval <- function(expr_str) {
           tryCatch(.eval_cached_expr(expr_str, get_penv()),
-                   error = function(e) NA_real_)
+                   error = function(e) .dynhr_reraise_unsafe(e, NA_real_))
         }
         ## Priority: raw expression columns first (re-evaluate against current
         ## params), then fall back to parse-time numeric snapshots.  This
@@ -130,23 +130,83 @@
       }
     }
 
-    ## Priority 2: parameter named sig_<shock> or stderr_<shock>
-    if (is.na(se) || !is.finite(se)) {
-      core <- .shock_core(nm)             # memoized regex strip (nm-only, value-free)
-      for (prefix in c("sig_", "stderr_", "sigma_")) {
-        pnm <- paste0(prefix, core)
-        if (pnm %in% names(params) && is.finite(params[[pnm]])) {
-          se <- params[[pnm]]
-          break
-        }
-      }
-    }
+    ## (0.9.4, A9) There is deliberately NO name-matching fallback here.  Until
+    ## 0.9.4 a shock missing from the shocks block took the value of any
+    ## parameter named sig_/stderr_/sigma_<core> -- so `sigma_c = 2` (risk
+    ## aversion) silently gave eps_c a variance of 4.  Dynare semantics: a
+    ## shock the shocks block does not declare has ZERO variance.
 
     ## Default: 0 (shock has no variance)
     if (is.na(se) || !is.finite(se)) se <- 0
     stderr[nm] <- se
   }
   stderr
+}
+
+## Helper: the shock covariance an IRF routine should scale its impulses by.
+##
+## SHARED by compute_irfs() (order 1) and compute_irfs_order2() (order 2) so the
+## two cannot drift apart again: before 0.9.4 the order-1 path preferred
+## `dr$Sigma_e` (with correlations) while the order-2 path always rebuilt a
+## DIAGONAL covariance from `params`, so the same model gave different IRFs at
+## the two orders.
+##
+## Precedence follows the 0.9.3.7 Kalman-path rule -- `params` WINS over
+## `dr$Sigma_e`:
+##   1. caller-supplied `params`  -> .get_shock_cov(model, exo, params)
+##   2. else `dr$Sigma_e`, when it carries the right dimension (set by
+##      solve_perturbation(Sigma_e = ))
+##   3. else .get_shock_cov(model, exo, model$param_values)
+## `params = NULL` therefore keeps the old dr$Sigma_e behaviour.
+## @noRd
+.irf_shock_scale <- function(dr, model, params = NULL) {
+  exo   <- dr$exo_names
+  n_exo <- length(exo)
+  if (!is.null(params)) return(.get_shock_cov(model, exo, params))
+  if (!is.null(dr$Sigma_e) && all(dim(dr$Sigma_e) == c(n_exo, n_exo)))
+    return(dr$Sigma_e)
+  .get_shock_cov(model, exo, model$param_values)
+}
+
+## Helper: lower-triangular Cholesky factor L of a shock covariance,
+## Sigma_e = L %*% t(L), in the DECLARED shock order (Dynare's orthogonalisation
+## convention for IRFs, variance decompositions and simulation draws).
+##
+## - Diagonal Sigma_e  -> diag(sqrt(diag(Sigma_e))), i.e. byte-identical to the
+##   old per-shock `sigma_k` scaling, so nothing changes for uncorrelated shocks.
+## - Positive-definite   -> t(chol(.)).
+## - PSD but singular (a shock with zero declared variance, a perfectly
+##   correlated pair) -> an explicit outer-product Cholesky that emits a zero
+##   column where the pivot vanishes.  chol() would error there; this keeps the
+##   factorisation exact (L L' == Sigma_e) instead of silently dropping the
+##   off-diagonals.  No tryCatch: the branch is decided by the pivot/eigenvalue.
+## @noRd
+.sigma_e_chol_lower <- function(Sigma_e) {
+  n <- nrow(Sigma_e)
+  if (is.null(n) || n == 0L) return(matrix(0, 0, 0))
+  S <- (Sigma_e + t(Sigma_e)) / 2
+  off <- S
+  diag(off) <- 0
+  if (all(off == 0)) return(diag(sqrt(pmax(diag(S), 0)), nrow = n))
+
+  ev <- eigen(S, symmetric = TRUE, only.values = TRUE)$values
+  if (min(ev) > 1e-12 * max(1, max(ev))) return(t(chol(S)))
+
+  ## Outer-product Cholesky with zero pivots tolerated (PSD / singular case).
+  L <- matrix(0, n, n)
+  for (j in seq_len(n)) {
+    prev <- seq_len(j - 1L)
+    d <- S[j, j] - sum(L[j, prev]^2)
+    if (d <= 0) next                       # zero pivot -> zero column
+    L[j, j] <- sqrt(d)
+    if (j < n) {
+      rows <- seq.int(j + 1L, n)
+      L[rows, j] <- (S[rows, j] -
+                     as.numeric(L[rows, prev, drop = FALSE] %*% L[j, prev])) /
+                    L[j, j]
+    }
+  }
+  L
 }
 
 ## Helper: extract shock skewness shape parameters (alpha) from model$shocks
@@ -158,23 +218,130 @@
 ## gives a symmetric Gaussian shock; alpha != 0 gives a skew-normal with
 ## E[eps_i] = sigma_i * delta_i * sqrt(2/pi), delta_i = alpha_i/sqrt(1+alpha_i^2).
 ## alpha can be NEGATIVE (brief Landmine 7).
+#' Draw zero-mean shock vectors from the joint closed skew-normal
+#'
+#' The law is the one the package's own skew likelihood evaluates
+#' (\code{.get_csn_shock_params()} / \code{.csn_state_noise_lift()} in
+#' \code{R/pskf-likelihood.R}):
+#' \deqn{e \sim CSN(\mu_e, \Sigma_e, \Gamma_e, 0, I_q)}
+#' with \eqn{\Gamma_e} the rows \eqn{\alpha_i/\sigma_i} of the skewed shocks and
+#' the FULL \eqn{\Sigma_e} (off-diagonals included) as the seed covariance. All
+#' cross-shock coupling is carried by \eqn{\Sigma_e}: the truncation latents
+#' inherit its correlation, which is what makes the cross-shock co-skewness
+#' nonzero and sign-matched to \eqn{\rho}.
+#'
+#' Sampling uses the stochastic (conditioning) representation of
+#' Gonzalez-Farias, Dominguez-Molina & Gupta (2004) / Arellano-Valle & Azzalini
+#' (2006): draw \eqn{[e; U]} jointly Gaussian with
+#' \deqn{Cov = [[\Sigma_e, \Sigma_e \Gamma_e'], [\Gamma_e \Sigma_e,
+#'              I + \Gamma_e \Sigma_e \Gamma_e']]}
+#' and keep the draws with \eqn{U \ge 0} componentwise. Acceptance is
+#' \eqn{\Phi_q(0; 0, I + \Gamma_e \Sigma_e \Gamma_e')}, at least \eqn{2^{-q}},
+#' so the vectorised over-draw below needs no per-period loop. Only shocks with
+#' \eqn{\alpha_i \ne 0} contribute a latent, keeping \eqn{q} as small as
+#' possible.
+#'
+#' The returned draws are shifted by the SAME mean correction the filter
+#' applies, the exact mean of the joint CSN law (\code{.csn_shock_mean()} in
+#' \code{R/pskf-likelihood.R}), so the draws are mean-zero and the simulated
+#' data sit where the filter places the steady state. With no skewed shock
+#' correlated to another shock this is the per-shock
+#' \eqn{E[e_i] = \sigma_i \delta_i \sqrt{2/\pi}},
+#' \eqn{\delta_i = \alpha_i/\sqrt{1+\alpha_i^2}}. (Before 0.9.4 that
+#' per-shock shift was applied at \eqn{\rho \ne 0} too, in both the filter
+#' and here, so the draws were NOT mean-zero and the circular DGP/likelihood
+#' agreement hid it.)
+#' Likewise the realised sample CORRELATION of the draws is NOT \eqn{\rho}:
+#' \eqn{\rho} parameterises the SEED covariance of the pre-truncation Gaussian,
+#' and the conditioning step changes it.
+#'
+#' @param n_draws  Number of shock vectors (rows) to return.
+#' @param Sigma_e  n_exo x n_exo seed shock covariance (from .get_shock_cov).
+#' @param alpha    length-n_exo skewness shape vector (from .get_shock_skewness).
+#' @param sigma_e  length-n_exo shock standard deviations (sqrt(diag(Sigma_e))).
+#' @return n_draws x n_exo numeric matrix.
+#' @noRd
+.draw_csn_shocks <- function(n_draws, Sigma_e, alpha, sigma_e) {
+  n_exo <- length(alpha)
+  alpha <- as.numeric(alpha); sigma_e <- as.numeric(sigma_e)
+
+  ## Only genuinely skewed shocks get a truncation latent. A zero-stderr shock
+  ## cannot be skewed (alpha/sigma is undefined), so it is excluded too.
+  sk <- which(alpha != 0 & is.finite(alpha) & sigma_e > 0)
+  q  <- length(sk)
+  if (q == 0L)
+    return(matrix(rnorm(n_draws * n_exo), n_draws, n_exo) %*%
+             t(.sigma_e_chol_lower(Sigma_e)))
+
+  Gam <- matrix(0, q, n_exo)
+  Gam[cbind(seq_len(q), sk)] <- alpha[sk] / sigma_e[sk]
+
+  SG  <- Sigma_e %*% t(Gam)                       # n_exo x q
+  M_U <- diag(q) + Gam %*% Sigma_e %*% t(Gam)     # q x q
+  J   <- rbind(cbind(Sigma_e, SG), cbind(t(SG), M_U))
+  J   <- 0.5 * (J + t(J))
+  Lj  <- chol(J + diag(1e-12, n_exo + q))         # upper factor: z %*% Lj
+
+  acc <- matrix(NA_real_, n_draws, n_exo)
+  got <- 0L
+  ## Acceptance >= 2^-q, so over-drawing by 2^q * 1.25 clears the remainder in
+  ## one or two passes for any practical n_exo.
+  repeat {
+    need <- n_draws - got
+    if (need <= 0L) break
+    m  <- max(128L, as.integer(ceiling(need * (2^q) * 1.25)))
+    Zc <- matrix(rnorm(m * (n_exo + q)), m, n_exo + q) %*% Lj
+    U  <- Zc[, n_exo + seq_len(q), drop = FALSE]
+    keep <- .rowSums(U >= 0, m, q) == q
+    if (any(keep)) {
+      ok   <- Zc[keep, seq_len(n_exo), drop = FALSE]
+      take <- min(nrow(ok), need)
+      acc[got + seq_len(take), ] <- ok[seq_len(take), , drop = FALSE]
+      got <- got + take
+    }
+  }
+
+  ## Filter-matching mean correction (see roxygen above): the exact joint-CSN
+  ## mean. The seed covariance's own diagonal is used for sigma inside, which
+  ## is what sigma_e is at every call site.
+  sweep(acc, 2L, .csn_shock_mean(Sigma_e, alpha), `-`)
+}
+
+
 .get_shock_skewness <- function(model, exo_names, params = NULL) {
   alpha <- setNames(rep(0, length(exo_names)), exo_names)
   if (is.null(params)) params <- model$param_values
 
   penv <- NULL
   get_penv <- function() {
-    if (is.null(penv)) penv <<- list2env(as.list(params), parent = baseenv())
+    if (is.null(penv)) penv <<- .dynhr_param_eval_env(params)
     penv
   }
 
   sv <- if (!is.null(model$shocks) && is.data.frame(model$shocks$variances))
     model$shocks$variances else NULL
 
+  ## Priority 0 (mirrors .get_shock_stderr's Priority 0 and .get_shock_cov's
+  ## correlation Priority 0): an ESTIMATED `skew <shock>` arrives in `params`
+  ## under the canonical "skew <shock>" key (injected by
+  ## apply_theta_to_params) and must override the shocks block -- INCLUDING a
+  ## `skew_expr` row, which would otherwise freeze alpha at its calibrated
+  ## value and leave the PSKF likelihood flat in the estimated skewness.
+  ## Applied first, and the block lookup below skips any shock it resolved.
+  skidx <- .skew_params_index(params, exo_names)
+  resolved <- logical(length(exo_names))
+  for (k in seq_len(nrow(skidx))) {
+    v <- params[[skidx$k[k]]]
+    if (!is.finite(v)) next
+    alpha[skidx$i[k]] <- v
+    resolved[skidx$i[k]] <- TRUE
+  }
+
   if (is.null(sv)) return(alpha)
   if (!("skew" %in% names(sv))) return(alpha)
 
   for (i in seq_along(exo_names)) {
+    if (resolved[i]) next
     nm  <- exo_names[i]
     idx <- which(sv$name == nm)
     if (length(idx) == 0L) next
@@ -184,7 +351,7 @@
     if ("skew_expr" %in% names(row) && !is.na(row$skew_expr) &&
         nzchar(row$skew_expr)) {
       al <- tryCatch(.eval_cached_expr(as.character(row$skew_expr), get_penv()),
-                     error = function(e) NA_real_)
+                     error = function(e) .dynhr_reraise_unsafe(e, NA_real_))
     }
     if (is.na(al) || !is.finite(al)) {
       if (!is.na(row$skew) && is.finite(row$skew)) al <- row$skew
@@ -230,32 +397,16 @@ compute_irfs <- function(dr, model, n_periods = 40L, shock_size = 1, params = NU
   n_exo  <- length(exo)
   n_state <- length(state_idx)
 
-  ## FIX: respect caller-supplied params (was unconditionally overwritten)
-  if (is.null(params)) params <- model$param_values
-
   ## Build full shock covariance and its lower Cholesky factor.
   ## Dynare convention: IRF for shock k uses the k-th column of chol(Sigma_e)
   ## (lower triangular), so correlated shocks propagate to all impact responses.
   ## For a diagonal Sigma_e this reduces to ghu[,k]*sigma_k (backward-compat).
-  ## M28: honour a shock covariance carried on the decision rules (set when the
-  ## caller passed solve_perturbation(Sigma_e=)) -- including off-diagonal
-  ## correlations -- in preference to re-deriving a covariance from model$shocks.
-  ## Falls back to the parsed shocks block when dr$Sigma_e is absent (the common
-  ## case, byte-identical to before).
-  Sigma_e_irf <- if (!is.null(dr$Sigma_e) &&
-                     all(dim(dr$Sigma_e) == c(n_exo, n_exo))) {
-    dr$Sigma_e
-  } else {
-    .get_shock_cov(model, exo, params)
-  }
-  L_chol <- tryCatch(
-    t(chol(Sigma_e_irf)),            # lower triangular: L %*% t(L) = Sigma_e
-    error = function(e) {
-      ## Fallback: diagonal (square-root of diagonal); preserves old behaviour
-      ## for degenerate / near-singular Sigma_e (e.g. shocks with zero stderr)
-      diag(sqrt(pmax(diag(Sigma_e_irf), 0)), nrow = n_exo)
-    }
-  )
+  ## A10 (0.9.4): the precedence between caller `params` and a covariance
+  ## carried on `dr` now lives in the shared .irf_shock_scale(), which
+  ## compute_irfs_order2() uses too -- `params` wins when supplied.
+  Sigma_e_irf <- .irf_shock_scale(dr, model, params)
+  if (is.null(params)) params <- model$param_values
+  L_chol <- .sigma_e_chol_lower(Sigma_e_irf)
 
   irfs <- list()
   for (k in seq_along(exo)) {
@@ -310,7 +461,12 @@ compute_irfs <- function(dr, model, n_periods = 40L, shock_size = 1, params = NU
 #'
 #' @param dr DecisionRules object
 #' @param n_periods Number of simulation periods
-#' @param shocks Matrix of shocks (n_periods x n_exo). If NULL, draws random.
+#' @param shocks Matrix of shocks (n_periods x n_exo). If NULL, shocks are
+#'   drawn from the model's full shock covariance \eqn{\Sigma_e} (from
+#'   \code{\link{shock_cov}}), \strong{including} the \code{corr} /
+#'   \code{var a, b} entries of the shocks block, via its lower Cholesky
+#'   factor. Skewed shocks (\code{alpha != 0}) are still drawn independently
+#'   from their skew-normal marginals and warn when correlations are declared.
 #' @param n_replications Number of replications for stochastic simulation.
 #'   When \code{1} (default) a plain \code{n_periods x n_endo} matrix is
 #'   returned (backward-compatible).  When \code{> 1} a 3-D array of dimension
@@ -379,7 +535,31 @@ simulate_model <- function(dr, n_periods = 200L, shocks = NULL,
     alpha   <- .get_shock_skewness(model, exo, params)
     sigma_e <- shock_stderr[exo]   # named vector, length n_exo
 
-    if (any(alpha != 0)) {
+    ## A9 (0.9.4): the drawn shocks must carry the model's FULL covariance --
+    ## `corr a, b` / `var a, b` entries in the shocks block were previously
+    ## ignored here and every path was drawn with independent innovations,
+    ## which silently contradicted compute_moments()/compute_irfs() and the
+    ## Kalman filter (all of which use .get_shock_cov()).
+    Sigma_e_sim <- .get_shock_cov(model, exo, params)
+    off_sim <- Sigma_e_sim
+    diag(off_sim) <- 0
+    has_corr <- any(abs(off_sim) > 0)
+
+    if (any(alpha != 0) && has_corr) {
+      ## L2 (0.9.4): CORRELATED + SKEWED shocks.  This branch used to warn that
+      ## the declared `corr` / `var a,b` entries were IGNORED and draw each
+      ## shock independently from its skew-normal marginal -- a simulation whose
+      ## DGP silently differed from the model's declared covariance AND from the
+      ## law the package's own skew likelihood evaluates.  It now draws from the
+      ## joint closed skew-normal that .get_csn_shock_params() (R/pskf-likelihood.R)
+      ## builds, so simulate_model() and the PSKF likelihood share one DGP.
+      shocks <- .draw_csn_shocks(total_periods, Sigma_e_sim, alpha, sigma_e)
+    } else if (any(alpha != 0)) {
+      ## Diagonal Sigma_e: the per-shock construction below is the SAME law as
+      ## .draw_csn_shocks() (with Sigma_e diagonal the truncation latents are
+      ## independent, so the joint CSN factorises into its marginals), and it is
+      ## kept because it consumes a fixed RNG stream that seeded regression
+      ## tests depend on, and needs no rejection step.
       ## CSN draw: e_i = sigma_i * (delta_i*|z1| + sqrt(1-delta_i^2)*z2) - mu_i
       ## where mu_i = sigma_i * delta_i * sqrt(2/pi)  (Landmine 6: subtract mean
       ## so shocks are mean-zero; sign error here shifts the steady state).
@@ -395,10 +575,18 @@ simulate_model <- function(dr, n_periods = 200L, shocks = NULL,
                     sweep(z2, 2L, sqrt(1 - delta^2), `*`)
       ## Column k scaled by sigma_e[k], then subtract mean correction mu_e[k]
       shocks <- sweep(sweep(shocks_std, 2L, sigma_e, `*`), 2L, mu_e, `-`)
-    } else {
-      ## Gaussian path (unchanged; regression-safe at alpha = 0)
+    } else if (!has_corr) {
+      ## Gaussian, diagonal Sigma_e: unchanged (regression-safe, and keeps the
+      ## exact RNG stream of every existing seeded test).
       shocks <- matrix(rnorm(total_periods * n_exo), ncol = n_exo)
       for (k in seq_along(exo)) shocks[, k] <- shocks[, k] * sigma_e[k]
+    } else {
+      ## Gaussian, correlated Sigma_e: e_t = L z_t with Sigma_e = L L'
+      ## (lower Cholesky, declared shock order -- the same factor
+      ## compute_irfs() / compute_moments() orthogonalise with).  MASS-free.
+      L_sim  <- .sigma_e_chol_lower(Sigma_e_sim)
+      z      <- matrix(rnorm(total_periods * n_exo), ncol = n_exo)
+      shocks <- z %*% t(L_sim)
     }
   }
 
@@ -555,6 +743,18 @@ simulate_model <- function(dr, n_periods = 200L, shocks = NULL,
 #'   \item{var_decomp_pct}{same, scaled to 100}
 #' }
 #'
+#' \strong{Correlated shocks (ordering dependence).} When \eqn{\Sigma_e} has
+#' non-zero off-diagonal entries the shocks are orthogonalised with its lower
+#' Cholesky factor, \eqn{\Sigma_e = L L'}, taken in the shock order the model
+#' DECLARES them (\code{dr$exo_names}) -- Dynare's \code{stoch_simul}
+#' convention. Shock \eqn{k} is credited the variance generated by column
+#' \eqn{k} of \eqn{g_u L}, so the per-shock contributions sum exactly to each
+#' variable's total variance. Like every Cholesky decomposition this is
+#' \emph{order dependent}: reordering \code{varexo} reallocates the shared
+#' (covariance) variance between the correlated shocks. With a diagonal
+#' \eqn{\Sigma_e} the decomposition is order-invariant and identical to the
+#' naive per-shock contribution \eqn{g_{u,k} \sigma_k^2 g_{u,k}'}.
+#'
 #' @param dr DecisionRules object
 #' @param model dynhr_mod object (for shock covariance)
 #' @param n_ar Number of autocorrelation lags to compute
@@ -600,18 +800,23 @@ compute_moments <- function(dr, model, n_ar = 5L, params = NULL) {
   ## variables keep finite moments and only nonstationary ones become NaN --
   ## matching Dynare.  See .modal_decomp / .modal_project_cov above.
   nonstat_tol <- getOption("dynhr.unit_root_tol", 1e-6)
-  ev <- eigen(ghx_state, only.values = TRUE)$values
+  ## A model with NO state variables (purely static in the shocks) has a 0x0
+  ## transition; eigen() / the Lyapunov solver fail on it, and its state
+  ## covariance is simply empty.
+  ev <- if (n_state > 0L) eigen(ghx_state, only.values = TRUE)$values else complex(0)
   has_unit_root <- any(Mod(ev) >= 1 - nonstat_tol)
 
   Q_state <- ghu_state %*% Sigma_e %*% t(ghu_state)   # innovation cov of states
   dec <- NULL
   nonstat_var <- integer(0)
 
-  if (!has_unit_root) {
+  if (n_state == 0L) {
+    Sigma_state <- matrix(0, 0L, 0L)
+  } else if (!has_unit_root) {
     Sigma_state <- solve_lyapunov(ghx_state, Q_state)
   } else {
     if (getOption("dynhr.warn_unit_root", TRUE)) {
-      warning(sprintf(
+      .dynhr_warn(sprintf(
         paste0("compute_moments(): model has %d nonstationary root(s) ",
                "(|eigenvalue| >= %.6f). Finite moments are returned for the ",
                "stationary subspace; variables loading on a nonstationary mode ",
@@ -704,14 +909,26 @@ compute_moments <- function(dr, model, n_ar = 5L, params = NULL) {
 
   ## Variance decomposition: contribution of each shock to each variable.
   ## Mirrors the stationary-subspace logic above for per-shock Lyapunov solves.
+  ##
+  ## Correlated shocks (Dynare convention): the innovations are orthogonalised
+  ## with the lower Cholesky factor of Sigma_e in the DECLARED shock order,
+  ## Sigma_e = L L'.  Shock k is credited the variance generated by column k of
+  ## ghu %*% L (unit-variance orthogonal innovation), so the per-shock
+  ## contributions sum EXACTLY to the total variance and no covariance term is
+  ## left unattributed.  For a diagonal Sigma_e, L = diag(sd) and this reduces
+  ## to the old ghu[, k] * sigma_k contribution byte-for-byte.
+  L_e        <- .sigma_e_chol_lower(Sigma_e)
+  ghu_L      <- ghu %*% L_e                       # n_endo x n_exo
+  ghu_L_st   <- ghu_L[state_idx, , drop = FALSE]  # n_state x n_exo
+
   var_decomp <- matrix(0, nrow = n_endo, ncol = n_exo)
   rownames(var_decomp) <- endo
   colnames(var_decomp) <- exo
 
   for (k in seq_along(exo)) {
-    ghu_state_k <- ghu_state[, k, drop = FALSE]
-    ghu_k       <- ghu[, k, drop = FALSE]
-    Q_state_k   <- ghu_state_k %*% (Sigma_e[k, k]) %*% t(ghu_state_k)
+    ghu_state_k <- ghu_L_st[, k, drop = FALSE]
+    ghu_k       <- ghu_L[, k, drop = FALSE]
+    Q_state_k   <- ghu_state_k %*% t(ghu_state_k)
 
     if (!has_unit_root) {
       Sigma_state_k <- solve_lyapunov(ghx_state, Q_state_k)
@@ -725,8 +942,7 @@ compute_moments <- function(dr, model, n_ar = 5L, params = NULL) {
 
     ## Full contribution of shock k (finite); nonstationary vars are zeroed so
     ## the per-variable shares still sum sensibly for the stationary block.
-    Sigma_y_k <- ghx %*% Sigma_state_k %*% t(ghx) +
-                 ghu_k %*% (Sigma_e[k, k]) %*% t(ghu_k)
+    Sigma_y_k <- ghx %*% Sigma_state_k %*% t(ghx) + tcrossprod(ghu_k)
     dk <- diag(Sigma_y_k)
     if (length(nonstat_var) > 0L) dk[nonstat_var] <- 0
     var_decomp[, k] <- pmax(replace(dk, is.nan(dk), 0), 0)
@@ -770,8 +986,14 @@ compute_moments <- function(dr, model, n_ar = 5L, params = NULL) {
 #' The h-step forecast-error covariance is:
 #' \deqn{V(h) = \sum_{j=0}^{h-1} \Psi_j \Sigma_e \Psi_j'}
 #' with \eqn{\Psi_0 = D} and \eqn{\Psi_j = C A^{j-1} B} for \eqn{j \ge 1}.
-#' The contribution of shock \eqn{k} to variable \eqn{i} at horizon \eqn{h} is
-#' \eqn{\sum_{j=0}^{h-1} (\Psi_j)_{ik}^2 \Sigma_e[k,k]}.
+#' Writing \eqn{\Sigma_e = L L'} for the lower Cholesky factor in the DECLARED
+#' shock order (Dynare's convention), the contribution of shock \eqn{k} to
+#' variable \eqn{i} at horizon \eqn{h} is
+#' \eqn{\sum_{j=0}^{h-1} (\Psi_j L)_{ik}^2}, so the shares sum exactly to
+#' \eqn{V(h)_{ii}} even with correlated shocks. With a diagonal \eqn{\Sigma_e}
+#' this is \eqn{\sum_j (\Psi_j)_{ik}^2 \Sigma_e[k,k]}, as before. As with any
+#' Cholesky orthogonalisation the split of the shared variance between
+#' correlated shocks depends on the \code{varexo} declaration order.
 #'
 #' For \code{horizon = Inf}, the per-shock Lyapunov solution is used (same
 #' machinery as \code{\link{compute_moments}}), which equals the limit of the
@@ -825,8 +1047,13 @@ conditional_variance_decomposition <- function(dr, model,
   has_unit_root <- any(Mod(ev) >= 1 - nonstat_tol)
   dec <- if (has_unit_root) .modal_decomp(ghx_state, nonstat_tol) else NULL
 
-  ## Pre-extract diagonal of Sigma_e (per-shock variances)
-  sigma_k2 <- diag(Sigma_e)   # length n_exo
+  ## Orthogonalise the innovations with the lower Cholesky factor of Sigma_e in
+  ## the DECLARED shock order (Dynare convention; see compute_moments()).  The
+  ## impulse matrices are then post-multiplied by L and each shock's
+  ## contribution is the squared column, so the shares sum exactly to the
+  ## h-step forecast-error variance even when Sigma_e is not diagonal.  For a
+  ## diagonal Sigma_e, L = diag(sd) and this is the old Psi[, k]^2 * sigma_k^2.
+  L_e <- .sigma_e_chol_lower(Sigma_e)
 
   ## Output array: n_endo x n_exo x n_h (raw FEV contributions)
   fevd <- array(0, dim = c(n_endo, n_exo, n_h),
@@ -843,14 +1070,11 @@ conditional_variance_decomposition <- function(dr, model,
 
     ## Psi_0 = D = ghu;  for j>=1: Psi_j = C * (A^{j-1} B) = ghx * phi_{j-1}
     ## phi_0 = B = ghu_state; phi_{j} = A * phi_{j-1} = ghx_state * phi_{j-1}
-    Psi_cur <- ghu             # n_endo x n_exo  (Psi_0)
-    phi     <- ghu_state       # n_state x n_exo (phi_0 = B)
+    Psi_cur <- ghu %*% L_e         # n_endo x n_exo  (Psi_0 L)
+    phi     <- ghu_state %*% L_e   # n_state x n_exo (phi_0 = B L)
 
     ## Running FEV accumulator
-    FEV <- matrix(0, n_endo, n_exo)
-    for (k in seq_len(n_exo)) {
-      FEV[, k] <- Psi_cur[, k]^2 * sigma_k2[k]
-    }
+    FEV <- Psi_cur^2
 
     for (hidx in h_finite) {
       if (horizons[hidx] == 1L || horizons[hidx] == 1) {
@@ -866,9 +1090,7 @@ conditional_variance_decomposition <- function(dr, model,
       phi     <- ghx_state %*% phi
 
       ## Accumulate FEV
-      for (k in seq_len(n_exo)) {
-        FEV[, k] <- FEV[, k] + Psi_cur[, k]^2 * sigma_k2[k]
-      }
+      FEV <- FEV + Psi_cur^2
 
       ## Store whenever we've hit a requested horizon (j+1 steps accumulated)
       h_done <- j + 1L
@@ -882,10 +1104,12 @@ conditional_variance_decomposition <- function(dr, model,
 
   ## ---- Infinite horizon via per-shock Lyapunov solve ------------------------
   if (length(h_inf) > 0L) {
+    ghu_L    <- ghu %*% L_e
+    ghu_L_st <- ghu_state %*% L_e
     for (k in seq_along(exo)) {
-      ghu_state_k <- ghu_state[, k, drop = FALSE]
-      ghu_k       <- ghu[, k, drop = FALSE]
-      Q_state_k   <- ghu_state_k %*% (Sigma_e[k, k]) %*% t(ghu_state_k)
+      ghu_state_k <- ghu_L_st[, k, drop = FALSE]
+      ghu_k       <- ghu_L[, k, drop = FALSE]
+      Q_state_k   <- tcrossprod(ghu_state_k)
 
       if (!has_unit_root) {
         Sigma_state_k <- solve_lyapunov(ghx_state, Q_state_k)
@@ -895,8 +1119,7 @@ conditional_variance_decomposition <- function(dr, model,
         Sigma_state_k <- matrix(0, n_state, n_state)
       }
 
-      Sigma_y_k <- ghx %*% Sigma_state_k %*% t(ghx) +
-                   ghu_k %*% (Sigma_e[k, k]) %*% t(ghu_k)
+      Sigma_y_k <- ghx %*% Sigma_state_k %*% t(ghx) + tcrossprod(ghu_k)
       dk <- diag(Sigma_y_k)
       dk <- pmax(replace(dk, is.nan(dk), 0), 0)
 
@@ -1068,6 +1291,19 @@ hp_filtered_moments <- function(dr, model, lambda = 1600, n_freq = 512L,
 #' **Scope:** Gaussian shocks only. For skew-normal shocks the fourth-moment
 #' formulas differ and are not yet implemented; a warning is issued.
 #'
+#' \strong{Correlated shocks (ordering dependence).} As in
+#' \code{\link{compute_moments}}, \code{var_decomp} orthogonalises the shocks
+#' with the lower Cholesky factor of \eqn{\Sigma_e} in the shock order the model
+#' DECLARES them, \eqn{\Sigma_e = L L'} (Dynare's convention). Shock \eqn{k} is
+#' credited the order-2 variance generated by \eqn{L_{\cdot k} L_{\cdot k}'}
+#' alone, so no covariance is left unattributed, and the split is \emph{order
+#' dependent}: reordering \code{varexo} reallocates the shared variance between
+#' correlated shocks. With a diagonal \eqn{\Sigma_e} it is identical to the
+#' per-shock \eqn{\Sigma_e[k,k]} contribution. Note the order-2 map
+#' \eqn{\Sigma_e \mapsto \mathrm{Var}(y)} is quadratic, so the shares sum to the
+#' total only up to genuine cross-shock interaction terms (exactly, for a linear
+#' model).
+#'
 #' @param dr DecisionRules2 object (from \code{solve_perturbation(order=2)}).
 #' @param model dynhr_mod object (for shock covariance).
 #' @param n_ar Number of autocorrelation lags to compute (default 5).
@@ -1098,7 +1334,7 @@ compute_moments_order2 <- function(dr, model, n_ar = 5L, params = NULL) {
   exo <- dr$exo_names
   alpha <- .get_shock_skewness(model, exo, params)
   if (!all(alpha == 0)) {
-    warning(
+    .dynhr_warn(
       "compute_moments_order2: one or more shocks have non-zero skewness. ",
       "The formulas assume Gaussian shocks; results will be approximate."
     )
@@ -1157,41 +1393,40 @@ compute_moments_order2 <- function(dr, model, n_ar = 5L, params = NULL) {
   colnames(corr_mat) <- endo
 
   ## --- Autocovariances (lag τ ≥ 1) ------------------------------------------
-  ## For Gaussian pruned system the lag-τ autocovariance is:
-  ##   Γ(τ) = ghx · hx^(τ-1) · (Σ_x + Var(x²)) · ghx'    for τ ≥ 1
-  ## (quadratic innovations are independent of lagged y under Gaussianity at lag≥1)
-  ## τ = 0 uses the full Sigma_y computed above.
+  ## A13a (0.9.4): exact augmented-system formula; see .order2_autocov() for the
+  ## derivation and for what the old ghx/S_sel recursion got wrong.
+  autocov  <- .order2_autocov(sys, st, n_ar)
   autocorr <- array(0, dim = c(n_endo, n_endo, n_ar))
   dimnames(autocorr) <- list(endo, endo, paste0("lag", seq_len(n_ar)))
-
-  ## Selection matrix S_sel maps states back to full endo space
-  S_sel <- matrix(0, nrow = n_s, ncol = n_endo)
-  for (i in seq_along(state_idx)) S_sel[i, state_idx[i]] <- 1
-
-  ## Propagation recurrence: Γ(τ) = ghx · S_sel · Γ(τ-1)
-  ## initialised from Γ(0)_x1 = ghx*Sigma_x*ghx', Γ(0)_x2 = ghx*Var_x2*ghx'.
-  Gamma_prev_x1 <- ghx %*% Sigma_x %*% t(ghx)
-  Gamma_prev_x2 <- ghx %*% Var_x2  %*% t(ghx)
-
-  for (lag in seq_len(n_ar)) {
-    Gamma_lag_x1 <- ghx %*% S_sel %*% Gamma_prev_x1
-    Gamma_lag_x2 <- ghx %*% S_sel %*% Gamma_prev_x2
-    Gamma_lag <- Gamma_lag_x1 + Gamma_lag_x2
-    autocorr[, , lag] <- Gamma_lag / sd_outer
-    Gamma_prev_x1 <- Gamma_lag_x1
-    Gamma_prev_x2 <- Gamma_lag_x2
-  }
+  for (lag in seq_len(n_ar)) autocorr[, , lag] <- autocov[, , lag] / sd_outer
 
   ## --- Variance decomposition (exact per-shock via the augmented system) ----
-  ## Shock k's contribution = order-2 Var(y) with Sigma_e zeroed except entry
-  ## (k,k).  Same machinery as the total, so per-shock attribution is internally
-  ## consistent (sums to the total up to genuine cross-shock interaction terms).
+  ## Shock k's contribution = order-2 Var(y) driven by orthogonal innovation k
+  ## ALONE, i.e. with Sigma_e replaced by the rank-1 block L[, k] L[, k]', where
+  ## Sigma_e = L L' is the lower Cholesky factor in the DECLARED shock order
+  ## (Dynare's convention; identical to what compute_moments() and
+  ## conditional_variance_decomposition() now do at order 1).
+  ##
+  ## 0.9.4 (WS4, follow-up to WS2's A4): this used to zero every Sigma_e entry
+  ## except the diagonal (k,k), which simply DISCARDS the off-diagonal
+  ## covariance -- with correlated shocks the per-shock pieces then failed to
+  ## add up, and the order-1 and order-2 decompositions of the SAME linear model
+  ## disagreed.  Because sum_k L[, k] L[, k]' = L L' = Sigma_e exactly, the
+  ## rank-1 split attributes all of the covariance.  For a diagonal Sigma_e,
+  ## L = diag(sd) and L[, k] L[, k]' is the old (k,k)-only matrix, so nothing
+  ## changes for uncorrelated shocks.
+  ##
+  ## Like every Cholesky orthogonalisation this is ORDER DEPENDENT: reordering
+  ## `varexo` reallocates the shared variance between correlated shocks.  And
+  ## note the order-2 map Sigma_e -> Var(y) is quadratic, so the pieces sum to
+  ## the total only up to genuine cross-shock interaction terms (they sum
+  ## EXACTLY when the model is linear).
+  L_e <- .sigma_e_chol_lower(Sigma_e)
   var_decomp <- matrix(0, nrow = n_endo, ncol = n_exo)
   rownames(var_decomp) <- endo
   colnames(var_decomp) <- exo
   for (k in seq_len(n_exo)) {
-    Sigma_ek <- matrix(0, n_exo, n_exo)
-    Sigma_ek[k, k] <- Sigma_e[k, k]
+    Sigma_ek <- tcrossprod(L_e[, k])
     sys_k <- .order2_aug_system(dr, Sigma_ek)
     var_decomp[, k] <- pmax(diag(.order2_stationary_moments(sys_k)$var_cov), 0)
   }
@@ -1253,8 +1488,10 @@ compute_moments_order2 <- function(dr, model, n_ar = 5L, params = NULL) {
   d1 <- n_u; d2 <- n_u * n_s; d3 <- n_s * n_u; d4 <- n_u * n_u
   D  <- d1 + d2 + d3 + d4
   Cr <- matrix(0, D, D)
-  i1 <- seq_len(d1); i2 <- (d1 + 1L):(d1 + d2)
-  i3 <- (d1 + d2 + 1L):(d1 + d2 + d3); i4 <- (d1 + d2 + d3 + 1L):D
+  ## seq_len offsets, not `a:b`: with no states (n_s = 0) the x1 blocks are
+  ## EMPTY, and `(d1 + 1L):(d1 + 0L)` is the DESCENDING pair c(d1 + 1, d1).
+  i1 <- seq_len(d1); i2 <- d1 + seq_len(d2)
+  i3 <- d1 + d2 + seq_len(d3); i4 <- d1 + d2 + d3 + seq_len(d4)
   Cr[i1, i1] <- Sigma_e
   Cr[i1, i2] <- kronecker(Sigma_e, t(a))
   Cr[i1, i3] <- kronecker(t(a), Sigma_e)
@@ -1277,7 +1514,9 @@ compute_moments_order2 <- function(dr, model, n_ar = 5L, params = NULL) {
   huu <- ghuu[sidx, , drop = FALSE]; hss <- ghss[sidx]
   vecSe <- as.numeric(Sigma_e)
   d <- 2L * n_s + n_s * n_s
-  ix1 <- seq_len(n_s); ix2 <- (n_s + 1L):(2L * n_s); ik <- (2L * n_s + 1L):d
+  ## seq_len offsets (see .order2_cov_r): a stateless model (n_s = 0, d = 0)
+  ## must give empty blocks, not the descending `(n_s + 1L):(2L * n_s)` = 1:0.
+  ix1 <- seq_len(n_s); ix2 <- n_s + seq_len(n_s); ik <- 2L * n_s + seq_len(n_s * n_s)
   Tlin <- matrix(0, d, d)
   Tlin[ix1, ix1] <- hx; Tlin[ix2, ix2] <- hx
   Tlin[ix2, ik] <- 0.5 * hxx; Tlin[ik, ik] <- kronecker(hx, hx)
@@ -1287,8 +1526,8 @@ compute_moments_order2 <- function(dr, model, n_ar = 5L, params = NULL) {
   c_u[ik]  <- as.numeric(kronecker(hu, hu) %*% vecSe)
   D1 <- n_u; D2 <- n_u * n_s; D3 <- n_s * n_u; D4 <- n_u * n_u
   Dr <- D1 + D2 + D3 + D4
-  j1 <- seq_len(D1); j2 <- (D1 + 1L):(D1 + D2)
-  j3 <- (D1 + D2 + 1L):(D1 + D2 + D3); j4 <- (D1 + D2 + D3 + 1L):Dr
+  j1 <- seq_len(D1); j2 <- D1 + seq_len(D2)
+  j3 <- D1 + D2 + seq_len(D3); j4 <- D1 + D2 + D3 + seq_len(D4)
   G <- matrix(0, d, Dr)
   G[ix1, j1] <- hu; G[ix2, j2] <- hxu; G[ix2, j4] <- 0.5 * huu
   G[ik, j2] <- kronecker(hu, hx); G[ik, j3] <- kronecker(hx, hu)
@@ -1310,15 +1549,63 @@ compute_moments_order2 <- function(dr, model, n_ar = 5L, params = NULL) {
   Cr0 <- .order2_cov_r(numeric(sys$n_s), Sigma_x, sys$Sigma_e)
   Sxi <- solve_lyapunov(sys$Tlin, sys$G %*% Cr0 %*% t(sys$G))
   var_cov <- sys$Dxi %*% Sxi %*% t(sys$Dxi) + sys$Gv %*% Cr0 %*% t(sys$Gv)
-  mu_xi <- as.numeric(solve(diag(sys$d) - sys$Tlin, sys$cc + sys$c_u))
+  mu_xi <- if (sys$d == 0L) numeric(0) else
+    as.numeric(solve(diag(sys$d) - sys$Tlin, sys$cc + sys$c_u))
   mean_dev <- as.numeric(sys$Dxi %*% mu_xi) + 0.5 * sys$ghss + sys$c_v
   list(var_cov = var_cov, mean = sys$ys + mean_dev, Sigma_x = Sigma_x,
+       ## A13a (0.9.4): the FULL augmented-state covariance and the innovation
+       ## covariance are needed for the exact lag-tau autocovariance; they were
+       ## computed here already but thrown away, and the callers reconstructed a
+       ## wrong recursion from Sigma_x / Var_x2 alone.  See .order2_autocov().
+       Sxi = Sxi, Cr0 = Cr0,
        Var_x2 = Sxi[sys$ix2, sys$ix2, drop = FALSE], mean_x2 = mu_xi[sys$ix2],
        ## Cov(x2_t, x1_t (x) x1_t): exact order-2 cross block (n_s x n_s^2),
        ## x1(x)x1 column (d,e) with e fastest.  Needed by the order-3 pruned-SS
        ## Cr0 to build the j5(=eps(x)x2) cross-category blocks correctly (the
        ## connected non-Gaussian moment E[x2c x1 x1]); see .order3_cov_r.
        Cov_x2_x11 = Sxi[sys$ix2, sys$ik, drop = FALSE])
+}
+
+## EXACT lag-tau autocovariances of the AFVRR order-2 pruned state space.
+##
+## A13a (0.9.4). Both compute_moments_order2() and pruned_ss_moments() used
+##   Gamma(tau) = ghx S_sel Gamma(tau-1),  seeded at
+##   Gamma(0)_hat = ghx (Sigma_x + Var_x2) ghx'
+## which is wrong twice over:
+##   (i) the seed omits the contemporaneous shock term (ghu Sigma_e ghu' and the
+##       order-2 Gv Cr0 Gv' blocks), so even a plain AR(1) state came out with
+##       autocorrelation rho^(tau+1) instead of rho^tau -- e.g. rho = 0.85 was
+##       reported as 0.614 at lag 1 against a 4e5-period MC value of 0.8486
+##       (MCSE ~ 0.0016, i.e. ~140 MCSE out);
+##   (ii) y_t is NOT a function of the TOTAL state x1+x2 alone -- its quadratic
+##       term 0.5 ghxx (x1 (x) x1) sees x1 only -- so no S_sel recursion on
+##       Gamma can be right for the pruned system.
+##
+## The pruned system IS linear in the augmented state
+##   xi_t = [x1; x2; x1 (x) x1],   xi_{t+1} = Tlin xi_t + c + G r_t
+##   y_t  = Dxi xi_t + const + Gv r_t
+## and r_t is a martingale difference given xi_t (E[r_t | xi_t] = (0,0,0,vecSe)
+## is constant because eps_t is independent of x1_t).  Hence for tau >= 1
+##   Cov(xi_t, r_{t-tau}) = Tlin^{tau-1} G Cr0 ,  Cov(r_t, xi_{t-tau}) = 0
+## and therefore
+##   Gamma(tau) = Dxi Tlin^{tau-1} [ Tlin Sxi Dxi' + G Cr0 Gv' ].
+## At tau = 0 the same algebra gives Dxi Sxi Dxi' + Gv Cr0 Gv' = var_cov, which
+## is exactly what .order2_stationary_moments() already returns -- a free
+## internal consistency check on the derivation.
+##
+## Returns an n_endo x n_endo x n_ar array of AUTOCOVARIANCES (not scaled).
+## @noRd
+.order2_autocov <- function(sys, st, n_ar) {
+  n_endo <- sys$n_endo
+  out <- array(0, dim = c(n_endo, n_endo, n_ar))
+  if (n_ar < 1L) return(out)
+  ## A = Tlin^{tau-1} [ Tlin Sxi Dxi' + G Cr0 Gv' ]   (d x n_endo)
+  A <- sys$Tlin %*% st$Sxi %*% t(sys$Dxi) + sys$G %*% st$Cr0 %*% t(sys$Gv)
+  for (lag in seq_len(n_ar)) {
+    out[, , lag] <- sys$Dxi %*% A
+    A <- sys$Tlin %*% A
+  }
+  out
 }
 
 ## Transient s0-conditional order-2 output moments (levels), t = 1..n_periods.
@@ -1369,7 +1656,7 @@ stoch_simul <- function(model, compiled = NULL, ss = NULL, params = NULL,
   ## for consistency with compute_irfs(); when supplied it overrides irf=).
   if (!is.null(n_periods)) {
     if (!missing(irf) && irf != 40L) {
-      message("stoch_simul: both 'irf' and 'n_periods' supplied; using 'n_periods'.")
+      .dynhr_inform("stoch_simul: both 'irf' and 'n_periods' supplied; using 'n_periods'.")
     }
     irf <- n_periods
   }
@@ -1380,13 +1667,13 @@ stoch_simul <- function(model, compiled = NULL, ss = NULL, params = NULL,
 
   if (is.null(params)) params <- model$param_values
   if (is.null(compiled)) {
-    if (verbose) cat("Compiling model...\n")
+    if (verbose) .dynhr_cat("Compiling model...\n")
     compiled <- compile_model(model, verbose = verbose)
   }
 
   ## Steady state
   if (is.null(ss)) {
-    if (verbose) cat("Computing steady state...\n")
+    if (verbose) .dynhr_cat("Computing steady state...\n")
     ss_result <- solve_steady_state(model, compiled, params, verbose = verbose)
     ss <- ss_result$ss
   } else {
@@ -1407,47 +1694,48 @@ stoch_simul <- function(model, compiled = NULL, ss = NULL, params = NULL,
 
   ## First-order perturbation
   if (order != 1L) stop("Only order=1 perturbation is supported")
-  if (verbose) cat("Solving first-order perturbation...\n")
+  if (verbose) .dynhr_cat("Solving first-order perturbation...\n")
   dr <- solve_perturbation(model, compiled, ss, params, verbose = verbose)
 
   ## Print eigenvalues
   if (verbose) {
-    cat("\nEigenvalues:\n")
+    .dynhr_cat("\nEigenvalues:\n")
     eig <- dr$eigenvalues
     eig_mod <- Mod(eig)
     for (i in seq_along(eig)) {
       flag <- if (eig_mod[i] < 1) "stable" else "UNSTABLE"
-      cat(sprintf("  %3d: %8.4f + %8.4fi (|lambda| = %7.4f) %s\n",
+      .dynhr_cat(sprintf("  %3d: %8.4f + %8.4fi (|lambda| = %7.4f) %s\n",
                   i, Re(eig[i]), Im(eig[i]), eig_mod[i], flag))
     }
-    cat(sprintf("\n%d stable, %d unstable, %d forward-looking\n",
+    .dynhr_cat(sprintf("\n%d stable, %d unstable, %d forward-looking\n",
                 dr$n_stable, dr$n_unstable, length(dr$fwd_vars)))
     if (dr$bk_satisfied) {
-      cat("Blanchard-Kahn conditions are satisfied.\n\n")
+      .dynhr_cat("Blanchard-Kahn conditions are satisfied.\n\n")
     } else {
-      cat("WARNING: Blanchard-Kahn conditions NOT satisfied!\n\n")
+      .dynhr_cat("WARNING: Blanchard-Kahn conditions NOT satisfied!\n\n")
     }
   }
 
   ## IRFs
   irfs <- NULL
   if (irf > 0) {
-    if (verbose) cat("Computing IRFs (", irf, " periods)...\n")
+    if (verbose) .dynhr_cat("Computing IRFs (", irf, " periods)...\n")
     irfs <- compute_irfs(dr, model, n_periods = irf, params = params)
   }
 
   ## Moments
-  if (verbose) cat("Computing theoretical moments...\n")
+  if (verbose) .dynhr_cat("Computing theoretical moments...\n")
   moments <- compute_moments(dr, model, params = params)
 
-  if (verbose) {
-    print_moments(moments, model)
-  }
+  ## Progress output inside a run, not a user-invoked render: emit it on the
+  ## levelled message stream so `dynhr_set_verbosity()` can silence it. One
+  ## call, so the tables cannot split across messages.
+  if (verbose) .dynhr_cat(format_moments(moments, model), sep = "\n")
 
   ## Simulation
   sim <- NULL
   if (periods > 0) {
-    if (verbose) cat("Simulating ", periods, " periods...\n")
+    if (verbose) .dynhr_cat("Simulating ", periods, " periods...\n")
     sim <- simulate_model(dr, n_periods = periods, model = model)
   }
 
@@ -1469,75 +1757,75 @@ stoch_simul <- function(model, compiled = NULL, ss = NULL, params = NULL,
 ## 5. DISPLAY FUNCTIONS
 ## ============================================================================
 
+#' Format theoretical moments as Dynare-style report lines
+#'
+#' Pure: builds and returns the lines, writes nothing. See R/format-report.R
+#' for why the reports are split this way -- in short, a report that emits ONCE
+#' works on any stream, while one that emits per table cell is bound to
+#' \code{cat()} forever.
+#'
+#' @param moments A moments list from [compute_moments()].
+#' @param model Optional model; unused, kept for signature compatibility.
+#' @return Character vector of lines.
+#' @noRd
+format_moments <- function(moments, model = NULL) {
+  endo <- names(moments$std_dev)
+  rule <- .fmt_rule(70L)
+
+  tbl1 <- .fmt_cols_lines(endo,
+                          Mean = rep(0, length(endo)),
+                          `Std. Dev.` = as.numeric(moments$std_dev[endo]),
+                          label_width = 20L, col_width = 12L, digits = 6L)
+  out <- c("THEORETICAL MOMENTS", rule, tbl1[1L], rule, tbl1[-1L], rule, "")
+
+  out <- c(out, "CORRELATION MATRIX", rule,
+           .fmt_matrix_lines(moments$correlation,
+                             row_labels = endo, col_labels = endo,
+                             row_width = 10L, col_width = 9L, digits = 4L,
+                             max_label = 8L),
+           "")
+
+  n_ar <- dim(moments$autocorr)[3L]
+  ac   <- vapply(seq_len(n_ar),
+                 function(lag) moments$autocorr[cbind(seq_along(endo),
+                                                      seq_along(endo), lag)],
+                 numeric(length(endo)))
+  ac <- matrix(ac, nrow = length(endo), ncol = n_ar)
+  out <- c(out, "AUTOCORRELATION (diagonal)", rule,
+           .fmt_matrix_lines(ac, row_labels = endo,
+                             col_labels = paste0("lag", seq_len(n_ar)),
+                             row_width = 15L, col_width = 10L, digits = 4L,
+                             corner = "Variable"),
+           "")
+
+  exo <- colnames(moments$var_decomp_pct)
+  c(out, "VARIANCE DECOMPOSITION (percent)", rule,
+    .fmt_matrix_lines(moments$var_decomp_pct, row_labels = endo,
+                      col_labels = exo, row_width = 15L, col_width = 10L,
+                      digits = 2L, max_label = 9L, corner = "Variable"),
+    rule, "")
+}
+
 #' Print theoretical moments in Dynare-style format
+#'
+#' One emit call, so the whole report is a single write on whichever stream it
+#' goes to.
+#'
+#' @inheritParams format_moments
+#' @return The formatted lines, invisibly.
 #' @noRd
 print_moments <- function(moments, model = NULL) {
-  endo <- names(moments$std_dev)
-
-  cat("THEORETICAL MOMENTS\n")
-  cat(strrep("-", 70), "\n")
-  cat(sprintf("%-20s %12s %12s\n", "Variable", "Mean", "Std. Dev."))
-  cat(strrep("-", 70), "\n")
-  for (nm in endo) {
-    cat(sprintf("%-20s %12.6f %12.6f\n", nm, 0, moments$std_dev[nm]))
-  }
-  cat(strrep("-", 70), "\n\n")
-
-  ## Correlation matrix
-  cat("CORRELATION MATRIX\n")
-  cat(strrep("-", 70), "\n")
-  n <- length(endo)
-  short <- substr(endo, 1, 8)
-  cat(sprintf("%-10s", ""))
-  for (nm in short) cat(sprintf("%9s", nm))
-  cat("\n")
-  for (i in seq_along(endo)) {
-    cat(sprintf("%-10s", short[i]))
-    for (j in seq_along(endo)) {
-      cat(sprintf("%9.4f", moments$correlation[i, j]))
-    }
-    cat("\n")
-  }
-  cat("\n")
-
-  ## Autocorrelation
-  n_ar <- dim(moments$autocorr)[3]
-  cat("AUTOCORRELATION (diagonal)\n")
-  cat(strrep("-", 70), "\n")
-  cat(sprintf("%-15s", "Variable"))
-  for (lag in seq_len(n_ar)) cat(sprintf("%10s", paste0("lag", lag)))
-  cat("\n")
-  for (i in seq_along(endo)) {
-    cat(sprintf("%-15s", endo[i]))
-    for (lag in seq_len(n_ar)) {
-      cat(sprintf("%10.4f", moments$autocorr[i, i, lag]))
-    }
-    cat("\n")
-  }
-  cat("\n")
-
-  ## Variance decomposition
-  exo <- colnames(moments$var_decomp_pct)
-  cat("VARIANCE DECOMPOSITION (percent)\n")
-  cat(strrep("-", 70), "\n")
-  cat(sprintf("%-15s", "Variable"))
-  for (nm in exo) cat(sprintf("%10s", substr(nm, 1, 9)))
-  cat("\n")
-  for (i in seq_along(endo)) {
-    cat(sprintf("%-15s", endo[i]))
-    for (j in seq_along(exo)) {
-      cat(sprintf("%10.2f", moments$var_decomp_pct[i, j]))
-    }
-    cat("\n")
-  }
-  cat(strrep("-", 70), "\n\n")
+  lines <- format_moments(moments, model)
+  cat(paste(lines, collapse = "\n"), "\n", sep = "")
+  invisible(lines)
 }
+
 
 #' Print first-order decision rules
 #'
-#' @param x A `DecisionRules` object from [solve_perturbation()].
+#' @param x A \code{DecisionRules} object from [solve_perturbation()].
 #' @param ... Ignored.
-#' @return `x`, invisibly.
+#' @return \code{x}, invisibly.
 #' @export
 print.DecisionRules <- function(x, ...) {
   cat("=== Decision Rules (first order) ===\n")
@@ -1560,9 +1848,9 @@ print.DecisionRules <- function(x, ...) {
 
 #' Print a stoch_simul result
 #'
-#' @param x A `StochSimulResult` object from [stoch_simul()], [compute_irfs()] or [compute_moments()].
+#' @param x A \code{StochSimulResult} object from [stoch_simul()], [compute_irfs()] or [compute_moments()].
 #' @param ... Ignored.
-#' @return `x`, invisibly.
+#' @return \code{x}, invisibly.
 #' @export
 print.StochSimulResult <- function(x, ...) {
   cat("=== stoch_simul Results ===\n")

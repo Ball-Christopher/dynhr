@@ -30,8 +30,8 @@ values, shock structure, and any estimation blocks.
 Supported .mod syntax (see \code{vignette("mod-syntax")} for the full
 reference with verified examples):
 
-\emph{Declarations:} \code{var} (with \code{var(log)} and
-\code{\%(long_name=...)} annotations), \code{varexo}, \code{varexo_det},
+\emph{Declarations:} \code{var} (with \code{\%(long_name=...)}
+annotations), \code{varexo}, \code{varexo_det},
 \code{parameters}, \code{predetermined_variables}, \code{varobs}.
 
 \emph{Model block:} \code{model;} / \code{model(linear);} ... \code{end;}.
@@ -42,7 +42,19 @@ Model-local \code{#name = expr;} intermediates stored in
 Equation \code{[name=...]} and \code{[mcp='...']} tags.
 Math: \code{exp}, \code{log}, \code{sqrt}, \code{abs}, trig functions,
 \code{max}/\code{min}, \code{normcdf}, \code{STEADY_STATE()},
-\code{EXPECTATION()}, standard arithmetic.
+standard arithmetic.
+\code{EXPECTATION(k)(expr)} (expectation of \code{expr} given the
+information of period \eqn{t+k}, e.g. \code{EXPECTATION(-1)(x(+1))}) is
+replaced, as in Dynare, by an auxiliary variable
+\code{AUX_EXPECT_LAG_<|k|>_<n>} (\code{..._LEAD_...} for \eqn{k \ge 0})
+defined by \code{AUX = expr} shifted by \eqn{-k} periods and entering the
+equation as \code{AUX(k)}.  A nested \code{EXPECTATION}, an argument that
+uses a \code{#} model-local variable, and \code{EXPECTATION} outside the
+model block are errors of class \code{dynhr_error_mod_expectation}.
+Variables in \code{predetermined_variables} are re-timed by \eqn{-1}
+everywhere in the model block, \code{#} local definitions included, before
+the \code{EXPECTATION} substitution and the auxiliary expansion of
+leads/lags beyond one period (Dynare's order).
 
 \emph{Steady state:} \code{steady_state_model;} ... \code{end;} ---
 sequential assignments evaluated by \code{eval_steady_state_model()}.
@@ -57,10 +69,17 @@ block, which \code{\link{historical_decomposition}} uses as its default
 grouping) and \code{model$shock_groups_blocks} (every block, keyed by its
 \code{name=} option).  A group that names an undeclared shock is an error.
 
-\emph{Macro language:} \code{@#define}, \code{@#for}/\code{@#endfor},
-\code{@#if}/\code{@#else}/\code{@#endif},
-\code{@#ifdef}/\code{@#ifndef}, \code{@#include}, and
-\code{@\{expr\}} interpolation.  Expanded before any other parsing.
+\emph{Macro language (Dynare 6/7):} \code{@#define} (values, and
+functions \code{@#define f(x) = ...}), \code{@#for}/\code{@#endfor}
+(ranges, arrays, tuple unpacking \code{@#for (i, j) in X}, \code{when}
+filters), \code{@#if}/\code{@#elseif}/\code{@#else}/\code{@#endif},
+\code{@#ifdef}/\code{@#ifndef}, \code{@#include}, \code{@#includepath},
+\code{@#error} (aborts when reached in a taken branch), \code{@#echo},
+\code{@#echomacrovars}, and \code{@\{expr\}} interpolation.  Macro
+expressions have Dynare's reals, strings, booleans, arrays and tuples,
+string/array concatenation with \code{+}, set operations, comprehensions,
+casts, indexing and built-in functions; they are evaluated by dynhr's own
+interpreter, never as R code.  Expanded before any other parsing.
 
 \emph{Other:} \code{initval}/\code{endval}, \code{histval} (pre-sample
 history; \code{y(0)} is lag 1, \code{y(-1)} is lag 2, stored lag-indexed in
@@ -68,6 +87,124 @@ history; \code{y(0)} is lag 1, \code{y(-1)} is lag 2, stored lag-indexed in
 \code{estimated_params_init}, \code{occbin_constraints},
 \code{planner_objective}, \code{verbatim} blocks.
 Comments: \code{//}, \code{/* ... */}, \code{\%}.
+
+\emph{Syntax errors:} an equation with text left over after a complete
+expression (e.g. a stray \code{)}), an unrecognised character, or an
+unsupported operator such as \code{!=} is an error of class
+\code{dynhr_error_mod_syntax} naming the equation; nothing is skipped.
+
+\emph{var(log):} \code{var(log) c k;} declares \code{c} and \code{k} and,
+as in Dynare 6+, also creates the endogenous variables \code{LOG_c} and
+\code{LOG_k}. Every occurrence of \code{c} in the model block (with any
+timing, \code{#} locals included) is replaced by \code{exp(LOG_c)} and the
+equation \code{c = exp(LOG_c);} is appended, so the perturbation is taken
+in \code{LOG_c} while \code{c} stays available as a (static) variable. The
+\code{LOG_*} variables are appended after the declared ones, before any
+\code{AUX_*} variable; \code{model$log_vars} maps each declared name to its
+\code{LOG_} name. A \code{steady_state_model} that assigns \code{c} gets
+\code{LOG_c = log(c);} appended (unless it assigns \code{LOG_c} itself), and
+\code{initval}/\code{endval}/\code{histval} values of \code{c} are carried
+to \code{LOG_c} as their logs. A \code{LOG_c} name that is already declared
+is an error of class \code{dynhr_error_mod_syntax}.
+
+\emph{observation_trends:} \code{observation_trends; y (g); end;} adds the
+deterministic linear trend \code{g * t} to the measurement equation of the
+observed variable \code{y}, as Dynare does: the observation intercept in
+period \code{t} is \code{ys[y] + g * t}, where \code{t = first_obs} for the
+first row of the data and \code{first_obs} is the \code{estimation(first_obs
+= ...)} option when present (1 otherwise). The slope may be any expression
+in declared parameters, and is re-evaluated at the parameter vector in force
+(so an estimated slope moves the likelihood). Stored in
+\code{model$observation_trends} (\code{$trends}: observable -> expression
+text; \code{$first_obs}); honoured by \code{\link{kalman_filter}},
+\code{\link{kalman_smoother}} and everything built on them. An entry for a
+variable that is not in \code{varobs} is an error, as in Dynare.
+
+\emph{Optimal simple rules:} \code{osr_params}, \code{optim_weights}
+(variance entries \code{y w;} and covariance entries \code{y, pie w;}) and
+\code{osr_params_bounds} (\code{param, lower, upper;}) are stored in
+\code{model$osr} (\code{$params}; \code{$weights}, a data frame
+\code{var1, var2, expr}; \code{$bounds}, a data frame
+\code{name, lower, upper}; weights and bounds are parameter expressions
+kept as text) and drive \code{\link{osr}} when its \code{free_params} /
+\code{loss_vars} are omitted.
+
+\emph{model_replace / model_remove / var_remove (Dynare 6+):} applied in
+file order before the model is parsed.  \code{model_remove('eq1', key =
+'value');} removes every equation carrying a listed tag (a bare string is
+the \code{name} tag; a tag that matches nothing is an error).  Each removed
+equation must have an \code{endogenous = 'v'} tag or a single endogenous
+variable on its left-hand side; that variable becomes exogenous if the
+remaining equations still use it (placed among the exogenous variables in
+declaration order) and is dropped otherwise.
+\code{model_replace('eq1'); EQUATIONS end;} removes the tagged equations
+and appends \code{EQUATIONS} at the end of the model, with no change of
+variable type.  \code{var_remove a b;} removes declared symbols
+(variables or parameters); removing one the model still uses is an error.
+Errors are of class \code{dynhr_error_mod_syntax}.
+
+\emph{diff():} \code{diff(EXPR)} is \code{EXPR - EXPR(-1)}, the lag moving
+every variable and \code{#} local in \code{EXPR} (nested \code{diff} and
+exogenous arguments allowed).  Dynare's preprocessor introduces
+\code{AUX_DIFF_*} variables for it; dynhr expands it inline, which gives
+the same equations in the model's own variables, with the usual
+\code{AUX_ENDO_LAG}/\code{AUX_EXO_LAG} auxiliaries for the lags.
+\code{adl()} is not an operator of Dynare 7 and is an error.
+
+\emph{ramsey_constraints:} \code{ramsey_constraints; i > 0; end;} bounds
+a variable of the Ramsey problem by a parameter expression (\code{>} /
+\code{>=} lower, \code{<} / \code{<=} upper).  Stored in
+\code{model$ramsey_constraints} (a data frame \code{var, op, bound}, the
+bound kept as text) and honoured by \code{\link{ramsey_obc_pf}}: each
+constraint is complementary to the Ramsey first-order condition with
+respect to its variable, as in Dynare 7, which uses the block only in its
+mixed-complementarity perfect-foresight solver
+(\code{perfect_foresight_solver(lmmcp)}); stochastic Ramsey solutions
+ignore it there too.  A variable that is not declared, or a bound that uses
+anything but parameters, is an error of class \code{dynhr_error_mod_syntax}.
+
+\emph{Command options} are split on top-level commas only, so list values
+such as \code{instruments=(i,tau)}, \code{irf_shocks=(e,u)} or
+\code{bandpass_filter=[6 32]} are read whole: a list of names becomes a
+character vector, a list of numbers (or integer ranges \code{m:n}) a
+numeric vector.  \code{\link{discretionary_policy}} takes its instruments
+and discount from the \code{discretionary_policy} command and
+\code{\link{osr}} its planner discount from the \code{osr} command.
+
+\emph{Nonstationary models (trend_var, var(deflator=...)):}
+\code{trend_var(growth_factor = G) A;} declares a trend variable
+(\code{A_t = G_t A_{t-1}}), \code{log_trend_var(log_growth_factor = g)
+LA;} an additive one (\code{LA_t = g_t + LA_{t-1}}); \code{var(deflator =
+D) Y;} declares \code{Y} as trending with the multiplicative trend
+\code{D} (an expression in trend variables, endogenous variables and
+parameters) and \code{var(log_deflator = D) Y;} with the additive trend
+\code{D}.  The model block is written in the nonstationary variables and,
+as Dynare's preprocessor does, rewritten into the stationary model before
+anything else (after the \code{predetermined_variables} re-timing): every
+\code{Y(k)} becomes \code{Y(k)*D(k)} (\code{Y(k)+D(k)}), a trend variable
+at a lead or lag becomes \code{A*G(+1)*...*G(+k)} or
+\code{A/(G*G(-1)*...*G(-k+1))} (sums for an additive trend), and then
+every trend variable becomes 1 (additive: 0).  So every declared name
+stands for its DETRENDED variable, which is what the steady state,
+\code{steady_state_model}, \code{initval} and the decision rule refer to.
+The rewrite is valid only on a balanced growth path: an equation that
+still depends on the level of a trend after detrending is an error of
+class \code{dynhr_error_unbalanced_growth} (Dynare aborts too).  A growth
+factor that uses a trend variable (an I(2) trend) is an error.  The
+declarations are stored in \code{model$nonstationary}
+(\code{$trend_vars}: \code{name, growth_factor, log};
+\code{$deflated}: \code{name, deflator, log}).
+
+\emph{deterministic_trends:} \code{deterministic_trends; y (g); end;} has
+the \code{observation_trends} entry syntax but names any declared
+endogenous variable; it is stored in \code{model$deterministic_trends}, and
+each entry for an observed variable (every entry when there is no
+\code{varobs}) adds the linear trend \code{g * t} to that observable's
+measurement equation exactly as \code{observation_trends} does (it is
+merged into \code{model$observation_trends}).  A variable in both blocks is
+an error.  (Dynare 7.1 stores the block in
+\code{options_.deterministic_trend_coeffs}, which none of its routines
+reads, and its generated driver fails on the statement.)
 }
 \seealso{
 \code{vignette("mod-syntax")} for the complete syntax reference

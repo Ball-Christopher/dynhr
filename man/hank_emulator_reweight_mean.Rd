@@ -9,18 +9,18 @@ hank_emulator_reweight_mean(emu, theta, rw_scale)
 \arguments{
 \item{emu}{A \code{\link{hank_mixture_emulator}}.}
 
-\item{theta}{Named list or length-`d` named numeric in `names(emu$box)`
+\item{theta}{Named list or length-\code{d} named numeric in \code{names(emu$box)}
 order.}
 
 \item{rw_scale}{Scalar multiplier on the reweighting shock size.}
 }
 \value{
-Length-`emu$K` numeric vector.
+Length-\code{emu$K} numeric vector.
 }
 \description{
-`rw_scale * ` the interpolated `gref` field: the B_ref-projected
-model-implied reweighting mean at `theta`, for reweighting shock size
-`rw_scale` (the emulator itself stores `gref` at the UNIT `config$rw_shock`
-path; `rw_scale` rescales it, matching the research scratch's
-`RW_SCALE * emu_slice(G, GP$gref, cc, ss)` usage).
+\code{rw_scale * } the interpolated \code{gref} field: the B_ref-projected
+model-implied reweighting mean at \code{theta}, for reweighting shock size
+\code{rw_scale} (the emulator itself stores \code{gref} at the UNIT \code{config$rw_shock}
+path; \code{rw_scale} rescales it, matching the research scratch's
+\code{RW_SCALE * emu_slice(G, GP$gref, cc, ss)} usage).
 }

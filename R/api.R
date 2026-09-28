@@ -6,7 +6,7 @@
 ##   prior_spec()     -- extract prior spec data.frame from a parsed model
 ##   make_posterior() -- build a cached log-posterior closure
 ##   find_mode()      -- locate the posterior mode
-##   mcmc()           -- RWMH sampler  -> dynhr_chains
+##   dynhr_mcmc()     -- RWMH sampler  -> dynhr_chains
 ##   smc()            -- SMC sampler   -> dynhr_chains
 ##   nuts()           -- NUTS sampler  -> dynhr_chains
 ##
@@ -57,7 +57,7 @@ print.dynhr_chains <- function(x, ...) {
   if (!is.null(x$acceptance_rate))
     cat(sprintf("  Acceptance rate : %.1f%%\n", x$acceptance_rate * 100))
 
-  ## Delayed-acceptance chains (mcmc(screen_fn = )) carry the stage-1 kill
+  ## Delayed-acceptance chains (dynhr_mcmc(screen_fn = )) carry the stage-1 kill
   ## rate and the count of expensive evaluations actually paid for.
   if (!is.null(x$screen_rate))
     cat(sprintf("  Screen rate     : %.1f%% (stage-1 rejects; %d expensive evals)\n",
@@ -144,7 +144,7 @@ prior_spec <- function(model) extract_prior_spec(model)
 #'
 #' Constructs a closure that evaluates \eqn{\log p(\theta | Y)} for any
 #' parameter vector \eqn{\theta}, caching the model structure to avoid
-#' recompilation on each call.  Call this once before \code{\link{mcmc}},
+#' recompilation on each call.  Call this once before \code{\link{dynhr_mcmc}},
 #' \code{\link{smc}}, or \code{\link{nuts}}.
 #'
 #' @param model       dynhr_mod from \code{\link{parse_mod}}
@@ -167,7 +167,7 @@ prior_spec <- function(model) extract_prior_spec(model)
 #'   ("identity" or "precision").
 #' @return A function \code{function(theta)} returning a named list
 #'   \code{list(logpost, loglik, logprior)}
-#' @seealso \code{\link{prior_spec}}, \code{\link{find_mode}}, \code{\link{mcmc}},
+#' @seealso \code{\link{prior_spec}}, \code{\link{find_mode}}, \code{\link{dynhr_mcmc}},
 #'   \code{\link{dm_posterior}} (the pipeline-object equivalent)
 #' @examples
 #' ## Model and data both ship with the package
@@ -198,9 +198,11 @@ make_posterior <- function(model, data, prior_spec, obs_vars, compiled,
 #' Find the posterior mode
 #'
 #' Runs a multi-stage optimizer to locate \eqn{\arg\max_\theta \log p(\theta|Y)}.
-#' The returned mode is the natural starting point for \code{\link{mcmc}} or
-#' \code{\link{nuts}}, and the inverse Hessian at the mode provides the
-#' initial proposal covariance for RWMH.
+#' The returned mode is the natural starting point for \code{\link{dynhr_mcmc}} or
+#' \code{\link{nuts}}. \code{find_mode()} returns the mode only; for the RWMH
+#' proposal covariance (the scaled inverse Hessian at the mode) and the exact
+#' gradient, use \code{\link{run_mode_finding}}, whose result carries
+#' \code{$Sigma_prop}.
 #'
 #' @param log_post_fn Log-posterior closure from \code{\link{make_posterior}}
 #' @param theta_init  Named numeric starting vector (e.g. prior means)
@@ -218,7 +220,7 @@ make_posterior <- function(model, data, prior_spec, obs_vars, compiled,
 #' @param verbose     Print progress (default \code{TRUE})
 #' @return Named list: \code{theta_mode}, \code{logpost}, \code{convergence},
 #'   \code{iterations}, \code{method}
-#' @seealso \code{\link{mcmc}}, \code{\link{nuts}}, \code{\link{make_posterior}},
+#' @seealso \code{\link{dynhr_mcmc}}, \code{\link{nuts}}, \code{\link{make_posterior}},
 #'   \code{\link{dm_mode}} (the pipeline-object equivalent)
 #'
 #' @references
@@ -278,7 +280,7 @@ find_mode <- function(log_post_fn, theta_init, prior_spec,
 #'   length governs the retained-draw split, while \code{n_warmup} still
 #'   enters the total draw target \code{n_draws + n_warmup}. A checkpoint
 #'   written under a different parameter configuration is refused. For bespoke samplers outside
-#'   \code{mcmc()}, the same contract is available via
+#'   \code{dynhr_mcmc()}, the same contract is available via
 #'   \code{\link{mcmc_chain_state}} / \code{\link{mcmc_chain_restore}}.
 #' @param flush_every Rows per checkpoint flush (default 1000; only used
 #'   with \code{checkpoint_dir}).
@@ -325,18 +327,18 @@ find_mode <- function(log_post_fn, theta_init, prior_spec,
 #' }
 #'
 #' set.seed(1)
-#' chains <- mcmc(log_post, theta0 = c(a = 0, b = 0),
-#'                Sigma_prop = diag(c(1, 0.25)),
-#'                n_draws = 500L, n_warmup = 200L, verbose = FALSE)
+#' chains <- dynhr_mcmc(log_post, theta0 = c(a = 0, b = 0),
+#'                      Sigma_prop = diag(c(1, 0.25)),
+#'                      n_draws = 500L, n_warmup = 200L, verbose = FALSE)
 #' chains
 #' summary(chains)
 #' @export
-mcmc <- function(log_post_fn, theta0, Sigma_prop,
-                 n_draws = 2000L, n_warmup = 1000L,
-                 checkpoint_dir = NULL, resume = FALSE,
-                 flush_every = 1000L, screen_fn = NULL, ...) {
+dynhr_mcmc <- function(log_post_fn, theta0, Sigma_prop,
+                       n_draws = 2000L, n_warmup = 1000L,
+                       checkpoint_dir = NULL, resume = FALSE,
+                       flush_every = 1000L, screen_fn = NULL, ...) {
   if (isTRUE(resume) && is.null(checkpoint_dir))
-    stop("mcmc: resume = TRUE requires 'checkpoint_dir' (the directory of ",
+    stop("dynhr_mcmc: resume = TRUE requires 'checkpoint_dir' (the directory of ",
          "the run to continue).", call. = FALSE)
   if (!is.null(screen_fn)) {
     ## Delayed acceptance: `screen_fn` is a CHEAP stand-in for `log_post_fn`
@@ -387,7 +389,7 @@ mcmc <- function(log_post_fn, theta0, Sigma_prop,
 #' @return A \code{\link{dynhr_chains}} object.  The \code{$log_marginal_lik}
 #'   slot contains the log marginal likelihood estimate
 #'   \eqn{\log p(Y | \mathcal{M})}
-#' @seealso \code{\link{mcmc}}, \code{\link{nuts}}, \code{\link{dm_sample}}
+#' @seealso \code{\link{dynhr_mcmc}}, \code{\link{nuts}}, \code{\link{dm_sample}}
 #'
 #' @references
 #'   Herbst, E. P., & Schorfheide, F. (2015). \emph{Bayesian Estimation of
@@ -419,8 +421,11 @@ smc <- function(log_post_fn, prior_spec, n_particles = 2000L, ...) {
 
 #' No-U-Turn Sampler (NUTS)
 #'
-#' Runs NUTS with dual-averaging step-size adaptation and optional diagonal
-#' mass-matrix adaptation.  Returns a \code{\link{dynhr_chains}} object.
+#' Runs NUTS with dual-averaging step-size adaptation and (by default)
+#' windowed mass-matrix adaptation.  The adapted quantity is the INVERSE mass,
+#' set to the warmup posterior variance (Stan's convention; releases before
+#' 0.9.3.50 set the mass itself to the variance, i.e. inverted -- see NEWS).
+#' Returns a \code{\link{dynhr_chains}} object.
 #'
 #' @param log_post_fn Log-posterior closure from \code{\link{make_posterior}}
 #' @param theta0      Named numeric starting vector
@@ -429,10 +434,12 @@ smc <- function(log_post_fn, prior_spec, n_particles = 2000L, ...) {
 #'   then discarded (default 1000)
 #' @param ...         Additional arguments forwarded to the internal sampler:
 #'   \code{step_size}, \code{max_treedepth}, \code{target_accept},
-#'   \code{adapt_mass}, \code{verbose}
+#'   \code{adapt_mass}, \code{metric} (\code{"diagonal"} (default),
+#'   \code{"warmup_dense"}, \code{"fisher_diag"}, \code{"lowrank"}),
+#'   \code{verbose}
 #' @return A \code{\link{dynhr_chains}} object.  The \code{$n_divergent}
 #'   slot reports divergent transitions (should be 0 in a well-tuned run)
-#' @seealso \code{\link{mcmc}}, \code{\link{smc}}, \code{\link{find_mode}},
+#' @seealso \code{\link{dynhr_mcmc}}, \code{\link{smc}}, \code{\link{find_mode}},
 #'   \code{\link{dm_sample}}
 #'
 #' @references
@@ -481,7 +488,7 @@ nuts <- function(log_post_fn, theta0, n_draws = 2000L, n_warmup = 1000L, ...) {
 #' @return A \code{\link{dynhr_chains}} object.  The \code{$chain} matrix has
 #'   \eqn{n_{\text{iter}} \times n_{\text{chain}}} rows (all walkers, all
 #'   post-warmup iterations).
-#' @seealso \code{\link{mcmc}}, \code{\link{smc}}, \code{\link{nuts}},
+#' @seealso \code{\link{dynhr_mcmc}}, \code{\link{smc}}, \code{\link{nuts}},
 #'   \code{\link{dm_sample}}
 #'
 #' @references
@@ -631,7 +638,7 @@ run_diagnostics <- function(...) run_all_diagnostics(...)
 #' @return A \code{\link{dynhr_chains}} object (M1 posterior) with extra
 #'   slots \code{log_Z_M0}, \code{log_ratio}, and \code{stage1}.
 #'
-#' @seealso \code{\link{smc}}, \code{\link{mcmc}}, \code{\link{nuts}}
+#' @seealso \code{\link{smc}}, \code{\link{dynhr_mcmc}}, \code{\link{nuts}}
 #'
 #' @references
 #'   Mlikota, M., & Schorfheide, F. (2024). Sequential Monte Carlo with

@@ -101,6 +101,10 @@ In R, with `dr` from `solve_perturbation()` and `ys = dr$ys`:
 G_log <- dr$ghx * outer(1 / ys[dr$endo_names], ys[dr$endo_names[dr$state_idx]])
 ```
 
+At first order, `solve_perturbation(..., loglinear = TRUE)` returns the
+log-deviation rule directly (variables with a non-positive steady state stay
+in levels).
+
 The same scaling applies to `ghu`, `ghxx`, `ghxu`, `ghuu`, and any IRF
 matrix: multiply each entry by \eqn{y^*_j / y^*_i} for the appropriate
 input/output pair.  Note that `dr$ys` for a `model(linear)` block returns
@@ -123,10 +127,13 @@ comparison trap for loglinear models.
 
 | Block | dynhr support | Notes |
 |-------|---------------|-------|
-| `var`, `varexo`, `parameters` | ✅ Full | Including `var(log)` and `%(long_name='...')` annotations |
-| `model;` ... `end;` | ✅ Full | Linear and nonlinear; lead/lag detection |
+| `var`, `varexo`, `parameters` | ✅ Full | Including `%(long_name='...')` annotations and `var(log)` (Dynare's transform: `LOG_x` is created, `x` becomes `exp(LOG_x)`, `x = exp(LOG_x)` is appended) |
+| `model;` ... `end;` | ✅ Full | Linear and nonlinear; lead/lag detection; `#` locals (also with a lead/lag, Dynare 7); `EXPECTATION`; complementarity conditions `⟂` (Dynare 7; ASCII form in 5.1) |
 | `steady_state_model;` | ✅ Full | Analytical steady state |
-| `shocks;` | ✅ Full | Shock variances |
+| `shocks;` | ✅ Full | Shock variances, correlations, `skew`, deterministic `periods`/`values` |
+| `shock_paths;` | ✅ Partial | Dynare 7 deterministic scenarios (no database / expectation-error scopes; controlled stanzas skipped with a warning) |
+| `heteroskedastic_shocks;` | ✅ Partial | `scales`, integer or (Dynare 7) date periods |
+| `observation_trends;` | ✅ Full | Gaussian Kalman filter / smoother |
 | `estimated_params;` | ✅ Full | Prior distributions (beta, gamma, inv_gamma, normal, uniform) |
 | `estimated_params_init;` | ✅ Full | Overrides for initial values |
 | `varobs;` | ✅ Full | Observable variable declaration |
@@ -162,14 +169,15 @@ end;
 You do **not** need to substitute `(1 - gamma)/(1 - 1/psi)` everywhere
 `theta` appears — just keep the `#theta` line as-is.
 
-Verified in `caldara_rp.mod` and `nk_hs2016.mod`.
+Verified against the development fixtures `caldara_rp.mod` and
+`nk_hs2016.mod` (test fixtures, not shipped with the package).
 
 ### 3a.2  `steady_state_model` blocks
 
 An analytical steady state expressed as a sequence of assignments is
-parsed directly.  dynhr's `solve_steady()` calls
-`eval_steady_state_model()` which evaluates the assignments
-top-to-bottom and returns the SS vector.
+parsed directly.  dynhr's `solve_steady()` evaluates the assignments
+top-to-bottom and uses the result as the steady state (or as the Newton
+starting point if it does not solve the model equations).
 
 ```
 steady_state_model;
@@ -183,40 +191,48 @@ end;
 You do **not** need to convert this into a hand-coded R function.
 Keep the `steady_state_model` block in the `.mod` file.
 
-Verified in `fs2000.mod` (18 assignments) and `caldara_rp.mod`.
+Verified against the development fixtures `fs2000.mod` (18 assignments)
+and `caldara_rp.mod` (test fixtures, not shipped with the package).
 
 ### 3a.3  `@#` macro directives
 
 dynhr expands Dynare's macro language **before** block parsing.  All
 of the following are supported:
 
-- `@#define NAME = VALUE` or `@#define NAME = ["a","b","c"]`
-- `@#for V in [list]`, `@#for V in A:B`, `@#for V in defined_array`
+- `@#define NAME = VALUE`, `@#define NAME = ["a","b","c"]`,
+  `@#define NAME` (true) and `@#define f(x) = EXPR` (macro functions)
+- `@#for V in [list]`, `@#for V in A:B`, `@#for V in defined_array`,
+  `@#for (a, b) in tuples`, `... when COND`
 - `@#endfor`
-- `@#if COND`, `@#else`, `@#endif`
+- `@#if COND`, `@#elseif COND`, `@#else`, `@#endif`
 - `@#ifdef NAME`, `@#ifndef NAME`
-- `@#include "file.inc"` (resolved relative to the `.mod` file's directory)
-- `@{expr}` interpolation inside any line
+- `@#include "file.inc"` or `@#include EXPR` (resolved relative to the
+  `.mod` file's directory, then `@#includepath` directories)
+- `@#error`, `@#echo`, `@#echomacrovars`
+- `@{expr}` interpolation inside any line, with the Dynare 6/7
+  expression language (string concatenation with `+`, arrays, tuples,
+  comprehensions, casts; see `vignette("mod-syntax")`, section 7.7)
 
 You do **not** need to pre-expand macros before loading.  Run
 `parse_mod()` directly on the unexpanded source.
-
-Note: `@#elseif` is **not** supported (it errors loudly) — rewrite as
-nested `@#if`/`@#else`.
 
 ### 3a.4  Common conversion gotchas
 
 | Situation | What to do |
 |-----------|-----------|
 | `#theta = ...` inside model | Leave it — dynhr handles it |
-| `steady_state_model;` block | Leave it — dynhr calls `eval_steady_state_model()` |
+| `steady_state_model;` block | Leave it — `solve_steady()` evaluates it |
 | `@#for`, `@#define`, `@#include` | Leave them — dynhr expands macros first |
+| `model_replace`, `model_remove`, `var_remove` | Leave them — applied with Dynare's semantics before the model is parsed |
+| `diff(x)` in equations | Leave it — expanded to `x - x(-1)` |
 | Parameters computed in `*_steadystate.m` | `parse_mod()` warns; use `inject_params(model, vals)` to supply them |
 | `x(+1)` lead, `x(-1)` lag | Standard Dynare timing, fully supported |
 | `x(+2)`, `eps(-1)` multi-period | dynhr auto-introduces auxiliary variables |
-| `predetermined_variables k;` | Supported — dynhr shifts timing by -1 in ASTs |
+| `predetermined_variables k;` | Supported — dynhr re-times `k` by -1 in the model text (`#` locals included) before building auxiliary variables, as Dynare does |
 | `model(linear)` | Supported — passed through in `model$model_options` |
-| `var(log)` annotation | Supported — variable name stripped of `(log)` |
+| `var(log) c;` | Supported — as in Dynare: `LOG_c` is declared, every `c` becomes `exp(LOG_c)` and `c = exp(LOG_c);` is appended (`model$log_vars`) |
+| `# r = i - pi(+1);` used as `r(-1)` | Supported — the local is substituted with its timing shifted (Dynare 7) |
+| `EQ ⟂ L < x < U;` | Supported — Dynare 7 complementarity conditions, also in ASCII (see 5.1) |
 
 See `vignette("mod-syntax")` for the complete syntax reference with
 verified examples.
@@ -242,7 +258,7 @@ automatically.  Five check types are supported:
 | `param_range` | `variable`, `min`, `max` | A parameter value is in range |
 | `irf_sign` | `shock`, `variable`, `horizon`, `sign` | IRF has expected sign at horizon |
 
-Example from the NK-HS2016 model:
+Example from the NK-HS2016 development fixture (not shipped):
 
 ```
 // @dynhr:expectations
@@ -266,7 +282,7 @@ automatically.  Each benchmark has the form:
 //             description="<text>"
 ```
 
-Example from the `03j` NZ production model:
+Example from the `03j` NZ production model (a development fixture, not shipped):
 
 ```
 // @dynhr:benchmarks
@@ -345,7 +361,7 @@ deviations above zero.
 ### 5.1  MCP equation tags
 
 For models with occasionally binding constraints (ZLB, borrowing
-limits, etc.), dynher recognises Dynare's `[mcp = '...']` equation
+limits, etc.), dynhr recognises Dynare's `[mcp = '...']` equation
 tags.  The syntax follows Dynare's convention:
 
 ```
@@ -359,17 +375,39 @@ The tag format is `mcp = 'VAR OP BOUND'` where `VAR` is the constrained
 variable, `OP` is `>` (lower bound) or `<` (upper bound), and `BOUND` is
 the numeric bound in model units.
 
-Use `obc_parse_tags()` to extract OBC specs, then pass them to
-`solve_obc_lcp()` or `occbin_solve_path()`:
+Dynare 7 deprecates the tag in favour of a condition written after the
+equation with `⟂` (or `_|_`), which also allows both bounds at once and
+bounds that are functions of parameters.  dynhr reads it the same way:
+
+```
+model;
+  r = rho_r * r(-1) + (1 - rho_r) * (phi_pi * pi + phi_y * y_gap) + m  _|_  r > -0.00401606;
+  mu = 0 _|_ 0 < i < 1 + 2*alpha;
+end;
+```
+
+Use `obc_parse_tags()` to extract the OBC specs, then pass them to the
+complementarity solvers (`solve_obc_lcp()`, `boehl_solve_regime_path()`,
+`compute_irfs_obc()`); `mcp_solve_path()` takes `mcp_parse_tags()` specs for
+the nonlinear model. The shipped `nk_2obc.mod` carries two such tags:
 
 ```{r obc-tags, eval = FALSE}
-# Extract OBC spec from equation tags
-obc_specs <- obc_parse_tags(model)
+two   <- parse_mod(system.file("extdata", "models", "nk_2obc.mod",
+                               package = "dynhr"), verbose = FALSE)
+cm    <- compile_model(two, verbose = FALSE)
+ss    <- solve_steady(cm, two$param_values, verbose = FALSE)$values
+dr    <- solve_perturbation(two, cm, ss, two$param_values, verbose = FALSE)
+specs <- obc_parse_tags(two)                 # one spec per tagged equation
+sys   <- dynhr:::extract_system_matrices(cm, ss, two$param_values)
 
-# Solve with LCP complementarity approach
-lcp_result <- solve_obc_lcp(model, compiled, steady$values, params,
-                             tags = obc_specs, verbose = FALSE)
+# Solve with the LCP complementarity approach; shocks is n_exo x T
+shocks <- matrix(0, length(two$varexo_names), 40,
+                 dimnames = list(two$varexo_names, NULL))
+shocks["eps_d", 1] <- -0.10
+lcp_result <- solve_obc_lcp(shocks, dr, sys, specs)
 ```
+
+See `vignette("solving")`, section 8, for these solvers side by side.
 
 ### 5.2  `occbin_constraints` block
 
@@ -381,17 +419,16 @@ occbin_constraints;
 end;
 ```
 
-Use `obc_collect_specs()` to merge both tag-based and block-based
-constraints:
-
-```{r obc-collect, eval = FALSE}
-specs <- obc_collect_specs(model)
-```
+`compile_model()` reads the block, so `occbin_solve_path()` and
+`occbin_compute_irfs()` pick the constraints up without further arguments
+(the shipped `nk_zlb_dynare.mod` is an example). The estimation runner
+merges tag-based and block-based constraints itself (internally,
+`dynhr:::obc_collect_specs()`).
 
 ### 5.3  `model(linear)` requirement
 
 OBC piecewise-linear methods require `model(linear);` in the model
-block.  dynhr enforces this with `obc_assert_linear()`.
+block; dynhr checks this and stops with an error otherwise.
 
 ---
 
@@ -410,7 +447,7 @@ This is consumed by `ramsey_model()` (augmented-system approach) and
 ```{r ramsey-from-mod, eval = FALSE}
 # Both engines automatically detect the planner_objective block
 ramsey_result <- ramsey_model(model, compiled, params)
-nn1_result    <- ramsey_nn1(model, compiled, params, n = 2L)
+nn1_result    <- ramsey_nn1(model, n = 2L, compiled = compiled)
 ```
 
 If the `.mod` file lacks a `planner_objective` block, you can pass the
@@ -507,7 +544,7 @@ m <- inject_params(m, pars)
 ## 4. Compile, seed the steady state from the external solver, perturbate
 comp <- compile_model(m)
 ss   <- solve_steady(comp, m$param_values, y0 = external_ss_vector)
-dr   <- solve_perturbation(comp, ss, order = 1)
+dr   <- solve_perturbation(m, comp, ss$values, m$param_values, order = 1)
 ```
 
 **Why `inject_params()` and not `set_param_values()`?**
@@ -589,13 +626,12 @@ steps for full functionality:
 | 9 | `%(long_name='...')` annotations | Richer variable labels |
 | 10 | `estimated_params;` block | Bayesian estimation pipeline |
 
-The `03j_no_omega_cp_est.mod` model in `inst/extdata/models/` is a
-complete example that uses all metadata block types.  Inspect it for
-real-world patterns:
+Of the shipped models, `rbc.mod` carries a `@dynhr-model` header and an
+`@dynhr:expectations` block, and `nk_2obc.mod` the `[mcp = '...']` tags;
+inspect them for working patterns:
 
 ```{r full-example, eval = FALSE}
-file.show(system.file("extdata", "models", "03j_no_omega_cp_est.mod",
-                      package = "dynhr"))
+file.show(system.file("extdata", "models", "rbc.mod", package = "dynhr"))
 ```
 
 ---

@@ -282,7 +282,7 @@ hank_euler3_residual <- function(hh, constraint_tol = 1e-8) {
   ## note above spells out the known unconstrained-branch cause).
   budget_loud_tol <- 1e-6
   if (budget_max_abs > budget_loud_tol)
-    warning("hank_euler3_residual: budget residual max|.| = ",
+    .dynhr_warn("hank_euler3_residual: budget residual max|.| = ",
             format(budget_max_abs, digits = 4), " exceeds ",
             format(budget_loud_tol, digits = 2), " (not machine precision). ",
             "The policy arrays and the budget identity have drifted apart on ",

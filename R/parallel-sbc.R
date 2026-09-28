@@ -72,22 +72,28 @@ run_sbc_mirai <- function(model, prior_spec, prior_sampler,
   ## `<<-` is required so the binding reaches the daemon's global environment
   ## (plain `<-` stays in the everywhere() expression's local frame and is not
   ## visible to subsequent mirai_map tasks via bare name lookup).
-  mirai::everywhere(
+  ## Collected (`[]`) so a daemon-side worker-version-skew abort reaches the
+  ## caller (see .dynhr_raise_worker_skew) instead of leaving daemons with no
+  ## `.worker_cm`.
+  .dynhr_raise_worker_skew(mirai::everywhere(
     {
       suppressMessages(library(dynhr))
       ## Replay the host's dynhr option state: `.dynhr_opts` is a
       ## namespace-private env, so `dynhr_set_options(...)` from the calling
       ## session does not reach a freshly spawned daemon on its own, and each
       ## SBC replication would then build its posterior from DIFFERENT options
-      ## than the serial path (see .dynhr_daemon_state).
-      utils::getFromNamespace(".dynhr_daemon_apply", "dynhr")(.dynhr_state)
+      ## than the serial path (see .dynhr_daemon_state). `.dynhr_apply` is the
+      ## HOST's function object, so the worker-version check runs even on an
+      ## older installed dynhr (see .mirai_pool_init).
+      .dynhr_apply(.dynhr_state)
       .cmpl        <- utils::getFromNamespace("compile_model", "dynhr")
       .worker_cm  <<- .cmpl(.worker_model, verbose = FALSE)
       .worker_model <<- .worker_model
     },
     .args = list(.worker_model = model,
-                 .dynhr_state = .dynhr_daemon_state())
-  )
+                 .dynhr_state = .dynhr_daemon_state(),
+                 .dynhr_apply = .dynhr_daemon_apply)
+  )[])
 
   ## ---- dispatch ----------------------------------------------------------
   ## Build a task wrapper; all per-replication args are shipped via .args.

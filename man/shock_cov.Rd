@@ -30,9 +30,11 @@ spectral/identification diagnostics (D13, D15, D23, D24) use internally, so
 it is the correct value to pass as their \code{sigma_e=} argument.
 }
 \examples{
-\dontrun{
-m  <- parse_mod("model.mod")
+m  <- parse_mod(system.file("extdata/models/nk_demo.mod", package = "dynhr"),
+                verbose = FALSE)
 Se <- shock_cov(m)
-diag_cer(dr = dr, data = Y, model = m, sigma_e = Se)
-}
+Se
+## Sigma_e at a different parameter vector (estimated shock stds are named
+## after their shock):
+shock_cov(m, params = c(m$param_values, e_g = 0.5))
 }

@@ -19,7 +19,12 @@ simulate_model(
 
 \item{n_periods}{Number of simulation periods}
 
-\item{shocks}{Matrix of shocks (n_periods x n_exo). If NULL, draws random.}
+\item{shocks}{Matrix of shocks (n_periods x n_exo). If NULL, shocks are
+drawn from the model's full shock covariance \eqn{\Sigma_e} (from
+\code{\link{shock_cov}}), \strong{including} the \code{corr} /
+\code{var a, b} entries of the shocks block, via its lower Cholesky
+factor. Skewed shocks (\code{alpha != 0}) are still drawn independently
+from their skew-normal marginals and warn when correlations are declared.}
 
 \item{n_replications}{Number of replications for stochastic simulation.
 When \code{1} (default) a plain \code{n_periods x n_endo} matrix is

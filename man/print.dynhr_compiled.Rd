@@ -7,15 +7,15 @@
 \method{print}{dynhr_compiled}(x, ...)
 }
 \arguments{
-\item{x}{A `dynhr_compiled` object, as returned by [compile_model()].}
+\item{x}{A \code{dynhr_compiled} object, as returned by [compile_model()].}
 
 \item{...}{Ignored; present for S3 generic compatibility.}
 }
 \value{
-`x`, invisibly. Called for the side effect of printing.
+\code{x}, invisibly. Called for the side effect of printing.
 }
 \description{
-Prints a one-screen summary of a `dynhr_compiled` object: variable and
+Prints a one-screen summary of a \code{dynhr_compiled} object: variable and
 parameter counts, and the shapes of the static and dynamic residual /
 Jacobian blocks.
 }

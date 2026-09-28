@@ -11,6 +11,49 @@
   NULL
 }
 
+#' Resolve the Ramsey planner's discount factor
+#'
+#' Precedence: the caller's \code{discount} (a parameter name, applied
+#' symbolically, or a number); else the \code{.mod}'s
+#' \code{ramsey_model(planner_discount = ...)} /
+#' \code{ramsey_policy(planner_discount = ...)} option (a parameter name is
+#' kept symbolic, any other expression is evaluated at \code{params}); else a
+#' parameter named \code{beta} / \code{betta}.  Errors (class
+#' \code{dynhr_error_no_discount}) when none of these gives a finite number --
+#' there is no silent 0.99 default.
+#' @param discount NULL, a parameter name, or a number.
+#' @param model    dynhr_mod (its parsed commands and parameter names).
+#' @param params   Named numeric parameter vector the value is taken from.
+#' @param fn       Caller name for the error message.
+#' @return list(arg = discount to pass on (NULL = auto-detect beta/betta
+#'   symbolically; a parameter name; or a number), value = numeric).
+#' @noRd
+.ramsey_discount <- function(discount, model, params, fn) {
+  if (is.null(discount)) {
+    pd <- .mod_command_options(model, c("ramsey_model", "ramsey_policy"))$planner_discount
+    if (!is.null(pd)) {
+      discount <- if (is.character(pd) && length(pd) == 1L &&
+                      pd %in% model$param_names && pd %in% names(params)) pd
+                  else .eval_mod_scalar_option(pd, params, "planner_discount")
+    }
+  }
+  value <- if (is.character(discount) && length(discount) == 1L) {
+    if (discount %in% names(params)) as.numeric(params[[discount]])
+    else suppressWarnings(as.numeric(discount))
+  } else if (is.numeric(discount) && length(discount) == 1L) {
+    as.numeric(discount)
+  } else {
+    .get_discount(params)
+  }
+  if (is.null(value) || length(value) != 1L || !is.finite(value))
+    .dynhr_abort(
+      fn, "(): no discount factor for the planner. Pass discount = <value> ",
+      "(Dynare: planner_discount =), write ramsey_model(planner_discount = ",
+      "...) in the .mod, or calibrate a parameter named beta / betta.",
+      class = "dynhr_error_no_discount")
+  list(arg = discount, value = value)
+}
+
 #' Ramsey optimal policy workflow (v0.2 core support)
 #'
 #' Solves the model at supplied parameters, then evaluates the planner objective
@@ -25,10 +68,18 @@
 #' @param planner_objective Optional objective expression text. If NULL, uses
 #'   parsed \code{planner_objective(...);} from the model when available.
 #' @param order Perturbation order for policy solution (1 or 2)
-#' @param n_periods Simulation length used for welfare evaluation
+#' @param n_periods Simulation length used for welfare evaluation.  Default
+#'   raised from 400 to 2000 in 0.9.4: the unconditional welfare is a
+#'   Monte-Carlo mean over a persistent path and 400 periods left it visibly
+#'   noisy.  Its batch-means standard error is reported as
+#'   \code{$welfare$welfare_se}; check it before reading a welfare gap.
 #' @param burn_in Burn-in discarded before welfare evaluation
-#' @param discount Optional discount factor; defaults to parameter \code{beta}
-#'   when present, else 0.99
+#' @param discount Optional discount factor.  When \code{NULL} it is taken from
+#'   the \code{.mod}'s \code{ramsey_policy(planner_discount = ...)} or
+#'   \code{ramsey_model(planner_discount = ...)} option, else from the
+#'   parameter \code{beta} or \code{betta} (Dynare's spelling); if none exists
+#'   the call ERRORS (class \code{dynhr_error_no_discount}) rather than
+#'   silently assuming 0.99, as it did before 0.9.4.
 #' @param planner_discount Dynare-compatible alias for \code{discount}; used when
 #'   \code{discount} is \code{NULL} (NEW-W1).
 #' @param verbose Print progress
@@ -39,7 +90,7 @@ ramsey_policy <- function(model,
                           params = NULL,
                           planner_objective = NULL,
                           order = 1L,
-                          n_periods = 400L,
+                          n_periods = 2000L,
                           burn_in = 100L,
                           discount = NULL,
                           planner_discount = NULL,
@@ -96,14 +147,15 @@ ramsey_policy <- function(model,
   )
   sim_levels <- attr(sim, "levels")
 
-  if (is.null(discount)) {
-    discount <- if ("beta" %in% names(params) && is.finite(params[["beta"]])) {
-      as.numeric(params[["beta"]])
-    } else {
-      0.99
-    }
-  }
-  discount <- as.numeric(discount)
+  ## A7 (0.9.4): use the shared .get_discount() lookup, which ALSO recognises
+  ## the Dynare spelling `betta`.  This block previously looked only for `beta`
+  ## and silently fell back to 0.99, so every `betta`-calibrated model was
+  ## discounted at the wrong rate with no diagnostic.  There is now no silent
+  ## default: a model with no discount parameter must say so explicitly via
+  ## `discount=` / `planner_discount=`.  The .mod's own
+  ## ramsey_policy(planner_discount = ...) / ramsey_model(planner_discount =
+  ## ...) option comes before the beta/betta lookup (it used to be ignored).
+  discount <- .ramsey_discount(discount, model, params, "ramsey_policy")$value
 
   objective_ast <- parse_expression(
     text = objective_text,
@@ -121,15 +173,39 @@ ramsey_policy <- function(model,
   welfare_steady <- .eval_planner_ast(objective_ast, ss$ss, params, ss$ss) /
     max(1e-8, (1 - discount))
 
+  ## A7 (0.9.4): the unconditional welfare is a Monte-Carlo average over a
+  ## SERIALLY CORRELATED simulated path, so report its uncertainty instead of
+  ## letting callers read the last digits as signal.  Non-overlapping batch
+  ## means (batch length ~ sqrt(n)) is the standard consistent estimator of the
+  ## asymptotic variance of a mean from a stationary correlated series; it
+  ## needs no bandwidth choice and handles the persistence of DSGE paths.
+  obj_ok  <- obj_t[is.finite(obj_t)]
+  n_ok    <- length(obj_ok)
+  obj_se  <- NA_real_
+  n_batch <- NA_integer_
+  if (n_ok >= 16L) {
+    b       <- max(2L, as.integer(floor(sqrt(n_ok))))
+    n_batch <- as.integer(floor(n_ok / b))
+    bm      <- colMeans(matrix(obj_ok[seq_len(n_batch * b)], nrow = b))
+    ## Var(mean) = Var(batch means) / n_batch (batches ~ independent for b >> tau)
+    obj_se  <- sqrt(stats::var(bm) / n_batch)
+  }
+  welfare_se <- obj_se / max(1e-8, (1 - discount))
+
   out <- list(
     objective = list(text = objective_text, ast = objective_ast),
     steady = ss,
     dr = dr,
     welfare = list(
       objective_mean = obj_mean,
+      objective_mean_se = obj_se,
       steady_value = welfare_steady,
       unconditional_value = welfare_unconditional,
+      unconditional_se = welfare_se,
+      welfare_se = welfare_se,
       gap_vs_steady = welfare_unconditional - welfare_steady,
+      gap_se = welfare_se,           # welfare_steady is deterministic
+      n_batches = n_batch,
       discount = discount
     ),
     meta = list(order = order, n_periods = n_periods, burn_in = burn_in)
@@ -137,7 +213,7 @@ ramsey_policy <- function(model,
   class(out) <- c("dynhr_ramsey_result", "list")
 
   if (isTRUE(verbose)) {
-    message(sprintf(
+    .dynhr_inform(sprintf(
       "[dynhr] Ramsey welfare evaluated (unconditional=%.6f, steady=%.6f)",
       out$welfare$unconditional_value, out$welfare$steady_value
     ))
@@ -175,6 +251,13 @@ print.dynhr_ramsey_result <- function(x, ...) {
   cat(sprintf("  Objective mean (sim)  : %.6f\n", x$welfare$objective_mean))
   cat(sprintf("  Welfare (steady)      : %.6f\n", x$welfare$steady_value))
   cat(sprintf("  Welfare (unconditional): %.6f\n", x$welfare$unconditional_value))
+  ## The unconditional value is a simulation mean: show its batch-means MC SE
+  ## so a "welfare gap" is not read past the noise floor.
+  if (!is.null(x$welfare$welfare_se) && is.finite(x$welfare$welfare_se))
+    cat(sprintf("  MC SE (batch means)   : %.6f  (%d batches, %d periods)\n",
+                x$welfare$welfare_se,
+                as.integer(x$welfare$n_batches %||% NA_integer_),
+                as.integer(x$meta$n_periods)))
   cat(sprintf("  Gap vs steady         : %.6f\n", x$welfare$gap_vs_steady))
   invisible(x)
 }
@@ -275,7 +358,11 @@ print.dynhr_ramsey_result <- function(x, ...) {
 #' @param discount          Discount factor for the Lagrangian used to derive
 #'   the FOCs.  May be a character string naming a model parameter (applied
 #'   symbolically, e.g. \code{"beta"}), a numeric value, or \code{NULL}
-#'   (default) to auto-detect a parameter named \code{"beta"} or \code{"betta"}.
+#'   (default) to take the \code{.mod}'s \code{ramsey_model(planner_discount =
+#'   ...)} (or \code{ramsey_policy(planner_discount = ...)}) option, else to
+#'   auto-detect a parameter named \code{"beta"} or \code{"betta"}.  If none
+#'   of these exists the call errors (class \code{dynhr_error_no_discount});
+#'   there is no silent 0.99 default.
 #'   This must match the model's structural discount factor; the augmented
 #'   decision rules are wrong otherwise (see \code{\link{ramsey_augment_mod}}).
 #' @param planner_discount  Dynare-compatible alias for \code{discount}; used when
@@ -338,11 +425,12 @@ ramsey_model <- function(model,
   # parsing, ramsey_steady, ast_eval) can resolve them.
   ssm <- model$steady_state_model
   if (length(ssm) > 0) {
-    env <- new.env(parent = baseenv())
-    for (nm in names(params)) assign(nm, params[[nm]], envir = env)
+    ## A-SEC: allowlist-sandboxed env + the checked parse cache; an unsafe
+    ## statement aborts (re-raised past the NA fallback), never evaluates.
+    env <- .ssm_eval_env(params)
     for (assignment in ssm) {
-      val <- tryCatch(eval(parse(text = assignment$text), envir = env),
-                      error = function(e) NA)
+      val <- tryCatch(eval(.cached_parse(assignment$text), envir = env),
+                      error = function(e) .dynhr_reraise_unsafe(e, NA))
       if (is.numeric(val) && length(val) == 1 && is.finite(val)) {
         assign(assignment$name, val, envir = env)
         if (!assignment$name %in% names(params)) {
@@ -355,20 +443,17 @@ ramsey_model <- function(model,
   # ---- 2. Method dispatch ----
   method <- match.arg(method)
 
-  # Resolve a numeric discount honouring the user's discount= argument: a
-  # character names a parameter; a numeric is used directly; NULL auto-detects.
-  discount_value <- if (is.character(discount) && length(discount) == 1L) {
-    if (discount %in% names(params)) as.numeric(params[[discount]])
-    else suppressWarnings(as.numeric(discount))
-  } else if (is.numeric(discount) && length(discount) == 1L) {
-    as.numeric(discount)
-  } else {
-    .get_discount(params)
-  }
+  # Resolve the discount: the user's discount= (a parameter name, applied
+  # symbolically, or a number), else the .mod's
+  # ramsey_model(planner_discount = ...) option (used to be ignored in favour
+  # of beta), else beta/betta; no silent 0.99 when none of them exists.
+  disc           <- .ramsey_discount(discount, model, params, "ramsey_model")
+  discount       <- disc$arg
+  discount_value <- disc$value
 
   if (method == "nn1") {
     # Delegate to the (n,n+1) approximation (Phase E)
-    if (verbose) cat("[ramsey_model] Delegating to ramsey_nn1 (method='nn1')...\n")
+    if (verbose) .dynhr_cat("[ramsey_model] Delegating to ramsey_nn1 (method='nn1')...\n")
 
     # The 'n' parameter for (n,n+1) approximation: (order, order+1)
     nn1_result <- ramsey_nn1(
@@ -377,7 +462,7 @@ ramsey_model <- function(model,
       n                = order,
       ramsey_result    = NULL,
       return_model     = FALSE,
-      beta             = discount_value %||% 0.99,
+      beta             = discount_value,
       orig_ss          = orig_ss,
       compiled         = compiled,
       verbose          = verbose,
@@ -396,7 +481,11 @@ ramsey_model <- function(model,
       welfare          = list(
         steady_value = nn1_result$welfare$steady_state %||% NA_real_,
         unconditional = nn1_result$welfare$unconditional %||% NA_real_,
-        discount     = nn1_result$welfare$discount %||% discount_value %||% 0.99
+        ## A7 (0.9.4): why the unconditional welfare is NA, when it is
+        ## ("order1_certainty_equivalent" at n = 1) -- D18 reports it.
+        unconditional_reason =
+          nn1_result$welfare$unconditional_reason %||% NA_character_,
+        discount     = nn1_result$welfare$discount %||% discount_value
       ),
       meta = list(
         method           = "nn1",
@@ -421,7 +510,7 @@ ramsey_model <- function(model,
   }
 
   # ---- 4. Generate augmented .mod ----
-  if (verbose) cat("[ramsey_model] Generating augmented .mod...\n")
+  if (verbose) .dynhr_cat("[ramsey_model] Generating augmented .mod...\n")
   aug_result <- ramsey_augment_mod(
     model,
     planner_objective = obj_text,
@@ -431,12 +520,12 @@ ramsey_model <- function(model,
   )
 
   # ---- 4. Parse augmented model ----
-  if (verbose) cat("[ramsey_model] Parsing augmented model...\n")
+  if (verbose) .dynhr_cat("[ramsey_model] Parsing augmented model...\n")
   aug_model <- ramsey_parse_augmented(aug_result, verbose = verbose)
 
   # ---- 5. Solve competitive-equilibrium steady state ----
   if (is.null(orig_ss) && solve_orig_ss) {
-    if (verbose) cat("[ramsey_model] Solving competitive-equilibrium SS...\n")
+    if (verbose) .dynhr_cat("[ramsey_model] Solving competitive-equilibrium SS...\n")
     if (is.null(compiled)) {
       compiled <- compile_model(model, verbose = verbose)
     }
@@ -447,9 +536,9 @@ ramsey_model <- function(model,
     n_eq   <- length(model$equations)
     if (n_eq < n_endo) {
       if (verbose) {
-        cat(sprintf("  Non-square model: %d eqs for %d vars (instrument model).\n",
+        .dynhr_cat(sprintf("  Non-square model: %d eqs for %d vars (instrument model).\n",
                     n_eq, n_endo))
-        cat("  Using initval (or zeros) as competitive-equilibrium SS.\n")
+        .dynhr_cat("  Using initval (or zeros) as competitive-equilibrium SS.\n")
       }
       competitive_ss <- setNames(rep(0, n_endo), model$var_names)
       if (length(model$initval) > 0) {
@@ -476,13 +565,13 @@ ramsey_model <- function(model,
   # ---- 6. Compile augmented model ----
   ## Compile once at the order ramsey_solve() will need, then reuse for both the
   ## SS solve and the perturbation (L10 perf: avoids a redundant recompile).
-  if (verbose) cat("[ramsey_model] Compiling augmented model...\n")
+  if (verbose) .dynhr_cat("[ramsey_model] Compiling augmented model...\n")
   aug_compiled <- compile_model(aug_model,
                                 max_order = if (order >= 2L) 2L else 1L,
                                 verbose = verbose)
 
   # ---- 7. Solve augmented steady state ----
-  if (verbose) cat("[ramsey_model] Solving augmented (Ramsey) SS...\n")
+  if (verbose) .dynhr_cat("[ramsey_model] Solving augmented (Ramsey) SS...\n")
   ramsey_ss <- ramsey_steady(
     model = model,
     compiled = compiled,
@@ -497,7 +586,7 @@ ramsey_model <- function(model,
   )
 
   # ---- 8. Solve perturbation on augmented system ----
-  if (verbose) cat("[ramsey_model] Solving augmented perturbation...\n")
+  if (verbose) .dynhr_cat("[ramsey_model] Solving augmented perturbation...\n")
   ramsey_dr <- ramsey_solve(
     aug_model = aug_model,
     aug_steady = ramsey_ss,
@@ -517,7 +606,7 @@ ramsey_model <- function(model,
 
   ss_vals <- competitive_ss
   welfare_val <- .eval_planner_ast(obj_ast, ss_vals, params, ss_vals)
-  discount <- discount_value %||% 0.99
+  discount <- discount_value
   welfare_steady <- welfare_val / max(1e-8, (1 - discount))
 
   # ---- 10. Build result ----
@@ -531,7 +620,7 @@ ramsey_model <- function(model,
     multiplier_map   = aug_result$multiplier_map,
     welfare          = list(
       steady_value = welfare_steady,
-      discount     = discount_value %||% 0.99
+      discount     = discount_value
     ),
     meta = list(
       order            = order,

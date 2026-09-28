@@ -790,7 +790,19 @@
   ## term is a second-order correction on top of the dominant QQ0 term);
   ## a hard iteration cap with a diagnostic warning guards against a
   ## non-converging edge case rather than looping silently.
-  Sxi <- solve_lyapunov(sys$Tlin, QQ0)
+  ## Both the Lyapunov solves and the fixed point's convergence test run in
+  ## the BLOCK-BALANCED basis (W77; see .pruned_lyap_balanced in
+  ## R/pruned-state-space.R): the blocks of Sxi scale as sigma^2 ... sigma^6,
+  ## so a test relative to max|Sxi| left the x1 block 1.4e-6 relative off once
+  ## every shock std was x 100. (The fixed-point test also had a max(1, .)
+  ## floor: absolute below max|Sxi| = 1.)
+  k_aug <- integer(sys$d)
+  k_aug[c(sys$ix1)] <- 1L
+  k_aug[c(sys$ix2, sys$ik2)] <- 2L
+  k_aug[c(sys$ix3, sys$ik12, sys$ik3)] <- 3L
+  dsc <- .pruned_block_scale(k_aug, sqrt(max(diag(Sigma_x), 0)))
+  DD  <- outer(dsc, dsc)
+  Sxi <- .pruned_lyap_balanced(sys$Tlin, QQ0, dsc)
   Sxi <- (Sxi + t(Sxi)) * 0.5
 
   max_iter_xr <- 100L
@@ -802,14 +814,15 @@
     cross <- sys$Tlin %*% Cxr %*% t(sys$G)
     QQ_full <- QQ0 + cross + t(cross)
     QQ_full <- (QQ_full + t(QQ_full)) * 0.5
-    Sxi_new <- solve_lyapunov(sys$Tlin, QQ_full)
+    Sxi_new <- .pruned_lyap_balanced(sys$Tlin, QQ_full, dsc)
     Sxi_new <- (Sxi_new + t(Sxi_new)) * 0.5
-    d_max <- max(abs(Sxi_new - Sxi)) / max(1, max(abs(Sxi_new)))
+    scl   <- max(abs(Sxi_new / DD))
+    d_max <- if (scl > 0) max(abs(Sxi_new - Sxi) / DD) / scl else 0
     Sxi <- Sxi_new
     if (d_max < tol_xr) { converged_xr <- TRUE; break }
   }
   if (!converged_xr)
-    warning("`.order3_stationary_moments`: Cov(xi,r) fixed-point iteration ",
+    .dynhr_warn("`.order3_stationary_moments`: Cov(xi,r) fixed-point iteration ",
             "did not converge to tol=", tol_xr, " within ", max_iter_xr,
             " iterations; result may be inaccurate.")
 
@@ -888,18 +901,75 @@ pruned_state_space3 <- function(dr3, model, params = NULL) {
   )
 }
 
+## EXACT lag-tau autocovariances of the AFVRR order-3 pruned state space.
+##
+## 0.9.4 (WS4, follow-up to WS2's A13a).  WS2 found that the ORDER-2 lag
+## autocovariances used a wrong seed and an order-1 recursion, and replaced them
+## with the exact augmented-system formula `.order2_autocov()`.  Order 3 had no
+## autocovariance code AT ALL (so it could not carry the same bug), and
+## `pruned_ss_moments3()` returned only the mean and the contemporaneous
+## variance.  This is the order-3 analogue, MC-validated in
+## `tests/testthat/test-bugfix-094-followup-order3-autocov.R`.
+##
+## DERIVATION.  The pruned system is linear in the augmented state:
+##   xi_{t+1} = Tlin xi_t + G r_t + c,      y_t = Dxi xi_t + Gv r_t + dconst.
+## Unlike order 2, xi_t is CORRELATED with its own raw innovation r_t (the
+## j7/j11/j12 categories multiply eps_t (x) eps_t by a CURRENT x1_t factor), and
+## that conditional mean is LINEAR:  E[r_t | xi_t] = A xi_t + b, with
+## A = .order3_cond_mean_r_coef() and Cov(xi_t, r_t) = Cxr = Sxi A' exactly
+## (A is supported on the ix1 columns, which is what .order3_cov_xi_r() builds).
+## Writing u_t = r_t - E[r_t | xi_t] (so Cov(xi_t, u_t) = 0) folds the system to
+##   xi_{t+1} = Ttil xi_t + G u_t + ...,   y_t = Dtil xi_t + Gv u_t + ...
+## with Ttil = Tlin + G A and Dtil = Dxi + Gv A -- exactly the folding the
+## order-3 Kalman likelihood `pruned_ss_loglik3()` already uses and which is
+## certified there.  Then, with M_tau = Cov(xi_{t+tau}, y_t),
+##   M_1        = Tlin (Sxi Dxi' + Cxr Gv') + G (Cxr' Dxi' + Cr0 Gv')
+##   M_{tau+1}  = Ttil M_tau
+##   Gamma(tau) = Dtil M_tau.
+## At order 2 (A = 0, Cxr = 0) this collapses term for term to
+## `.order2_autocov()`.
+## @noRd
+.order3_autocov <- function(sys, st, n_ar) {
+  n_endo <- sys$n_endo
+  out <- array(0, dim = c(n_endo, n_endo, n_ar))
+  if (n_ar < 1L) return(out)
+
+  Cxr <- .order3_cov_xi_r(st$Sxi[, sys$ix1, drop = FALSE], sys$Sigma_e,
+                          sys$jn, sys$d, sys$Dr)
+  A   <- .order3_cond_mean_r_coef(sys$Sigma_e, sys$jn, sys$d, sys$Dr,
+                                  sys$ix1, sys$n_s)
+  Dtil <- sys$Dxi  + sys$Gv %*% A
+  Ttil <- sys$Tlin + sys$G  %*% A
+
+  M <- sys$Tlin %*% (st$Sxi %*% t(sys$Dxi) + Cxr %*% t(sys$Gv)) +
+       sys$G    %*% (t(Cxr) %*% t(sys$Dxi) + st$Cr0 %*% t(sys$Gv))
+  for (lag in seq_len(n_ar)) {
+    out[, , lag] <- Dtil %*% M
+    M <- Ttil %*% M
+  }
+  out
+}
+
+
 #' Compute unconditional moments from an order-3 pruned state-space object
 #'
 #' P1 sub-increment: analytic stationary mean and variance of the
 #' observables under the order-3 AFVRR pruned recursion, via
 #' \code{.order3_stationary_moments}.
 #'
+#' Since 0.9.4 it also returns the exact lag-\eqn{\tau} autocovariances and
+#' autocorrelations, the order-3 analogue of the \code{autocorr} slot of
+#' \code{\link{compute_moments_order2}} / \code{\link{pruned_ss_moments}} (which
+#' order 3 previously did not provide at all).
+#'
 #' @param pss3 A \code{pruned_ss3} object from \code{\link{pruned_state_space3}}.
+#' @param n_ar Number of autocovariance lags to compute (default 5; 0 to skip).
 #' @return A list with \code{mean} (named n_endo vector), \code{var_cov}
-#'   (n_endo x n_endo), \code{std_dev}, \code{Sigma_x}, \code{Var_x2},
+#'   (n_endo x n_endo), \code{std_dev}, \code{autocov} and \code{autocorr}
+#'   (n_endo x n_endo x n_ar arrays), \code{Sigma_x}, \code{Var_x2},
 #'   \code{mean_x2}.
 #' @export
-pruned_ss_moments3 <- function(pss3) {
+pruned_ss_moments3 <- function(pss3, n_ar = 5L) {
   stopifnot(inherits(pss3, "pruned_ss3"))
   sys <- pss3$sys
   st  <- .order3_stationary_moments(sys)
@@ -914,8 +984,22 @@ pruned_ss_moments3 <- function(pss3) {
   std_dev   <- sqrt(variances)
   names(std_dev) <- pss3$endo_names
 
+  n_ar  <- max(0L, as.integer(n_ar))
+  endo  <- pss3$endo_names
+  autocov  <- .order3_autocov(sys, st, n_ar)
+  autocorr <- autocov
+  if (n_ar > 0L) {
+    dn <- list(endo, endo, paste0("lag", seq_len(n_ar)))
+    dimnames(autocov) <- dn
+    sd_outer <- outer(std_dev, std_dev)
+    sd_outer[sd_outer == 0] <- Inf
+    for (lag in seq_len(n_ar)) autocorr[, , lag] <- autocov[, , lag] / sd_outer
+    dimnames(autocorr) <- dn
+  }
+
   list(
     mean = mn, var_cov = Sigma_y, std_dev = std_dev,
+    autocov = autocov, autocorr = autocorr,
     Sigma_e = pss3$Sigma_e, Sigma_x = st$Sigma_x,
     Var_x2 = st$Var_x2, mean_x2 = st$mean_x2
   )
@@ -1137,11 +1221,11 @@ make_log_posterior_pruned3 <- function(model, data, prior_spec, obs_vars,
       dr3 <- tryCatch(
         solve_perturbation(model, compiled, ss, params,
                            order = 3L, verbose = FALSE),
-        error = function(e) NULL
+        error = function(e) .dynhr_reraise_bug(e, NULL)
       )
       if (is.null(dr3) || !isTRUE(dr3$bk_satisfied)) return(NULL)
       pss3 <- tryCatch(pruned_state_space3(dr3, model, params),
-                       error = function(e) NULL)
+                       error = function(e) .dynhr_reraise_bug(e, NULL))
       if (is.null(pss3)) return(NULL)
       list(dr = dr3, pss = pss3)
     },
@@ -1149,7 +1233,7 @@ make_log_posterior_pruned3 <- function(model, data, prior_spec, obs_vars,
       loglik <- tryCatch(
         pruned_ss_loglik3(sol$pss, Y, obs_vars, me_variance = me_variance,
                           me_floor_check = me_floor_check),
-        error = function(e) -Inf
+        error = function(e) .dynhr_reraise_bug(e, -Inf)
       )
       if (!is.finite(loglik)) return(NULL)
       list(loglik = loglik, Sigma_e = sol$pss$Sigma_e)

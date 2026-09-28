@@ -67,19 +67,19 @@
   if (.HAS_RCPP_QZ()) {
     oq <- tryCatch(ordered_qz_cpp(E, D), error = function(e) NULL)
     if (!is.null(oq) && isTRUE(oq$ok)) {
-      if (verbose) cat("  Using ordered dgges (C++)...\n")
+      if (verbose) .dynhr_cat("  Using ordered dgges (C++)...\n")
       return(.qz_classify(oq$S, oq$T, oq$Q, oq$Z,
                           oq$ALPHAR, oq$ALPHAI, oq$BETA))
     }
     if (verbose)
-      cat("  C++ ordered QZ unavailable/failed; trying QZ package...\n")
+      .dynhr_cat("  C++ ordered QZ unavailable/failed; trying QZ package...\n")
   }
 
   # Fallback: QZ package (QZ::qz + qz.dtgsen). Retained for builds without the
   # compiled DLL and for options(dynhr.use_rcpp = FALSE). NOTE: qz.dtgsen here
   # is the routine with the memory bug; this path is intentionally secondary.
   if (requireNamespace("QZ", quietly = TRUE)) {
-    if (verbose) cat("  Using QZ package with Eigenvalue update...\n")
+    if (verbose) .dynhr_cat("  Using QZ package with Eigenvalue update...\n")
     qz <- QZ::qz(E, D)
     eig_vals <- ifelse(abs(qz$BETA) > 1e-14,
       complex(real = qz$ALPHAR, imaginary = qz$ALPHAI) / qz$BETA, Inf + 0i)
@@ -93,7 +93,7 @@
 
   # Use geigen package if available
   if (requireNamespace("geigen", quietly = TRUE)) {
-    if (verbose) cat("  Using geigen package...\n")
+    if (verbose) .dynhr_cat("  Using geigen package...\n")
     ge <- geigen::geigen(E, D, symmetric = FALSE)
     eig_vals <- ge$values
     ord <- order(Mod(eig_vals))
@@ -116,7 +116,7 @@
   # nonsingular (i.e. the pencil has no infinite generalized eigenvalues);
   # regularising a near-singular D would silently produce a wrong decision
   # rule, so refuse instead.
-  if (verbose) cat("  Using pure-R eigendecomposition fallback...\n")
+  if (verbose) .dynhr_cat("  Using pure-R eigendecomposition fallback...\n")
   if (1 / kappa(D, exact = FALSE) < 1e-12) {
     stop("Pure-R QZ fallback cannot handle a numerically singular D matrix ",
          "(pencil has infinite generalized eigenvalues). Install the 'QZ' ",

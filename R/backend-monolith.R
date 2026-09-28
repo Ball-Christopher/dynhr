@@ -62,7 +62,11 @@
   P <- diag(1, n)
   for (iter in 1:500) {
     P_new <- F_mat %*% P %*% t(F_mat) + GQG
-    if (max(abs(P_new - P)) < tol) return(.sym(P_new))
+    ## RELATIVE convergence (W76, 2026-09-26): an absolute `tol` stopped a
+    ## small-scale model (P ~1e-9) with P0 wrong in its leading digits and
+    ## never let a large-scale one converge. Relative to max|P_new|, as in
+    ## solve_lyapunov() and the Kalman steady-state lock.
+    if (max(abs(P_new - P)) <= tol * max(abs(P_new))) return(.sym(P_new))
     if (any(!is.finite(P_new)) || max(abs(P_new)) > 1e20) break
     P <- P_new
   }

@@ -418,6 +418,8 @@ hank_het_dist_jacobian_nd <- function(block, T_h,
 }
 
 
+#' Backward sweep shared by the one-asset Jacobians
+#'
 #' Backward sweep shared by \code{hank_het_jacobian} and
 #' \code{hank_het_dist_jacobian}: curly-Y (per-output date-0 outcome response)
 #' and curly-D (induced one-period-ahead distribution change) to an anticipated
@@ -549,6 +551,35 @@ hank_het_dist_jacobian_nd <- function(block, T_h,
 #'   perturbation in the s=0 term.
 #' @param delta_va Relative FD step for the backward value-function propagation.
 #' @param delta_d FD step for the distributional (curly-D) response.
+#' @param expectations \code{NULL} (default: full-information rational
+#'   expectations, FIRE) or a named list selecting the behavioural
+#'   expectations of Lenney and Rosso (2026, Bank of England Staff Working
+#'   Paper 1197), applied to the FIRE Jacobian before it is returned:
+#'   \itemize{
+#'     \item \code{theta}: stickiness in \eqn{[0, 1)}; each period a fraction
+#'       \eqn{1-\theta} of households updates its information set (the
+#'       paper's \eqn{\delta} is \eqn{\theta/(1-\theta)}).
+#'     \item \code{gamma}: extrapolation (default 0); an updating household's
+#'       forecast of every future input moves by \eqn{-\gamma} times the input
+#'       observed at the update (\eqn{\gamma < 0} is overreaction to current
+#'       conditions).
+#'     \item \code{type}: optional, \code{"behavioural"} (default),
+#'       \code{"sticky"} (requires \code{gamma = 0}: the sticky expectations of
+#'       Auclert, Rognlie and Straub 2020) or \code{"fire"} (same as
+#'       \code{NULL}).
+#'   }
+#'   \code{theta} and \code{gamma} are either scalars (every input) or numeric
+#'   vectors named by input (inputs left out stay FIRE). The time-\eqn{h}
+#'   average forecast of the input path is \eqn{A_h\,dX}, with
+#'   \eqn{A_h[s,s] = 1} for \eqn{s \le h} (observed),
+#'   \eqn{A_h[s,s] = 1-\theta^{h+1}} and
+#'   \eqn{A_h[s,r] = -\gamma(1-\theta)\theta^{h-r}} (\eqn{r \le h}) for
+#'   \eqn{s > h}; the behavioural Jacobian is
+#'   \eqn{\bar J = \sum_h P_h A_h}, where \eqn{P_h} is the fake-news matrix
+#'   shifted down the diagonal by \eqn{h} (the paper's eq. 7). \code{theta = 0},
+#'   \code{gamma = 0} returns the FIRE Jacobian unchanged. Only the linear
+#'   (Jacobian) path is behavioural: the nonlinear transition functions stay
+#'   perfect-foresight.
 #'
 #' @return Nested list \code{J[[output]][[input]]}, each a \code{T x T} matrix
 #'   with \code{[t, s] = dO_t/dI_s}.  (The date-0 response vectors are the first
@@ -558,9 +589,11 @@ hank_het_jacobian <- function(block, T_h,
                               inputs = c("r", "w"),
                               outputs = c("A", "C"),
                               delta_in = 1e-5, delta_va = 1e-6,
-                              delta_d = 1e-6) {
+                              delta_d = 1e-6, expectations = NULL) {
   inputs  <- .hank_het_check_inputs(block, inputs)
   outputs <- .hank_het_check_outputs(block, outputs)
+  ## Validate the expectations spec up front (before the expensive sweep).
+  .ssj_expectations_resolve(expectations, inputs, "hank_het_jacobian")
   Lam <- block$Lambda
 
   ## --- Step 2: expectation vectors E_s = Lambda^s y^o, s = 0 .. T-1 ---
@@ -618,7 +651,11 @@ hank_het_jacobian <- function(block, T_h,
       J[[o]][[i]] <- Jm
     }
   }
-  J
+  ## Behavioural expectations (Lenney-Rosso eq. 7): a per-input transform of
+  ## the finished FIRE Jacobian. The flow-output diagonal correction above is
+  ## a contemporaneous (observed-input) term, which the transform leaves
+  ## unchanged -- it sits in F[0, 0] only.
+  .ssj_apply_expectations(J, expectations, inputs, "hank_het_jacobian")
 }
 
 

@@ -4,7 +4,7 @@
 ## (GIRFs) for pruned second-order DSGE models.
 ##
 ## Dependencies: .order2_aug_system, .order2_stationary_moments,
-##               .order2_conditional_moments, .get_shock_cov, .get_shock_stderr
+##               .get_shock_cov, .get_shock_stderr
 ##               (all in R/stochsimul-monolith.R — no cross-file edits needed)
 ##
 ## References:
@@ -84,35 +84,39 @@ stochastic_steady_state <- function(dr, model, params = NULL) {
 #' Computes the Koop-Pesaran-Potter (1996) GIRF from the stochastic steady
 #' state (SSS) of a pruned second-order DSGE model, or from a caller-supplied
 #' initial state for state-dependent GIRF exercises:
-#' \deqn{\text{GIRF}_h(k) = E[y_{t+h} \mid \varepsilon_t = e_k,\;
-#'   x_t = x_0]
-#'   - E[y_{t+h} \mid x_t = x_0]}
+#' \deqn{\text{GIRF}_h(k) = E[y_{t+h-1} \mid x_{t-1} = x_0,\;
+#'   \varepsilon_t = e_k]
+#'   - E[y_{t+h-1} \mid x_{t-1} = x_0,\; \varepsilon_t = 0]}
 #' for each shock \eqn{k}, where \eqn{e_k} is the \eqn{k}-th column of the
 #' lower Cholesky factor of \eqn{\Sigma_\varepsilon} (scaled by
-#' \code{shock_size}) and \eqn{x_0} is the initial state (defaults to the
-#' stochastic steady state).
+#' \code{shock_size}), \eqn{x_0} is the initial state (defaults to the
+#' stochastic steady state) and the future shocks
+#' \eqn{\varepsilon_{t+1}, \ldots} are integrated out in both terms.  The
+#' baseline carries a zero impact shock (not a random one), so the h = 1
+#' response is deterministic; the analytic and the Monte-Carlo
+#' (\code{n_replications}) paths use this same convention.
 #'
-#' Future shocks are integrated out analytically using
-#' \code{.order2_conditional_moments} (augmented Lyapunov propagation); no
-#' Monte Carlo is needed.  At order 1 (all quadratic terms zero), GIRFs equal
-#' standard IRFs from the deterministic SS.
+#' Initial-state convention: the pruned state is started at
+#' \eqn{x^{(1)} = x_0 - y^*} (deviation from the deterministic SS) and
+#' \eqn{x^{(2)} = 0}.  The GIRF does not depend on the \eqn{x^{(2)}} split,
+#' which enters the pruned recursion linearly and cancels in the difference.
 #'
 #' Period-indexing: row h of the returned matrix corresponds to h periods
 #' after the shock (h = 1 is the impact period, the same convention as
-#' \code{compute_irfs()}).  The h = 1 impact is computed explicitly via the
-#' output policy functions:
-#' \deqn{\text{GIRF}_1(k) = g_{hu} e_k + g_{hxu}(e_k \otimes x^*_1)
-#'   + \tfrac{1}{2} g_{huu}(e_k \otimes e_k)}
-#' where \eqn{x^*_1} is the first-order state deviation from the deterministic
-#' SS (from \code{initial_state}, or the ergodic mean when
-#' \code{initial_state = NULL}).
-#' Periods h = 2, \ldots, n use analytic Lyapunov propagation from the
-#' post-shock state \eqn{x^*_1 + h_u e_k}; the second-order correction
-#' \eqn{E[x^{(2)}]} is initialized to 0 in the propagator (see
-#' \code{.order2_conditional_moments}), introducing an \eqn{O(\sigma^2)}
-#' approximation that is absorbed into the \eqn{c_u / c_v} constants after
-#' a few steps.  This error is negligible for typical DSGE calibrations
-#' (shock stderr 1--3 \%); full augmented-state initialization is deferred.
+#' \code{compute_irfs()}).  The h = 1 impact is
+#' \deqn{\text{GIRF}_1(k) = g_{u} e_k + g_{xu}(e_k \otimes x^{(1)})
+#'   + \tfrac{1}{2} g_{uu}(e_k \otimes e_k).}
+#' For h >= 2 the analytic path is EXACT for the pruned order-2 system: with
+#' the augmented state \eqn{\xi = (x^{(1)}, x^{(2)}, x^{(1)} \otimes x^{(1)})}
+#' (Andreasen, Fernandez-Villaverde & Rubio-Ramirez 2018) the conditional
+#' means \eqn{E[\xi_{t+1} \mid \xi_t] = T \xi_t + c} and
+#' \eqn{E[y_t \mid \xi_t] = D \xi_t + d} are affine with state-independent
+#' constants, so
+#' \deqn{\text{GIRF}_h(k) = D\, T^{h-2} (\xi^{e_k}_{t} - \xi^{0}_{t}),}
+#' where \eqn{\xi^{e}_{t}} is the (known) augmented state one period after
+#' the impact shock \eqn{e}.  No Monte Carlo and no approximation beyond the
+#' pruned order-2 solution itself is involved.  At order 1 (all quadratic
+#' terms zero), GIRFs equal standard IRFs from the deterministic SS.
 #'
 #' @param dr DecisionRules2 object returned by \code{solve_perturbation(order=2)}
 #' @param model dynhr_mod object
@@ -289,7 +293,7 @@ compute_girf <- function(dr, model, n_periods = 40L, shock_size = 1,
     ## with future shocks (h>=2) drawn from N(0, Sigma_e) in both expectations.
     ## Matches the validated Gate-7 oracle convention exactly.
     ## ======================================================================
-    if (!is.null(seed)) set.seed(as.integer(seed))
+    if (!is.null(seed)) .local_seed(as.integer(seed))  # caller's stream restored on exit (C1)
 
     ## Pruned-recursion state matrices (state rows only).
     hxx <- dr$ghxx[state_idx, , drop = FALSE]
@@ -382,11 +386,38 @@ compute_girf <- function(dr, model, n_periods = 40L, shock_size = 1,
   } else {
     ## ======================================================================
     ## Analytic pruned-state-space GIRF path (default).
+    ##
+    ## EXACT for the pruned order-2 system.  With the augmented state
+    ##   xi_t = (x1_t, x2_t, x1_t (x) x1_t)
+    ## the conditional mean is affine with a STATE-INDEPENDENT constant:
+    ##   E[xi_{t+1} | xi_t] = Tlin xi_t + cc + c_u,
+    ##   E[y_t      | xi_t] = ys + Dxi xi_t + 0.5 ghss + c_v
+    ## (E[eps (x) x1 | xi] = 0, E[eps (x) eps] = vec(Sigma_e)).  The shocked
+    ## and baseline expectations start from the SAME initial state and differ
+    ## only in the impact shock (e_k vs 0 -- the MC path's convention), so one
+    ## period after impact each augmented state is a known point and
+    ##   GIRF_h = Dxi Tlin^(h-2) (xi_shock - xi_base),   h >= 2,
+    ## all constants cancelling.  Pre-fix bug (W43, 2026-09-25): the tail
+    ## differenced a shocked path started at h = 2 against a baseline path
+    ## started at h = 1 (one period out of step: a shock-size-independent
+    ## offset equal to the baseline's own one-period drift) and dropped the
+    ## post-impact x2 terms.  Away from the SSS the error was 20-47 % (rbc,
+    ## k 5 % below det-SS); from the SSS it was ~0.2 %.
     ## ======================================================================
-    n_tail <- n_periods - 1L
-    if (n_tail > 0L) {
-      cm_base_tail <- .order2_conditional_moments(sys, x1_start, n_tail)
+    hxx <- dr$ghxx[state_idx, , drop = FALSE]
+    huu <- dr$ghuu[state_idx, , drop = FALSE]
+    hss <- dr$ghss[state_idx]
+    x11_start <- x1_start %x% x1_start
+    ## Augmented state one period after a deterministic impact shock e.  The
+    ## initial x2 is 0 (the MC path's convention); it enters only through
+    ## hx x2 and cancels in the difference, so the GIRF does not depend on it.
+    xi_after <- function(e) {
+      x1n <- as.numeric(hx %*% x1_start + hu %*% e)
+      x2n <- as.numeric(0.5 * hxx %*% x11_start + hxu %*% (e %x% x1_start) +
+                          0.5 * huu %*% (e %x% e)) + 0.5 * hss
+      c(x1n, x2n, x1n %x% x1n)
     }
+    xi_base <- xi_after(numeric(n_exo))
 
     for (ki in seq_along(shock_idx)) {
       k <- shock_idx[ki]
@@ -394,9 +425,9 @@ compute_girf <- function(dr, model, n_periods = 40L, shock_size = 1,
       e_k <- as.numeric(L_chol[, k]) * shock_size
 
       ## --- h = 1: explicit impact ---
-      ## GIRF_1 = output(x1_start + shock) - output(x1_start):
+      ## GIRF_1 = output(x1_start, e_k) - output(x1_start, 0):
       ##   y1_diff = ghu * e_k               (first-order)
-      ##   y2_diff = ghxu*(e_k⊗x1_start) + 0.5*ghuu*(e_k⊗e_k)  (quadratic cross)
+      ##   y2_diff = ghxu*(e_k (x) x1_start) + 0.5*ghuu*(e_k (x) e_k)
       ## ghss and ghx*x2 cancel between shocked and baseline.
       girf_1 <- as.numeric(dr$ghu %*% e_k) +
                 as.numeric(dr$ghxu %*% (e_k %x% x1_start)) +
@@ -406,14 +437,11 @@ compute_girf <- function(dr, model, n_periods = 40L, shock_size = 1,
                          dimnames = list(paste0("t", seq_len(n_periods)), endo))
       girf_mat[1L, ] <- girf_1
 
-      if (n_tail > 0L) {
-        ## --- h = 2..n_periods: analytic propagation from post-shock state ---
-        ## x1 after one pruned step: hx*x1_start + hu*e_k
-        x1_after <- as.numeric(hx %*% x1_start + hu %*% e_k)
-
-        cm_shock_tail <- .order2_conditional_moments(sys, x1_after, n_tail)
-
-        girf_mat[2L:n_periods, ] <- cm_shock_tail$mean - cm_base_tail$mean
+      ## --- h = 2..n_periods: exact propagation of the conditional-mean gap ---
+      dxi <- xi_after(e_k) - xi_base
+      for (h in seq_len(n_periods)[-1L]) {
+        girf_mat[h, ] <- as.numeric(sys$Dxi %*% dxi)
+        dxi <- as.numeric(sys$Tlin %*% dxi)
       }
 
       irfs[[ki]] <- girf_mat

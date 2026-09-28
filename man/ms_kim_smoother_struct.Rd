@@ -14,7 +14,7 @@ ms_kim_smoother_struct(
   me_variance = 0,
   lik_init = c("auto", "stationary", "kappa"),
   regime_pass = c("joint", "kim"),
-  collapse = c("gpb2", "gpb3")
+  collapse = c("gpb2", "gpb3", "imm")
 )
 }
 \arguments{
@@ -72,7 +72,10 @@ diagnostic of a \code{"gpb2"} run is O(1) nats or more (see the
 costs about \eqn{h} times as much.  \code{regime_pass = "kim"} is not
 defined for it (its backward step conditions on \eqn{y_{1:t}}, which
 discards exactly what the extra components are kept for) and is an
-error.}
+error.  \code{"imm"} runs the interacting-multiple-model forward pass
+(\code{\link{ms_kim_filter_struct}(collapse = "imm")}) and smooths it with
+the same per-regime backward core as \code{"gpb2"}, exactly as
+\code{\link{ms_kim_smoother}(collapse = "imm")} does.}
 }
 \value{
 A list of class \code{"ms_kim_smoother"} with all the fields
@@ -84,6 +87,8 @@ A list of class \code{"ms_kim_smoother"} with all the fields
       section).}
     \item{\code{ss_states_by_regime}}{\code{n_state x h} matrix of
       per-regime steady states of the state variables.}
+    \item{\code{state_ref}}{The common reference the smoothed states are
+      deviations from, \code{ys_1[state_vars]}.}
   }
 }
 \description{
@@ -104,16 +109,15 @@ forward pass, so there is exactly one backward recursion in the package.
 }
 \section{Deviation reference}{
 
-Smoothed states are deviations from the COMMON reference implied by the
-structural filter's state equation \eqn{s_t = T_j s_{t-1} + R_j
-\varepsilon_t}, which carries no regime-dependent intercept: the per-regime
-steady state enters only as the switching observation intercept
-\eqn{d_i = ys_i[obs\_vars]}.  All regimes' state vectors therefore live in
-one coordinate system and Kim's collapse mixes like with like.  Regime
-means are re-introduced only in level space, in
-\code{smoothed_states_level}, which mixes LEVELS
-\eqn{s_{t|T}^{(j)} + ys_j[\text{state}]} with the smoothed regime
-probabilities.
+Smoothed states are deviations from the COMMON reference
+\code{state_ref} \eqn{= ys_1[\mathrm{state}]} of the structural filter's
+state equation \eqn{s_t = c_j + T_j s_{t-1} + R_j \varepsilon_t} (see
+\emph{The law} in \code{\link{ms_kim_filter_struct}}): the regime steady
+states and the solver's regime constant enter as the intercepts
+\eqn{c_j} and \eqn{d_j}, so all regimes' state vectors live in one
+coordinate system and Kim's collapse mixes like with like.
+\code{smoothed_states_level} is \code{state_ref} plus the regime mixture
+of the smoothed deviations.
 }
 
 \section{Smoothed covariances under switching dynamics}{

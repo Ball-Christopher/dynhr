@@ -26,6 +26,7 @@ method_of_moments(
   ridge = 1e-06,
   jacobian = c("auto", "analytic", "fd"),
   burn_in = 100L,
+  se_bounds = FALSE,
   verbose = TRUE
 )
 }
@@ -94,6 +95,15 @@ or \code{"fd"}.}
 
 \item{burn_in}{SMM burn-in periods discarded before the simulated sample.}
 
+\item{se_bounds}{If \code{TRUE}, also report combined-data standard-error
+bounds in \code{$se_bounds} (see \code{\link{mom_se_bounds}}): the
+best- and worst-case standard errors if each moment had come from a
+different sample, so that only the moment variances
+\eqn{c\,\hat\Omega_{jj}/T} were known. Exactly duplicated moments
+(the symmetric entries of \code{vec(Sigma_y)}) are kept perfectly
+correlated. The full-information sandwich \code{$se} always lies inside
+the bounds. Default \code{FALSE}; nothing else in the result changes.}
+
 \item{verbose}{Print optimiser progress.}
 }
 \value{
@@ -103,7 +113,9 @@ An object of class \code{"dynhr_mom"}: a list with
   \code{weight_matrix},
   \code{moment_fit} (a data.frame with the sample and model moment, their
   difference and a standardized difference), \code{jacobian},
-  \code{jacobian_method}, and the settings used.
+  \code{jacobian_method}, \code{se_bounds} (a
+  \code{"dynhr_se_bounds"} object when \code{se_bounds = TRUE}, else
+  \code{NULL}), and the settings used.
 }
 \description{
 Estimates structural parameters by minimising the GMM criterion

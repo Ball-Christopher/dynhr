@@ -26,16 +26,6 @@
 # Helper: perturbation-order detection
 # ============================================================================
 
-## Package-private store for one-time warnings (avoids MCMC warning spam).
-.cumulant_warn_env <- new.env(parent = emptyenv())
-
-#' Emit a warning at most once per session, keyed by `key`.
-#' @noRd
-.cumulant_warn_once <- function(key, msg) {
-  if (isTRUE(.cumulant_warn_env[[key]])) return(invisible(NULL))
-  .cumulant_warn_env[[key]] <- TRUE
-  warning(msg, call. = FALSE)
-}
 
 #' Robustly detect the perturbation order of a decision-rule object
 #'
@@ -209,16 +199,21 @@
   n_s <- nrow(hx)
 
   # Solve (I - hx ⊗ hx ⊗ hx) · vec(C3) = ½ · vec(rhs)
-  # via eigen-decomposition of hx for efficiency (like the compact Sylvester)
-  eig   <- eigen(hx)
-  V     <- eig$vectors
-  lam   <- eig$values
+  # via eigen-decomposition of hx for efficiency (like the compact Sylvester),
+  # or by doubling when the eigenvector matrix is numerically singular (see
+  # .tensor_lyap_eigenbasis: a repeated EXACT-zero eigenvalue, e.g. fs2000).
+  eb <- .tensor_lyap_eigenbasis(hx)
+  if (is.null(eb))
+    return(.symmetrize_jk(.tensor_lyap_doubling(hx, 0.5 * rhs,
+                                                .tensor_lyap_op3)))
+  V     <- eb$V
+  lam   <- eb$lam
 
   # Transform RHS into eigenbasis
   # For tensor T of dims (n_s, n_s, n_s), apply V^{-1} to mode 1,
   # and V^{-1} ⊗ V^{-1} to modes 2,3.
   # Mode 2,3 joint transformation: vec(V^{-1} · X · V^{-T})
-  Vi      <- solve(V)
+  Vi      <- eb$Vi
   rhs_tfm <- Vi %*% rhs                     # mode 1: V^{-1} · rhs
   rhs_tfm <- .apply_kron2(Vi, rhs_tfm)      # modes 2,3: V^{-1} · X · V^{-T}
 
@@ -245,15 +240,104 @@
   c3 <- V %*% c3_tfm
   c3 <- .apply_kron2(V, c3)
 
-  # Symmetrize: C_3 should be symmetric in the last two indices (j,k)
-  # C_3[i, (j,k)] = C_3[i, (k,j)] by definition of joint cumulant
+  .symmetrize_jk(c3)
+}
+
+
+#' Symmetrize an n_s × n_s^2 third-order tensor in its last two indices
+#'
+#' C_3[i, (j,k)] = C_3[i, (k,j)] by definition of the joint cumulant.
+#'
+#' @param c3 n_s × n_s^2 matrix (row i, column (k-1)·n_s + j).
+#' @return The (j,k)-symmetrized matrix.
+#' @noRd
+.symmetrize_jk <- function(c3) {
+  n_s <- nrow(c3)
   for (i in seq_len(n_s)) {
     Ci <- matrix(c3[i, ], n_s, n_s)
     Ci <- (Ci + t(Ci)) * 0.5
     c3[i, ] <- as.numeric(Ci)
   }
-
   c3
+}
+
+
+## rcond(V) below which the eigenbasis route of the tensor-Lyapunov solves is
+## abandoned for doubling. The eigenbasis route loses ~ eps / rcond(V) relative
+## accuracy, so 1e-6 bounds its error near 1e-10 while leaving every
+## well-conditioned basis (fs2000: 0.06-0.13; the failure: ~1e-277) on the
+## original, bit-identical path.
+.tensor_lyap_rcond_tol <- 1e-6
+
+#' Eigenbasis of hx for the tensor-Lyapunov solves, or NULL when unusable
+#'
+#' The tensor-Lyapunov solves (I - hx^{⊗m}) vec(C) = vec(R) decouple
+#' element-wise in the eigenbasis of hx, which needs V^{-1}. LAPACK's
+#' eigenvector back-substitution (dtrevc) returns a numerically SINGULAR V when
+#' hx has an eigenvalue repeated EXACTLY: for the second copy the divisor
+#' T[k,k] - lambda is exactly zero, is replaced by the underflow threshold
+#' (~1e-292), and the resulting eigenvector collapses onto the first copy.
+#' fs2000's state block has two structurally zero columns (P, y), so its
+#' eigenvalue 0 is double; whenever round-off leaves both Schur diagonals at
+#' an exact 0.0 (alp = 0.34, 0.35601, 0.40, ...) rcond(V) ~ 1e-277 and
+#' solve(V) failed, while at neighbouring points one diagonal is +-1e-16 and
+#' V is fine (rcond ~ 0.1). The tensor operator itself is well conditioned
+#' there (its eigenvalues 1 - lam_i lam_j lam_k all lie in [1 - rho^3, 1]), so
+#' this is an artefact of the eigenvector basis, not of the moment system.
+#'
+#' @param hx n_s × n_s state transition.
+#' @return list(V, Vi, lam), or NULL when V is non-finite or
+#'   rcond(V) < .tensor_lyap_rcond_tol (the caller then uses
+#'   .tensor_lyap_doubling).
+#' @noRd
+.tensor_lyap_eigenbasis <- function(hx) {
+  eig <- eigen(hx)
+  V   <- eig$vectors
+  if (!all(is.finite(V)) || rcond(V) < .tensor_lyap_rcond_tol) return(NULL)
+  list(V = V, Vi = solve(V), lam = eig$values)
+}
+
+#' Mode product of hx on all three modes of an n_s × n_s^2 tensor
+#'
+#' (hx^{⊗3} T)[a,(b,c)] = sum_{i,j,k} hx[a,i] hx[b,j] hx[c,k] T[i,(j,k)].
+#' @noRd
+.tensor_lyap_op3 <- function(A, X) .apply_kron2(A, A %*% X)
+
+#' Solve the stationary tensor-Lyapunov X = op(hx, X) + Q by doubling
+#'
+#' X = sum_{m >= 0} op(hx^m, Q), accumulated as S_{k+1} = S_k + op(A_k, S_k),
+#' A_{k+1} = A_k^2 (A_0 = hx), where op(A, .) multiplies every tensor mode by
+#' A. Needs no eigenvectors, so it is exact where the eigenbasis route is not
+#' (see .tensor_lyap_eigenbasis). Convergence is RELATIVE, as in
+#' solve_lyapunov(), so the solve is scale-equivariant.
+#'
+#' No stationary solution exists when the spectral radius of hx is >= 1; that
+#' case returns an all-NaN tensor, the same contract as solve_lyapunov(), so
+#' the likelihood is non-finite and the draw is rejected (the eigenbasis route
+#' instead drops the unit-root modes; it is only bypassed when V is singular).
+#'
+#' @param hx n_s × n_s state transition.
+#' @param Q  driving tensor, in the layout \code{op} expects.
+#' @param op function(A, X) applying A to every mode of X.
+#' @param max_iter,tol doubling cap and relative stopping tolerance.
+#' @return The solution, same shape as Q.
+#' @noRd
+.tensor_lyap_doubling <- function(hx, Q, op, max_iter = 200L, tol = 1e-14) {
+  nan_out <- Q
+  nan_out[] <- NaN
+  rho <- max(Mod(eigen(hx, only.values = TRUE)$values))
+  if (!is.finite(rho) || rho >= 1) return(nan_out)
+  X <- Q
+  A <- hx
+  for (it in seq_len(max_iter)) {
+    inc <- op(A, X)
+    X   <- X + inc
+    if (!all(is.finite(X))) return(nan_out)
+    ## `<=`: an all-zero X (Q = 0) stops at once.
+    if (max(abs(inc)) <= tol * max(abs(X))) return(X)
+    A <- A %*% A
+  }
+  nan_out
 }
 
 
@@ -836,13 +920,18 @@ compute_third_cumulant <- function(dr, model, params = NULL) {
 #' @noRd
 .solve_lyap4 <- function(hx, R) {
   n_s <- nrow(hx)
-  eg  <- eigen(hx); V <- eg$vectors; lam <- eg$values; Vi <- solve(V)
   applymode <- function(A, M, mode) {
     d  <- dim(A); rest <- setdiff(1:4, mode)
     A2 <- matrix(aperm(A, c(mode, rest)), d[mode])
     A2 <- array(M %*% A2, c(nrow(M), d[rest]))
     aperm(A2, order(c(mode, rest)))
   }
+  ## Singular eigenvector basis (repeated exact eigenvalue): doubling instead.
+  eb <- .tensor_lyap_eigenbasis(hx)
+  if (is.null(eb))
+    return(.tensor_lyap_doubling(hx, R, function(A, X)
+      applymode(applymode(applymode(applymode(X, A, 1), A, 2), A, 3), A, 4)))
+  V <- eb$V; lam <- eb$lam; Vi <- eb$Vi
   Rt <- applymode(applymode(applymode(applymode(R, Vi, 1), Vi, 2), Vi, 3), Vi, 4)
   Ct <- array(0 + 0i, dim(Rt))
   for (p in seq_len(n_s)) for (q in seq_len(n_s))
@@ -917,7 +1006,7 @@ compute_third_cumulant <- function(dr, model, params = NULL) {
   d  <- n_s + n_exo
   Sg <- matrix(0, d, d); Sg[seq_len(n_s), seq_len(n_s)] <- Sigma_x
   Sg[(n_s + 1L):d, (n_s + 1L):d] <- Sigma_e
-  bi <- seq_len(n_s); ei <- (n_s + 1L):d; Sgi <- solve(Sg)
+  bi <- seq_len(n_s); ei <- (n_s + 1L):d
   Wm <- vector("list", n_s); ar <- matrix(0, d, n_s)
   for (p in seq_len(n_s)) {
     M <- matrix(0, d, d)
@@ -929,8 +1018,12 @@ compute_third_cumulant <- function(dr, model, params = NULL) {
   for (r in seq_len(n_s)) { ar[bi, r] <- hx[r, ]; ar[ei, r] <- hu[r, ] }
   zeroX2 <- array(0, c(n_s, n_s, n_s, n_s))
   for (p in seq_len(n_s)) for (q in seq_len(n_s)) {
+    ## Wick chain Sg Wp Sg Wq Sg. Formerly Cp Sg^{-1} Cq, which is the same
+    ## matrix but needs Sg invertible: fs2000's 4-state Sigma_x is rank 2
+    ## (singular values ~1e-1, 1e-4, 1e-19, 1e-20), so solve(Sg) failed at
+    ## EVERY parameter value and cumulant order 4 could not be evaluated.
     Cp <- Sg %*% Wm[[p]] %*% Sg; Cq <- Sg %*% Wm[[q]] %*% Sg
-    CpSq <- Cp %*% Sgi %*% Cq; CqSp <- Cq %*% Sgi %*% Cp
+    CpSq <- Cp %*% Wm[[q]] %*% Sg; CqSp <- Cq %*% Wm[[p]] %*% Sg
     for (r in seq_len(n_s)) for (s in seq_len(n_s))
       zeroX2[p, q, r, s] <- 4 * as.numeric(ar[, r] %*% CpSq %*% ar[, s]) +
                             4 * as.numeric(ar[, r] %*% CqSp %*% ar[, s])
@@ -1397,7 +1490,8 @@ sample_cumulants <- function(Y, max_order = 4L) {
 #' @param orders Integer vector: which cumulant orders to match
 #'   (default 1:4, i.e. mean, variance, skewness, kurtosis)
 #' @param weight_method How to weight cumulant discrepancies:
-#'   "identity" — equal weight (default)
+#'   "identity" — equal weight (default), in the data's units: not unit-free,
+#'     the order-k block scales as sigma^(2k) (see make_log_posterior_cumulant)
 #'   "precision" — inverse of estimated asymptotic variance (stub; use
 #'     \code{weight_matrix} instead)
 #' @param weight_matrix Optional p × p numeric matrix.  When non-NULL, the
@@ -1445,14 +1539,13 @@ sample_cumulants <- function(Y, max_order = 4L) {
 
   dr_order <- .dr_perturbation_order(dr)
   if (any(orders >= 3L) && dr_order < 2L) {
-    .cumulant_warn_once(
-      "cumulant_orders34_needs_order2",
-      paste0(
+    .dynhr_warn(paste0(
         "Cumulant orders 3-4 were requested but the decision rule is ",
         "first-order (no ghxx/ghss): only orders 1-2 contribute to the ",
         "cumulant log-likelihood. Re-solve with ",
         "solve_perturbation(order = 2) to activate the skewness/kurtosis ",
-        "terms."))
+        "terms."),
+    once = TRUE, key = "cumulant_orders34_needs_order2")
   }
   if (any(orders >= 3L) && dr_order >= 2L) {
     c3_result <- compute_third_cumulant(dr, model, params)
@@ -1563,7 +1656,19 @@ sample_cumulants <- function(Y, max_order = 4L) {
 #' @param me_variance Measurement error variance (default 0)
 #' @param cumulant_orders Integer vector: which cumulant orders to match
 #'   (default 1:4, i.e. mean, variance, skewness, kurtosis)
-#' @param cumulant_weight Weight method: "identity" or "precision"
+#' @param cumulant_weight Weight method: "identity" or "precision".
+#'   "identity" is the criterion \code{-T/(2p) * sum(delta^2)} in the units
+#'   of the data: it is a GMM criterion, not a likelihood, and it is not
+#'   unit-free.  The order-k moments carry units \eqn{\sigma^k}, so the
+#'   order-k block scales as \eqn{\sigma^{2k}}; with orders 3-4 and data whose
+#'   standard deviation is a few units, the fourth-cumulant block dominates
+#'   (on a linear model, where the model fourth cumulant is exactly 0, it is
+#'   the squared sample k-statistic, of order \eqn{T \sigma^8 / p}).  For a
+#'   value comparable across orders, models or units (log evidence, model
+#'   tempering), pass \code{weight_matrix} from
+#'   \code{estimate_gmm_weight_matrix(..., method = "analytic")}, under which
+#'   each block contributes about -0.5 times a chi-squared variate with as
+#'   many degrees of freedom as the block has distinct moments.
 #' @param weight_matrix Optional p × p numeric matrix pre-computed by
 #'   \code{\link{estimate_gmm_weight_matrix}}.  When non-\code{NULL},
 #'   the GMM objective \code{-T/2 * t(delta) W delta} is used at every
@@ -1654,7 +1759,7 @@ make_log_posterior_cumulant <- function(model, data, prior_spec, obs_vars,
           solve_perturbation_order2(model, compiled, ss, params,
                                     dr1 = dr, Sigma_e = Sigma_e,
                                     h = solver_h, verbose = FALSE),
-          error = function(e) NULL)
+          error = function(e) .dynhr_reraise_bug(e, NULL))
         if (!is.null(dr2)) dr <- dr2
       }
       list(sys = s1$sys, dr = dr)
@@ -1705,7 +1810,104 @@ make_log_posterior_cumulant <- function(model, data, prior_spec, obs_vars,
 }
 
 
-#' Analytic long-run covariance Omega for GMM orders 1-2
+## Ridge-regularise a GMM long-run covariance PER MOMENT (W77, 2026-09-26):
+##   Omega_reg = Omega + ridge * diag(diag(Omega)),
+## i.e. a ridge on the CORRELATION form. The moments stack orders 1-4 whose
+## scales are sigma^1 ... sigma^4, so Omega's diagonal spans sigma^2 ...
+## sigma^8; the former ridge * max(diag(Omega)) * I was set by the
+## highest-order block and swamped the low-order ones (and vice versa at the
+## other end of the scale): with every shock std and the data x 1e-4 the
+## Newey-West orders-1:2 cumulant loglik moved by 2.6 against its own value
+## at scale 1. The per-moment ridge is invariant to any rescaling of the
+## moments. A moment with a non-positive diagonal (degenerate) gets
+## ridge * max(diag) as before. The condition number is that of the
+## correlation form -- the one that governs the Cholesky inverse and does
+## not report the moments' unit spread as ill-conditioning.
+.gmm_ridge <- function(Omega, ridge) {
+  dg <- diag(Omega)
+  dmax <- max(dg)
+  if (!is.finite(dmax) || dmax <= 0) dmax <- 1
+  dr <- ifelse(is.finite(dg) & dg > 0, dg, dmax)
+  Omega_reg <- Omega + ridge * diag(dr, nrow = length(dr))
+  sd <- sqrt(dr)
+  Cr <- Omega_reg / outer(sd, sd)
+  cond_num <- if (!all(is.finite(Cr))) Inf else {
+    ev <- eigen(Cr, only.values = TRUE, symmetric = TRUE)$values
+    max(ev) / min(ev)
+  }
+  list(Omega_reg = Omega_reg, cond_num = cond_num)
+}
+
+
+## Gaussian long-run covariance of the order-k sample k-statistic (k >= 2) in
+## the sample_cumulants() layout (C1, 2026-09-29).
+##
+## Under Gaussianity the influence function of the order-k k-statistic
+## (mean and lower cumulants estimated) is the order-k Wick / Hermite product
+## :y_i1 ... y_ik:, and Isserlis' theorem gives, at lag h,
+##   Cov(:y_t,i1 ... y_t,ik:, :y_{t-h},a1 ... y_{t-h},ak:)
+##     = sum over the k! permutations pi of prod_r Gamma(h)[i_r, a_pi(r)],
+## Gamma(h) = Cov(y_t, y_{t-h}) (Gamma(-h) = Gamma(h)'). The long-run
+## covariance is the sum over h in Z. Writing A(h)[u, v] = prod_r
+## Gamma(h)[i_r(u), a_r(v)] (the k-fold Kronecker power, in the moment layout),
+## each permutation is a fixed column permutation of A(h), so the lag sum is
+## taken on A and the k! column permutations are applied once:
+##   Omega_k = sum_pi (A(0) + sum_{h >= 1} [A(h) + A(h)'])[, pos_pi].
+## For k = 2 this is the (I + K)(Gamma kron Gamma) block of Omega_22. Scalar
+## check: Var(sqrt(T) k4) -> 24 sigma^8 sum_h rho(h)^4.
+##
+## The layouts: sample_cumulants()$c3 is n x n^2 with column (j-1) n + k,
+## vectorised column-major, so its position is i + n (k-1) + n^2 (j-1)
+## (i fastest); $c4 likewise, position i + n (l-1) + n^2 (k-1) + n^3 (j-1).
+## The kernel is symmetric under relabelling the tuple slots (the same
+## relabelling on both sides), so only the multiset each position carries
+## matters; expand.grid() enumerates positions in exactly this order.
+##
+## Duplicated positions (the same multiset in several slots) make Omega_k
+## singular; the moment vector carries the duplicates identically on both
+## sides, so the discrepancy lies in Omega's range and the (per-moment ridged)
+## inverse gives the pseudo-inverse quadratic form up to O(ridge).
+.gaussian_kstat_lrv <- function(G, Sigma_full, obs_idx, k,
+                                 max_lags = 2000L, tol = 1e-12) {
+  n <- length(obs_idx)
+  p <- n^k
+  idx <- as.matrix(expand.grid(rep(list(seq_len(n)), k)))   # p x k tuples
+  dimnames(idx) <- NULL
+  kron_pow <- function(Gm) {
+    A <- Gm[idx[, 1L], idx[, 1L], drop = FALSE]
+    for (r in 2:k) A <- A * Gm[idx[, r], idx[, r], drop = FALSE]
+    A
+  }
+  A_sum <- kron_pow(Sigma_full[obs_idx, obs_idx, drop = FALSE])
+  Gam <- Sigma_full
+  for (h in seq_len(max_lags)) {
+    Gam     <- G %*% Gam
+    A_h     <- kron_pow(Gam[obs_idx, obs_idx, drop = FALSE])
+    contrib <- A_h + t(A_h)
+    if (max(abs(contrib)) < tol * max(abs(A_sum))) break
+    A_sum <- A_sum + contrib
+  }
+  ## Column permutations: position of the tuple (a_pi(1), ..., a_pi(k)).
+  perms <- .all_perms(k)
+  wts   <- n^(seq_len(k) - 1L)
+  Omega <- matrix(0, p, p)
+  for (s in seq_len(nrow(perms))) {
+    pos <- as.integer(1L + (idx[, perms[s, ], drop = FALSE] - 1L) %*% wts)
+    Omega <- Omega + A_sum[, pos, drop = FALSE]
+  }
+  (Omega + t(Omega)) * 0.5
+}
+
+## All permutations of 1:k, one per row (k! x k).
+.all_perms <- function(k) {
+  if (k <= 1L) return(matrix(1L, 1L, 1L))
+  sub <- .all_perms(k - 1L)
+  do.call(rbind, lapply(seq_len(k), function(f)
+    cbind(f, matrix(setdiff(seq_len(k), f)[sub], nrow(sub)))))
+}
+
+
+#' Analytic long-run covariance Omega for GMM orders 1-4
 #'
 #' For a stationary Gaussian linear state-space with observable covariance
 #' \eqn{\Sigma_y} and lag-\eqn{h} autocovariance \eqn{\Gamma(h)}:
@@ -1713,8 +1915,20 @@ make_log_posterior_cumulant <- function(model, data, prior_spec, obs_vars,
 #' \describe{
 #'   \item{Omega_11}{T * Sigma_y  — asymptotic variance of the sample mean}
 #'   \item{Omega_22}{T * long-run covariance of vec(sample_cov)}
-#'   \item{Omega_12}{0  — Gaussian odd-even cumulant cross-independence}
+#'   \item{Omega_33, Omega_44}{long-run covariance of the sample third /
+#'     fourth k-statistics under Gaussianity (Wick products; see
+#'     .gaussian_kstat_lrv). Included only for a decision rule of order >= 2,
+#'     as in .cumulant_loglik.}
+#'   \item{Omega_jk, j != k}{0  — Wick products of different orders are
+#'     uncorrelated under Gaussianity}
 #' }
+#'
+#' Orders 3-4: the blocks are EXACT for a Gaussian observable process (a linear
+#' model, or an order-2 rule whose second-order terms vanish). For a genuinely
+#' non-Gaussian order-2 rule they are the Gaussian-null covariance: the terms
+#' of the true long-run covariance that involve cumulants of order >= 3 (up
+#' to order 8) are omitted, so W remains a valid, unit-free, positive-definite
+#' GMM weight but is no longer the efficient one.
 #'
 #' The moment vector for order 2 uses vec(Sigma_y) (full n_obs^2 elements, not
 #' vech), matching .build_moment_vector / .cumulant_loglik exactly.  The
@@ -1757,7 +1971,7 @@ make_log_posterior_cumulant <- function(model, data, prior_spec, obs_vars,
 #' @param model     dynhr_mod
 #' @param params    Named parameter vector
 #' @param obs_vars  Character vector of observable names
-#' @param orders    Integer vector (must be subset of 1:2)
+#' @param orders    Integer vector (subset of 1:4)
 #' @param ridge     Ridge fraction for regularization
 #' @param max_lags  Maximum lags to sum (default 2000; truncated earlier if tol met)
 #' @param tol       Frobenius-norm tolerance for lag truncation (default 1e-12)
@@ -1789,9 +2003,16 @@ make_log_posterior_cumulant <- function(model, data, prior_spec, obs_vars,
   Sigma_full  <- moments$var_cov                       # n_endo x n_endo
 
   # ---- Determine total moment dimension p ----
+  ## Orders 3-4 enter the moment vector only when the decision rule is at
+  ## least second order -- the same condition under which .cumulant_loglik()
+  ## and .build_moment_vector() (the Newey-West path) include them -- so W
+  ## always matches the delta it will weight.
+  hi_ok <- .dr_perturbation_order(dr) >= 2L
   p_11 <- if (1L %in% orders) n_obs      else 0L
   p_22 <- if (2L %in% orders) n_obs * n_obs else 0L
-  p    <- p_11 + p_22
+  p_33 <- if (3L %in% orders && hi_ok) n_obs^3 else 0L
+  p_44 <- if (4L %in% orders && hi_ok) n_obs^4 else 0L
+  p    <- p_11 + p_22 + p_33 + p_44
 
   # ---- Build block-diagonal Omega ----
   Omega <- matrix(0, p, p)
@@ -1815,12 +2036,17 @@ make_log_posterior_cumulant <- function(model, data, prior_spec, obs_vars,
   if (p_11 > 0L) {
     Omega_11 <- Sigma_y   # h=0 contribution
 
+    ## Lag truncation RELATIVE to the block (W77): an absolute 1e-12 stopped
+    ## at h = 1 whenever the observables' variances were below ~1e-12 (every
+    ## shock std x 1e-4 put Omega_22 ~ 1e-16 under it -- a lag-0-only
+    ## long-run variance, 3 units of cumulant loglik off), and summed all
+    ## 2000 lags at large scale.
     Gam <- Sigma_full     # Gamma(0) in endo space
     for (h in seq_len(max_lags)) {
       Gam     <- G %*% Gam
       Gamma_h <- Gam[obs_idx, obs_idx, drop = FALSE]
       contrib <- Gamma_h + t(Gamma_h)
-      if (max(abs(contrib)) < tol) break
+      if (max(abs(contrib)) < tol * max(abs(Omega_11))) break
       Omega_11 <- Omega_11 + contrib
     }
     Omega[1L:p_11, 1L:p_11] <- Omega_11
@@ -1868,7 +2094,7 @@ make_log_posterior_cumulant <- function(model, data, prior_spec, obs_vars,
       Amh    <- GtkGt + K_nn %*% GtkG
 
       contrib <- Ah + Amh
-      if (max(abs(contrib)) < tol) break
+      if (max(abs(contrib)) < tol * max(abs(Omega_22))) break
       Omega_22 <- Omega_22 + contrib
     }
 
@@ -1877,23 +2103,31 @@ make_log_posterior_cumulant <- function(model, data, prior_spec, obs_vars,
     Omega[row0:row1, row0:row1] <- Omega_22
   }
 
-  # Cross-block Omega_12 = 0 (Gaussian: odd-even cumulant cross-covariance
-  # vanishes — mean and variance are independent for Gaussian).
+  # -- Blocks (3,3) and (4,4): Gaussian (Wick) long-run covariance of the
+  #    sample third / fourth k-statistics (see .gaussian_kstat_lrv) --
+  off <- p_11 + p_22
+  if (p_33 > 0L) {
+    Omega[off + seq_len(p_33), off + seq_len(p_33)] <-
+      .gaussian_kstat_lrv(G, Sigma_full, obs_idx, 3L, max_lags, tol)
+    off <- off + p_33
+  }
+  if (p_44 > 0L) {
+    Omega[off + seq_len(p_44), off + seq_len(p_44)] <-
+      .gaussian_kstat_lrv(G, Sigma_full, obs_idx, 4L, max_lags, tol)
+  }
 
-  # ---- Ridge regularization ----
-  diag_max <- max(diag(Omega))
-  if (!is.finite(diag_max) || diag_max <= 0) diag_max <- 1
-  delta_ridge <- ridge * diag_max
-  Omega_reg   <- Omega + delta_ridge * diag(p)
+  # Cross-blocks between different orders are 0: under Gaussianity the
+  # influence functions of the order-k sample cumulants are the order-k Wick
+  # (Hermite) products, and Wick products of different orders are
+  # uncorrelated at every lag (mean and variance independent, etc.).
 
-  # ---- Condition number ----
-  cond_num <- tryCatch({
-    ev <- eigen(Omega_reg, only.values = TRUE, symmetric = TRUE)$values
-    max(ev) / min(ev)
-  }, error = function(e) Inf)
+  # ---- Ridge regularization (per moment; see .gmm_ridge) ----
+  rg        <- .gmm_ridge(Omega, ridge)
+  Omega_reg <- rg$Omega_reg
+  cond_num  <- rg$cond_num
 
   if (!is.finite(cond_num) || cond_num > 1e12) {
-    warning(
+    .dynhr_warn(
       ".analytic_gmm_weight_matrix: condition number of Omega_reg is ",
       if (is.finite(cond_num)) format(cond_num, scientific = TRUE) else "Inf",
       ".  Increase 'ridge' or check model stationarity.", call. = FALSE)
@@ -1963,21 +2197,32 @@ make_log_posterior_cumulant <- function(model, data, prior_spec, obs_vars,
 #'   \code{.cumulant_loglik()}.
 #' @param method    \code{"newey_west"} (default): Newey–West HAC long-run
 #'   covariance of per-observation moment contributions.
-#'   \code{"analytic"}: block-diagonal analytic long-run covariance for
-#'   \code{orders} \eqn{\subseteq \{1, 2\}} (Gaussian state-space formula using
-#'   model-implied autocovariances).  Errors for \code{orders} including 3 or 4
-#'   (requires order-6/8 cumulants not yet implemented).
+#'   \code{"analytic"}: block-diagonal analytic long-run covariance from the
+#'   model-implied autocovariances (Gaussian state-space formula, Isserlis'
+#'   theorem).  For orders 3 and 4 it is the long-run covariance of the sample
+#'   k-statistics under Gaussianity: exact for a linear (Gaussian) model, and
+#'   for a non-Gaussian order-2 decision rule the Gaussian-null weight (the
+#'   terms involving cumulants of order 3 and above are omitted, so the weight
+#'   is valid and unit-free but not the efficient one).  As on the Newey-West
+#'   path, the order-3/4 blocks are included only when \code{dr} is of order
+#'   2 or higher (the orders \code{.cumulant_loglik()} matches for that rule).
 #' @param bandwidth Integer or \code{NULL}.  Newey–West lag truncation \eqn{L}.
 #'   \code{NULL} (default) uses the rule \eqn{L = \lfloor 4 (T/100)^{2/9} \rfloor}.
 #' @param ridge     Ridge regularization fraction (default \code{1e-6}).
 #'   The regularized covariance is
-#'   \eqn{\hat\Omega_{reg} = \hat\Omega_{NW} + \delta \cdot \max_i(\hat\Omega_{ii}) \cdot I_p},
-#'   where \eqn{\delta} = \code{ridge}.
+#'   \eqn{\hat\Omega_{reg} = \hat\Omega + \delta \cdot \mathrm{diag}(\hat\Omega_{11}, \ldots, \hat\Omega_{pp})},
+#'   where \eqn{\delta} = \code{ridge}: a ridge on the correlation form, so
+#'   each moment is regularized relative to its own variance and the weight
+#'   matrix is invariant to the units of the data (the moments of orders 1
+#'   to 4 scale as \eqn{\sigma} to \eqn{\sigma^4}).  A moment with a
+#'   non-positive variance gets \eqn{\delta \max_i \hat\Omega_{ii}}.
 #'
 #' @return A \eqn{p \times p} symmetric positive-definite numeric matrix
 #'   \eqn{W = \hat\Omega_{reg}^{-1}}.  Attributes: \code{p} (number of
 #'   moments), \code{T_obs} (sample size), \code{bandwidth} (lag truncation
-#'   used), \code{condition_number} (condition of \eqn{\hat\Omega_{reg}}).
+#'   used), \code{condition_number} (condition number of the correlation
+#'   form of \eqn{\hat\Omega_{reg}}, which does not depend on the units of
+#'   the moments).
 #'
 #' @seealso \code{\link{make_log_posterior_cumulant}}, \code{.cumulant_loglik}
 #' @export
@@ -1987,14 +2232,6 @@ estimate_gmm_weight_matrix <- function(data, dr, model, params, obs_vars,
                                         bandwidth = NULL,
                                         ridge = 1e-6) {
   method <- match.arg(method)
-
-  if (method == "analytic" && any(orders >= 3L)) {
-    stop("method = \"analytic\" with orders >= 3 is not yet implemented: ",
-         "computing the asymptotic covariance of skewness/kurtosis moments ",
-         "requires order-6/8 cumulants which dynhr does not yet have.  ",
-         "Use method = \"newey_west\", or restrict to orders = 1:2 for the ",
-         "analytic path.  For orders 3-4, use method = \"newey_west\" instead.")
-  }
 
   if (method == "analytic") {
     return(.analytic_gmm_weight_matrix(dr, model, params, obs_vars,
@@ -2127,7 +2364,7 @@ estimate_gmm_weight_matrix <- function(data, dr, model, params, obs_vars,
 
   # ---- Warn when p > T (over-identified, rank-deficient regime) ----
   if (p > T_obs) {
-    warning(
+    .dynhr_warn(
       "estimate_gmm_weight_matrix: number of moments (p = ", p, ") exceeds ",
       "sample size (T = ", T_obs, ").  The long-run covariance matrix is ",
       "rank-deficient; the ridge-regularized inverse may be unreliable.  ",
@@ -2157,26 +2394,20 @@ estimate_gmm_weight_matrix <- function(data, dr, model, params, obs_vars,
   # Symmetrize numerically
   Omega_NW <- (Omega_NW + t(Omega_NW)) * 0.5
 
-  # ---- Ridge regularization ----
+  # ---- Ridge regularization (per moment; see .gmm_ridge) ----
   diag_max <- max(diag(Omega_NW))
   if (!is.finite(diag_max) || diag_max <= 0) {
-    # Fall back to a safe diagonal scale if Omega is degenerate
-    diag_max <- 1
-    warning("estimate_gmm_weight_matrix: Omega_NW has non-positive diagonal; ",
+    .dynhr_warn("estimate_gmm_weight_matrix: Omega_NW has non-positive diagonal; ",
             "using ridge = ", ridge, " * I_p.  Check data and model.",
             call. = FALSE)
   }
-  delta_ridge <- ridge * diag_max
-  Omega_reg <- Omega_NW + delta_ridge * diag(p)
+  rg        <- .gmm_ridge(Omega_NW, ridge)
+  Omega_reg <- rg$Omega_reg
+  cond_num  <- rg$cond_num
 
-  # ---- Check condition number and warn if extreme ----
-  cond_num <- tryCatch({
-    ev <- eigen(Omega_reg, only.values = TRUE, symmetric = TRUE)$values
-    max(ev) / min(ev)
-  }, error = function(e) Inf)
-
+  # ---- Warn if the (scale-free) condition number is extreme ----
   if (!is.finite(cond_num) || cond_num > 1e12) {
-    warning(
+    .dynhr_warn(
       "estimate_gmm_weight_matrix: condition number of Omega_reg is ",
       if (is.finite(cond_num)) format(cond_num, scientific = TRUE)
       else "Inf",

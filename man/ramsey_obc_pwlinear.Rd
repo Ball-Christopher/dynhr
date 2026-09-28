@@ -22,20 +22,33 @@ ramsey_obc_pwlinear(
 
 \item{planner_objective}{Character string: the planner objective expression.}
 
-\item{obc_specs}{List of OBC specs from \code{\link{obc_parse_tags}}.}
+\item{obc_specs}{List of OBC specs from \code{\link{obc_parse_tags}}.
+If NULL, the specs come from the model: its MCP tags / complementarity
+conditions and its \code{ramsey_constraints} block (a bound on \code{x}
+is complementary to the Ramsey first-order condition with respect to
+\code{x}, as in \code{\link{ramsey_obc_pf}}).}
 
 \item{params}{Named parameter vector. Defaults to
 \code{model$param_values}.}
 
-\item{method}{Regime search method: \code{"guess_verify"} (OccBin,
-default) or \code{"boehl"} (complementarity iteration).}
+\item{method}{Regime search on the impulse path.  Both run the
+deterministic complementarity iteration of
+\code{\link{boehl_solve_regime_path}} (every period is re-checked at
+every iteration, so a period can bind and later be released):
+\code{"guess_verify"} (default, OccBin) starts from binding exactly the
+periods where the all-slack path violates a bound, \code{"boehl"} starts
+from the all-slack path.}
 
 \item{shock_std}{Standard deviation for the shock used in regime path
 computation (default 1.0, i.e. one-standard-deviation impulse).}
 
 \item{max_iter}{Maximum regime search iterations (default 100).}
 
-\item{tol}{Tolerance for regime convergence (default 1e-6).}
+\item{tol}{Relative round-off band of the regime decisions
+(default 1e-6): passed to \code{\link{boehl_solve_regime_path}}, whose
+bound and multiplier tests are relative to \eqn{|x| + |b|} and to the
+tagged equation's term magnitudes, so the regimes do not depend on the
+units of the model.}
 
 \item{verbose}{Print progress messages.}
 
@@ -45,9 +58,11 @@ computation (default 1.0, i.e. one-standard-deviation impulse).}
 An object of class \code{dynhr_ramsey_obc_pwl} containing:
   \item{ramsey_result}{The underlying \code{dynhr_ramsey_result2} object.}
   \item{dr_slack}{Slack-regime DecisionRules for the augmented system.}
-  \item{dr_bind}{Binding-regime DecisionRules for each unique regime.}
+  \item{dr_bind}{Binding-regime rule of a period in which every spec binds
+    and the next period is slack (the last period of a spell).}
   \item{regime_path}{Integer vector: optimal regime path (bitfield encoding).}
-  \item{irf}{IRF matrix (T x n_aug) under the Ramsey OBC policy.}
+  \item{irf}{n_aug x T matrix of deviations from the Ramsey steady state
+    under the Ramsey OBC policy.}
   \item{meta}{Metadata.}
 }
 \description{
@@ -63,8 +78,14 @@ The algorithm:
   2. Extract the linear system matrices from the augmented compiled model.
   3. For each OBC spec, construct the binding-regime system by replacing
      the constrained equation with the binding constraint.
-  4. Solve the binding-regime system for each candidate regime combination.
-  5. Run the OccBin guess-and-verify (or Boehl complementarity) iteration
-     to find the consistent regime path.
-  6. Return slack and binding decision rules for the augmented system.
+  4. Run the OccBin guess-and-verify iteration of
+     \code{\link{boehl_solve_regime_path}} on the impulse path: each
+     candidate regime path is solved with its time-varying rules (the
+     backward recursion over the regimes ahead) and verified on the
+     constrained path.
+  5. Return slack and binding decision rules for the augmented system.
+
+On a linear-quadratic Ramsey problem the result is the perfect-foresight
+path of \code{\link{ramsey_obc_pf}} (Dynare's \code{lmmcp}), including
+multi-period spells and a bound that binds only because another one does.
 }

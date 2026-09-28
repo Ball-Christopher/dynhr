@@ -9,15 +9,15 @@ hank_emulator_state_space(emu, theta)
 \arguments{
 \item{emu}{A \code{\link{hank_mixture_emulator}}.}
 
-\item{theta}{Named list or length-`d` named numeric in `names(emu$box)`
+\item{theta}{Named list or length-\code{d} named numeric in \code{names(emu$box)}
 order.}
 }
 \value{
-A `dsge_ss` object (see \code{\link{hank_kalman_loglik}}).
+A \code{dsge_ss} object (see \code{\link{hank_kalman_loglik}}).
 }
 \description{
-Interpolates the emulator's stored `Theta` field at `theta` and rebuilds a
-`dsge_ss` state space from it (\code{\link{.hank_emu_mk_ss}}, reproducing
+Interpolates the emulator's stored \code{Theta} field at \code{theta} and rebuilds a
+\code{dsge_ss} state space from it (\code{\link{.hank_emu_mk_ss}}, reproducing
 \code{\link{hank_state_space}}'s single-shock shift-register construction
 EXACTLY).
 }

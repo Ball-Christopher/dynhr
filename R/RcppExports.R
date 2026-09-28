@@ -137,6 +137,22 @@ mcp_sparse_solve_cpp <- function(i_idx, j_idx, x_vals, rhs, n_dim) {
     .Call(`_dynhr_mcp_sparse_solve_cpp`, i_idx, j_idx, x_vals, rhs, n_dim)
 }
 
+mvn_logcdf_cpp <- function(b_in, C_in, abs_tol = 1e-5, rel_tol = 1e-7, start_level = -1L) {
+    .Call(`_dynhr_mvn_logcdf_cpp`, b_in, C_in, abs_tol, rel_tol, start_level)
+}
+
+mvn_logcdf2_cpp <- function(h1, h2, rho) {
+    .Call(`_dynhr_mvn_logcdf2_cpp`, h1, h2, rho)
+}
+
+mvn_logcdf3_cpp <- function(b, C) {
+    .Call(`_dynhr_mvn_logcdf3_cpp`, b, C)
+}
+
+mvn_logcdf_dispatch_cpp <- function(x, S, miwa_qmax) {
+    .Call(`_dynhr_mvn_logcdf_dispatch_cpp`, x, S, miwa_qmax)
+}
+
 ordered_qz_cpp <- function(E, D, critmod = 1.0000010) {
     .Call(`_dynhr_ordered_qz_cpp`, E, D, critmod)
 }

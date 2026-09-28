@@ -49,7 +49,7 @@ A function \code{function(theta)} returning a named list
 \description{
 Constructs a closure that evaluates \eqn{\log p(\theta | Y)} for any
 parameter vector \eqn{\theta}, caching the model structure to avoid
-recompilation on each call.  Call this once before \code{\link{mcmc}},
+recompilation on each call.  Call this once before \code{\link{dynhr_mcmc}},
 \code{\link{smc}}, or \code{\link{nuts}}.
 }
 \examples{
@@ -69,6 +69,6 @@ theta0 <- setNames(priors$mean, priors$name)
 str(log_post(theta0))
 }
 \seealso{
-\code{\link{prior_spec}}, \code{\link{find_mode}}, \code{\link{mcmc}},
+\code{\link{prior_spec}}, \code{\link{find_mode}}, \code{\link{dynhr_mcmc}},
   \code{\link{dm_posterior}} (the pipeline-object equivalent)
 }

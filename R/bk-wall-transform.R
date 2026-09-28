@@ -79,7 +79,7 @@
   if (is.null(pen))
     stop("bk_wall_transform(): model has no dynamic (forward/mixed) block -- ",
          "the Blanchard-Kahn pencil is empty.")
-  ge  <- geigen::geigen(pen$E, pen$D, symmetric = FALSE)
+  ge  <- .bk_ggev(pen$E, pen$D)
   lam <- ge$alpha / ge$beta
   fin <- is.finite(lam) & (abs(ge$beta) > finite_tol * max(abs(ge$alpha), 1))
   if (!any(fin))
@@ -88,7 +88,7 @@
   mods[which.min(abs(mods - 1))] - 1
 }
 
-#' Count of finite generalized eigenvalues within `near_tol` of |lambda| = 1
+#' Count of finite generalized eigenvalues within \code{near_tol} of |lambda| = 1
 #'
 #' Used to fail loud on a NON-SIMPLE crossing: if two or more distinct
 #' eigenvalues sit at (or near) the unit circle simultaneously at the wall
@@ -96,7 +96,7 @@
 #' is a KINK, not a smooth root, and (*) is not a valid smooth map there.
 #' @keywords internal
 .bk_wall_near_wall_count <- function(D, E, near_tol = 1e-4, finite_tol = 1e-9) {
-  ge  <- geigen::geigen(E, D, symmetric = FALSE)
+  ge  <- .bk_ggev(E, D)
   lam <- ge$alpha / ge$beta
   fin <- is.finite(lam) & (abs(ge$beta) > finite_tol * max(abs(ge$alpha), 1))
   if (!any(fin)) return(0L)
@@ -115,8 +115,8 @@
 #' @param other_names Names of the OTHER free parameters \eqn{\theta_{-j}} the wall
 #'   depends on (order matches the vector passed to the returned function).
 #' @param base_params Full named parameter vector (all model parameters,
-#'   including any not being sampled) used as the template; `wall_param` and
-#'   `other_names` entries are overridden per call.
+#'   including any not being sampled) used as the template; \code{wall_param} and
+#'   \code{other_names} entries are overridden per call.
 #' @param bracket length-2 numeric, the theta_j search bracket for uniroot().
 #' @param tol uniroot() tolerance.
 #' @param cache_size Max number of memoized (\eqn{\theta_{-j}}, root) pairs (simple
@@ -250,14 +250,14 @@
 #'
 #' @param model,compiled Parsed \code{dynhr_mod} and its compiled form.
 #' @param prior_spec data.frame (as consumed by
-#'   \code{\link{build_param_transform}}) covering `other_names`'s support.
+#'   \code{\link{build_param_transform}}) covering \code{other_names}'s support.
 #' @param par_names Character vector, the full free-parameter vector order
 #'   (same convention as \code{build_param_transform}).
 #' @param wall_param Single parameter name in \code{par_names}: the
 #'   boundary-relevant coordinate theta_j.
 #' @param bracket length-2 numeric, the theta_j search range for uniroot()
 #'   (must straddle the wall for every \eqn{\theta_{-j}} the sampler will visit;
-#'   widen if `to_unconstrained`/`to_constrained` fail loud on a bracket
+#'   widen if \code{to_unconstrained}/\code{to_constrained} fail loud on a bracket
 #'   error).
 #' @param params Optional named numeric vector of ALL model parameters
 #'   (defaults to \code{model$param_values}) used as the template for

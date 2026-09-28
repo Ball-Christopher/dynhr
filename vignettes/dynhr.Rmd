@@ -23,16 +23,19 @@ knitr::opts_chunk$set(
 Dynare-format `.mod` files, solves the model by first- through
 fifth-order perturbation, runs the Kalman filter and smoother (including
 block-Kalman and OBC PKF variants), and provides a suite of Bayesian
-estimation samplers (RWMH, SMC, SMC², NUTS, DIME, PMMH).  A diagnostic
-battery (D0–D41) helps you evaluate whether the estimated model is
-numerically and economically plausible.
+estimation samplers (RWMH, SMC, SMC², NUTS, HMC, MALA, ChEES, DSMH, DIME,
+PMMH) with an exact posterior gradient.  A diagnostic battery (D0–D41) helps
+you evaluate whether the estimated model is numerically and economically
+plausible.
 
-The package ships with a small corpus of reference models (RBC, three-equation
-New Keynesian, Herbst–Schorfheide 2016, Lubik–Schorfheide 2003, the
-three-equation New Keynesian model `nk_demo` — which also ships its
-own 192-quarter dataset — the `03j` NZ production model, and the
-Caldara et al. 2012 financial-accelerator model) with regression goldens
-produced from Dynare.jl and Octave Dynare 7.0.
+The package ships a small set of reference models in
+`inst/extdata/models/`: a real business cycle model in one- and two-shock
+versions (`rbc.mod`, `rbc2shock.mod`), the three-equation New Keynesian model
+`nk_demo.mod` with its own 200-quarter simulated dataset, two linear New
+Keynesian models with occasionally binding constraints (`nk_2obc.mod`,
+`nk_zlb_dynare.mod`), and Smets–Wouters (2007) with its data, mode and
+Hessian (`sw2007.mod`). `MODELS_SOURCE.md` in the same directory records
+where each file comes from.
 
 ```{r library}
 library(dynhr)
@@ -159,7 +162,8 @@ optional diagnostics — and saves outputs to a directory.
 A model *and* a dataset ship with the package, so this runs from a clean
 install with no data of your own — `nk_demo.mod` is a three-equation New
 Keynesian model (nine estimated parameters) and `nk_demo_data.csv` is
-192 quarters of US output- and price-growth observations:
+200 quarters of output-growth, inflation and interest-rate observations
+simulated from the model itself:
 
 ```{r rfe, results = "hide"}
 mod_file <- system.file("extdata/models/nk_demo.mod", package = "dynhr")
@@ -203,9 +207,10 @@ the usual Gaussian likelihood, following Mutschler (2015).
 
 The stepwise API above asks you to re-thread the same pieces — model,
 compiled model, data, `obs_vars`, prior spec — through every call.
-`dynhr_model()` bundles them once, and the `dm_*()` verbs take that object
-as their first argument and hand back a new one with the step's result
-stored in a slot, so the pipeline pipes:
+`dynhr_model()` bundles them once, as an estimation spec held by the object
+(`dm$spec`, see `dynhr_estimation_spec()`), and the `dm_*()` verbs take that
+object as their first argument and hand back a new one with the step's
+result stored in a slot, so the pipeline pipes:
 
 ```{r dm-object, results = "hide"}
 obs_vars <- c("ygr", "infl", "intr")
@@ -216,23 +221,29 @@ dm <- dynhr_model(system.file("extdata/models/nk_demo.mod", package = "dynhr"),
                   data = Y, obs_vars = obs_vars) |>
   dm_solve() |>
   dm_posterior() |>
-  dm_mode(n_iter = 200L, verbose = FALSE)
+  dm_mode(n_iter = 200L)
 ```
 
 ```{r dm-print}
 dm
-dm$mode$logpost
+dm$mode$mode$logpost
 ```
 
 The verbs are `dm_solve()`, `dm_posterior()`, `dm_mode()`, `dm_sample()`
-(`sampler = "rwmh"`, `"nuts"`, `"smc"` or `"dime"`), `dm_diagnostics()`,
-`dm_irf()` and `dm_forecast()`.  Each one is a pure re-threading of the
-stored fields into the function documented above — `dm_solve()` *is*
-`solve_perturbation()`, `dm_sample()` *is* `mcmc()`/`nuts()`/`smc()`/`dime()`
-— so results are identical to the functional pipeline, and the raw result
-objects (`dm$solution`, `dm$log_post`, `dm$chains`, …) are the same objects
-those functions return.  Nothing runs implicitly: a verb whose prerequisite
-is missing errors and names the step to run first.
+(any sampler of `sampler_spec()`: `"rwmh"`, `"nuts"`, `"smc"`, `"dime"`, …),
+`dm_diagnostics()`, `dm_irf()` and `dm_forecast()`.  The estimation verbs
+are thin layers over the spec runner: `dm_posterior()` builds the objective
+`run_estimation()` uses (a `.mod` `heteroskedastic_shocks`, `filter_tunes`,
+stochastic-volatility block or OBC constraint included), and `dm_mode()` /
+`dm_sample()` run their stage through `run_estimation()` on the held spec —
+with its defaults (several chains and R-hat, the mode stage's proposal
+covariance, `compute$seed`) — so their results equal
+`run_estimation(dynhr_estimation_spec(dm))`. A verb's own arguments
+(`dm_mode(n_iter = 200L)`, `dm_sample(n_draws = 2000L)`) are recorded in the
+returned object's spec, and `update(dm, ...)` edits the spec and clears every
+stored result that depends on the edit.  `dm_solve()`, `dm_irf()` and
+`dm_forecast()` take `at = "params"` (the calibration, the default),
+`"mode"` or `"posterior_mean"`.
 
 ---
 

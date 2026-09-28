@@ -46,7 +46,13 @@ Newton solver for higher accuracy.}
 
 \item{max_iter}{Maximum Newton iterations per regime (default 50; ignored for pwlinear)}
 
-\item{tol}{Newton convergence tolerance on max|R| (default 1e-8; ignored for pwlinear)}
+\item{tol}{Relative Newton convergence tolerance (default 1e-8;
+ignored for pwlinear): the iteration stops when
+every stacked equation's residual is within tol
+times the magnitude of its terms (sum over the terms
+of |dF/dy| |y|, shocks included; plus a round-off
+floor), so the solution does not depend on the units
+of the model (an absolute max|R| < tol before W79)}
 
 \item{max_regime_iter}{Maximum outer regime-switching iterations (default 30)}
 

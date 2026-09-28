@@ -35,7 +35,19 @@ make_log_posterior_cumulant(
 \item{cumulant_orders}{Integer vector: which cumulant orders to match
 (default 1:4, i.e. mean, variance, skewness, kurtosis)}
 
-\item{cumulant_weight}{Weight method: "identity" or "precision"}
+\item{cumulant_weight}{Weight method: "identity" or "precision".
+"identity" is the criterion \code{-T/(2p) * sum(delta^2)} in the units
+of the data: it is a GMM criterion, not a likelihood, and it is not
+unit-free.  The order-k moments carry units \eqn{\sigma^k}, so the
+order-k block scales as \eqn{\sigma^{2k}}; with orders 3-4 and data whose
+standard deviation is a few units, the fourth-cumulant block dominates
+(on a linear model, where the model fourth cumulant is exactly 0, it is
+the squared sample k-statistic, of order \eqn{T \sigma^8 / p}).  For a
+value comparable across orders, models or units (log evidence, model
+tempering), pass \code{weight_matrix} from
+\code{estimate_gmm_weight_matrix(..., method = "analytic")}, under which
+each block contributes about -0.5 times a chi-squared variate with as
+many degrees of freedom as the block has distinct moments.}
 
 \item{weight_matrix}{Optional p × p numeric matrix pre-computed by
 \code{\link{estimate_gmm_weight_matrix}}.  When non-\code{NULL},

@@ -20,6 +20,7 @@ perfect_foresight_solve(
   Y_init = NULL,
   exo_init = NULL,
   exo_terminal = NULL,
+  controlled_paths = compiled$model$controlled_paths,
   verbose = FALSE
 )
 }
@@ -82,6 +83,24 @@ auxiliary variables. Required for a non-constant terminal exogenous path
 A(T)); if NULL, falls back to the last row of \code{exo_path} (= A(T)),
 which mis-states the terminal-period growth rates in such models.}
 
+\item{controlled_paths}{Controlled paths (Dynare 7's
+\code{perfect_foresight_controlled_paths} block, or the
+\code{exogenize}/\code{endogenize} stanzas of a \code{shock_paths}
+block): a data.frame with one row per controlled period and columns
+\code{exogenize} (endogenous variable whose value is imposed),
+\code{endogenize} (exogenous variable solved for instead),
+\code{period} (1..\code{n_periods}) and \code{value} (the imposed level).
+In each listed period the endogenous variable is fixed at \code{value}
+and the shock becomes an unknown of the stacked Newton system, whose
+Jacobian column for that endogenous variable is replaced by the
+derivative with respect to the shock -- the same column swap as Dynare's
+\code{controlled_paths_substitute_stacked_jacobian.m}.  Defaults to the
+parsed model's \code{$controlled_paths} (empty unless the .mod declares
+one); pass \code{NULL} to ignore it.  An entry of \code{exo_path} at an
+endogenized (period, shock) cell is only the Newton starting guess; the
+solved value is returned in \code{$exo_path}.  Not available for OccBin
+(bind/relax) models.}
+
 \item{verbose}{Logical: print convergence progress (default FALSE).}
 }
 \value{
@@ -92,6 +111,11 @@ List with:
   \item{max_res}{Numeric: final max|R_stack|.}
   \item{endo_names}{Character: variable ordering of Y columns.}
   \item{merit_history}{Numeric vector: merit function value per iteration.}
+  \item{exo_path}{T × n_exo exogenous path the solution was computed with:
+    the input \code{exo_path}, with the solved shocks in the endogenized
+    (period, shock) cells when \code{controlled_paths} is used.}
+  \item{controlled_paths}{The validated controlled-paths table (NULL when
+    none was used).}
 }
 \description{
 Solves the T-period deterministic transition path for DSGE models that

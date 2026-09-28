@@ -1,17 +1,20 @@
 ---
-title: "`r params$model_name` -- dynhr Diagnostic Report"
+title: "`r local({ p <- params$meta_rds; if (!is.null(p) && nzchar(p) && file.exists(p)) readRDS(p)$model_name else params$model_name })` -- dynhr Diagnostic Report"
 date: "`r format(Sys.time(), '%Y-%m-%d %H:%M')`"
 params:
   diags_rds:         ""
   irfs_rds:          ""
   llm_txt:           ""
   exec_txt:          ""
+  meta_rds:          ""
+  escape_r:          ""
+  plotutil_r:        ""
   model_name:        "model"
   show_explanations: true
 format:
   typst:
     toc: true
-    toc-depth: 3
+    toc-depth: 2
     section-numbering: 1.1.a
     papersize: a4
     margin:
@@ -22,9 +25,8 @@ format:
     monofont: "JetBrains Mono"
     fontsize: 11pt
     fig-width: 8
-    fig-height: 6.5
+    fig-height: 3.4
     fig-dpi: 200
-    fig-pos: H
     fig-align: center
     out-width: 100%
     default-image-extension: png
@@ -34,14 +36,11 @@ format:
     keep-typ: false
     include-in-header:
       text: |
-        // dynhr Paul-Tol vibrant brand for Typst
-        #let dynhr-blue    = rgb("#0077BB")
-        #let dynhr-teal    = rgb("#009988")
-        #let dynhr-magenta = rgb("#EE3377")
-        #let dynhr-orange  = rgb("#EE7733")
-        #let dynhr-cyan    = rgb("#33BBEE")
-        #let dynhr-red     = rgb("#CC3311")
-        #let dynhr-grey    = rgb("#BBBBBB")
+        // Only the heading colour is static here.  Every level colour (PASS /
+        // WARN / FAIL / ERROR / INFO) is emitted per badge from meta$colours
+        // (dynhr:::.badge_colour()), so the PDF can never drift from the
+        // palette the rest of the package uses.
+        #let dynhr-blue = rgb("#0077BB")
         #set text(font: ("Source Sans 3", "Source Sans Pro", "Segoe UI"), size: 11pt)
         #show heading.where(level: 1): set text(fill: dynhr-blue,  font: ("Source Serif 4", "Source Serif Pro", "Georgia"))
         #show heading.where(level: 2): set text(fill: dynhr-blue,  font: ("Source Serif 4", "Source Serif Pro", "Georgia"))
@@ -57,247 +56,298 @@ execute:
 ```{r setup}
 `%||%` <- function(a, b) if (is.null(a) || (is.character(a) && !nzchar(a))) b else a
 # Track the chunk default so we can restore it after a per-plot override.
-.default_fig_height <- knitr::opts_chunk$get("fig.height") %||% 6.5
+.default_fig_height <- knitr::opts_chunk$get("fig.height") %||% 3.4
+# A single diagnostic plot must not monopolise a page: two figures per page is
+# the target, so per-plot height requests are capped rather than obeyed.
+.max_fig_height <- 9.0   # a page; per-parameter facet plots (68 params -> 74 in requested) get one full page, small plots keep their own height
+
+# Many-panel figures are SPLIT rather than squashed: at NZSIM scale a
+# 68-parameter facet plot capped at .max_fig_height gave 0.75 in per facet row
+# and a 190-level correlation plot 0.05 in per level.  A4 is much tighter than
+# the browser, so these limits are lower than the HTML template's.
+.paginate_max_rows <- 5L    # facet rows per page
+.paginate_max_y    <- 26L   # discrete y levels per page
 diags <- if (nzchar(params$diags_rds %||% "") && file.exists(params$diags_rds)) {
   readRDS(params$diags_rds)
 } else NULL
 irfs  <- if (nzchar(params$irfs_rds  %||% "") && file.exists(params$irfs_rds)) {
   readRDS(params$irfs_rds)
 } else NULL
-model_name        <- params$model_name
+
+# report-meta.rds is the ONLY source of classification, ordering, colour,
+# explanation and provenance information.  This template used to re-derive the
+# badge from $pass / $errored and had no WARN level at all, so a WARN printed
+# as a clean PASS; re-deriving anything here is forbidden.
+meta <- if (nzchar(params$meta_rds %||% "") && file.exists(params$meta_rds))
+  readRDS(params$meta_rds) else NULL
+if (is.null(meta) && !is.null(diags))
+  stop("report-meta.rds was not supplied (params$meta_rds); ",
+       "the template cannot classify diagnostics without it.")
+
+if (nzchar(params$escape_r %||% "") && file.exists(params$escape_r)) {
+  source(params$escape_r)
+}
+if (!exists(".escape_for", inherits = TRUE))
+  stop("escape.R was not supplied (params$escape_r); ",
+       "the template cannot safely interpolate text without .escape_for().")
+
+# .fig_height_for() / .paginate_plot() are spooled the same way, for the same
+# reason.  The template keeps NO copy of the height rule.
+if (nzchar(params$plotutil_r %||% "") && file.exists(params$plotutil_r)) {
+  source(params$plotutil_r)
+}
+if (!exists(".fig_height_for", inherits = TRUE) ||
+    !exists(".paginate_plot", inherits = TRUE))
+  stop("plotutil.R was not supplied (params$plotutil_r); ",
+       "the template cannot size or paginate figures without it.")
+
 show_explanations <- isTRUE(params$show_explanations)
 
-diag_items <- if (!is.null(diags)) {
-  Filter(function(r) inherits(r, "dynhr_diagnostic"), diags)
-} else list()
+.LEVELS  <- c("ERROR", "FAIL", "WARN", "INFO", "PASS")
+.CALLOUT <- c(ERROR = "important", FAIL = "important", WARN = "warning",
+              INFO  = "note",      PASS = "tip")
 
-n_pass <- sum(vapply(diag_items, function(r) isTRUE(r$pass),    logical(1)))
-n_fail <- sum(vapply(diag_items, function(r) identical(r$pass, FALSE), logical(1)))
-n_err  <- sum(vapply(diag_items, function(r) isTRUE(r$errored), logical(1)))
-n_info <- length(diag_items) - n_pass - n_fail - n_err
-
-.badge_txt <- function(pass, errored = FALSE) {
-  if (isTRUE(errored)) "ERROR" else if (is.na(pass)) "INFO" else if (pass) "PASS" else "FAIL"
+diag_items <- if (!is.null(diags))
+  Filter(function(r) inherits(r, "dynhr_diagnostic"), diags) else list()
+if (length(diag_items) > 0L) {
+  ord <- meta$order[meta$order %in% names(diag_items)]
+  ord <- c(ord, setdiff(names(diag_items), ord))
+  diag_items <- diag_items[ord]
 }
-.callout_type <- function(pass, errored = FALSE) {
-  if (isTRUE(errored)) "danger" else if (is.na(pass)) "note" else if (pass) "tip" else "warning"
-}
+diag_badges <- if (length(diag_items) > 0L)
+  meta$badges[names(diag_items)] else character(0)
+counts <- if (is.null(meta)) stats::setNames(integer(length(.LEVELS)), .LEVELS) else
+  meta$counts
 
-# Escape characters that Pandoc / Typst treat specially in markdown text:
-#  '@'  -> Pandoc treats `@key` as a citation, which Typst turns into a cite()
-#          that fails when there is no bibliography.
-#  '<', '>'  -> Typst syntax characters; safer to escape.
-.pdf_safe <- function(x) {
-  if (is.null(x)) return("")
-  x <- as.character(x)
-  x <- gsub("@", "\\@", x, fixed = TRUE)
-  x <- gsub("<", "\\<", x, fixed = TRUE)
-  x <- gsub(">", "\\>", x, fixed = TRUE)
-  x
+.colour <- function(level) {
+  cc <- meta$colours[[level]]
+  if (is.null(cc) || is.na(cc)) "#BBBBBB" else cc
 }
 
-# Flatten multi-line summary text into a single paragraph (safe inside a
-# markdown table cell or callout title).  Replaces \n with " - ".
-.pdf_inline <- function(x) {
-  if (is.null(x)) return("")
-  x <- as.character(x)
-  x <- gsub("\r\n", "\n", x, fixed = TRUE)
-  x <- gsub("\n+", " | ", x)
-  .pdf_safe(x)
+# .diag_meta_for() falls back to the diagnostic's own name when a diagnostic
+# has no .DIAG_META row; don't print the name twice in that case.
+.disp_id <- function(nm) {
+  did <- meta$disp_id[[nm]] %||% ""
+  if (identical(did, nm)) "" else did
 }
 
-.diag_info <- list(
-  expectations = list(what = "User-declared quantitative expectations (data means/SDs, parameter ranges, IRF signs).",
-                      look = "All PASS expected. Failures suggest data/prior inconsistency.",
-                      ref  = "User-defined; ?diag_expectations."),
-  d1  = list(what = "Local identification (Iskrev 2010): rank of Jacobian of moments w.r.t. parameters.",
-             look = "Rank deficiency lists weak parameters; add moments or reparameterise.",
-             ref  = "Iskrev (2010); Komunjer & Ng (2011)."),
-  d3  = list(what = "Morris elementary-effects sensitivity screening on moments.",
-             look = "Parameters with mu* near zero are insensitive and likely unidentified.",
-             ref  = "Morris (1991); Saltelli et al. (2008)."),
-  d4  = list(what = "Prior predictive: data moments inside the 95% prior-predictive interval.",
-             look = "Failure -> tighten/widen relevant priors.",
-             ref  = "Gelman, Meng & Stern (1996)."),
-  d5  = list(what = "MCMC convergence: rank-normalised R-hat, Bulk/Tail-ESS, trace, ACF.",
-             look = "R-hat < 1.01, Bulk-ESS > 1000, Tail-ESS > 400, BFMI > 0.3, no divergences.",
-             ref  = "Vehtari et al. (2021); Gelman & Rubin (1992)."),
-  d6  = list(what = "Prior-posterior overlap per estimated parameter.",
-             look = "Overlap < 0.80 means data is informative.",
-             ref  = "Geweke (1992)."),
-  d7  = list(what = "Mode-finding robustness across optimisation starts.",
-             look = "One basin = robust; multiple basins = possible multimodality.",
-             ref  = "Gelman & Rubin (1992)."),
-  d8  = list(what = "IRF plausibility against @dynhr:benchmarks sign and magnitude rules.",
-             look = "Failed sign often indicates mis-specified Taylor rule or shock calibration.",
-             ref  = "Christiano, Eichenbaum & Evans (1999)."),
-  d9  = list(what = "Moment matching: model vs data standard deviations.",
-             look = "SD ratio in [0.5, 2.0] acceptable.",
-             ref  = "Schorfheide (2000); Smets & Wouters (2007)."),
-  d10 = list(what = "Variance decomposition of forecast error.",
-             look = "Concentration in one shock may signal misspecification.",
-             ref  = "Sims (1980); Kamber, Morley & Wong (2018)."),
-  d11 = list(what = "Historical decomposition from Kalman smoother.",
-             look = "Plausibility check of shock contributions to historical episodes.",
-             ref  = "Banbura, Giannone & Reichlin (2010)."),
-  d12 = list(what = "Smoothed shocks: Ljung-Box and normality.",
-             look = "Serial correlation indicates a missing persistent component.",
-             ref  = "Ljung & Box (1978)."),
-  d13 = list(what = "Cross-equation restrictions: DSGE-implied VAR (Yule-Walker) vs unrestricted OLS VAR.",
-             look = "Frobenius rel. diff < 0.5 + Wald p > 0.05 = restrictions supported.",
-             ref  = "Del Negro & Schorfheide (2004, 2009) JBES."),
-  d14 = list(what = "Bayes factor model comparison (log marginal likelihoods).",
-             look = "log10 BF > 2 decisive; 1-2 strong; 0.5-1 substantial.",
-             ref  = "Kass & Raftery (1995); Jeffreys (1961)."),
-  d15 = list(what = "DSGE-VAR (Del Negro-Schorfheide): DSGE-prior-weighted VAR with hyperparameter lambda.",
-             look = "lambda* > 2 = DSGE restrictions supported; lambda* < 0.5 = rejected.",
-             ref  = "Del Negro & Schorfheide (2006) JBES."),
-  d16 = list(what = "Subsample stability: full vs subsample CrIs.",
-             look = "Non-overlap suggests structural breaks.",
-             ref  = "Lubik & Schorfheide (2004)."),
-  d17 = list(what = "Narrative identification: @dynhr:narratives sign/magnitude on smoothed shocks.",
-             look = "PASS = consistent; FAIL = contradicts narrative.",
-             ref  = "Antolin-Diaz & Rubio-Ramirez (2018).")
-)
+# Colour-coded level badge as raw Typst, so the level's own colour (and not
+# the callout type's generic one) is what the reader sees.
+.typst_badge <- function(level) {
+  sprintf('`#text(fill: rgb("%s"), weight: "bold")[%s]`{=typst}',
+          .colour(level), level)
+}
 
-.get_info <- function(nm) {
-  key <- tolower(nm); if (!is.null(.diag_info[[key]])) return(.diag_info[[key]])
-  base <- sub("_.*$", "", key); if (!is.null(.diag_info[[base]])) return(.diag_info[[base]])
-  NULL
+.render_summary_block <- function(summary_text) {
+  if (is.null(summary_text) || !nzchar(summary_text)) return("")
+  lines <- strsplit(summary_text, "\n", fixed = TRUE)[[1]]
+  lines <- lines[nzchar(lines)]
+  if (length(lines) <= 1L) return(.escape_for(summary_text, "typst"))
+  paste(paste0("- ", .escape_for(lines, "typst")), collapse = "\n")
+}
+
+# Plots are written out explicitly rather than print()ed inside the chunk:
+# knitr snapshots the figure options at chunk start, so a mid-chunk
+# opts_chunk$set() cannot give each plot in a loop its own height or caption.
+# Writing the PNG here is also what caps the height (C5 -- a 7.5in request
+# used to leave ~60% of every page blank).
+.FIG_DIR <- "report-figs"
+dir.create(.FIG_DIR, showWarnings = FALSE)
+
+.print_plot <- function(p, nm = NULL, pnm = NULL) {
+  if (!inherits(p, "gg")) return(invisible(NULL))
+  ## Split a many-panel / many-level figure first; a plot that cannot be
+  ## split comes back as a one-element list holding p itself.
+  pages <- .paginate_plot(p, max_rows = .paginate_max_rows,
+                          max_y = .paginate_max_y,
+                          default = .default_fig_height,
+                          maximum = .max_fig_height)
+  np <- length(pages)
+  for (k in seq_len(np)) {
+    pk  <- pages[[k]]
+    h   <- attr(pk, "dynhr_fig_height", exact = TRUE)
+    h   <- if (!is.null(h) && is.finite(h)) as.numeric(h) else
+      .fig_height_for(pk, .default_fig_height, .max_fig_height)
+    ## Per-parameter facet plots scale their requested height with the number
+    ## of estimated parameters (a 68-parameter model asked for 74 in) and a
+    ## single figure must not overrun the page.  Cap at .max_fig_height: a
+    ## plot that needs more than that is still delivered, just denser.
+    h   <- min(h, .max_fig_height)
+    ttl <- pk$labels$title %||% (pnm %||% "diagnostic plot")
+    cap <- if (is.null(nm)) ttl else sprintf("%s -- %s", nm, ttl)
+    key <- gsub("[^A-Za-z0-9]+", "-", paste(c(nm, pnm, ttl), collapse = "-"))
+    ## The page index is part of the file key: without it every page of a
+    ## split figure would overwrite the previous page's PNG.
+    key <- paste0(substr(key, 1L, 80L), if (np > 1L) sprintf("-p%02d", k) else "")
+    f   <- file.path(.FIG_DIR, paste0(key, ".png"))
+    ggplot2::ggsave(f, pk, width = 8, height = h, dpi = 200, units = "in",
+                    limitsize = FALSE)
+    cat(sprintf('\n\n![%s](%s){fig-alt="%s" width=100%%}\n\n',
+                .escape_for(cap, "typst"), f,
+                gsub('"', "'", cap, fixed = TRUE)))
+  }
+  invisible(NULL)
+}
+
+# Methodology text comes from meta$explanations; the template carries no second
+# copy of any threshold.
+.explanation_block <- function(nm) {
+  if (!show_explanations) return(invisible(NULL))
+  info <- meta$explanations[[nm]]
+  if (is.null(info)) return(invisible(NULL))
+  cat(sprintf("**What:** %s\n\n", .escape_for(info$what %||% "", "typst")))
+  cat(sprintf("**What to look for:** %s\n\n",
+              .escape_for(info$look_for %||% "", "typst")))
+  cat(sprintf("*Reference:* %s\n\n",
+              .escape_for(info$citation %||% "", "typst")))
+  invisible(NULL)
+}
+
+.diag_block <- function(nm) {
+  r     <- diag_items[[nm]]
+  level <- unname(diag_badges[[nm]])
+  did   <- .disp_id(nm)
+  cat(sprintf("\n## %s%s -- %s\n\n", .escape_for(nm, "typst"),
+              if (nzchar(did)) paste0(" -- ", .escape_for(did, "typst")) else "",
+              level))
+  cat(sprintf("::: {.callout-%s}\n%s\n\n", .CALLOUT[[level]], .typst_badge(level)))
+  cat(.render_summary_block(r$summary %||% ""), "\n\n", sep = "")
+  act <- meta$actions[[nm]] %||% ""
+  if (nzchar(act))
+    cat(sprintf("**Action:** %s\n\n", .escape_for(act, "typst")))
+  .explanation_block(nm)
+  cat(":::\n\n")
+  for (pnm in names(r$plots)) .print_plot(r$plots[[pnm]], nm, pnm)
+  invisible(NULL)
 }
 ```
 
-## Executive Summary
+# Executive Summary
 
 ```{r exec-summary}
 #| results: asis
-# Prefer the pre-rendered executive summary (written by write_report()), so we
-# don't depend on dynhr being installed in the Quarto subprocess.
-exec_lines <- NULL
-if (nzchar(params$exec_txt %||% "") && file.exists(params$exec_txt)) {
-  exec_lines <- readLines(params$exec_txt, warn = FALSE)
-} else if (!is.null(diags) &&
-           requireNamespace("dynhr", quietly = TRUE) &&
-           exists("format_executive_summary",
-                  where = asNamespace("dynhr"), inherits = FALSE)) {
-  exec_lines <- dynhr:::format_executive_summary(diags,
-                  model_name = model_name, unicode = FALSE)
-}
+# Pre-rendered by write_report(); a fenced code block keeps the scorecard's
+# fixed-width alignment and needs no escaping.
+exec_lines <- if (nzchar(params$exec_txt %||% "") && file.exists(params$exec_txt))
+  readLines(params$exec_txt, warn = FALSE) else NULL
 if (!is.null(exec_lines)) {
-  # Fenced code block -> monospace in Typst, preserving the scorecard's
-  # fixed-width column alignment.
-  cat("```\n")
+  cat("````\n")
   cat(paste(exec_lines, collapse = "\n"))
-  cat("\n```\n")
+  cat("\n````\n")
 } else {
   cat("> No diagnostic suite loaded (diags_rds not supplied).\n")
 }
 ```
 
-## Summary
+# Provenance
 
-`r sprintf("**%d PASS  |  %d FAIL  |  %d ERROR  |  %d INFO**  --  %d diagnostics", n_pass, n_fail, n_err, n_info, length(diag_items))`
-
-```{r summary-table}
+```{r provenance}
 #| results: asis
+# A diagnostic report is a claim about a specific model, at a specific commit,
+# against specific data: state that before 30 pages of plots, not after.
+prov_labels <- c(dynhr_version = "dynhr version", git_commit = "Git commit",
+                 model_name = "Model", model_file = "Model file",
+                 n_obs = "Observations", obs_vars = "Observables",
+                 data_hash = "Data hash", sample_span = "Sample span",
+                 seed = "Seed", sampler = "Sampler", n_draws = "Draws",
+                 n_warmup = "Warmup", n_chains = "Chains",
+                 rendered_at = "Rendered at")
+prov <- meta$provenance %||% list()
+cat("| Item | Value |\n|:-----|:------|\n")
+for (k in names(prov_labels)) {
+  v <- prov[[k]]
+  txt <- if (is.null(v) || length(v) == 0L || all(is.na(v)))
+    "not recorded" else paste(as.character(v), collapse = ", ")
+  cat(sprintf("| %s | %s |\n", .escape_for(prov_labels[[k]], "md_table"),
+              .escape_for(txt, "md_table")))
+}
+cat("\n")
+```
+
+# Summary
+
+```{r summary-line}
+#| results: asis
+cat(sprintf("**%d PASS | %d WARN | %d FAIL | %d ERROR | %d INFO** -- %d diagnostics\n\n",
+            counts[["PASS"]], counts[["WARN"]], counts[["FAIL"]],
+            counts[["ERROR"]], counts[["INFO"]], length(diag_items)))
+cat(.escape_for(meta$legend %||% "", "typst"), "\n\n", sep = "")
 if (length(diag_items) > 0) {
-  rows <- lapply(seq_along(diag_items), function(i) {
-    nm <- names(diag_items)[i]
-    r  <- diag_items[[i]]
-    s  <- .pdf_inline(r$summary %||% "")
-    if (nchar(s) > 110) s <- paste0(substr(s, 1, 107), "...")
-    sprintf("| `%s` | %s | %s |",
-            .pdf_safe(nm), .badge_txt(r$pass, errored = isTRUE(r$errored)), s)
-  })
   cat("| ID | Status | Summary |\n")
   cat("|:---|:------:|:--------|\n")
-  cat(paste(unlist(rows), collapse = "\n"), "\n\n", sep = "")
+  for (nm in names(diag_items)) {
+    r <- diag_items[[nm]]
+    # Escape FIRST (which also flattens newlines to "; "), then truncate, so a
+    # cut can never split an escape sequence or re-open a pipe.
+    s <- .escape_for(r$summary %||% "", "md_table")
+    if (nchar(s) > 110) s <- paste0(substr(s, 1, 107), "...")
+    cat(sprintf("| `%s` | %s | %s |\n", .escape_for(nm, "md_table"),
+                unname(diag_badges[[nm]]), s))
+  }
+  cat("\n")
 }
 ```
 
-## Diagnostic details
-
-```{r details}
+```{r diag-sections}
 #| results: asis
-render_summary_block <- function(summary_text) {
-  # Render multi-line $summary as a bullet list so each line stays separate
-  # and the callout block doesn't get broken by Pandoc folding paragraphs.
-  if (is.null(summary_text) || !nzchar(summary_text)) return("")
-  lines <- strsplit(summary_text, "\n", fixed = TRUE)[[1]]
-  lines <- lines[nzchar(lines)]
-  if (length(lines) <= 1L) {
-    return(.pdf_safe(summary_text))
+# Same severity sections as the HTML report, so the two formats read against
+# each other: ERROR (did not run) before FAIL (ran and failed), PASS last.
+present <- .LEVELS[vapply(.LEVELS, function(lv) any(diag_badges == lv), logical(1))]
+if (length(present) == 0L) {
+  cat("\n# Diagnostic details\n\n*No diagnostics to report.*\n\n")
+} else {
+  for (lv in present) {
+    cat(sprintf("\n# %s (%d)\n\n", lv, sum(diag_badges == lv)))
+    for (nm in names(diag_items)[diag_badges == lv]) .diag_block(nm)
   }
-  paste(paste0("- ", .pdf_safe(lines)), collapse = "\n")
-}
-
-for (nm in names(diag_items)) {
-  r     <- diag_items[[nm]]
-  ctype <- .callout_type(r$pass, errored = isTRUE(r$errored))
-  badge <- .badge_txt(r$pass, errored = isTRUE(r$errored))
-  cat(sprintf('\n::: {.callout-%s}\n## %s -- %s\n\n',
-              ctype, .pdf_safe(nm), badge))
-  cat(render_summary_block(r$summary %||% ""), "\n\n", sep = "")
-  if (show_explanations) {
-    info <- .get_info(nm)
-    if (!is.null(info)) {
-      cat(sprintf("**What:** %s\n\n",            .pdf_safe(info$what)))
-      cat(sprintf("**What to look for:** %s\n\n", .pdf_safe(info$look)))
-      cat(sprintf("*Reference:* %s\n\n",          .pdf_safe(info$ref)))
-    }
-  }
-  cat(":::\n\n")
-  for (pnm in names(r$plots)) {
-    p <- r$plots[[pnm]]
-    if (inherits(p, "gg")) {
-      h <- attr(p, "dynhr_fig_height", exact = TRUE)
-      if (!is.null(h) && is.finite(h)) {
-        knitr::opts_chunk$set(fig.height = as.numeric(h))
-      } else {
-        knitr::opts_chunk$set(fig.height = .default_fig_height)
-      }
-      print(p)
-      cat("\n\n")
-    }
-  }
-  knitr::opts_chunk$set(fig.height = .default_fig_height)
 }
 ```
 
-## Impulse responses
+# Impulse responses
 
 ```{r irfs-static}
 #| results: asis
 if (is.null(irfs) || length(irfs) == 0L) {
   cat("\n*No IRFs were supplied to `write_report()`.*\n\n")
 } else {
+  horizons <- vapply(irfs, function(p) {
+    d <- if (inherits(p, "gg")) p$data else NULL
+    if (is.null(d) || is.null(d$horizon)) NA_integer_ else as.integer(max(d$horizon))
+  }, integer(1))
+  cat(sprintf("Units: %s\n\n", .escape_for(meta$irf_units %||% "", "typst")))
+  if (length(unique(horizons[!is.na(horizons)])) > 1L)
+    cat(sprintf("Horizons differ across shocks (%s periods); the x-ranges below are not comparable.\n\n",
+                .escape_for(paste(sort(unique(horizons[!is.na(horizons)])),
+                                  collapse = ", "), "typst")))
   for (shock_nm in names(irfs)) {
-    cat(sprintf("\n### Shock: %s\n\n", .pdf_safe(shock_nm)))
+    cat(sprintf("\n## Shock: %s\n\n", .escape_for(shock_nm, "typst")))
     p <- irfs[[shock_nm]]
     if (!inherits(p, "gg")) next
-    h <- attr(p, "dynhr_fig_height", exact = TRUE)
-    if (!is.null(h) && is.finite(h)) {
-      knitr::opts_chunk$set(fig.height = as.numeric(h))
-    }
-    print(p)
-    knitr::opts_chunk$set(fig.height = .default_fig_height)
-    cat("\n\n")
+    # The section heading already names the shock: drop the duplicated plot
+    # title, keeping it as the figure caption.
+    ttl <- p$labels$title %||% shock_nm
+    p2  <- p + ggplot2::labs(title = NULL)
+    attr(p2, "dynhr_fig_height") <- attr(p, "dynhr_fig_height", exact = TRUE)
+    .print_plot(p2, NULL, ttl)
   }
 }
 ```
 
-## LLM-readable summary
+# LLM-readable summary
 
 ```{r llm-block}
 #| results: asis
 if (nzchar(params$llm_txt %||% "") && file.exists(params$llm_txt)) {
-  cat("```\n")
+  cat("````\n")
   cat(paste(readLines(params$llm_txt, warn = FALSE), collapse = "\n"))
-  cat("\n```\n")
+  cat("\n````\n")
 }
 ```
 
-## Session info
+# Render environment
+
+This is the environment the *report* was rendered in (a separate Quarto R
+subprocess). The environment the *diagnostics* ran in is in Provenance above.
 
 ```{r session}
 sessionInfo()

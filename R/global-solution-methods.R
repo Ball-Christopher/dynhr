@@ -107,7 +107,7 @@ predict.GlobalSolution <- function(object, newdata, ...) {
 #' @export
 simulate.GlobalSolution <- function(object, nsim = 100L, seed = NULL,
                                     init_state = NULL, ...) {
-  if (!is.null(seed)) set.seed(seed)
+  .local_seed(seed)  # as stats::simulate(): caller's RNG stream restored on exit (C1)
 
   state_names <- object$state_names
   endo        <- object$all_endo_names
@@ -448,7 +448,7 @@ euler_errors <- function(x, ...) UseMethod("euler_errors")
 
   for (j in seq_len(n_pts)) {
     state_lag <- setNames(grid_nat[j, sn], sn)
-    y_t <- tryCatch(pol$y_at(state_lag, zero_e), error = function(e) NULL)
+    y_t <- tryCatch(pol$y_at(state_lag, zero_e), error = function(e) .dynhr_reraise_bug(e, NULL))
     if (is.null(y_t) || anyNA(y_t) || !all(is.finite(y_t))) next
     nl <- pol$next_lag(y_t)
 
@@ -458,16 +458,16 @@ euler_errors <- function(x, ...) UseMethod("euler_errors")
     ok    <- TRUE
     for (ki in seq_len(n_combo)) {
       eps_next <- setNames(quad$nodes[ki, ], exo)
-      y_lead <- tryCatch(pol$y_at(nl, eps_next), error = function(e) NULL)
+      y_lead <- tryCatch(pol$y_at(nl, eps_next), error = function(e) .dynhr_reraise_bug(e, NULL))
       if (is.null(y_lead) || !all(is.finite(y_lead))) { ok <- FALSE; break }
       dy   <- .acc_assemble_dy(map, state_lag, y_t, y_lead, zero_e)
       resk <- tryCatch(dyn$residuals_fn(dy, params, ssv),
-                       error = function(e) NULL)
+                       error = function(e) .dynhr_reraise_bug(e, NULL))
       if (is.null(resk) || !all(is.finite(resk))) { ok <- FALSE; break }
       acc_r <- acc_r + quad$weights[ki] * resk
       if (!is.na(nu_col)) {
         Jk <- tryCatch(dyn$jacobian_fn(dy, params, ssv),
-                       error = function(e) NULL)
+                       error = function(e) .dynhr_reraise_bug(e, NULL))
         if (is.null(Jk) || !all(is.finite(Jk))) { ok <- FALSE; break }
         acc_j <- acc_j + quad$weights[ki] * Jk[, nu_col]
         acc_m <- acc_m + quad$weights[ki] *
@@ -566,7 +566,7 @@ euler_errors <- function(x, ...) UseMethod("euler_errors")
     v  <- if (nm %in% names(ss_vals)) ss_vals[[nm]] else 0
     dy[k] <- v + 1e-3 * (1 + abs(v))
   }
-  J <- tryCatch(dyn$jacobian_fn(dy, params, ss_vals), error = function(e) NULL)
+  J <- tryCatch(dyn$jacobian_fn(dy, params, ss_vals), error = function(e) .dynhr_reraise_bug(e, NULL))
   if (is.null(J)) return(rep(TRUE, map$n_eq))
   rowSums(abs(J[, map$p1$col, drop = FALSE]) > 0) > 0
 }

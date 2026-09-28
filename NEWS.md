@@ -1,3 +1,922 @@
+# dynhr 0.9.4
+
+This is a large correctness, performance and API release, following a full
+package review. It consolidates development versions 0.9.3.8 to 0.9.3.139.
+The dev version of each change is given in parentheses. The per-version
+notes for 0.9.3.34 onwards are archived in the development repository as
+`dev/NEWS-0.9.3-dev.md` (not shipped with the package); 0.9.3.8 to 0.9.3.33
+(the messaging layer, the diagnostics refresh and the report fixes) had no
+per-version notes and are summarised here from the commit history.
+
+Many fixes change results: likelihoods, gradients, samplers, proposals, OBC
+paths, priors, moments and diagnostics. **Estimates made with 0.9.3.7 or
+earlier should be re-run**, and in particular anything using PSKF, OBC
+filters, structural Markov switching, the Whittle likelihood, the analytic
+gradient, bounded `estimated_params` rows, or estimated `corr` / `skew`
+rows. The machine-readable list is the result-change
+registry, `dynhr:::.dynhr_result_changes`: each row gives the version and
+the components it touches. Estimation results now carry a run record, and
+`dynhr_verify()` / `dynhr_rerun()` name the registered changes that separate
+a result from the installed build (see *New features*).
+
+The release carries breaking API changes; read the first section before
+upgrading.
+
+## Breaking changes
+
+### Messages, warnings and progress output (0.9.3.8-0.9.3.12)
+
+- **Progress output is now on the message stream, not stdout.** 587 `cat()`
+  calls that printed progress inside computations (the `verbose = TRUE`
+  text of `solve_model()`, the samplers, ...) now emit messages, so
+  **`capture.output()` / `sink()` no longer capture them**; use
+  `capture.output(type = "message")`, `suppressMessages()` or the verbosity
+  level. Objects printing themselves (`print` / `summary` / `format`
+  methods, and report printers such as `verify_steady_state()` and
+  `hmc_summary()`) still write to stdout (0.9.3.9, 0.9.3.10). The moments
+  tables of `stoch_simul(verbose = TRUE)` are now one message (0.9.3.12),
+  and `profile_ci()` prints one line per grid point instead of a dot
+  (0.9.3.11).
+- **Warnings and messages are classed conditions** (`dynhr_warning`,
+  `dynhr_message`, `dynhr_error`, plus a subclass where given). They are
+  base R conditions, so `suppressWarnings()`, `tryCatch()` and
+  `expect_warning()` work as before, and message text is unchanged
+  (0.9.3.8).
+- **One verbosity level:** `dynhr_set_verbosity()` / `dynhr_verbosity()`,
+  one of `"silent"`, `"error"`, `"warn"`, `"info"` (default) or `"debug"`.
+  The default keeps everything that printed before; `"warn"` mutes progress
+  and `"silent"` also drops warnings. Errors are never suppressed. The level
+  can override a per-call `verbose = TRUE`, `verbose = FALSE` still does not
+  silence warnings, and the level reaches mirai daemons (0.9.3.8, 0.9.3.9).
+- **"Warn once" is per run, not per session.** The old latches were never
+  reset, so a second run in one session emitted none of those warnings. Now
+  12 entry points (`run_full_estimation()`, `run_posterior_estimation()`,
+  `run_mode_finding()`, `run_estimation_passport()`, `dynhr_sbc()`,
+  `dynhr_smc2()`, `dynhr_benchmark()`, `dynhr_model()`, `solve_model()`,
+  `method_of_moments()`, `forecast_backtest()`, `conditional_forecast()`)
+  each open a run: a repeated warning is shown once per run, and the run
+  reports how many repeats it suppressed when it ends (0.9.3.8).
+
+### Renamed or removed
+
+- **`mcmc()` is now `dynhr_mcmc()`** (it masked `coda::mcmc`), and **`tune()`
+  is now `filter_tune()`** (it masked `e1071::tune` and the tidymodels `tune`
+  package). There are no aliases; the `"mcmc"` class is unchanged (0.9.3.75).
+- **`dm_test()` is now `diebold_mariano_test()`**, class
+  `dynhr_diebold_mariano_test`. No alias (0.9.3.129).
+- **`hank_filter_shocks()` takes `me_variance`** instead of `me_sd`
+  (0.9.3.58).
+- **`boehl_spell_trajectory()` is removed** and `obc_simulate()` has a new
+  signature (0.9.3.92).
+- **`obc_guess_verify()` loses its observation pre-pass and `obs_tol`**;
+  `regime_path_init` now only seeds period 1, and the OBC filters gain
+  `horizon = 200` (0.9.3.93).
+- **D30 drops its `"JuliaCall"` backend**: `run_all_diagnostics(d30_backend
+  =)` takes `"auto"`, `"Rmpfr"` or `"base"` (0.9.3.19).
+
+### The `dynhr_model` / `dm_*` redesign (0.9.3.129)
+
+- A `dynhr_model` now holds a `dynhr_estimation_spec` (`dm$spec`). Its fields
+  (`dm$model`, `dm$data`, `dm$obs_vars`, `dm$priors`, ...) are read-only
+  through `$` / `[[`; edit them with `update(dm, ...)`, which also clears
+  every dependent cached result.
+- `dm_mode()` and `dm_sample()` run their stage through `run_estimation()`,
+  so the spec defaults apply (4 chains, 10000 / 5000 draws). `$mode` is a
+  `dynhr_mode_result` (log posterior at `$mode$mode$logpost`) and a new `$fit`
+  slot holds the posterior result. `dm_sample()` loses `theta0`, and unknown
+  `...` names are an error. Neither verb needs `dm_posterior()` first.
+- `dm_posterior()` builds the spec runner's objective, so the `.mod`'s
+  heteroskedastic_shocks / filter_tunes / stochastic-volatility / OBC blocks
+  are now applied (they were ignored).
+
+### Priors and `.mod` semantics
+
+- **Uniform priors follow Dynare:** `uniform_pdf, P1, P2` is now **mean and
+  standard deviation** (support P1 +/- sqrt(3) P2), not the bounds. Write
+  bounds as `NAME, uniform_pdf, , , LB, UB;`. Giving P1/P2 together with
+  P3/P4, giving neither, or a non-positive sd is an error; the silent [0, 1]
+  default is gone. `dynhr_warning_uniform_parameterisation` flags rows that
+  were probably written as bounds (0.9.3.76).
+- **`estimated_params` follows Dynare's rules.** `LB`/`UB` bounds are now
+  honoured (they were ignored). `p3`/`p4` are no longer truncation bounds for
+  every shape: BETA is a generalised beta on `[p3, p4]`, GAMMA and the
+  inverse gammas take `p3` as a shift, NORMAL is truncated, UNIFORM uses
+  `[p3, p4]`. **A short-form row `NAME, SHAPE, p1, p2, lo, hi;` that meant
+  truncation now means a generalised or shifted prior; convert it to the
+  long form `NAME, p1, lo, hi, SHAPE, p1, p2;`** as the bundled models were
+  (0.9.3.39).
+- `INITVAL` / `estimated_params_init` now give `run_mode_finding()`'s default
+  start (0.9.3.39).
+- A shock missing from the shocks block gets zero variance, as in Dynare; it
+  no longer borrows a same-named `sig_`/`stderr_`/`sigma_` parameter
+  (0.9.3.34).
+- Integer `heteroskedastic_shocks` periods are now offset by an integer
+  `first_obs > 1` (0.9.3.56).
+
+### Changed defaults
+
+- **The exact gradient is the default everywhere.** The `grad_method` option
+  defaults to `"auto"` (0.9.3.109) and so does `make_posterior_grad()`'s own
+  formal, `run_nuts_mirai()` and the parallel mode tasks (0.9.3.127): mode
+  finding, the Hessian and SBC change. `dynhr_set_options(grad_method =
+  "hybrid")` restores the old sampler behaviour.
+- **The estimation runners' gradient samplers use the exact gradient by
+  default** (0.9.4). NUTS / HMC / MALA / ChEES in `run_posterior_estimation()`,
+  `run_full_estimation()` and `run_estimation()` default to
+  `analytic_grad = TRUE` (the spec field `sampler_spec(...)$analytic_grad`
+  too); before, they used a finite-difference gradient unless asked. The
+  exact gradient is used wherever the likelihood has one; other likelihoods
+  keep the numerical gradient without a warning (the former
+  `dynhr_warning_spec_analytic_grad_unavailable` is gone). Default-argument
+  draws change; `analytic_grad = FALSE` reproduces the old behaviour. The
+  low-level `nuts()` / `dynhr_nuts()` without `grad_fn` still use finite
+  differences.
+- `dynhr_hmc()` jitters its step size by +/-20% (`step_jitter = 0.2`);
+  `step_jitter = 0` reproduces the old chain (0.9.3.57).
+- PSKF pruning compensation: `offset_miwa_qmax` defaults to 5 (0.9.3.118).
+- `kalman_smoother(method = "auto")` restarts on the univariate recursion
+  when F is singular (0.9.3.66).
+- `me_variance` defaults to `NULL` (the option) in `run_full_estimation()`,
+  `run_mode_finding()` and `dynhr_model()` (0.9.3.111).
+- `run_mode_finding(use_exact_hessian = NULL)` (was `FALSE`, which masked the
+  option) (0.9.3.101).
+- `run_mcmc_mirai()`, `run_nuts_mirai()` and `run_mode_mirai()` take
+  `seed_base = NULL`, resolved from `options(seed_base)` (42 when unset)
+  (0.9.3.114).
+
+### Changed return values
+
+- `dynhr_nuts()$acceptance_rate` is now the mean post-warmup NUTS acceptance
+  statistic; it used to be identically 1 (0.9.3.128).
+- `run_estimation()` and its wrappers skip the mode stage when every sampler is
+  prior-initialised (SMC, DSMH, DIME, SMC²) and nothing needs the mode:
+  `$mode` is then `NULL` (0.9.3.111).
+- `osr()`: `result$loss_weights` is the weight matrix (0.9.3.71).
+- Structural MS: `c_const` is now the steady-state-gap constant k_s, a named
+  length-n_endo vector (0.9.3.90).
+- Run-record hashes carry their algorithm as a prefix (`"sha256:"` /
+  `"md5:"`) (0.9.3.102).
+- Diagnostic results have a WARN level (`pass = TRUE, warn = TRUE`),
+  rendered by every printer and report; several diagnostics' thresholds and
+  badges changed (see *Diagnostics*) (0.9.3.25).
+- `ramsey_policy()`: order-1 unconditional welfare is `NA` with a reason, and
+  `welfare_se` is stored (`n_periods` default 2000) (0.9.3.23).
+
+### Now an error or refused (was silently ignored or wrong)
+
+- **Theta is read by name everywhere (0.9.4).** Every theta-taking closure
+  (`make_log_posterior()` / `make_posterior()` for every likelihood,
+  `make_posterior_grad()` and its fused companion, `make_transformed_logpost()` /
+  `make_transformed_grad()`, `make_loglik_contrib()`) maps theta through one
+  helper: an UNNAMED theta of length `nrow(prior_spec)` is taken in
+  `prior_spec$name` order (as `numDeriv` / `optim` pass it), a named theta in
+  any order maps by name, and a wrong length or names that do not match
+  `prior_spec$name` (including a partial named subset) raise
+  `dynhr_error_theta_names`; a length-0 theta is the explicit "evaluate at the
+  calibrated parameters" call and passes through. Before, an unnamed theta
+  mapped onto nothing -- the closure silently scored the calibrated model with
+  logprior 0 (SW2007: -2383 against -874.6) -- and the gradient closures
+  relabelled a permuted named theta by POSITION, evaluating it at the wrong
+  point. An unnamed `theta_init` to the mode finder now keeps its names and
+  the prior-bound box constraints (they were dropped).
+
+- A `.mod` expression calling anything outside the sandbox allowlist aborts
+  the parse (`dynhr_error_unsafe_mod_expression`) instead of yielding `NA`
+  (0.9.3.24); see *Security*.
+- `.mod` parsing: leftover tokens and unknown characters abort
+  (`dynhr_error_mod_syntax`) instead of truncating the equation (0.9.3.36);
+  undeclared `predetermined_variables` and nested `EXPECTATION` abort
+  (0.9.3.37); `adl()` is an error (0.9.3.72); an unbalanced growth model
+  aborts (`dynhr_error_unbalanced_growth`, stricter than Dynare) (0.9.3.89).
+- Student-t likelihood: `student_df <= 2` aborts; `me_extra`, `shock_scale`,
+  `known_shocks`, `filter_tunes` and heteroskedastic shocks are refused
+  (`dynhr_error_student_t_unsupported`) (0.9.3.35).
+- A trended model (`observation_trends`) is refused by every path except the
+  Gaussian Kalman filter (0.9.3.47).
+- A vector `me_variance` is refused where it is not supported
+  (`dynhr_error_me_variance_vector`) (0.9.3.96).
+- `discretionary_policy()` and the Ramsey / welfare functions error when no
+  discount is found (`dynhr_error_discount_missing`,
+  `dynhr_error_no_discount`); they used a silent 0.99 (0.9.3.38, 0.9.3.82).
+  `osr()` driven by `planner_objective` requires `discount=` (0.9.3.78).
+- `osr()` no longer imposes a hidden [0.1, 10] box, and a unit-root loss
+  variable is penalised instead of counting as zero loss (0.9.3.71).
+- Estimation validation: OBC with the cumulant likelihood, an mcp model with
+  a Kalman-only likelihood, an unknown method, `checkpoint_dir` with SMC, and
+  `resume` without a directory are errors (0.9.3.107); spec `extra` keys that
+  shadow a typed field are refused (`dynhr_error_spec_shadowed_field`)
+  (0.9.3.111).
+- Analytic gradients refuse `lik_init = "kappa"` and singular-F models
+  (`dynhr_error_grad_lik_init`, `dynhr_error_grad_singular_F`);
+  `posterior_hessian()` refuses a non-stationary P0 (0.9.3.115, 0.9.3.117).
+- Resuming a checkpoint with a different target, or across a registered
+  result change, is refused unless `on_mismatch = "warn"` (0.9.3.107,
+  0.9.3.108).
+- Parallel workers running a different build from the session abort
+  (`dynhr_error_worker_version_skew`): **run `R CMD INSTALL` after changing
+  the source, before any parallel run** (0.9.3.41).
+- Programming errors (subscript out of bounds, object not found, ...) are
+  re-raised instead of becoming a silent numerical fallback, and malformed
+  user text (e.g. a `planner_objective` naming an undefined symbol) errors
+  (0.9.3.87, 0.9.3.97-0.9.3.99).
+- **Arguments that used to pass silently through `...` (0.9.4).**
+  `make_log_posterior()` / `make_posterior()` reject a `...` name that no
+  likelihood takes (`dynhr_error_unknown_argument`; `verbose` is accepted
+  and ignored). A name another likelihood takes (e.g. `order = 99L` with the
+  Gaussian likelihood), and `freq_band`, `pruned_order`, `student_df` or
+  `lik_init` set away from their defaults for a likelihood that does not use
+  them, are ignored with a warning (`dynhr_warning_inapplicable_argument`).
+  `run_mode_finding()` forwards its `...` to this constructor, so it rejects
+  the same names. `run_posterior_estimation()` and `run_full_estimation()`
+  reject the retired spellings `nburn` / `ndraws` / `nchains` /
+  `nparticles` / `nwalkers` (and `run_full_estimation()` also `Y`,
+  `obs_names`, `observables`, `me_var`, `me_sd`) with
+  `dynhr_error_retired_argument`, naming the current argument; they used to
+  fail deep inside a sampler with an unclassed "unused argument" (and
+  `me_var` was partial-matched to `me_variance`).
+- `smc(phi_schedule = )` without `approx_loglik_fn` (likelihood tempering)
+  used to be ignored, so the run was adaptive; it is now an alias for
+  `lambda_schedule` (a one-time `dynhr_message_schedule_alias` says so), and
+  giving both with different values is an error
+  (`dynhr_error_schedule_conflict`). `smc_model_tempered()` keeps
+  `phi_schedule` for its bridge stage only (0.9.4).
+- `dynhr_set_options(name = NULL)` un-sets the option. The documented
+  restore idiom `old <- dynhr_set_options(x = v); do.call(dynhr_set_options,
+  old)` returns `NULL` for an option that was unset, and used to STORE that
+  `NULL`, which then shadowed the registered default (e.g. `grad_method`
+  read as `NULL`). The options live in dynhr's own store, not in R's
+  `options()` (`getOption("dynhr.allow_monge_metric")` is always `NULL`);
+  read them with `dynhr_get_options(effective = TRUE)`.
+  `allow_monge_metric` still gates `metric = "monge"` (0.9.4).
+
+### Seeded output changes
+
+Seeded chains differ from 0.9.3.7 even where the target is unchanged: NUTS /
+HMC / ChEES (mass adaptation, 0.9.3.50; initial mass, 0.9.3.131), gradient
+samplers with `analytic_grad = TRUE` (gradient default, 0.9.3.109), HMC (step
+jitter, 0.9.3.57), DSMH (per-chain streams, 0.9.3.86), and parallel chains,
+which now honour `seed` (0.9.3.107).
+
+## Results that change
+
+Sizes are those measured in the dev notes; see the registry for the
+component tags.
+
+### Security
+
+- **Reading a `.mod` file could execute arbitrary R code.** Calibration,
+  initval / histval, shocks, verbatim and `@#define` expressions were
+  evaluated in a `baseenv()` child, so `system()` / `unlink()` in a `.mod`
+  ran at parse time. One allowlist sandbox now covers the parser and D33
+  (0.9.3.24), and also `filter_tunes` / `heteroskedastic_shocks` values,
+  `steady_state_model`, shocks-block expressions and OBC / OccBin / MCP
+  bounds, checked once at parse so MCMC draws pay nothing extra (0.9.3.34).
+
+### Posterior outputs
+
+- **The posterior path reused the calibration / mode decision rule**, so
+  `posterior_irfs()`, `posterior_moments()` and the diagnostics' re-solve
+  saw calibrated dynamics. They now re-solve at the posterior mean
+  (0.9.3.23).
+- **`run_full_estimation(run_diag = TRUE)` crashed after sampling**, every
+  time. It now solves at the posterior mode and passes the solution, priors,
+  observables, IRFs and per-chain draws to `run_all_diagnostics()`
+  (0.9.3.29).
+
+### Kalman filter and initialisation
+
+- **Singular-F test** used an absolute 1e-10 pivot cut, so a
+  well-conditioned F at small scale went univariate: art_zlb_mcp scored
+  1227.49 against the dense 3280.37, and rescaling the data changed the
+  answer. It now follows Dynare 7.1's rcond rule (0.9.3.119). The
+  missing-data, `shock_scale` and `me_extra` branches apply the same rule
+  (they were 249 and 503 nats off) (0.9.3.121).
+- **Steady-state lock and Lyapunov / P0 tolerances are relative** (the
+  absolute lock left 0.66 nat at scale 1e-3) (0.9.3.119, 0.9.3.121).
+- **Exact-diffuse phase ended early at large data scales** (10.1 nats at
+  scale 1e4, 28.8 at 1e6); `lik_init = "auto"` switched a valid singular P0
+  to diffuse / kappa (18 nats) (0.9.3.123).
+- **`method = "dare"` returned -Inf on any missing observation when
+  `me_variance > 0`**, which also hit every `return_ll_contrib = TRUE` call
+  (0.9.3.96).
+- **Student-t filter and `kf_innovation_diagnostics()` dropped `K me K'`**
+  (0.6-1.7 nats at `me_variance = 0.1`) (0.9.3.35).
+- `shock_scale` on a unit-root model gave -Inf; it is now supported through
+  the univariate filter (0.9.3.110).
+- `kalman_smoother()` silently dropped zero-variance components (7.9e-3
+  adding-up residual); `historical_decomposition()`'s coherence checks had a
+  `max(1, .)` floor that hid small-scale incoherence (0.9.3.66, 0.9.3.123).
+- Pruned state space: the augmented covariance is solved block-balanced
+  (1.4e-6 relative at scale 100); the TPF initial-cloud jitter is relative to
+  each state's variance (0.9.3.123).
+- **Conditional forecasts ignored shock correlations** (0.9.3.38).
+
+### Gradients and Hessians
+
+- **Compound-LHS equations broke the analytic solution-derivative
+  gradients** (implicit / adjoint / adjoint_solution, orders 1 and 2):
+  SW2007 `crhoa` -36.9 against 88.97, max relative error 21.8; fs2000 order-2
+  and pruned gradients off by up to 21x (0.9.3.106).
+- **Parameters that only shift an observable's steady state**
+  (`y_obs = y + mu`) returned only their prior score under every
+  `grad_method`: SW2007 `constepinf` -15.97 against -55.28. Gradient mode
+  finding could stall (0.9.3.105).
+- **The old default `hybrid` gradient** missed the 1e-6 exactness gate on
+  every benchmark model (8e-4 to 2.5e-2 relative) and returned 0 instead of
+  236.5 for an NZSIM parameter at its bound. The exact gradient is now the
+  default; fixture modes moved by up to 2.5e-6 in theta and every optimiser
+  reaches the same, slightly higher mode (0.9.3.127).
+- **`posterior_hessian()`'s exact Hessian misplaced its second-order
+  blocks** whenever an estimated stderr preceded a structural parameter:
+  SW2007 13% Frobenius error, 22.7x on the `csigl` diagonal. Affects
+  `use_exact_hessian` proposals and the newrat H0 seed (0.9.3.135).
+- **Gradient and exact Hessian ignored `power_posterior` and system
+  priors** (0.9.3.40); the mode stage's gradient also ignored Whittle
+  `debias` and cumulant orders / weights (0.9.3.111); parallel mode finding
+  and the parallel Step-6 posterior dropped `system_priors` (0.9.3.121,
+  0.9.3.134); the runner's sampler gradients omitted the system prior
+  (0.9.3.139).
+- **`lik_init` did not reach the gradient**: every gradient was the
+  `"auto"` one (d/drho 7.747 against the objective's 9.565 under
+  `"diffuse"`) (0.9.3.115, 0.9.3.117, 0.9.3.119). Hybrid now takes its FD
+  base value from the objective, and the gradient recursions lock where the
+  filter locks (0.9.3.121).
+- **Step-6 proposal Hessian** is the central difference of the exact
+  gradient (fs2000 relative error 4e-6 against 8e-4) (0.9.3.134); at a mode
+  on a prior bound it no longer steps across the bound and hands prior
+  variances to coupled parameters (0.9.3.130).
+- Cumulant orders within 1:2 get an exact gradient (was FD, ~1e-5 relative)
+  (0.9.3.115); the shock-covariance derivative is exact (FD-noise-level
+  change) (0.9.3.136, 0.9.3.137).
+- `dynhr_set_options(use_exact_hessian = TRUE)` was never honoured
+  (0.9.3.101).
+
+### Samplers and proposals
+
+- **The default diagonal mass adaptation in NUTS, HMC and ChEES was
+  inverted**, squaring the target's conditioning: on a 10-d correlated
+  Gaussian the posterior means were 19 MCSE off and the covariance 48% off
+  (0.9.3.50).
+- **Theta/eta errors under `transform_params`:** the serial NUTS / ChEES
+  initial mass was off by d^4 (~1e8) (0.9.3.131); the dense `"hessian"`
+  metric was off by d_i d_j (~1e3), the CPM path walked in the wrong space,
+  and parallel NUTS applied the eta chain rule twice (0.9.3.132); parallel
+  NUTS started from a different metric than serial, and the `whittle_fim`
+  fallback was always diagonal (0.9.3.133).
+- **At a mode on a prior bound, RWMH froze** (acceptance 0) because the
+  delta-method proposal was ~1e6 too wide; samplers now use the bound-aware
+  `$Sigma_prop_eta` (acceptance 0.33) (0.9.3.131).
+- **SMC sampled a different posterior**: it ignored `power_posterior`,
+  dropped system priors in the pruned / PSKF / Student-t factories, and drew
+  bounded betas from a different law (sd 0.173 against 0.158) (0.9.3.39,
+  0.9.3.42). THAMES paired draws with the wrong particle and ignored
+  ellipsoid mass outside the support (~+0.05 nats per boundary parameter),
+  and model-tempered SMC gave Inf / NaN on infeasible M0 particles
+  (0.9.3.42).
+- **Parallel chains ignored `seed`** (seeds 31 and 99 gave identical draws),
+  and `run_full_estimation()` ignored `transform_params`, `rwmh_*`,
+  `proposal_cov_method` and `use_exact_hessian` (0.9.3.107).
+- **`dm_*`:** the default RWMH chain was frozen (acceptance 0, 1 unique row
+  in 60; now 0.66), and SMC diagnostics treated the weighted cloud as
+  equal-weight (means off by up to 0.65 sd) (0.9.3.129).
+- A repeated sampler method was pooled twice (0.9.3.45); sequences with
+  different draw counts crashed the convergence step (0.9.3.108).
+- **One ESS / R-hat implementation** (split, rank-normalised, folded R-hat;
+  bulk / tail ESS, matching `posterior` 1.7.0) replaces three; the old
+  shared helper double-counted lag 0 (ESS ~3x too low) and pooled chains by
+  concatenation (0.9.3.24). `chain_diagnostics()` used the wrong
+  autocorrelation pairing, capped ESS at N and had no rank-normalisation
+  (0.9.3.40).
+- `thames_mdd(se_method = "iid")` dropped the truncation indicator's
+  variance (mean SE / across-seed sd 0.41, now 0.93) (0.9.3.24).
+
+### PSKF and skewed shocks
+
+- **The order-1 PSKF used the wrong law whenever an observable loads a
+  contemporaneous shock** (nearly every model): with zero skew it did not
+  reduce to the Kalman filter (AR(1) -25.11 against -11.38). PSKF estimates
+  from earlier versions are biased (AR(1) mode (0.84, 0.21) against
+  (0.74, 0.27)); re-run them. The conditional-forecast PSKF path had the same
+  bug (0.9.3.104).
+- **Correlated skewed shocks were mis-centred** (true mean 0.36 against 0.76
+  in the example) (0.9.3.96).
+- **Pruning compensation and CDF accuracy:** 9.3 / 18.4 / 26.6 nats off an
+  unbiased particle filter at T = 50 / 100 / 200 with two skewed shocks, now
+  within 0.02 nat (0.9.3.118); the 3-7 dimensional CDFs are a deterministic
+  C++ evaluator (the previous one was 1e-3 to 1e-1 nat off in orthant
+  tails), dimension-2 CDFs no longer floor at log p = -36, and small
+  correlations are no longer zeroed (0.9.3.122).
+- **`pskf_smoother()`** used an absolute 1e-10 jitter (1e-6 relative gain
+  error) and silently dropped the skewness correction on error (0.9.3.113);
+  its smoothed means at t < T were off by up to 0.6 posterior sd and are now
+  exact given the retained latents (0.9.3.116). Linearly dependent
+  noise-free observables no longer give -Inf or a Lapack error (0.9.3.116).
+
+### OBC, OccBin and perfect foresight
+
+- **Piecewise-linear OBC paths were wrong for spells longer than one
+  period** (next period assumed slack; interacting constraints missed): a
+  3-period ZLB spell was off by 0.019, a 6-period spell by 0.18. Affects
+  `boehl_*`, `solve_obc_lcp`, `compute_irfs_obc`, `obc_simulate`,
+  `occbin_solve_path(method = "pwlinear")` and `ramsey_obc_pwlinear`. OBC
+  specs could also replace the wrong equation when .mod order and
+  declaration order differ (0.9.3.92).
+- **The OBC Kalman filter is now Dynare 7's OccBin piecewise-linear filter**:
+  the old one gave 665.63 where Dynare gives 860.786. OBC posteriors,
+  smoother, decomposition and inversion filter change, and the likelihood is
+  no longer path-dependent on the previous draw (0.9.3.93).
+- **The OBC particle filters (PPF / COPF)** now solve each particle's
+  multi-period regime sequence: COPF gave -18010 where the PKF gives 394.76,
+  and bootstrap and COPF differed by 32.8 nats. All-missing periods no
+  longer slip the time index (0.9.3.94).
+- **`pf_newton_solve()` never released a binding period**, so spells could
+  come out too long; `ramsey_obc_pwlinear()` kept a one-period ZLB episode
+  binding for the whole horizon (0.9.3.82).
+- **MCP upper-bound and two-sided constraints never solved** (the failure
+  was loud) (0.9.3.59).
+- **OBC bounds are levels everywhere.** The Boehl and OBC-binding paths
+  disagreed when the steady state was non-zero (0.9.3.23); the regime and
+  LCP solvers compared deviations with level bounds (Lemke returned an empty
+  spell, Newton bound every period on a non-zero-steady-state toy)
+  (0.9.3.27); the PKF binding check shares the bound conversion (0.9.3.28).
+- **Regime decisions are scale-free** (plain inequalities with a relative
+  round-off band, as in Dynare) in the PWL check, PKF, PPF / COPF, Lemke LCP,
+  `occbin_solve_path()`, `pf_newton_solve()` and `ramsey_obc_pf()`. At small
+  units a 0.5% bound violation did not bind, Lemke returned z = 0, and
+  perfect-foresight paths were 20-99% off. Natural-scale Dynare-parity cases
+  are unchanged (0.9.3.124, 0.9.3.126, 0.9.3.128).
+
+### Markov switching
+
+- **The structural MS filter scored y_t with the previous regime's
+  observation rows** (0.9.3.83), and **ignored regime-dependent steady
+  states** (off by 24-8374 nats against exact enumeration; `c_const` was
+  wrong) (0.9.3.90). Structural log-likelihoods, regime probabilities,
+  smoothed states and `ms_smoothed_fit_struct()` change; re-run structural
+  MS estimates. Reduced-form MS filters are unchanged.
+- The ergodic regime distribution is one SVD solver, replacing two
+  power-iteration copies, which were wrong for persistent chains (0.9.3.19,
+  0.9.3.23).
+
+### Moments, simulation and IRFs
+
+- **Pruned order-2 lag autocovariances were wrong** (the lag-1
+  autocorrelation of an AR(1) state came out rho^3) (0.9.3.23);
+  `pruned_ss_moments3()` gains lag autocovariances (0.9.3.27).
+- **Variance decompositions orthogonalise correlated shocks** by Cholesky
+  in declared order, as Dynare does, at order 1 (0.9.3.23) and in
+  `compute_moments_order2()`, where 22% of the variance was unattributed
+  (0.9.3.27).
+- **Simulators:** `simulate_model()` honours shock correlations (0.9.3.23),
+  and for skewed shocks too (0.9.3.28); the order-2 / order-3 simulators
+  and the SBC data generator drew Gaussian shocks for skewed models and now
+  use the PSKF likelihood's joint closed-skew-normal law; the order-3
+  Gaussian path
+  honours `corr` (0.9.3.28). `simulate_model_order2(pruning = FALSE)`
+  (0.9.3.23) and `simulate_model_order3(pruning = FALSE)` (which used the
+  order-1 state rule) are genuinely unpruned (0.9.3.27).
+- Both IRF APIs use one shock-scale helper, with `params` winning
+  (0.9.3.23).
+
+### Whittle, cumulant and GMM
+
+- **Order-4 cumulant values before 0.9.2.0004 were corrupt; the identity
+  weight is not unit-free.** Before 0.9.2.0004 the model's order-4 cumulant
+  block was silently recycled against the sample's (250 entries against 16)
+  and the sample fourth cumulant was divided by T+1: on a linear 3-observable
+  model the 1:4 log-likelihood read -1591 where the exact identity criterion
+  is -61941. Cumulant order-4 posteriors or evidence from before 0.9.2.0004
+  are invalid. The default `cumulant_weight = "identity"` criterion is in the
+  data's units (the order-k block scales as sigma^(2k)), so it is not
+  comparable across units or models; for evidence pass
+  `weight_matrix = estimate_gmm_weight_matrix(..., method = "analytic")`,
+  which now builds the order-3/4 blocks (Gaussian long-run variances via
+  Isserlis' theorem) instead of erroring (0.9.4). On that model the order-4
+  term becomes -0.37 nats.
+- **Cumulant likelihood at repeated eigenvalues (0.9.4).** The order-3/4
+  cumulant log-likelihood and its adjoint gradient aborted with
+  `solve.default(V): computationally singular` wherever `eigen(hx)` returned a
+  numerically singular eigenvector matrix -- an exactly repeated eigenvalue,
+  e.g. fs2000's double structural zero at scattered `alp` values (0.34,
+  0.35601, 0.40). Those points now use a doubling solve (machine precision
+  against a dense Kronecker solve); previously finite values are
+  bit-identical. Order 4 no longer inverts blockdiag(Sigma_x, Sigma_e), so a
+  rank-deficient Sigma_x (fs2000: rank 2 of 4) evaluates -- it errored at
+  every theta.
+
+- **The Whittle likelihood was wrong twice:** half-weighted ordinates, and
+  (with `debias = FALSE`) a 2 pi scale error that biased the shock std down
+  by sqrt(2 pi). Whittle posteriors were far too wide (0.9.3.35).
+- The analytic Whittle gradient errored whenever a finite-differenced
+  parameter preceded an analytic one (0.9.3.84); the cumulant
+  `adjoint_solution` gradient crashed with estimated shock stds (0.9.3.110).
+- The cumulant GMM weight matrix depended on the data's units (2.6-3.0 nats
+  at scale 1e-4) (0.9.3.123); `method_of_moments(weighting = "diagonal")`
+  weights were off by 2 at scale 1e-4 (0.9.3.124).
+
+### HANK
+
+- **`hank_determinacy()` uses the sequence-space winding-number
+  criterion**; the old `rcond(H_U)` test called an indeterminate operator
+  (e.g. a Taylor rule with phi < 1) determinate (0.9.3.54).
+
+### Priors
+
+- **Estimated `corr a, b` and `skew <shock>` rows were applied as the first
+  shock's stderr**, so the estimated correlation or skewness never reached
+  the likelihood (0.9.3.28).
+- `log_prior()` and `log_prior_density()` share one density per
+  distribution; IG1 / IG2 with sd = Inf use the mean-preserving limits; the
+  prior sampler draws truncated normal / gamma / inverse gamma by inverse
+  CDF instead of clamping (which put point masses at the bounds) (0.9.3.24).
+- An estimated `stderr eps_X` prior was renamed to `sig_X` whenever such a
+  parameter existed, even when the shocks block did not use it, so the
+  estimated std had no effect on the likelihood (0.9.3.39).
+- One prior sampler draws exactly what the density scores (SMC, SMC², SBC,
+  DIME, prior predictive, prior sensitivity) (0.9.3.39); prior CDFs and
+  quantiles honour `p3`/`p4` (0.9.3.40).
+- **Modes and draws produced before 0.9.3.39 may lie outside the
+  now-enforced `estimated_params` support.** The `LB` / `UB` bounds were
+  ignored before, so an old mode with a parameter below its `LB` now has
+  log posterior `-Inf` (the SW2007 stress variant's old mode had
+  `ctou = 0.00094` against an `LB` of 0.005). Prior draws hand-rolled from
+  the untruncated laws also differ from the bounded prior: SW2007's
+  indeterminate share of the prior is 3.1% under the untruncated laws and
+  0.45% under the bounded prior (`crpi >= 1`). Re-draw from the prior with
+  the package's sampler, and re-find old modes, before comparing.
+
+### Diagnostics
+
+**All 41 D-series diagnostics were adversarially reviewed and fixed**
+(0.9.3.13-0.9.3.22); about half had been silently degenerate (zero
+Jacobians from a fixed decision rule, never wired, or placeholder paths).
+Expect different badges. The largest changes:
+
+- **Never ran or always degenerate:** D11 on `historical_decomposition()`
+  output, D17 (not wired into `run_all_diagnostics()`), D23 (FAIL on every
+  run), D24, D25, D29 (zero Jacobian) and D31 (0.9.3.16-0.9.3.20); D27 was
+  FAIL for every OBC model (0.9.3.19).
+- **Identification:** D1, D20, D23 and D37 use a finite-difference-aware
+  rank, so exactly unidentified models no longer pass; D37 gave a false PASS
+  in the singular case (0.9.3.13, 0.9.3.18, 0.9.3.21).
+- **Posterior path:** D4 was always NA, D8's IRFs were calibration values,
+  and D9 compared 0 observables (0.9.3.15, 0.9.3.16).
+- **False verdicts:** D12's gate failed 100% of correct models, D16's
+  false-FAILed 84% of stable ones, D14 compared the best model with the
+  weakest competitor instead of the runner-up, D6's overlap was inflated
+  15x, and D5's ESS was ~3x too low (0.9.3.15-0.9.3.17).
+- **Wrong formulas:** D13 / D15's `Gamma_k` missed a term and transposed
+  VAR(p >= 2) lag blocks; D19 compared order-1 and order-2 IRFs for
+  different shock vectors (4.5 against 0.02); D35's plain OPG was blind to
+  serial correlation (0.9.3.17, 0.9.3.18, 0.9.3.20).
+- **New thresholds, checked against the literature** (0.9.3.25,
+  0.9.3.26): D5 WARNs at R-hat > 1.01 and FAILs at >= 1.05, and WARNs when
+  bulk or tail ESS is below 100 x n_chains (the flat 1000 target is gone);
+  D0 separates unit-root singularity (WARN) from redundant equations
+  (FAIL); D40 flags near-unit roots and is wired in; D8 checks response
+  signs only, over periods 1-8, by default; D9 includes measurement-error
+  variances; D20's strength table gates only with `weighting = "sampling"`;
+  D29 uses the model-implied moment covariance (size 0.06 against 0.21);
+  D41's variance test is kurtosis-robust (t5 innovations reject 0.071
+  against 0.251 at nominal 5%); D15 demeans by the decision-rule steady
+  state and adds the lambda = Inf endpoint.
+- **Prior sensitivity** no longer re-parses the `.mod` text (trailing
+  `%` comments with commas were read as bounds) (0.9.3.31), and starts its
+  flat-prior search at the informative mode: on NZSIM the search from the
+  support midpoints stopped short and flagged 30 of 68 parameters as
+  prior-driven. A search that ends below its start is reported as INFO
+  (0.9.3.33).
+- D26's calibrate-vs-estimate ranking uses 90% prior intervals as plausible
+  ranges (0.9.3.64); D41 and D37 use relative tests (0.9.3.124).
+- `dynhr_sbc()` reports failed replications (the parallel path lost every
+  message) (0.9.3.87); `dynhr_benchmark()` always reported
+  `accept_rate = NA` (0.9.3.100); `run_mode_finding()$V_mode` was always NULL
+  (0.9.3.45).
+
+### Solvers and parser
+
+- **The first-order shock loading `ghu` could be silently wrong (0.9.4).**
+  `solve_perturbation()` solved `ghu = -(f_0 + f_+ P)^{-1} f_u` with R's
+  `solve()`, which refuses any system with rcond below 2.2e-16, and fell back
+  to a silent truncated-SVD pseudo-inverse. The result was a rank-deficient
+  `ghu` with O(1) model-equation residuals, reported with
+  `bk_satisfied = TRUE`. At a near-unit-root corner of a small NK model
+  (rcond 7e-19) the `g` and `z` rows were (-0.10, 0.28, -0.29) and
+  (0.11, -0.29, 0.86) instead of unit vectors, the Kalman fallback skipped 653
+  of 900 observations, and optimisers were drawn to a spurious likelihood far
+  above the genuine mode. `ghu` is now solved by plain LU (as Dynare's
+  backslash) however ill-conditioned; only an exactly singular system falls
+  back, with a `dynhr_warning_ghu_singular` warning, `ghu_singular = TRUE` and
+  `bk_satisfied = FALSE`. `ms_solve()`'s per-regime `ghu` and its fixed-point
+  step (which declared ill-conditioned steps "diverged") use the same rule.
+- **The parser could turn a typo into a different model**: `y = 2*z) +
+  5*z(-1);` parsed as `y = 2*z` (0.9.3.36).
+- **`predetermined_variables`** gave wrong solutions with a `#` local or a
+  `k(-1)` term (0.9.3.37).
+- **Ramsey FOCs lost every derivative through a `#` model-local**; the
+  generated Ramsey `.mod` rounded to 7 digits (0.9.3.38).
+- **`solve_perturbation()` zeroed the ghx column of states** whose own rows
+  were zero, e.g. the Ramsey lagged multiplier (a discretion-like rule)
+  (0.9.3.88).
+- **Order-4/5 sigma terms were wrong** when a current shock entered
+  nonlinearly (`ghss2` 0.0507 against 0.0048) (0.9.3.43); models with no
+  states got zero higher-order terms at orders 2-5 (0.9.3.38).
+- **`model(linear)` constants were zero-filled** in the steady state; it now
+  solves the affine system. The SW2007 benchmark log posterior is
+  -874.6253133934 (it was -1968.70 with `ctrend`, `constepinf`, `constelab`
+  and `conster` dropped) (0.9.3.23, 0.9.3.27). With a singular Jacobian it
+  reported convergence with a non-zero residual; ordered QZ accepted a
+  failing `dgges` INFO (0.9.3.38).
+- `solve_perturbation()` flags a singular Z11 as `bk_satisfied = FALSE` with
+  a classed warning (0.9.3.23).
+- `ramsey_policy()` honours `betta` (0.9.3.23);
+  `run_full_estimation(ramsey_discount =)` warns and skips on models with
+  neither `beta` nor `betta` instead of aborting the estimation (0.9.3.27).
+- **`compute_girf()`'s analytic order-2 GIRF was wrong for h >= 2** (up to
+  75% of the peak on rbc2shock) (0.9.3.81).
+- Dynare command options with lists (`instruments=(i,tau)`) were corrupted,
+  block options with lists hid the block, and `var(...)` with nested
+  parentheses was dropped (0.9.3.78, 0.9.3.82, 0.9.3.89).
+- `planner_discount` is honoured (0.9.3.82).
+
+## New features
+
+### Estimation specs, runner and reproducibility
+
+- **`dynhr_estimation_spec()`** built from `likelihood_spec()`,
+  `mode_spec()`, `sampler_spec()`, `compute_spec()` and `outputs_spec()`,
+  with validation, `print`, `update()` and content hashes;
+  `validate_spec()`, `as_estimation_spec()` (from flat arguments, a run
+  record or a .mod), `diff_specs()`, and `write_spec()` / `read_spec()` in
+  YAML, JSON and RDS (0.9.3.103). New fields `mode$run` (0.9.3.114) and
+  `likelihood$pskf_cdf` (0.9.3.120).
+- **`run_estimation(spec)`** is the single code path;
+  `run_full_estimation()`, `run_posterior_estimation()` and
+  `run_mode_finding()` are thin wrappers (0.9.3.107).
+  `run_full_estimation()` accepts every sampler and likelihood and gains
+  `checkpoint_dir`, `resume` and `on_mismatch` (0.9.3.108).
+- **Run records and replay:** results carry `$run_record` (arguments, data
+  and model, every option, RNG state, provenance, hashes); `dynhr_rerun()`
+  replays bit-identically (0.9.3.101). Records carry the full spec
+  (schema 2) and the resolved gradient method (0.9.3.107, 0.9.3.110,
+  0.9.3.114).
+- `run_mode_finding(theta_init =)` sets the optimiser start (0.9.3.33).
+- **`dynhr_verify(result)`** reports PASS/FAIL for target, code and
+  environment, with deterministic and distributional checks (0.9.3.108).
+- **Result-change registry** and checkpoint integrity checks (0.9.3.107,
+  0.9.3.108).
+- **Option registry:** every global option has a documented default, and
+  `dynhr_get_options(effective = TRUE)` lists the values in force
+  (0.9.3.101).
+- **`dm_*` verbs over the spec**, `update(dm, ...)`, and
+  `at = c("params", "mode", "posterior_mean")` on `dm_solve()`, `dm_irf()`
+  and `dm_forecast()` (0.9.3.129).
+
+### Samplers
+
+- `sbc_uniformity_test()` and a new `sbc_ranks()` are exported for bespoke SBC
+  harnesses that run their own sampler (0.9.4). Ranks lie in `0:L`, where
+  `L = length(seq.int(1L, n_keep, by = thin))` is the number of thinned draws;
+  that `L` is what `sbc_uniformity_test(L = )` expects (`floor(n_keep / thin)`
+  can be one smaller).
+- `dynhr_dsmh()`: Dynamic Striated Metropolis-Hastings, a port of Dynare
+  7.1's `dsmh.m`, also `run_posterior_estimation(methods = "DSMH")`
+  (0.9.3.68); parallel via `n_cores` (0.9.3.86, 0.9.3.87).
+- Pooled multi-chain NUTS warmup, `dynhr_set_options(nuts_adapt =
+  "pooled")` (0.9.3.77).
+- NUTS metrics `"lowrank"` (0.9.3.49) and `"fisher_diag"` (0.9.3.57), passed
+  through `run_*_estimation(metric =)` including the parallel path
+  (0.9.3.57).
+- NUTS `$accept_stat`, `$accept_stats` and `$move_rate` (0.9.3.128);
+  `rwmh_cpm(transform =)` (0.9.3.132); `sampler_spec("hmc")` gains
+  `analytic_grad` / `grad_method` (0.9.3.139).
+- `grad_method = "auto"` picks the exact method per likelihood and reports
+  it (`[NUTS] gradient method: auto -> adjoint_solution`) (0.9.3.109,
+  0.9.3.110). `make_posterior_grad()` and `posterior_hessian()` gain
+  `lik_init`, `power` and `system_priors` (0.9.3.40, 0.9.3.115, 0.9.3.117).
+
+### Likelihoods and filters
+
+- `kalman_filter()` reports `$diagnostics$n_dropped_informative` and
+  `dropped_informative_by_period`, and warns (class
+  `dynhr_warning_dropped_observations`, once per estimation run) when the
+  univariate filter skips a component with a zero forecast variance whose
+  innovation is not negligible -- the likelihood then omits real data. The
+  loglik is unchanged. The standard-to-univariate fallback message no longer
+  claims exact agreement when components were skipped, and `n_dropped` now
+  also counts skips under the steady-state lock (`univariate_ss`) (0.9.4).
+- Per-observable `me_variance` (a length-n_obs vector) in `kalman_filter()`,
+  `kalman_smoother()`, PSKF and `make_log_posterior()` (0.9.3.96).
+- `kalman_smoother(method = c("auto", "durbin-koopman", "univariate"))`
+  (0.9.3.66).
+- IMM filtering for Markov switching, `collapse = "imm"`, reduced-form
+  (0.9.3.60) and structural (0.9.3.83).
+- `pskf_cdf = "fast"` restores the old PSKF CDF evaluation (0.9.3.118).
+
+### Dynare parity
+
+- `observation_trends` and `var(log)` (0.9.3.47); `trend_var`,
+  `log_trend_var`, `var(deflator=)`, `var(log_deflator=)` and
+  `deterministic_trends` (0.9.3.89). No Dynare construct remains on the
+  "unsupported" list (0.9.3.89).
+- Complementarity tags, `shock_paths`, dated `heteroskedastic_shocks`, and
+  leads / lags of `#` locals (0.9.3.56); `model_replace` / `model_remove` /
+  `var_remove`, `diff()`, unquoted equation tags, and a macro processor with
+  its own interpreter (never evaluated as R) (0.9.3.72);
+  `EXPECTATION(k)(expr)` (0.9.3.37).
+- `perfect_foresight_controlled_paths` (0.9.3.73).
+- Optimal policy: `optim_weights` (with cross terms), `osr_params_bounds`,
+  `osr` from `planner_objective` alone, multi-instrument
+  `discretionary_policy()`, `ramsey_constraints` (0.9.3.71, 0.9.3.78), and
+  `ramsey_obc_pwlinear()` with `ramsey_constraints` (0.9.3.92).
+- D0 names each redundant-equation relation, as Dynare's
+  `model_diagnostics` does (0.9.3.70).
+
+### Diagnostic reports (0.9.3.30-0.9.3.32)
+
+After an adversarial review of the HTML / PDF reports:
+- The templates read one spooled contract (badges, counts, colours,
+  explanations, actions, provenance) written by `write_report()`, with
+  output escaped per target format.
+- A methodology table covers every emitted diagnostic, with the new rules.
+- Reports gain a provenance section (package version, `GIT_COMMIT`, model
+  file, data dimensions and hash, observables, sampler settings), also on
+  the posterior-result and `run_diag = TRUE` paths.
+- WARN level in the PDF; severity-ordered sections opening on the first
+  non-empty level; per-diagnostic anchors; no Google Fonts or MathJax; the
+  "All diagnostics" double render is gone (22.8 MB -> ~10 MB on the scale
+  check).
+- Large models render: plot heights are capped, many-panel figures are
+  split into pages (PDF 5 rows / 26 levels, HTML 12 / 60) up to 8 pages,
+  and fixed-width callout text wraps (0.9.3.31, 0.9.3.32).
+- The temporary directory is cleaned unless `dynhr.report.keep_tmp` is set.
+
+### Analysis tools
+
+- `variance_decomposition_nonlinear()` for pruned order-2 / order-3
+  solutions (0.9.3.48), with exact polynomial Shapley above 12 shocks, and
+  `historical_decomposition_nonlinear()` (0.9.3.65).
+- `lp_estimand()`: what a local projection recovers from a solved model
+  (0.9.3.80).
+- `svar_ica()` and `match_irfs_svar_ica()`: indirect inference with a
+  non-Gaussian SVAR (0.9.3.74).
+- `mom_se_bounds()` and `method_of_moments(se_bounds = TRUE)` (0.9.3.62).
+- `posterior_log_scores()`, `psis_lfo()`, `mdd_modified_harmonic_mean()` and
+  `marginal_likelihoods()` (0.9.3.52).
+- D26 ranks which parameters to calibrate and which to estimate (0.9.3.44);
+  `run_all_diagnostics(log_marglik_se =)` gives D14 a 2-SE INFO band
+  (0.9.3.25, 0.9.3.26); D9 adds an INFO posterior-predictive band (0.9.3.26).
+- `posterior::as_draws*()` and `coda::as.mcmc*()` methods, plus
+  `as.data.frame()`, `coef()`, `vcov()`, `logLik()`, `nobs()` (0.9.3.45).
+- `spectral_density(normalise =)` (0.9.3.43); `dynhr_sitrep()` (0.9.3.41).
+
+### HANK
+
+- `hank_filter_shocks()`: sequence-space least-squares shock filter
+  (0.9.3.55).
+- `hank_limited_info_md()` / `hank_limited_info_ssj()`: limited-information
+  estimation of a heterogeneous-agent block (0.9.3.53).
+- `hank_nonlinearity_scan()` and `hank_residual_audit()` (0.9.3.61);
+  `hank_steady_state_scan()` (0.9.3.70).
+- Behavioural (non-FIRE) expectations in the sequence space,
+  `expectations = list(theta =, gamma =, type =)` (0.9.3.95).
+
+### Robustness
+
+- Catch-all error handlers (about 40 in 0.9.3.87, then 187 in three sweeps)
+  re-raise programming errors while keeping numerical fallbacks (0.9.3.87,
+  0.9.3.97-0.9.3.99).
+- `.mod` blocks a call does not apply (`filter_tunes`,
+  `heteroskedastic_shocks`, `stochastic_volatility`, `mcp`) warn
+  (`dynhr_warning_mod_blocks_ignored`) (0.9.3.111).
+- Seeded functions restore the caller's `.Random.seed` (0.9.3.41).
+- `dynhr_set_options(use_analytic_hess = FALSE)` is honoured (new mode spec
+  field `analytic_h0`, the newrat analytic H0 seed); it was accepted and
+  ignored (0.9.4).
+- `geigen` (Suggests) is optional in the BK-distance / BK-wall tools: without
+  it they fall back to LAPACK zggev via QZ (0.9.4).
+- The shipped SBC coverage matrix (`inst/extdata/sbc_matrix.rds`, rendered by
+  `vignette("sbc-matrix")`) is regenerated with the 2026-09 re-certification
+  (0.9.4).
+
+## Performance
+
+Installed-build timings from the dev notes (Apple M5):
+
+| | SW2007 | NZSIM |
+|---|---|---|
+| exact gradient vs old hybrid default (0.9.3.127) | 14.5 vs 80.4 ms | 45 vs 268 ms |
+| exact gradient, 0.9.3.133 -> 0.9.3.134 | 14.2 -> 12.1 ms | 50.0 -> 26.4 ms |
+| Step-6 proposal Hessian (0.9.3.134) | 7.36 s -> 0.68 s | 34.3 s -> 4.9 s |
+| NUTS per leaf, fused lp + gradient (0.9.3.138) | 18.0 -> 8.3 ms | 43.3 -> 19.7 ms |
+
+- PSKF accurate-mode normal CDFs (0.9.4): bivariate terms use Genz's BVND and
+  trivariate terms Genz's (2004) exact TVN (Plackett reduction, adaptive
+  Gauss-Kronrod, |error in p| ~1e-15) in C++ when p >= 1e-3 (TVN also needs
+  det(correlation) >= 1e-8); the log-scale quadrature and the lattice are kept
+  for the tails and near-singular blocks, and the block-factorisation dispatch
+  runs in C++. `hank_reiter_pskf_loglik` at n_a = 16, T = 200: about 4.4x faster
+  per evaluation (BVND + dispatch 2.4x, ~340 -> 144 ms; then TVN 1.85x,
+  measured A/B on a loaded machine). The slowdown since
+  0.9.0 (~88 ms) came from 0.9.3.104 (the corrected law keeps 3 skew
+  dimensions, not 1) and 0.9.3.122 (bivariate quadrature, 1e-12 snap). The
+  BVND / dispatch step moves likelihoods only at round-off (<= 3e-12
+  relative); the TVN removes the lattice's per-call error (~3.6e-7), so PSKF
+  logliks move ~1e-5 to 1e-4 TOWARD the exact value (the probe +3.8e-5, now
+  3e-13 from a TVPACK reference).
+- The exact gradient is 1.5-6.6x faster than hybrid on 6 of 7 benchmark
+  models (on nk_hs2016 hybrid is 1.3x faster but 1e-3 off) (0.9.3.127).
+- Unfused samplers carry the gradient: identical draws, half the gradient
+  calls (e.g. 936 -> 469) (0.9.3.139).
+- Exact shock-covariance derivative: one `.o2sd_dSigma_e` pass 6.8 ms ->
+  0.03-0.8 ms (0.9.3.137); sparse parameter Jacobian (0.9.3.136).
+- The adjoint Kalman filter solves its Lyapunov equations by doubling (was
+  an O(n^6) Kronecker LU) (0.9.3.105).
+- PSKF's C++ MVN CDF: the accurate filter costs ~3.7x the fast setting,
+  against 5-11x for 0.9.3.118's evaluator (0.9.3.122).
+- Cumulant `adjoint_solution` gradient up to ~100x faster than `implicit`
+  (rbc2shock orders 1:3: 22 vs 1921 ms) (0.9.3.110).
+- OBC particle filters group particles by regime guess, ~60x faster than
+  solving one by one (0.9.3.94).
+- Exact Shapley for 20 shocks at order 2: 0.7 s instead of 49 s of
+  permutation MC (0.9.3.65); IMM is 1.5-2.3x faster than GPB(2) (0.9.3.60).
+- Pooled NUTS warmup: 3.3-3.9x (`lowrank`) and 1.7-3.4x (`diagonal`)
+  effective samples per gradient on a badly scaled d = 20 Gaussian
+  (0.9.3.77); the `lowrank` metric is >100x the default at condition number
+  1e4 (0.9.3.49).
+
+## Validation
+
+- **SBC re-certification** (frozen 0.9.3.87 build, AR(1)): chees x Gaussian is
+  now **certified** (200 replications, min p = 0.441); hmc x Gaussian
+  (min p = 0.510) and nuts x Gaussian (min p = 0.707) re-certified;
+  nuts x Whittle is calibrated at T = 200 (min p = 0.346; it was < 1e-4
+  before the Whittle fix) but stays *characterized* (0.9.3.125).
+- **Dynare 7.1 parity:** OccBin PKF likelihood 860.78638394718621 and every
+  per-period density (0.9.3.93); `occbin_solver` spells to 1e-9-1e-12
+  (0.9.3.92); `perfect_foresight_solver(lmmcp)` to 2e-8 (0.9.3.82);
+  `ramsey_constraints` paths to 5e-8 (0.9.3.78); Ramsey ghx/ghu to 2e-13
+  (0.9.3.88); OSR loss to 1e-10 and objective 3.57149415801871 (0.9.3.71,
+  0.9.3.78); multi-instrument discretion to 1e-7 (0.9.3.71); growth models
+  to 1e-8 and trended log-likelihood to 1e-9 (0.9.3.47, 0.9.3.89);
+  `var(log)` to 1e-11 (0.9.3.47); order-4/5 `k_order_solver` terms
+  (0.9.3.43); controlled paths to 1e-7 (0.9.3.73); uniform priors
+  bit-for-bit (0.9.3.76); `planner_discount` to 1e-8 (0.9.3.82).
+- **Scale-equivariance audit:** every likelihood and smoother was put
+  through loglik(c) + N log c = constant for data / shock scales c in
+  1e-4..1e4; the absolute tolerances that broke it were made relative
+  (0.9.3.119-0.9.3.128). Gaussian, Student-t, sv_rbpf, global_pf, Kim / IMM /
+  structural MS, HANK, OBC PKF / PPF and PSKF were checked (0.9.3.123).
+- **Independent oracles:** analytic gradients against Richardson FD on 7
+  models (0.9.3.127); the exact Hessian against FD of the exact gradient to
+  7.5e-8 (0.9.3.135); PSKF against a grid filter and an unbiased particle
+  filter (0.9.3.118), the MVN CDF against a quadrature oracle to log p = -300
+  (0.9.3.122); structural MS against exact regime-path enumeration
+  (0.9.3.83, 0.9.3.90); Whittle against the exact Gaussian likelihood to
+  ~0.2 nats (0.9.3.35); SV RB-PF against exact grid and rejection-sampling
+  likelihoods (0.9.3.67).
+- **Diagnostics:** the D5 estimators match `posterior` 1.7.0 (0.9.3.15);
+  D15's lambda = Inf endpoint matches a from-scratch VAR likelihood to 1e-9
+  (0.9.3.26); the corr / skew prior fix is checked against a closed-form
+  AR(1) likelihood, a 601 x 601 quadrature and an independent rejection
+  sampler (0.9.3.28).
+- **Equivalence:** `dm_*` equals `run_estimation()` bit for bit on the same
+  spec (0.9.3.129), and the thin wrappers are bit-identical to the old
+  serial runners (0.9.3.107).
+
+## Known limitations
+
+- The OccBin PKF is about 6x slower per evaluation than the old filter
+  (0.11 s against 0.018 s at T = 80) (0.9.3.93).
+- PSKF: a genuine pruning error of 0.08-0.13 nat remains in heavier
+  configurations (3 skewed shocks into 2 states) (0.9.3.118); the smoother
+  is ~0.05 sd from the exact posterior at the default `max_q = 5` (0.9.3.116).
+- Markov switching: GPB(2) can fail badly where GPB(3) does not, GPB(3) is
+  not exact in general, and the one-step `collapse_max` can miss multi-period
+  losses; IMM can be much worse than GPB(2) when the regimes'
+  previous-period states differ a lot (0.9.3.83, 0.9.3.90).
+- `observation_trends` is honoured only by the Gaussian Kalman path; mode
+  finding falls back to FD gradients for trended models (0.9.3.47).
+- A vector `me_variance` is refused by the other likelihoods, MS, OBC, the
+  particle filters and `make_posterior_grad()` (0.9.3.96).
+- The Student-t likelihood refuses `me_extra`, `shock_scale`,
+  `known_shocks`, `filter_tunes` and heteroskedastic shocks (0.9.3.35).
+- `lik_init = "kappa"` has no analytic gradient kernel (0.9.3.115).
+- With a system prior, SMC's `log_marginal_lik` includes the system prior's
+  unknown normalising constant (0.9.3.42).
+- Behavioural expectations apply to linear paths only; the horizon-varying
+  variant is not implemented (0.9.3.95).
+- `hank_limited_info_md()`: the analytic chi-squared J test is oversized;
+  prefer `se = "bootstrap"` (0.9.3.53). `svar_ica(method = "dcov")` is
+  O(T^2) per evaluation; use `"fastica"` for long samples (0.9.3.74).
+- `fisher_diag` is not a uniform improvement and stays opt-in (0.9.3.57).
+- Not every error is classed yet: `stop()` calls get a `dynhr_error` class
+  only where a file was already being changed. The default verbosity stays
+  `"info"` for this release (0.9.3.8-0.9.3.12).
+- Not done (measured): the Kalman adjoint runs at ~1.4x the forward filter
+  (0.9.3.137); the per-session JIT warm-up is ~0.5 s once per R process
+  (0.9.3.134).
+
 # dynhr 0.9.3.7
 
 **`dr$Sigma_e` was silently ignored by the Kalman path, and there was no way

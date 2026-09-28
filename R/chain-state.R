@@ -47,7 +47,7 @@
 #' sampler needs to continue a chain \emph{exactly} where it stopped. Use
 #' with \code{\link{mcmc_chain_save}} / \code{\link{mcmc_chain_restore}}
 #' from inside your own sampler loop; the built-in samplers get the same
-#' behaviour through \code{\link{mcmc}}'s \code{checkpoint_dir} argument.
+#' behaviour through \code{\link{dynhr_mcmc}}'s \code{checkpoint_dir} argument.
 #'
 #' @section The resume contract:
 #' Restoring a state saved after sweep \eqn{n} and running \eqn{m} more
@@ -82,7 +82,7 @@
 #'   fingerprint, ...); compared by the caller, not by the package.
 #' @return An object of class \code{"dynhr_chain_state"}.
 #' @seealso \code{\link{mcmc_chain_save}}, \code{\link{mcmc_chain_restore}},
-#'   \code{\link{mcmc_chain_extend}}, \code{\link{mcmc}}
+#'   \code{\link{mcmc_chain_extend}}, \code{\link{dynhr_mcmc}}
 #' @export
 mcmc_chain_state <- function(position, lp = NA_real_, sweep = 0L,
                              scales = NULL, adapt_state = NULL,
@@ -112,7 +112,7 @@ mcmc_chain_state <- function(position, lp = NA_real_, sweep = 0L,
 #' @param file  Path to write (conventionally \code{*.state.rds}).
 #' @return \code{file}, invisibly.
 #' @seealso \code{\link{mcmc_chain_state}}, \code{\link{mcmc_chain_restore}},
-#'   \code{\link{mcmc_chain_extend}}, \code{\link{mcmc}} (whose
+#'   \code{\link{mcmc_chain_extend}}, \code{\link{dynhr_mcmc}} (whose
 #'   \code{checkpoint_dir} / \code{resume} arguments use this contract)
 #' @examples
 #' state <- mcmc_chain_state(position = c(a = 0.1, b = -0.4),

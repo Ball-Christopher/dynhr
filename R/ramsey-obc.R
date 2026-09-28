@@ -54,14 +54,26 @@
 #' @param obc_specs         List of OBC specs as returned by
 #'   \code{\link{obc_parse_tags}} or \code{obc_collect_specs}.  Each spec must
 #'   have \code{$eq_idx}, \code{$var_idx}, \code{$var_name}, \code{$op}, \code{$bound}.
-#'   If NULL, tries to parse MCP tags from the model.
+#'   If NULL, the specs come from the model: its MCP tags / complementarity
+#'   conditions (\code{\link{obc_parse_tags}}) and its
+#'   \code{ramsey_constraints} block.  A \code{ramsey_constraints} bound on
+#'   \code{x} (in levels) is complementary to the Ramsey first-order
+#'   condition with respect to \code{x}, as in Dynare 7's
+#'   \code{perfect_foresight_solver(lmmcp)}: in a binding period the FOC is
+#'   replaced by \code{x = bound}.
 #' @param params            Named numeric parameter vector. Defaults to
 #'   \code{model$param_values}.
 #' @param order             Perturbation order for Ramsey solution (default 1).
 #' @param T_horizon         Integer: number of periods for the perfect-foresight
 #'   path (default 40).
 #' @param max_iter          Maximum Newton iterations per regime (default 50).
-#' @param tol               Newton convergence tolerance on max|R| (default 1e-8).
+#' @param tol               Tolerance (default 1e-8) passed to
+#'   \code{\link{pf_newton_solve}}: its Newton stop (every stacked
+#'   equation's residual within \code{tol} times the magnitude of its terms,
+#'   and \eqn{\max|R| <} \code{tol}) and the relative round-off band of its
+#'   regime decisions (bound violations relative to \eqn{|x| + |b|}, the
+#'   release test relative to the relaxed equation's term magnitudes), so the
+#'   regimes do not depend on the units of the model.
 #' @param max_regime_iter   Maximum regime switches in active-set iteration (default 30).
 #' @param step_size         Newton step-length (default 1.0).
 #' @param verbose           Print progress messages.
@@ -109,12 +121,18 @@ ramsey_obc_pf <- function(model,
   }
 
   # ---- 2. Get or create OBC specs ----
+  # With obc_specs = NULL the specs come from the .mod: MCP tags /
+  # complementarity conditions on the model equations, plus the
+  # ramsey_constraints block (mapped onto the augmented system below).
+  use_rc <- is.null(obc_specs) && is.data.frame(model$ramsey_constraints) &&
+    nrow(model$ramsey_constraints) > 0L
   if (is.null(obc_specs)) {
-    obc_specs <- obc_parse_tags(model)
+    obc_specs <- if (!use_rc || .model_has_obc_tags(model))
+      obc_parse_tags(model) else list()
   }
 
   # ---- 3. Build the Ramsey augmented model ----
-  if (verbose) cat("[ramsey_obc_pf] Building augmented Ramsey model (order=1)...\n")
+  if (verbose) .dynhr_cat("[ramsey_obc_pf] Building augmented Ramsey model (order=1)...\n")
 
   ramsey_result <- ramsey_model(
     model             = model,
@@ -163,9 +181,14 @@ ramsey_obc_pf <- function(model,
   #   - Original variable indices 1..n_orig are unchanged
   # So the specs are already valid for the augmented system.
   aug_specs <- obc_specs  # Same eq_idx and var_idx for original equations/vars
+  if (use_rc) {
+    aug_specs <- c(aug_specs,
+                   .ramsey_constraint_specs(model, ramsey_result, params))
+    obc_specs <- aug_specs
+  }
 
   # ---- 6. Run perfect-foresight solver on augmented system ----
-  if (verbose) cat("[ramsey_obc_pf] Running perfect-foresight Newton solver",
+  if (verbose) .dynhr_cat("[ramsey_obc_pf] Running perfect-foresight Newton solver",
                    sprintf("(%d periods, %d OBC specs)...\n", T_horizon, length(aug_specs)))
 
   pf_result <- pf_newton_solve(
@@ -191,13 +214,19 @@ ramsey_obc_pf <- function(model,
   colnames(Y_orig) <- model$var_names
 
   # ---- 8. Compute welfare along the path ----
-  discount <- .get_discount(params) %||% 0.99
+  ## The discount ramsey_model() resolved (discount= in ..., the .mod's
+  ## planner_discount, else beta/betta) -- not beta with a silent 0.99.
+  discount <- ramsey_result$welfare$discount
+  ## Evaluated AT the steady state (this used to pass
+  ## as.numeric(model$var_names) -- the variable NAMES coerced to NA -- which
+  ## warned on every call and returned NA).
+  ss_orig <- stats::setNames(as.numeric(aug_ss[model$var_names]),
+                             model$var_names)
   welfare_steady <- .eval_planner_ast(
     parse_expression(obj_text,
       var_names = c(model$var_names, model$varexo_names),
       param_names = model$param_names),
-    setNames(as.numeric(model$var_names), model$var_names),
-    params, aug_ss[seq_len(n_orig)]
+    ss_orig, params, ss_orig
   ) / max(1e-8, 1 - discount)
 
   # Path welfare: discounted sum of objective along the path
@@ -243,6 +272,68 @@ ramsey_obc_pf <- function(model,
 }
 
 
+#' Does any model equation carry an MCP tag or a complementarity condition?
+#' @noRd
+.model_has_obc_tags <- function(model) {
+  any(vapply(model$equations, function(eq) {
+    if (!is.null(eq$complementarity)) return(TRUE)
+    tag <- eq$tag_raw %||% eq$tag
+    !is.null(tag) && length(tag) == 1L && !is.na(tag) &&
+      grepl("mcp\\s*=", tag)
+  }, logical(1)))
+}
+
+#' OBC specs on the augmented Ramsey system from a ramsey_constraints block
+#'
+#' Dynare 7 pairs a `ramsey_constraints` bound on variable x with the Ramsey
+#' first-order condition with respect to x
+#' (`+<fname>/dynamic_complementarity_conditions.m`: lb/ub on x, the FOC
+#' "Ramsey FOC w.r.t. x" as its complementary equation).  In the augmented
+#' model of ramsey_augment_mod() the FOCs follow the original equations in
+#' variable order, skipping identically-zero ones, so the FOC of x is equation
+#' n_eq + (number of nonzero FOCs up to x).  Bounds are LEVELS (the path
+#' solver works in levels), evaluated at `params`.
+#' @return list of OBC specs (eq_idx, var_idx, var_name, op, bound).
+#' @noRd
+.ramsey_constraint_specs <- function(model, ramsey_result, params) {
+  rc <- model$ramsey_constraints
+  focs <- ramsey_result$augmented_result$foc_equations
+  aug_model <- ramsey_result$augmented_model
+  if (is.null(focs) || length(focs) != length(model$var_names))
+    .dynhr_abort("ramsey_constraints need the augmented Ramsey system ",
+                 "(ramsey_model(method = \"augmented\")).",
+                 class = "dynhr_error_ramsey_constraints")
+  nonzero <- !vapply(focs, ast_is_zero, logical(1))
+  env <- .dynhr_param_eval_env(params)
+  lapply(seq_len(nrow(rc)), function(k) {
+    v <- rc$var[k]
+    j <- match(v, model$var_names)
+    if (!nonzero[j])
+      .dynhr_abort("ramsey_constraints: the Ramsey first-order condition ",
+                   "with respect to ", v, " is identically zero, so there is ",
+                   "no equation to pair with its bound.",
+                   class = "dynhr_error_ramsey_constraints")
+    bx <- gsub("(?<![A-Za-z0-9_])inf(?![A-Za-z0-9_])", "Inf", rc$bound[k],
+               perl = TRUE)
+    b <- .dynhr_sandbox_eval(bx, env, context = "the ramsey_constraints bound")
+    if (!is.numeric(b) || length(b) != 1L || is.na(b))
+      .dynhr_abort("ramsey_constraints: the bound `", rc$bound[k], "` of ", v,
+                   " does not evaluate to a number at the parameters.",
+                   class = "dynhr_error_ramsey_constraints")
+    eq_idx <- length(model$equations) + sum(nonzero[seq_len(j)])
+    if (eq_idx > length(aug_model$equations))
+      .dynhr_abort("ramsey_constraints: cannot locate the Ramsey first-order ",
+                   "condition with respect to ", v, " in the augmented model.",
+                   class = "dynhr_error_ramsey_constraints")
+    list(eq_idx   = eq_idx,
+         var_idx  = match(v, aug_model$var_names),
+         var_name = v,
+         op       = rc$op[k],
+         bound    = as.numeric(b))
+  })
+}
+
+
 #' @export
 print.dynhr_ramsey_obc_pf <- function(x, ...) {
   cat("\n<dynhr_ramsey_obc_pf>  [Perfect-foresight Ramsey + OBC]\n")
@@ -280,31 +371,52 @@ print.dynhr_ramsey_obc_pf <- function(x, ...) {
 #'   2. Extract the linear system matrices from the augmented compiled model.
 #'   3. For each OBC spec, construct the binding-regime system by replacing
 #'      the constrained equation with the binding constraint.
-#'   4. Solve the binding-regime system for each candidate regime combination.
-#'   5. Run the OccBin guess-and-verify (or Boehl complementarity) iteration
-#'      to find the consistent regime path.
-#'   6. Return slack and binding decision rules for the augmented system.
+#'   4. Run the OccBin guess-and-verify iteration of
+#'      \code{\link{boehl_solve_regime_path}} on the impulse path: each
+#'      candidate regime path is solved with its time-varying rules (the
+#'      backward recursion over the regimes ahead) and verified on the
+#'      constrained path.
+#'   5. Return slack and binding decision rules for the augmented system.
+#'
+#' On a linear-quadratic Ramsey problem the result is the perfect-foresight
+#' path of \code{\link{ramsey_obc_pf}} (Dynare's \code{lmmcp}), including
+#' multi-period spells and a bound that binds only because another one does.
 #'
 #' @param model             A dynhr_mod object.
 #' @param planner_objective Character string: the planner objective expression.
 #' @param obc_specs         List of OBC specs from \code{\link{obc_parse_tags}}.
+#'   If NULL, the specs come from the model: its MCP tags / complementarity
+#'   conditions and its \code{ramsey_constraints} block (a bound on \code{x}
+#'   is complementary to the Ramsey first-order condition with respect to
+#'   \code{x}, as in \code{\link{ramsey_obc_pf}}).
 #' @param params            Named parameter vector. Defaults to
 #'   \code{model$param_values}.
-#' @param method            Regime search method: \code{"guess_verify"} (OccBin,
-#'   default) or \code{"boehl"} (complementarity iteration).
+#' @param method            Regime search on the impulse path.  Both run the
+#'   deterministic complementarity iteration of
+#'   \code{\link{boehl_solve_regime_path}} (every period is re-checked at
+#'   every iteration, so a period can bind and later be released):
+#'   \code{"guess_verify"} (default, OccBin) starts from binding exactly the
+#'   periods where the all-slack path violates a bound, \code{"boehl"} starts
+#'   from the all-slack path.
 #' @param shock_std         Standard deviation for the shock used in regime path
 #'   computation (default 1.0, i.e. one-standard-deviation impulse).
 #' @param max_iter          Maximum regime search iterations (default 100).
-#' @param tol               Tolerance for regime convergence (default 1e-6).
+#' @param tol               Relative round-off band of the regime decisions
+#'   (default 1e-6): passed to \code{\link{boehl_solve_regime_path}}, whose
+#'   bound and multiplier tests are relative to \eqn{|x| + |b|} and to the
+#'   tagged equation's term magnitudes, so the regimes do not depend on the
+#'   units of the model.
 #' @param verbose           Print progress messages.
 #' @param ...               Additional arguments passed to \code{\link{ramsey_model}}.
 #'
 #' @return An object of class \code{dynhr_ramsey_obc_pwl} containing:
 #'   \item{ramsey_result}{The underlying \code{dynhr_ramsey_result2} object.}
 #'   \item{dr_slack}{Slack-regime DecisionRules for the augmented system.}
-#'   \item{dr_bind}{Binding-regime DecisionRules for each unique regime.}
+#'   \item{dr_bind}{Binding-regime rule of a period in which every spec binds
+#'     and the next period is slack (the last period of a spell).}
 #'   \item{regime_path}{Integer vector: optimal regime path (bitfield encoding).}
-#'   \item{irf}{IRF matrix (T x n_aug) under the Ramsey OBC policy.}
+#'   \item{irf}{n_aug x T matrix of deviations from the Ramsey steady state
+#'     under the Ramsey OBC policy.}
 #'   \item{meta}{Metadata.}
 #' @export
 ramsey_obc_pwlinear <- function(model,
@@ -330,13 +442,25 @@ ramsey_obc_pwlinear <- function(model,
   if (is.null(params)) params <- model$param_values
 
   # ---- 2. Get OBC specs ----
+  # With obc_specs = NULL the specs are the model's MCP tags plus its
+  # ramsey_constraints block (mapped onto the augmented system in step 6),
+  # exactly as in ramsey_obc_pf().  Until 2026-09-25 (W48) a
+  # ramsey_constraints block was refused here: the per-regime binding policy
+  # assumed the NEXT period slack (a spell of 2+ periods was solved with the
+  # wrong expectation) and the regime search flagged a bound only when the
+  # SLACK policy violated it (a bound violated only because another one
+  # binds was never imposed).  The regime search now uses the time-varying
+  # OccBin rules and verifies on the constrained path, and matches
+  # ramsey_obc_pf() / Dynare lmmcp.
+  use_rc <- is.null(obc_specs) && is.data.frame(model$ramsey_constraints) &&
+    nrow(model$ramsey_constraints) > 0L
   if (is.null(obc_specs)) {
-    obc_specs <- obc_parse_tags(model)
+    obc_specs <- if (!use_rc || .model_has_obc_tags(model))
+      obc_parse_tags(model) else list()
   }
-  n_spec <- length(obc_specs)
 
   # ---- 3. Build augmented Ramsey system (order 1) ----
-  if (verbose) cat("[ramsey_obc_pwlinear] Building augmented Ramsey system...\n")
+  if (verbose) .dynhr_cat("[ramsey_obc_pwlinear] Building augmented Ramsey system...\n")
 
   ramsey_result <- ramsey_model(
     model             = model,
@@ -356,7 +480,7 @@ ramsey_obc_pwlinear <- function(model,
   n_mult       <- n_aug - n_orig
 
   # ---- 4. Extract augmented system matrices ----
-  if (verbose) cat("[ramsey_obc_pwlinear] Extracting augmented system matrices...\n")
+  if (verbose) .dynhr_cat("[ramsey_obc_pwlinear] Extracting augmented system matrices...\n")
 
   sys <- extract_system_matrices(aug_compiled, aug_ss, params)
   # Augment sys with n_endo, endo_names, etc. needed by obc helpers
@@ -366,7 +490,7 @@ ramsey_obc_pwlinear <- function(model,
   sys$n_exo      <- length(sys$exo_names)
 
   # ---- 5. Solve slack-regime perturbation (order 1) ----
-  if (verbose) cat("[ramsey_obc_pwlinear] Solving slack-regime perturbation...\n")
+  if (verbose) .dynhr_cat("[ramsey_obc_pwlinear] Solving slack-regime perturbation...\n")
 
   dr_slack <- solve_perturbation(
     aug_model, aug_compiled, aug_ss, params,
@@ -384,19 +508,23 @@ ramsey_obc_pwlinear <- function(model,
       bound    = s$bound
     )
   })
+  if (use_rc) {
+    obc_specs <- c(obc_specs,
+                   .ramsey_constraint_specs(model, ramsey_result, params))
+    aug_specs <- obc_specs
+  }
+  n_spec <- length(aug_specs)
 
-  # Build the binding-regime policy using the OccBin terminal-substitution
-  # approach: obc_solve_binding replaces the constrained equations with the
-  # binding constraints and substitutes the slack policy as the terminal
-  # condition for the next period (Guerrieri-Iacoviello 2015).
+  # The rule of a period in which every spec binds and the NEXT period is
+  # slack (obc_solve_binding(), Guerrieri-Iacoviello 2015 terminal
+  # substitution): the last period of a spell.  Earlier spell periods follow
+  # the time-varying rules of the regime search below.
   obs_idx <- seq_len(n_aug)
-  state_idx <- dr_slack$state_idx
-  n_state   <- length(state_idx)
 
   dr_bind <- obc_solve_binding(sys, dr_slack, aug_specs, obs_idx)
 
   # ---- 7. Run regime search ----
-  if (verbose) cat("[ramsey_obc_pwlinear] Running regime search (method = '", method, "')...\n", sep = "")
+  if (verbose) .dynhr_cat("[ramsey_obc_pwlinear] Running regime search (method = '", method, "')...\n", sep = "")
 
   # Build shock sequence: one std dev impulse to the first shock in period 1.
   # boehl_simulate()/boehl_solve_regime_path() take an n_exo x T matrix
@@ -409,54 +537,44 @@ ramsey_obc_pwlinear <- function(model,
     shock_seq[1, 1] <- shock_std
   }
 
-  if (method == "boehl") {
-    # Use Boehl complementarity iteration
-    regime_search <- boehl_solve_regime_path(
-      shock_seq    = shock_seq,
-      dr_slack     = dr_slack,
-      sys          = sys,
-      specs        = aug_specs,
-      obs_idx      = obs_idx,
-      max_iter     = max_iter,
-      tol          = tol
-    )
-    regime_path <- regime_search$regime_path
-    irf_paths   <- regime_search$paths
-  } else {
-    # Use OccBin guess-and-verify Kalman-filter approach
-    # Generate Y by simulating under all-slack assumption first
-    Y_init <- boehl_simulate(
-      shock_seq    = shock_seq,
-      dr_slack     = dr_slack,
-      regime_cache = .build_regime_cache(dr_slack, n_aug, state_idx, obs_idx),
-      regime_path  = integer(n_T)
-    )$paths
-
-    regime_search <- obc_guess_verify(
-      Y         = Y_init,
-      dr_slack  = dr_slack,
-      sys       = sys,
-      obs_idx   = obs_idx,
-      model     = aug_model,
-      params    = params,
-      obs_vars  = aug_model$var_names,
-      specs     = aug_specs,
-      max_iter  = max_iter
-    )
-    regime_path <- regime_search$regime_path
-
-    # Compute IRF by simulating under the found regime path
-    sim <- boehl_simulate(
-      shock_seq    = shock_seq,
-      dr_slack     = dr_slack,
-      regime_cache = regime_search$regime_cache,
-      regime_path  = regime_path
-    )
-    irf_paths <- sim$paths
+  # The shock path is KNOWN (an impulse), so the regime search is the
+  # deterministic complementarity iteration on the simulated path (each
+  # iteration re-checks EVERY period, so a period can bind and later be
+  # released).  "boehl" starts it from the all-slack path; "guess_verify"
+  # starts from OccBin's initial guess, binding exactly where the all-slack
+  # path violates a bound.  This used to call obc_guess_verify(), the
+  # Kalman-FILTER regime search, on the all-slack simulation: its observation
+  # pre-pass locked every period where the simulated DEVIATION was at or
+  # below the LEVEL bound as binding for good, so a one-period ZLB episode
+  # came back binding for the whole horizon.
+  init <- NULL
+  if (method == "guess_verify") {
+    cache <- new.env(parent = emptyenv(), hash = TRUE)
+    obc_ensure_policy(0L, cache, sys, dr_slack, aug_specs, obs_idx)
+    slack_paths <- boehl_simulate(shock_seq, dr_slack, cache, integer(n_T))$paths
+    bnd_dev <- .obc_bound_dev(aug_specs, dr_slack)
+    init <- integer(n_T)
+    for (j in seq_along(aug_specs)) {
+      x <- slack_paths[aug_specs[[j]]$var_idx, ]
+      viol <- if (aug_specs[[j]]$op == ">") x < bnd_dev[[j]] else x > bnd_dev[[j]]
+      init[viol] <- bitwOr(init[viol], 2L^(j - 1L))
+    }
   }
+  regime_search <- boehl_solve_regime_path(
+    shock_seq        = shock_seq,
+    dr_slack         = dr_slack,
+    sys              = sys,
+    specs            = aug_specs,
+    obs_idx          = obs_idx,
+    max_iter         = max_iter,
+    tol              = tol,
+    regime_path_init = init
+  )
+  regime_path <- regime_search$regime_path
+  irf_paths   <- regime_search$paths
 
   # ---- 8. Compute welfare ----
-  discount <- .get_discount(params) %||% 0.99
+  discount <- ramsey_result$welfare$discount
   welfare_steady <- ramsey_result$welfare$steady_value
 
   # ---- 9. Build result ----
@@ -535,10 +653,11 @@ ramsey_obc_welfare_cost <- function(model,
   obj_text <- planner_objective %||% model$planner_objective$text %||% NULL
   if (is.null(obj_text)) stop("No planner objective provided.")
   if (is.null(params)) params <- model$param_values
-  discount <- .get_discount(params) %||% 0.99
+  discount <- .ramsey_discount(NULL, model, params,
+                               "ramsey_obc_welfare_cost")$value
 
   # Unconstrained Ramsey
-  if (verbose) cat("[ramsey_obc_welfare_cost] Solving unconstrained Ramsey...\n")
+  if (verbose) .dynhr_cat("[ramsey_obc_welfare_cost] Solving unconstrained Ramsey...\n")
   ramsey_uncon <- ramsey_model(model, params = params,
     planner_objective = obj_text, order = 1L, verbose = verbose)
 
@@ -546,7 +665,7 @@ ramsey_obc_welfare_cost <- function(model,
   # Build shock path: one std-dev impulse to the first exogenous shock at
   # period 1, matching the convention used by ramsey_obc_pwlinear() (see
   # `shock_seq[1, 1] <- shock_std` above).
-  if (verbose) cat("[ramsey_obc_welfare_cost] Solving OBC-constrained Ramsey (PF)...\n")
+  if (verbose) .dynhr_cat("[ramsey_obc_welfare_cost] Solving OBC-constrained Ramsey (PF)...\n")
   T_horizon <- 40L
   shock_path <- matrix(0, nrow = T_horizon, ncol = length(model$varexo_names))
   colnames(shock_path) <- model$varexo_names
@@ -596,31 +715,3 @@ print.dynhr_ramsey_obc_cost <- function(x, ...) {
   invisible(x)
 }
 
-
-#' Build a minimal regime cache containing only the slack policy
-#'
-#' Internal helper for piecewise-linear Ramsey.  Creates an R environment
-#' with the slack (regime 0) policy pre-seeded, suitable for initial
-#' simulation passes.
-#'
-#' @param dr_slack  Slack-regime DecisionRules.
-#' @param n_aug     Number of augmented endogenous variables.
-#' @param state_idx Integer vector: state variable indices.
-#' @param obs_idx   Integer vector: observable variable indices.
-#' @return An R environment (hash map) with key "0".
-#' @noRd
-.build_regime_cache <- function(dr_slack, n_aug, state_idx, obs_idx) {
-  cache <- new.env(parent = emptyenv(), hash = TRUE)
-  n_state <- length(state_idx)
-  assign("0", list(
-    dr      = dr_slack,
-    c_full  = numeric(n_aug),
-    c_state = numeric(n_state),
-    c_obs   = numeric(length(obs_idx)),
-    TT      = dr_slack$ghx[state_idx, , drop = FALSE],
-    RR      = dr_slack$ghu[state_idx, , drop = FALSE],
-    ZZ      = dr_slack$ghx,
-    DD      = dr_slack$ghu
-  ), envir = cache)
-  cache
-}

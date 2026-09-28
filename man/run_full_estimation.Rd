@@ -10,7 +10,8 @@ run_full_estimation(
   obs_vars = NULL,
   output_dir = ".",
   output_prefix = "dynhr_est",
-  sampler = c("rwmh", "smc", "nuts", "dime"),
+  sampler = c("rwmh", "smc", "nuts", "dime", "pmmh", "hmc", "mala", "chees", "dsmh",
+    "smc2"),
   n_draws = 10000L,
   n_warmup = 5000L,
   n_chains = 4L,
@@ -19,12 +20,14 @@ run_full_estimation(
   parallel = FALSE,
   parallel_backend = "mirai",
   n_cores = NULL,
-  analytic_grad = FALSE,
+  analytic_grad = TRUE,
+  metric = c("diagonal", "warmup_dense", "fisher_diag", "lowrank"),
   n_mode_iter = 10000L,
   mode_method = "newrat",
   mode_n_starts = NULL,
-  me_variance = 0,
-  likelihood = c("gaussian", "cumulant", "whittle", "tpf", "sv_rbpf"),
+  me_variance = NULL,
+  likelihood = c("gaussian", "cumulant", "whittle", "tpf", "sv_rbpf", "pskf",
+    "student_t", "pruned", "global_pf", "pkf", "ppf", "copf"),
   lik_init = "auto",
   freq_band = c(0, pi),
   system_priors = NULL,
@@ -43,11 +46,15 @@ run_full_estimation(
   ramsey_order = 1L,
   ramsey_n_periods = 400L,
   ramsey_burn_in = 100L,
+  ramsey_discount = NULL,
   filter_tunes = NULL,
   heteroskedastic_shocks = NULL,
   stochastic_volatility = NULL,
   tpf_options = list(),
   plan = NULL,
+  checkpoint_dir = NULL,
+  resume = FALSE,
+  on_mismatch = "refuse",
   ...
 )
 }
@@ -69,7 +76,11 @@ current working directory.}
 \code{"dynhr_est"}).}
 
 \item{sampler}{Which sampler to use: \code{"rwmh"} (default),
-\code{"smc"}, \code{"nuts"}, or \code{"dime"}.}
+\code{"smc"}, \code{"nuts"}, \code{"dime"}, \code{"pmmh"} (random-walk
+MH over an unbiased particle likelihood), \code{"hmc"}, \code{"mala"},
+\code{"chees"}, \code{"dsmh"} or \code{"smc2"} -- every sampler of
+\code{\link{sampler_spec}}. Arguments a sampler does not take (e.g.
+\code{n_chains} for \code{"hmc"}) are left out, with a message.}
 
 \item{n_draws}{Post-warmup draws to retain (default \code{10000L}).
 Set to \code{0} to run mode-finding only.}
@@ -99,12 +110,30 @@ log-posterior closure once via \code{.mirai_pool_closure()}.}
 \item{n_cores}{Worker (daemon) count when \code{parallel = TRUE}
 (\code{NULL} = auto-detect, capped at \code{n_chains}).}
 
-\item{analytic_grad}{For \code{sampler = "nuts"} on a standard Gaussian
-model, use the exact analytic gradient (\code{\link{make_posterior_grad}}:
-a compiled Kalman score for the shock-std parameters plus a numerical
-gradient for the rest) instead of a fully numerical gradient. Default
-\code{FALSE}. Applies to the serial (single-chain) NUTS path; the parallel
-multi-chain path uses the numerical gradient.}
+\item{analytic_grad}{For the gradient samplers (NUTS, HMC, MALA, ChEES), use
+the analytic gradient from \code{\link{make_posterior_grad}} instead of a
+finite-difference one. Its method is the \code{grad_method} option,
+default \code{"auto"}: the exact \code{"adjoint_solution"} for the
+Gaussian likelihood. Default \code{TRUE}: the exact gradient wherever the
+likelihood has one; a likelihood without one (the OBC filters,
+\code{"tpf"}, \code{"pskf"}, ...) keeps the numerical gradient without a
+warning. \code{FALSE} always finite-differences the log-posterior.
+Applies to the serial path and to the parallel multi-chain NUTS path
+(standard Gaussian models).}
+
+\item{metric}{For \code{sampler = "nuts"}: the warmup mass-matrix
+adaptation. \code{"diagonal"} (default) starts from the inverse-Hessian
+diagonal at the mode and adapts a diagonal inverse mass equal to the
+warmup posterior variance (Stan's convention); \code{"warmup_dense"}
+ends warmup with a Ledoit-Wolf dense inverse mass; \code{"fisher_diag"}
+(opt-in) sets the diagonal inverse mass to
+\eqn{\sqrt{\mathrm{var}(x)/\mathrm{var}(\nabla \log p)}} from each
+window's draws and gradients (Seyboldt, Carlson & Carpenter 2026,
+arXiv:2603.18845); \code{"lowrank"} (opt-in) adapts a
+low-rank-plus-diagonal inverse mass from draws and gradients (same
+paper's Algorithm 1, Lao 2026 schedule). Applies to the serial NUTS path;
+the parallel multi-chain path always uses \code{"diagonal"} and warns
+otherwise. Ignored by the other samplers.}
 
 \item{n_mode_iter}{Maximum optimizer iterations for mode-finding (default
 \code{10000L}).}
@@ -119,12 +148,18 @@ multi-start mode-finding (Step 6) when \code{parallel = TRUE}
 (\code{NULL} = one per daemon). Ignored when \code{parallel = FALSE}.}
 
 \item{me_variance}{Measurement-error variance added to the observation
-noise diagonal (default \code{0}).  Use a small positive value for
+noise diagonal. \code{NULL} (default) reads the \code{me_variance}
+option (0 unless set), as the estimation spec's
+\code{likelihood$me_variance} does.  Use a small positive value for
 stochastically singular models.}
 
 \item{likelihood}{Likelihood type: \code{"gaussian"} (Kalman filter, default),
-\code{"cumulant"}, \code{"whittle"}, or \code{"tpf"} (Tempered Particle
-Filter).}
+\code{"cumulant"}, \code{"whittle"}, \code{"tpf"} (Tempered Particle
+Filter), \code{"sv_rbpf"}, \code{"pskf"}, \code{"student_t"} (pass
+\code{student_df} in \code{...}), \code{"pruned"}, \code{"global_pf"}, or
+the OBC filters \code{"pkf"}, \code{"ppf"} and \code{"copf"} (which pick
+the filter of an OBC model) -- every likelihood of
+\code{\link{likelihood_spec}}.}
 
 \item{lik_init}{Kalman filter \code{P0} initialisation
 (default \code{"auto"}).  Ignored for non-Gaussian likelihoods.}
@@ -136,7 +171,10 @@ restriction (default \code{c(0, pi)}, ignored for other likelihoods).}
 (from \code{\link{system_prior_spec}}) providing system-prior
 log-density contributions, or \code{NULL}.}
 
-\item{seed}{Random seed for reproducibility (default \code{42L}).}
+\item{seed}{Random seed for reproducibility (default \code{42L}): it
+seeds the mode stage (the caller's RNG stream is restored on exit) and
+re-seeds the sampler stage; the parallel samplers use it as their base
+seed.}
 
 \item{run_diag}{Run the diagnostic battery after sampling?  (default
 \code{FALSE}; set \code{TRUE} for a full run).}
@@ -180,6 +218,12 @@ posterior mode (or calibrated parameters when \code{n_draws = 0}).}
 
 \item{ramsey_burn_in}{Burn-in for Ramsey welfare simulation.}
 
+\item{ramsey_discount}{Planner discount factor for the Ramsey step.  When
+\code{NULL} (default) it is taken from the parameter \code{beta} or
+\code{betta}; if the model has neither, the Ramsey step is SKIPPED with a
+\code{dynhr_warn_ramsey_skipped} warning (\code{$ramsey} stays
+\code{NULL}) instead of aborting the whole estimation.}
+
 \item{filter_tunes}{Call-level tune override.  \code{NULL} (default) uses
 the \code{filter_tunes} block from the \code{.mod} file if present.  Pass
 a \code{filter_tunes_spec} object (built with
@@ -205,7 +249,20 @@ Typical keys: \code{n_particles}, \code{ess_target}, \code{n_mh},
 single argument.  Mutually exclusive with \code{filter_tunes} and
 \code{heteroskedastic_shocks}.}
 
-\item{...}{Additional arguments forwarded to the chosen sampler.}
+\item{checkpoint_dir}{Optional directory for streamed, restartable
+sampling (the samplers that support it are listed at
+\code{\link{run_posterior_estimation}}).}
+
+\item{resume}{When \code{TRUE}, continue the chains saved in
+\code{checkpoint_dir}, adding \code{n_draws} draws.}
+
+\item{on_mismatch}{What a \code{resume} does when the checkpoint's target
+differs from this call's, or a registered result change touches this
+run: \code{"refuse"} (default) or \code{"warn"} (resume; the result is
+marked). See \code{\link{run_estimation}}, section Checkpoints.}
+
+\item{...}{Additional arguments forwarded to the chosen sampler
+(\code{student_df} and \code{obc_filter} go to the likelihood).}
 }
 \value{
 A \code{dynhr_estimation_result} list with elements:
@@ -224,7 +281,15 @@ A \code{dynhr_estimation_result} list with elements:
       \code{NULL} unless \code{compute_smoother = TRUE} and OBC is active.}
     \item{\code{ramsey}}{A \code{dynhr_ramsey_result}, or \code{NULL} if
       \code{run_ramsey = FALSE}.}
+    \item{\code{resolved}}{What the sampler stage resolved at run time:
+      \code{grad_method}, the analytic-gradient method it used (named by
+      sampler, e.g. \code{"adjoint_solution"} for a requested
+      \code{"auto"}), and \code{grad_method_requested}; \code{NULL} when
+      no sampler ran. The run record copies it.}
     \item{\code{meta}}{Run metadata: mod_file, sampler, seed, timestamps, use_obc}
+    \item{\code{run_record}}{A \code{dynhr_run_record}: resolved arguments,
+      option snapshot, RNG state and provenance; replay it with
+      \code{\link{dynhr_rerun}}.}
   }
 }
 \description{
@@ -233,6 +298,22 @@ posterior mode, draws from the posterior with the chosen sampler, and
 optionally runs the diagnostic battery.  Results are saved to
 \code{output_dir} and returned as a structured list.
 }
+\section{One code path}{
+
+The arguments become a \code{\link{dynhr_estimation_spec}}
+(\code{\link{as_estimation_spec}}), run by \code{\link{run_estimation}}:
+the mode stage is exactly \code{\link{run_mode_finding}}'s and the sampler
+stage exactly \code{\link{run_posterior_estimation}}'s, so
+\code{run_full_estimation(...)} returns the mode and the draws of
+\code{run_mode_finding()} followed by \code{run_posterior_estimation(seed =
+seed)} with the same settings. In particular it honours the
+result-changing options (\code{transform_params}, \code{rwmh_adapt_cov},
+\code{rwmh_n_blocks}, \code{proposal_cov_method},
+\code{use_exact_hessian}, ...; see \code{\link{dynhr_set_options}}), which
+its own mode and sampler code ignored before dynhr 0.9.3.105. The
+particle-likelihood variance preflight is evaluated at the mode.
+}
+
 \section{Arguments by stage}{
 
 The argument list is long because one call spans the whole pipeline.  Every
@@ -252,7 +333,8 @@ argument has a default; a minimal call needs only \code{mod_file},
     \code{mode_n_starts}}
   \item{\strong{Sampler}}{\code{sampler}, \code{n_draws}, \code{n_warmup},
     \code{n_chains}, \code{n_particles}, \code{n_walkers},
-    \code{analytic_grad}, \code{seed}, \code{...}}
+    \code{analytic_grad}, \code{seed}, \code{checkpoint_dir},
+    \code{resume}, \code{on_mismatch}, \code{...}}
   \item{\strong{Parallelism}}{\code{parallel}, \code{parallel_backend},
     \code{n_cores}}
   \item{\strong{Occasionally-binding constraints}}{\code{obc},
@@ -292,7 +374,8 @@ fit$chains$log_marginal_lik
 }
 }
 \seealso{
-\code{\link{parse_mod}}, \code{\link{find_mode}}, \code{\link{mcmc}},
+\code{\link{parse_mod}}, \code{\link{find_mode}}, \code{\link{dynhr_mcmc}},
   \code{\link{smc}}, \code{\link{nuts}}, \code{run_all_diagnostics},
-  \code{write_llm_report}
+  \code{write_llm_report}, \code{\link{run_estimation}} (the spec runner
+  behind this wrapper), \code{\link{dynhr_rerun}}, \code{\link{dynhr_verify}}
 }

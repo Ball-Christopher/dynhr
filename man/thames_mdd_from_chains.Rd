@@ -22,7 +22,7 @@ A named list with elements \code{log_mdd}, \code{se},
 Convenience wrapper around \code{\link{thames_mdd}} that extracts posterior
 draws and their theta-space unnormalized log-posterior values from a
 \code{dynhr_chains} object (as returned by \code{\link{run_full_estimation}}
-or the public samplers \code{\link{mcmc}}, \code{\link{nuts}},
+or the public samplers \code{\link{dynhr_mcmc}}, \code{\link{nuts}},
 \code{\link{smc}}).
 }
 \details{
@@ -41,6 +41,14 @@ within-chain autocorrelation but may slightly understate the cross-chain
 variance component.  For a per-chain breakdown, call \code{thames_mdd}
 directly on each \code{chain_list[[k]]$chain} and
 \code{chain_list[[k]]$post_logpost}.
+
+**SMC results.** A weighted SMC cloud whose \code{post_logpost} is still in
+particle order (no \code{resample_idx}) is resampled to equal weights with
+all per-particle fields re-indexed together before pairing, so every draw
+carries its own log-posterior. The prior-support box an SMC run records
+(\code{support_lower}/\code{support_upper}) is passed to
+\code{thames_mdd(lower =, upper =)} for the support correction unless
+\code{lower}/\code{upper} are given in \code{...}.
 
 **Never errors.** Any failure (too few draws, singular covariance, missing
 log-posterior) returns \code{list(log_mdd = NA_real_, se = NA_real_, ...)}

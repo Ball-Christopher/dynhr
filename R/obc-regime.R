@@ -7,7 +7,7 @@
 ##   obc_regime_idx()     -- logical bind-flags -> integer bitfield regime index
 ##   obc_regime_flags()   -- integer regime index -> logical bind-flags
 ##   obc_ensure_policy()  -- lazily compute and cache per-regime policy matrices
-##   obc_guess_verify()   -- OccBin iterative regime-path refinement
+##   obc_guess_verify()   -- regime path of the data via the OccBin PKF
 ##   .obc_warn_me_floor_lock() -- me-floor hazard guard using the slack regime
 ##                                as the stationary-F proxy (see below)
 ##
@@ -70,7 +70,8 @@
   HH <- tcrossprod(DD %*% Sigma_e, DD)
   SS <- RR %*% Sigma_e %*% t(DD)
 
-  Sxi0 <- tryCatch(solve_lyapunov(TT, QQ), error = function(e) NULL)
+  Sxi0 <- tryCatch(solve_lyapunov(TT, QQ),
+                   error = function(e) .dynhr_reraise_bug(e, NULL))
   if (is.null(Sxi0) || !all(is.finite(Sxi0))) return(invisible(NULL))
 
   .warn_me_floor_lock(
@@ -93,9 +94,9 @@
 #' For a lower bound (>): violation when predicted value < bound.
 #' For an upper bound (<): violation when predicted value > bound.
 #'
-#' Note: this zero-shock check is used by obc_guess_verify (outer loop) and
-#' as a fallback.  The PKF filter (obc-filter.R) uses pkf_check_binding
-#' instead, which additionally incorporates the extracted shock eps_{t|t}.
+#' Note: this zero-shock, one-period, slack-rule check is NOT the OccBin
+#' regime check (it ignores the shock and every later period); since W49
+#' (0.9.3.93) neither obc_guess_verify() nor the PKF uses it.
 #'
 #' @param state_prev Numeric vector: filtered state at t-1 (length n_state)
 #' @param dr_slack   Slack-regime DecisionRules
@@ -103,9 +104,15 @@
 #' @return Logical vector (length = length(specs))
 #' @noRd
 obc_should_bind <- function(state_prev, dr_slack, specs) {
-  vapply(specs, function(s) {
+  ## `ghx %*% state_prev` is a DEVIATION from steady state while `s$bound` is a
+  ## LEVEL (the package convention, ledger A6) -- compare against the
+  ## deviation-form bound.  Before 0.9.4 this used the raw level and disagreed
+  ## with obc_solve_binding()/boehl whenever the steady state was non-zero.
+  bnd <- .obc_bound_dev(specs, dr_slack)
+  vapply(seq_along(specs), function(j) {
+    s <- specs[[j]]
     var_pred <- sum(dr_slack$ghx[s$var_idx, ] * state_prev)
-    if (s$op == ">") var_pred < s$bound else var_pred > s$bound
+    if (s$op == ">") var_pred < bnd[[j]] else var_pred > bnd[[j]]
   }, logical(1))
 }
 
@@ -175,6 +182,14 @@ obc_regime_flags <- function(regime_idx, n_specs) {
 #' @noRd
 obc_ensure_policy <- function(regime_idx, regime_cache, sys, dr_slack, specs, obs_idx,
                                copf_args = NULL) {
+  ## The system the cache was built for: boehl_simulate() and the other
+  ## deterministic-path solvers derive the TIME-VARYING rules of a regime
+  ## path from it (.obc_pwl_rules(); a per-regime entry below is the rule of
+  ## a binding period whose NEXT period is slack, i.e. the last period of a
+  ## spell only).
+  if (!exists(".pwl_src", envir = regime_cache, inherits = FALSE))
+    assign(".pwl_src", list(sys = sys, dr_slack = dr_slack, specs = specs),
+           envir = regime_cache)
   key <- as.character(regime_idx)
   if (exists(key, envir = regime_cache, inherits = FALSE))
     return(get(key, envir = regime_cache, inherits = FALSE))
@@ -259,22 +274,22 @@ obc_ensure_policy <- function(regime_idx, regime_cache, sys, dr_slack, specs, ob
 # OccBin guess-and-verify
 # =============================================================================
 
-#' OccBin guess-and-verify regime path
+#' OccBin regime path of the data (piecewise-linear Kalman filter)
 #'
-#' Iteratively refines the binding/slack regime assignment across time periods.
-#' At each iteration: run the regime-switching Kalman filter, collect filtered
-#' states, recheck each period's regime consistency using the slack policy, and
-#' update. Stops when the regime path is unchanged or max_iter is reached.
+#' Runs \code{kalman_filter_obc_pkf()} -- Dynare's OccBin PKF: in every
+#' period the regime sequence expected at t is solved (guess-and-verify on
+#' the constrained path from the one-step smoothed state and the filtered
+#' shock) and the period's time-varying rule is used -- and returns its
+#' regime path together with the regime cache holding the per-period rules,
+#' so a following \code{kalman_filter_obc(..., regime_path)} evaluates the
+#' same likelihood.
 #'
-#' Pre-pass: when an OBC variable is directly observed (appears in obs_vars),
-#' periods where the observed value is at the bound are flagged as binding before
-#' the iterative loop. This handles impact-period binding caused by a large
-#' shock, which the state-based prediction cannot detect from s_{t-1} = 0.
-#'
-#' The regime_path is an integer vector where each value is a bitfield encoding
-#' which constraints are binding: bit j (0-based) = 1 means spec j binds.
-#' Regime 0 = all slack.  For k=1 this collapses to the legacy 0/1 path.
-#' Each distinct binding combination gets its own lazily-computed policy.
+#' Changed in 0.9.3.93 (W49): this was an outer loop that filtered with one
+#' policy per regime (next period slack), re-checked every period against
+#' the SLACK rule applied to the lagged filtered state, and locked periods in
+#' which an observed constrained variable sat at its bound (an
+#' observation pre-pass Dynare does not have).  Both checks are wrong for
+#' spells of two or more periods.
 #'
 #' @param Y           Observation matrix (n_obs x T)
 #' @param dr_slack    Slack-regime DecisionRules
@@ -285,85 +300,27 @@ obc_ensure_policy <- function(regime_idx, regime_cache, sys, dr_slack, specs, ob
 #' @param obs_vars    Character vector of observed variable names
 #' @param specs       OBC spec list
 #' @param me_variance Measurement error variance
-#' @param max_iter    Maximum outer iterations (default 20)
-#' @param obs_tol     Tolerance for direct observation-based binding detection
+#' @param max_iter    Maximum re-updates per period (Dynare's
+#'                    likelihood.max_number_of_iterations, default 10)
 #' @return List with:
-#'   $regime_path  -- Integer vector (length T): bitfield regime per period
-#'   $regime_cache -- R environment of lazily-computed per-regime policies
+#'   $regime_path     -- integer vector (length T): regime in period t
+#'   $regime_expected -- list: regime sequence expected in period t
+#'   $regime_cache    -- R environment: slack policy plus the PKF's
+#'                       per-period rules
+#'   $loglik          -- the PKF log-likelihood (-Inf on failure)
+#'   $failed_period   -- NA or the period in which no regime converged
 #' @noRd
 obc_guess_verify <- function(Y, dr_slack, sys, obs_idx,
                               model, params, obs_vars, specs,
-                              me_variance = 1e-8, max_iter = 20L,
-                              obs_tol = 1e-5) {
-  n_T         <- if (is.null(dim(Y))) length(Y) else ncol(Y)
-  n_specs     <- length(specs)
-  regime_path <- integer(n_T)   # initial guess: all slack (regime 0)
+                              me_variance = 1e-8, max_iter = 10L) {
   regime_cache <- new.env(parent = emptyenv(), hash = TRUE)
-
-  # Ensure slack policy is pre-seeded so the first Kalman pass can run
   obc_ensure_policy(0L, regime_cache, sys, dr_slack, specs, obs_idx)
-
-  # ---- Pre-pass: lock in periods where an OBC variable is directly observed
-  # at its bound. These are hard constraints: the iterative loop cannot flip
-  # them to slack because the observation is definitive evidence.
-  # Multiple simultaneously-observed constraints are OR'd into the bitfield.
-  forced_bind <- integer(n_T)
-  for (s_idx in seq_along(specs)) {
-    s       <- specs[[s_idx]]
-    obs_row <- match(s$var_name, obs_vars)
-    if (!is.na(obs_row)) {
-      obs_vals <- if (is.null(dim(Y))) Y else Y[obs_row, ]
-      for (t in seq_len(n_T)) {
-        if (!is.na(obs_vals[t])) {
-          at_bound <- if (s$op == ">") obs_vals[t] <= s$bound + obs_tol
-                      else             obs_vals[t] >= s$bound - obs_tol
-          if (at_bound) {
-            # OR this spec's bit into the regime for period t
-            cur_flags        <- obc_regime_flags(regime_path[t], n_specs)
-            cur_flags[s_idx] <- TRUE
-            regime_path[t]   <- obc_regime_idx(cur_flags)
-            forced_bind[t]   <- 1L
-          }
-        }
-      }
-    }
-  }
-
-  # Pre-build any regimes required by the forced-bind periods
-  for (t in seq_len(n_T)) {
-    if (forced_bind[t] != 0L)
-      obc_ensure_policy(regime_path[t], regime_cache, sys, dr_slack, specs, obs_idx)
-  }
-
-  for (iter in seq_len(max_iter)) {
-    kf <- kalman_filter_obc(
-      Y, dr_slack, regime_cache,
-      model, params, obs_vars, regime_path,
-      me_variance     = me_variance,
-      return_filtered = TRUE
-    )
-    if (is.null(kf) || !is.finite(kf$loglik)) break
-
-    filt   <- kf$filtered_states   # n_state x T
-    s_prev <- numeric(nrow(filt))
-    new_regime <- integer(n_T)
-
-    for (t in seq_len(n_T)) {
-      if (forced_bind[t] != 0L) {
-        new_regime[t] <- regime_path[t]   # observation-locked; cannot be overridden
-      } else {
-        bind_flags  <- obc_should_bind(s_prev, dr_slack, specs)
-        regime_idx  <- obc_regime_idx(bind_flags)
-        if (regime_idx != 0L)
-          obc_ensure_policy(regime_idx, regime_cache, sys, dr_slack, specs, obs_idx)
-        new_regime[t] <- regime_idx
-      }
-      s_prev <- filt[, t]
-    }
-
-    if (identical(new_regime, regime_path)) break
-    regime_path <- new_regime
-  }
-
-  list(regime_path = regime_path, regime_cache = regime_cache)
+  kf <- kalman_filter_obc_pkf(
+    Y, dr_slack, regime_cache, sys, model, params, obs_vars, specs,
+    obs_idx = obs_idx, me_variance = me_variance, max_inner = max_iter)
+  list(regime_path     = kf$regime_path,
+       regime_expected = kf$regime_expected,
+       regime_cache    = regime_cache,
+       loglik          = kf$loglik,
+       failed_period   = kf$failed_period)
 }

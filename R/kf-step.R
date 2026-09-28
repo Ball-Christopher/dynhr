@@ -91,30 +91,62 @@ kf_step <- function(s, P, y, TT, ZZ, RR, DD, Sigma_e,
                     scale = NULL, d = NULL, me_diag = NULL, me_extra = NULL) {
   n_obs <- length(y)
 
-  ## Per-period scaled shock covariance Se_t = diag(scale) Sigma_e diag(scale)
-  ## and the derived observation/cross terms rebuilt from the SAME Se_t so a
-  ## shock hitting both state and observation is scaled consistently.
+  ## Per-period scaled shock covariance Se_t = diag(scale) Sigma_e diag(scale).
+  ## The derived observation/cross terms are rebuilt from the SAME Se_t inside
+  ## .kf_step_core() so a shock hitting both state and observation is scaled
+  ## consistently.
   if (is.null(scale)) {
     Se_t <- Sigma_e
   } else {
     Se_t <- Sigma_e * outer(scale, scale)
   }
-  HH_t <- tcrossprod(DD %*% Se_t, DD)
-  SS_t <- RR %*% Se_t %*% t(DD)
 
   ## Innovation.
   v <- y - as.numeric(ZZ %*% s)
   if (!is.null(d)) v <- v - d
 
-  ## Forecast covariance F with measurement-error diagonal. me_vec is the FULL
-  ## observation-noise variance vector for this period (base + extra); it is
-  ## the true i.i.d. noise law, so it also enters the Joseph term below.
+  ## me_vec is the FULL observation-noise variance vector for this period
+  ## (base + extra); it is the true i.i.d. noise law, so it enters both F and
+  ## the Joseph term (see .kf_step_core).
   me_vec <- NULL
   if (!is.null(me_diag))  me_vec <- rep_len(as.numeric(me_diag), n_obs)
   if (!is.null(me_extra)) {
     mx <- rep_len(as.numeric(me_extra), n_obs)
     me_vec <- if (is.null(me_vec)) mx else me_vec + mx
   }
+
+  st <- .kf_step_core(s, P, v, TT, ZZ, RR, DD, Se_t, me_vec)
+  if (is.null(st)) return(NULL)
+  ll <- -0.5 * n_obs * log(2 * pi) - 0.5 * (st$logdet_F + st$maha)
+  if (!is.finite(ll)) return(NULL)
+
+  list(ll = ll, s = st$s, P = st$P)
+}
+
+
+## .kf_step_core(): the shared single-period Kalman measurement/prediction
+## update behind kf_step() and the hand-rolled filters that need more than the
+## Gaussian ll increment (the Student-t likelihood in
+## R/kalman-filter-student.R and kf_innovation_diagnostics() in
+## R/kf-innovation-diagnostics.R; brief 23 D1). Keeping ONE copy of the
+## covariance update is the point: two hand-rolled copies had dropped the
+## measurement-error Joseph term K diag(me) K' (brief 23 A2).
+##
+## Inputs are already reduced to the rows observed this period:
+##   v      innovation y_t - d - ZZ s   (length k)
+##   ZZ, DD k-row observation loadings
+##   Se_t   this period's shock covariance
+##   me_vec length-k TRUE i.i.d. measurement-error variances, or NULL
+## Returns NULL when F is non-finite or not positive definite (the caller
+## decides whether that is -Inf or an error), else
+##   list(F, Fi, logdet_F, maha = v' F^-1 v, s = s', P = P')
+## with (s', P') the next-period PREDICTION moments.
+.kf_step_core <- function(s, P, v, TT, ZZ, RR, DD, Se_t, me_vec = NULL) {
+  n_obs <- length(v)
+  HH_t <- tcrossprod(DD %*% Se_t, DD)
+  SS_t <- RR %*% Se_t %*% t(DD)
+
+  ## Forecast covariance F with measurement-error diagonal.
   PZ <- P %*% t(ZZ)
   Ft <- ZZ %*% PZ + HH_t
   if (!is.null(me_vec)) Ft <- Ft + diag(me_vec, nrow = n_obs)
@@ -129,10 +161,9 @@ kf_step <- function(s, P, y, TT, ZZ, RR, DD, Sigma_e,
   if (!all(is.finite(Ft))) return(NULL)
   Fc <- tryCatch(chol(Ft), error = function(e) NULL)
   if (is.null(Fc)) return(NULL)
-  Fi  <- chol2inv(Fc)
-  ldf <- 2 * sum(log(diag(Fc)))
-  ll  <- -0.5 * n_obs * log(2 * pi) - 0.5 * (ldf + drop(crossprod(v, Fi %*% v)))
-  if (!is.finite(ll)) return(NULL)
+  Fi   <- chol2inv(Fc)
+  ldf  <- 2 * sum(log(diag(Fc)))
+  maha <- drop(crossprod(v, Fi %*% v))
 
   ## Kalman gain and prediction-form update.
   K_t  <- (TT %*% PZ + SS_t) %*% Fi
@@ -167,5 +198,5 @@ kf_step <- function(s, P, y, TT, ZZ, RR, DD, Sigma_e,
     P_n <- P_n + K_t %*% (me_vec * t(K_t))
   P_n <- (P_n + t(P_n)) * 0.5
 
-  list(ll = ll, s = s_n, P = P_n)
+  list(F = Ft, Fi = Fi, logdet_F = ldf, maha = maha, s = s_n, P = P_n)
 }

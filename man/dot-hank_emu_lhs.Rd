@@ -2,7 +2,7 @@
 % Please edit documentation in R/hank-mixture-emulator.R
 \name{.hank_emu_lhs}
 \alias{.hank_emu_lhs}
-\title{Simple base-R Latin-hypercube design in `[0, 1]^d`}
+\title{Simple base-R Latin-hypercube design in \code{[0, 1]^d}}
 \usage{
 .hank_emu_lhs(n, d)
 }
@@ -12,11 +12,11 @@
 \item{d}{Integer number of coordinates.}
 }
 \value{
-An `n x d` matrix in `[0, 1]^d`.
+An \code{n x d} matrix in \code{[0, 1]^d}.
 }
 \description{
-A classic stratified LHS: each coordinate's `[0, 1]` range is split into
-`n` equal strata, one point drawn uniformly within each stratum, and the
+A classic stratified LHS: each coordinate's \code{[0, 1]} range is split into
+\code{n} equal strata, one point drawn uniformly within each stratum, and the
 per-coordinate strata orderings independently permuted (so every 1-D
 marginal is a jittered equal-stratification and no package dependency is
 needed for this one design step).

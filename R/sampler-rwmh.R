@@ -342,7 +342,7 @@ rwmh <- function(log_post_fn, theta0, Sigma_prop,
       msg <- sprintf("Ch%s %d/%d accept=%.0f%% lp=%.1f scale=%.3f ETA=%.0fs",
                      label, i, n_draws, rate * 100, trace_lp_curr, scale, eta)
       if (!is.null(progressor)) progressor(message = msg, amount = 1)
-      else if (verbose) cat("  ", msg, "\n")
+      else if (verbose) .dynhr_cat("  ", msg, "\n")
     }
   }
 
@@ -405,12 +405,21 @@ rwmh <- function(log_post_fn, theta0, Sigma_prop,
 #' @param log_post_fn  Function(theta, U_list = NULL) -> list(logpost, U_list).
 #'   Must be the inner function returned by \code{make_log_posterior_tpf}.
 #' @param theta0       Named initial parameter vector.
-#' @param Sigma_prop   Proposal covariance (n_par x n_par).
+#' @param Sigma_prop   Proposal covariance (n_par x n_par): an ETA-SPACE
+#'   covariance when \code{transform} is non-NULL, theta-space otherwise.
 #' @param n_draws      Total draws (including burn-in).
 #' @param n_burn       Burn-in draws to discard.
 #' @param scale        Initial proposal scale factor.
 #' @param target_rate  Target acceptance rate for adaptive scaling.
 #' @param adapt_every  Adapt scale every N draws (during burn-in).
+#' @param transform    Optional "dynhr_param_transform" (from
+#'   \code{build_param_transform}), as in \code{rwmh()}: the random walk runs
+#'   on \code{eta = to_unconstrained(theta)} with the target
+#'   \code{logpost(to_constrained(eta)) + log_jacobian(eta)}; stored chain
+#'   rows are \code{to_constrained(eta)} and \code{logpost_trace} /
+#'   \code{post_logpost} the theta-space log-posterior. W86: before this
+#'   argument existed, \code{run_posterior_estimation()}'s transform_params
+#'   path handed the eta-space proposal covariance to a THETA-space walk.
 #' @param rho_u        AR(1) correlation for U: U' = rho_u * U + sqrt(1 - rho_u^2) * Z.
 #'   Range (0, 1). rho_u = 0 is independent (standard PMCMC); rho_u -> 1
 #'   gives maximum correlation. Default 0.99.
@@ -426,7 +435,8 @@ rwmh_cpm <- function(log_post_fn, theta0, Sigma_prop,
                      adapt_every = 100L,
                      rho_u = 0.99,
                      verbose = TRUE,
-                     progressor = NULL, chain_id = NULL) {
+                     progressor = NULL, chain_id = NULL,
+                     transform = NULL) {
 
   ## Input validation
   if (!is.numeric(rho_u) || length(rho_u) != 1L || !is.finite(rho_u) ||
@@ -444,9 +454,29 @@ rwmh_cpm <- function(log_post_fn, theta0, Sigma_prop,
   logpost_trace <- numeric(n_draws)
   accepted      <- logical(n_draws)
 
+  ## --- Sampling space: eta (transform) or theta ------------------------------
+  ## The walk runs on `state`; `.cpm_eval()` returns the log_post_fn result
+  ## with $logpost the SAMPLING-space target (+ log|dtheta/deta| under the
+  ## transform) and $lp_theta the theta-space log-posterior for the trace.
+  .cpm_theta <- function(state) {
+    th <- if (is.null(transform)) state else transform$to_constrained(state)
+    names(th) <- par_names
+    th
+  }
+  .cpm_eval <- function(state, U_list) {
+    r <- log_post_fn(.cpm_theta(state), U_list = U_list)
+    r$lp_theta <- r$logpost
+    if (!is.null(transform) && !is.null(r$logpost))
+      r$logpost <- r$logpost + transform$log_jacobian(state)
+    r
+  }
+  state0 <- if (is.null(transform)) theta0 else transform$to_unconstrained(theta0)
+  names(state0) <- par_names
+
   ## --- Prime U_curr and lp_curr from theta0 --------------------------------
-  res0   <- log_post_fn(theta0, U_list = NULL)
+  res0   <- .cpm_eval(state0, U_list = NULL)
   lp_curr <- res0$logpost
+  lp_theta_curr <- res0$lp_theta
   if (!is.finite(lp_curr))
     stop("rwmh_cpm: Initial parameter vector has -Inf log-posterior. ",
          "Check starting values.", call. = FALSE)
@@ -493,9 +523,9 @@ rwmh_cpm <- function(log_post_fn, theta0, Sigma_prop,
     if (is.matrix(U_t)) c(nrow(U_t), N) else c(length(U_t), 1L)
   })
 
-  state_curr <- theta0
-  chain[1, ]       <- state_curr
-  logpost_trace[1] <- lp_curr
+  state_curr <- state0
+  chain[1, ]       <- .cpm_theta(state_curr)
+  logpost_trace[1] <- lp_theta_curr
   accepted[1]      <- TRUE
   n_accept         <- 0L
   t_start          <- Sys.time()
@@ -526,7 +556,7 @@ rwmh_cpm <- function(log_post_fn, theta0, Sigma_prop,
     }, U_curr, U_dims, U_type, SIMPLIFY = FALSE)
 
     ## -- Evaluate loglik at (theta_prop, U_prop) --------------------------------
-    res_prop <- log_post_fn(state_prop, U_list = U_prop)
+    res_prop <- .cpm_eval(state_prop, U_list = U_prop)
     lp_prop  <- res_prop$logpost
 
     ## -- Joint MH accept/reject (theta AND U move together) --------------------
@@ -534,6 +564,7 @@ rwmh_cpm <- function(log_post_fn, theta0, Sigma_prop,
     if (is.finite(log_alpha) && log(runif(1)) < log_alpha) {
       state_curr <- state_prop
       lp_curr    <- lp_prop
+      lp_theta_curr <- res_prop$lp_theta
       U_curr     <- res_prop$U_list  # CRITICAL: accept U_prop (not U_curr!)
       n_accept   <- n_accept + 1L
       accepted[i] <- TRUE
@@ -541,8 +572,8 @@ rwmh_cpm <- function(log_post_fn, theta0, Sigma_prop,
     ## On rejection: state_curr, lp_curr, U_curr all stay unchanged.
     ## U_prop is discarded. This is the correct CPM stationary distribution.
 
-    chain[i, ]       <- state_curr
-    logpost_trace[i] <- lp_curr
+    chain[i, ]       <- .cpm_theta(state_curr)
+    logpost_trace[i] <- lp_theta_curr
 
     ## -- Adaptive scale (during burn-in) ---------------------------------------
     if (i %% adapt_every == 0L && i <= n_burn) {
@@ -557,9 +588,9 @@ rwmh_cpm <- function(log_post_fn, theta0, Sigma_prop,
       eta     <- elapsed / i * (n_draws - i)
       label   <- if (is.null(chain_id)) "?" else as.character(chain_id)
       msg <- sprintf("CPM Ch%s %d/%d accept=%.0f%% lp=%.1f scale=%.3f rho_u=%.3f ETA=%.0fs",
-                     label, i, n_draws, rate * 100, lp_curr, scale, rho_u, eta)
+                     label, i, n_draws, rate * 100, lp_theta_curr, scale, rho_u, eta)
       if (!is.null(progressor)) progressor(message = msg, amount = 1)
-      else if (verbose) cat("  ", msg, "\n")
+      else if (verbose) .dynhr_cat("  ", msg, "\n")
     }
   }
 

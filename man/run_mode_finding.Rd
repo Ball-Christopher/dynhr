@@ -10,7 +10,7 @@ run_mode_finding(
   obs_vars = NULL,
   n_iter = 10000L,
   method = "newrat",
-  me_variance = 0,
+  me_variance = NULL,
   likelihood = c("gaussian", "cumulant", "whittle", "pruned", "pskf", "student_t",
     "sv_rbpf"),
   pruned_order = 2L,
@@ -26,8 +26,9 @@ run_mode_finding(
   heteroskedastic_shocks = NULL,
   stochastic_volatility = NULL,
   plan = NULL,
-  use_exact_hessian = FALSE,
+  use_exact_hessian = NULL,
   verbose = TRUE,
+  theta_init = NULL,
   ...
 )
 }
@@ -55,7 +56,9 @@ default: CMA-ES then L-BFGS-B). See \code{\link{find_mode}} for the full
 list of options.}
 
 \item{me_variance}{Measurement error variance added to the observation
-noise diagonal (default 0).  Use a small positive value for
+noise diagonal. \code{NULL} (default) reads the \code{me_variance}
+option (0 unless set), as the estimation spec's
+\code{likelihood$me_variance} does.  Use a small positive value for
 stochastically singular models.}
 
 \item{likelihood}{Likelihood type: \code{"gaussian"} (Kalman filter,
@@ -132,18 +135,21 @@ with a warning if the full Hessian is unusable. May also be set via
 \item{transform_params}{Run Step 5 mode-finding in unconstrained eta-space
 (default \code{TRUE}): via
 \code{build_param_transform} (built from \code{priors}) and
-\code{.run_mode_finding}'s `transform` argument -- see there for
+\code{.run_mode_finding}'s \code{transform} argument -- see there for
 the exact semantics (Jacobian-free objective, eta-space bounds for
-bounded optimizer stages, `theta_mode` returned in theta-space as
+bounded optimizer stages, \code{theta_mode} returned in theta-space as
 always). Applies to both the serial path and the PARALLEL multi-start
-path (\code{run_mode_mirai}'s `transform` argument): each
+path (\code{run_mode_mirai}'s \code{transform} argument): each
 daemon's \code{.run_mode_finding} call receives the transform, and
 dispersed multi-start points are jittered in eta-space (no bound
 clamping) before being mapped back to theta-space starts. May also be
 set globally via \code{dynhr_set_options(transform_params = TRUE)}. Has
 no effect on Step 6 (proposal covariance), which is always computed in
 theta-space here; \code{run_posterior_estimation()} performs its own
-delta-method conversion when sampling in eta-space.}
+delta-method conversion when sampling in eta-space. Exception: at a
+mode on a prior bound (a constrained, KKT mode, where that conversion
+divides by \eqn{(d\theta/d\eta)^2 \approx} (distance to the bound)^2),
+Step 6 also returns \code{Sigma_prop_eta}, see Value.}
 
 \item{filter_tunes}{Call-level tune override.  \code{NULL} (default) uses
 the \code{filter_tunes} block from the \code{.mod} file.  Pass a
@@ -164,7 +170,8 @@ SV specification for this call only, leaving the model object untouched.}
 Mutually exclusive with \code{filter_tunes} and
 \code{heteroskedastic_shocks}.}
 
-\item{use_exact_hessian}{Opt-in (default \code{FALSE}): build the RWMH
+\item{use_exact_hessian}{Opt-in (default \code{NULL}: the
+  \code{use_exact_hessian} option, else \code{FALSE}): build the RWMH
   proposal covariance from the analytic exact posterior Hessian
   (\code{posterior_hessian}) computed at the mode, instead of a
   finite-difference Hessian. Only applied for the standard Gaussian KF
@@ -188,10 +195,34 @@ Mutually exclusive with \code{filter_tunes} and
   uses the same analytic Hessian only to \emph{seed} the newrat optimiser's
   initial curvature \code{H0}; it does not set the reported covariance. On a
   large model that seed is itself expensive and of uncertain benefit -- set
-  \code{dynhr_set_options(use_analytic_hess = FALSE)} to fall back to the
-  cheap default \code{H0} if mode-finding setup is the bottleneck.)}
+  \code{mode_options = list(use_analytic_hess = FALSE)} (one run) or
+  \code{dynhr_set_options(use_analytic_hess = FALSE)} (the session; the
+  spec field \code{mode$analytic_h0}) to fall back to the cheap default
+  \code{H0} if mode-finding setup is the bottleneck.)}
 
 \item{verbose}{Print progress messages (default TRUE).}
+
+\item{theta_init}{Optional named numeric vector of starting values for
+  Step 4, in place of the default start. Names are matched against the prior
+  spec's \code{name} column (the canonical keys \code{extract_prior_spec()}
+  produces -- \code{sig_*} after the \code{eps_*} rename, \code{corr a,b},
+  \code{skew x}); a vector with missing or unknown names, or carrying any
+  \code{NA}/non-finite entry, is an error. Each value is clipped strictly
+  inside the prior spec's \code{[lower, upper]} (nudged by
+  \eqn{10^{-8}} times the support width when it sits on a bound), so the
+  bounded optimiser stages and the eta-transform stay finite. The supplied
+  start is used by EVERY path that reads the start: the serial optimiser,
+  the parallel multi-start portfolio (where chain 1 is always the start
+  itself), and the Hessian evaluated at the start. Default \code{NULL}
+  starts each parameter at its \code{estimated_params} INITVAL (as
+  overridden by an \code{estimated_params_init} block; the \code{init}
+  column of \code{extract_prior_spec()}) when that is finite and inside
+  \code{[lower, upper]}, and at its prior mean otherwise -- Dynare's rule.
+
+  The motivating use is \code{\link{diag_prior_sensitivity}}, which asks a
+  LOCAL question -- "does the mode move when the prior is flattened?" --
+  and so starts its flat-prior search at the informative mode rather than
+  at the midpoint of each flat uniform support.}
 
 \item{...}{Additional arguments forwarded to the mode-finder.}
 }
@@ -203,12 +234,33 @@ An object of class \code{"dynhr_mode_result"} containing:
     \item{\code{obs_vars}}{Observable variable names}
     \item{\code{prior_spec}}{Prior specification data.frame}
     \item{\code{log_post_fn}}{Log-posterior closure}
-    \item{\code{theta_init}}{Starting parameter vector (prior means)}
+    \item{\code{theta_init}}{Starting parameter vector (INITVAL / prior
+      means, or the clipped \code{theta_init=} argument when one was
+      supplied)}
     \item{\code{theta_mode}}{Posterior mode parameter vector}
     \item{\code{mode}}{Full mode-finding result list}
-    \item{\code{Sigma_prop}}{Proposal covariance for MCMC}
+    \item{\code{Sigma_prop}}{Proposal covariance for MCMC (theta-space).
+      When the mode sits within the finite-difference stencil of a prior
+      bound (a constrained mode: the posterior still rises toward the
+      bound), those parameters are differentiated one-sided (inward) and
+      decoupled from the rest: the other parameters get the inverse
+      curvature of the posterior with the bound parameters held at the
+      mode, and each bound parameter the inverse of its one-sided inward
+      curvature -- a local step scale, not a posterior variance (its
+      marginal is truncated and gradient-dominated; proposals across the
+      bound are rejected by the prior). A non-concave inward direction
+      falls back to the prior variance.}
+    \item{\code{Sigma_prop_eta}}{Present only at such a bound mode: the
+      eta-space (unconstrained, \code{transform_params}) proposal
+      covariance. Interior parameters: the usual delta-method conversion
+      of \code{Sigma_prop}; each bound parameter: the inverse negative
+      curvature of the Jacobian-adjusted eta log-posterior at its own
+      conditional mode (an O(1) variance), decoupled.}
     \item{\code{V_mode}}{Estimated variance-covariance at mode}
     \item{\code{me_variance},\code{likelihood}}{Settings used}
+    \item{\code{run_record}}{A \code{dynhr_run_record}: resolved arguments,
+      option snapshot, RNG state and provenance; replay it with
+      \code{\link{dynhr_rerun}}.}
   }
 }
 \description{
@@ -231,7 +283,7 @@ mode <- run_mode_finding(solved, Y, obs_vars = obs_vars,
 mode
 round(mode$theta_mode, 4)
 
-## The proposal covariance feeds straight into mcmc()
+## The proposal covariance feeds straight into dynhr_mcmc()
 dim(mode$Sigma_prop)
 
 }

@@ -57,7 +57,7 @@ an \eqn{O(\kappa)} "residual" to cells that are exactly optimal.  Written
 against \eqn{u'(c)} the illiquid condition is branch-universal.  (This is
 the defect that sank the first, cut implementation of this function -- its
 illiquid residual GREW under grid refinement because the constrained region
-resolves better as the grid refines; see briefs/19, F20.)
+resolves better as the grid refines.)
 
 The residuals are not zero by construction: the two-stage EGM interpolates
 its endogenous grids back onto the fixed ones, so what remains measures the

@@ -40,8 +40,12 @@
   ss_vec <- ss[endo]
 
   if (ns == 0L) {
-    if (verbose) message("No state variables; third-order x-terms are zero.")
-    return(.trivial_dr3(dr2))
+    ## No states: the only order-3 block is ghuuu, the third Taylor
+    ## coefficient of the static map -- NOT zero (y = exp(e) -> 1). The
+    ## symbolic solver handles the empty state blocks directly.
+    if (verbose) .dynhr_inform("No state variables; using the symbolic order-3 path.")
+    return(solve_perturbation_order3(model, compiled, ss, params, dr2,
+                                     verbose = verbose, backend = "symbolic"))
   }
 
   # Row-permutation: residuals_fn returns in compiled-eq order;
@@ -129,8 +133,8 @@
   hu  <- dr2$ghu[state_idx, , drop = FALSE]
 
   if (verbose) {
-    cat("FD-based third-order perturbation:\n")
-    cat(sprintf("  n=%d ns=%d nu=%d\n", n, ns, nu))
+    .dynhr_cat("FD-based third-order perturbation:\n")
+    .dynhr_cat(sprintf("  n=%d ns=%d nu=%d\n", n, ns, nu))
   }
 
   # ----------------------------------------------------------------------
@@ -154,7 +158,7 @@
   # ============================================================
   # 1. Compute Phi_xxx by FD (with all order-3 policy = 0)
   # ============================================================
-  if (verbose) cat("  FD-computing Phi_xxx...\n")
+  if (verbose) .dynhr_cat("  FD-computing Phi_xxx...\n")
   eval_x <- function(i, j, k, hi, hj, hk) {
     x <- numeric(ns); x[i] <- x[i]+hi; x[j] <- x[j]+hj; x[k] <- x[k]+hk
     R_fn(x, numeric(nu))
@@ -177,7 +181,7 @@
   # 2. Solve Sylvester for ghxxx
   #    A_L * X + fp * X * (hx ⊗ hx ⊗ hx) = -Phi_xxx
   # ============================================================
-  if (verbose) cat("  Solving Sylvester for ghxxx...\n")
+  if (verbose) .dynhr_cat("  Solving Sylvester for ghxxx...\n")
   K_x <- t(hx) %x% t(hx) %x% t(hx)
   Sylv_lhs <- kronecker(diag(ns^3), A_L) + kronecker(K_x, fp)
   ghxxx <- matrix(solve(Sylv_lhs, -as.vector(Phi_xxx)), nrow = n, ncol = ns^3)
@@ -186,7 +190,7 @@
   # 3. Phi_xxu: FD with ghxxx now known (substituted back into policy)
   #    Form: A_L * ghxxu = -Phi_xxu (no Sylvester recursion since u_{t+1}=0)
   # ============================================================
-  if (verbose) cat("  FD-computing Phi_xxu...\n")
+  if (verbose) .dynhr_cat("  FD-computing Phi_xxu...\n")
   # Re-define R with ghxxx substituted (order-3 x-only part of policy)
   policy_with_xxx <- function(x, u) {
     y <- policy_o2(x, u)
@@ -226,7 +230,7 @@
   # ============================================================
   # 4. Phi_xuu: similar
   # ============================================================
-  if (verbose) cat("  FD-computing Phi_xuu...\n")
+  if (verbose) .dynhr_cat("  FD-computing Phi_xuu...\n")
   eval_xuu <- function(i, j, k, hi, hj, hk) {
     x <- numeric(ns); x[i] <- x[i]+hi
     u <- numeric(nu); u[j] <- u[j]+hj; u[k] <- u[k]+hk
@@ -249,7 +253,7 @@
   # ============================================================
   # 5. Phi_uuu: fully symmetric in (u1, u2, u3)
   # ============================================================
-  if (verbose) cat("  FD-computing Phi_uuu...\n")
+  if (verbose) .dynhr_cat("  FD-computing Phi_uuu...\n")
   eval_uuu <- function(i, j, k, hi, hj, hk) {
     u <- numeric(nu); u[i] <- u[i]+hi; u[j] <- u[j]+hj; u[k] <- u[k]+hk
     R_with_xxx(numeric(ns), u)

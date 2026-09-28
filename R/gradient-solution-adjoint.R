@@ -176,13 +176,22 @@
   ## ---- reverse of the generalized Sylvester solve (one transposed solve) ---
   if (n_state > 0) {
     tA <- t(A); tfp <- t(f_plus); tSG <- t(SG)
-    sylv_fac_T <- .gen_sylvester_k1_factor(tA, tfp, tSG)
-    L <- if (!is.null(sylv_fac_T))
-      .gen_sylvester_k1_solve(sylv_fac_T, V_G)
-    else
-      .solve_kron_compact(tA, tfp, tSG, k = 1L, RHS = V_G)
-    ## residual guard: A' L + f_plus' L SG' must equal V_G
-    resid <- max(abs(tA %*% L + tfp %*% L %*% tSG - V_G))
+    ## ONE right-hand side: skip the factor's fixed-RHS self-test (a second
+    ## full back-substitution) and gate the actual solve with the same 1e-9
+    ## residual rule instead; a failure takes the .solve_kron_compact
+    ## fallback exactly as a failed self-test did (W89).
+    sylv_fac_T <- .gen_sylvester_k1_factor(tA, tfp, tSG, self_test = FALSE)
+    L <- NULL
+    if (!is.null(sylv_fac_T)) {
+      L <- .gen_sylvester_k1_solve(sylv_fac_T, V_G)
+      resid <- max(abs(tA %*% L + tfp %*% L %*% tSG - V_G))
+      if (!is.finite(resid) || resid > 1e-9 * max(1, max(abs(V_G)))) L <- NULL
+    }
+    if (is.null(L)) {
+      L <- .solve_kron_compact(tA, tfp, tSG, k = 1L, RHS = V_G)
+      ## residual guard: A' L + f_plus' L SG' must equal V_G
+      resid <- max(abs(tA %*% L + tfp %*% L %*% tSG - V_G))
+    }
     if (!is.finite(resid) || resid > 1e-6 * max(1, max(abs(V_G))))
       stop(sprintf(".solution_adjoint: transposed Sylvester residual %.3e", resid))
     bar_RHS <- -L
@@ -196,28 +205,59 @@
   ## ---- per-parameter primitive derivatives + contraction -------------------
   if (is.null(use_analytic))
     use_analytic <- isTRUE(getOption("dynhr.use_analytic_primitives", TRUE))
-  analytic <- NULL
+  ## Analytic primitives: contract the bars against ALL parameters' total
+  ## primitive derivatives in one reverse pass (.analytic_dprim_contract, W89)
+  ## instead of materializing every parameter's df blocks via
+  ## .analytic_dprimitives() and contracting them one by one -- the same
+  ## Frobenius sum (3), summed in a different order (agrees to rounding).
+  ## NULL exactly where .analytic_dprimitives() is NULL -> FD primitives.
+  g_analytic <- NULL
   if (use_analytic && .can_use_analytic_primitive_deriv(compiled)) {
     dys_all <- .analytic_dys(compiled, ys, params)
-    dprim   <- if (!is.null(dys_all))
-      .analytic_dprimitives(compiled, ys, params, dys_all) else NULL
-    if (!is.null(dys_all) && !is.null(dprim))
-      analytic <- list(dys = dys_all, dprim = dprim)
+    if (!is.null(dys_all)) {
+      bar_df_minus <- matrix(0, n_endo, n_endo)
+      if (n_state > 0) bar_df_minus[, state_idx] <- bar_df_minus_S
+      ## <bar_ys, dys_k> over the decision rule's endo names (as the
+      ## per-parameter sum(bar_ys * dys[endo]) did): a dys row outside
+      ## them carries no bar.
+      bys <- as.numeric(bar_ys[rownames(dys_all)])
+      bys[is.na(bys)] <- 0
+      g_analytic <- .analytic_dprim_contract(
+        compiled, ys, params, dys_all,
+        bar_df_plus = bar_df_plus, bar_df_zero = bar_df_zero,
+        bar_df_minus = bar_df_minus, bar_df_exo = bar_df_u,
+        bar_ys = bys)
+    }
   }
 
   grad <- setNames(rep(NA_real_, length(param_names)), param_names)
   ok   <- setNames(rep(FALSE, length(param_names)), param_names)
 
+  ## A requested name that is NOT a model parameter -- an estimated shock std
+  ## (Dynare `stderr <shock>`), which apply_theta_to_params() injects into
+  ## `params` under the SHOCK name -- enters neither the static nor the dynamic
+  ## residual functions, so every primitive derivative (dys, df_*) is exactly
+  ## zero and so is its gradient through the first-order solve. Its Sigma_e
+  ## channel is the caller's (the filter adjoint's G_Sig, the cumulant
+  ## bar_Sigma_e contraction). The analytic layer has no column for such a name
+  ## (.analytic_dys() is indexed by compiled$model$param_names), so indexing it
+  ## was a subscript-out-of-bounds crash (ls2003 cumulant, W65).
+  model_pars <- compiled$model$param_names %||% names(model$param_values)
+
   for (pname in param_names) {
-    prim <- tryCatch({
-      if (!is.null(analytic)) {
-        c(list(dys = setNames(as.numeric(analytic$dys[, pname]),
-                              rownames(analytic$dys))),
-          analytic$dprim[[pname]])
-      } else {
-        .solution_adjoint_fd_prims(pname, model, compiled, ys, params, h_rel)
-      }
-    }, error = function(e) NULL)
+    if (!(pname %in% model_pars)) {
+      grad[pname] <- 0
+      ok[pname]   <- TRUE
+      next
+    }
+    if (!is.null(g_analytic)) {
+      grad[pname] <- g_analytic[[pname]]
+      ok[pname]   <- TRUE
+      next
+    }
+    prim <- tryCatch(
+      .solution_adjoint_fd_prims(pname, model, compiled, ys, params, h_rel),
+      error = function(e) .dynhr_reraise_bug(e, NULL))
     if (is.null(prim) || is.null(prim$df_plus)) next
 
     gj <- sum(bar_df_plus * prim$df_plus) +
@@ -231,7 +271,7 @@
     ok[pname]   <- TRUE
   }
 
-  list(grad = grad, ok = ok, used_analytic = !is.null(analytic))
+  list(grad = grad, ok = ok, used_analytic = !is.null(g_analytic))
 }
 
 

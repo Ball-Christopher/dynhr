@@ -15,82 +15,82 @@ hank_mixture_emulator(
 )
 }
 \arguments{
-\item{box}{Named list of length-2 numeric `c(lo, hi)` ranges, one per
+\item{box}{Named list of length-2 numeric \code{c(lo, hi)} ranges, one per
 GE-coupled coordinate, e.g. \code{list(centre = c(0.920, 0.940), spread =
-c(0.008, 0.016))}. `d = length(box)` is arbitrary.}
+c(0.008, 0.016))}. \code{d = length(box)} is arbitrary.}
 
-\item{config}{Fixed HANK configuration list with: `n_e, n_a, amax, alpha,
-delta, Z, eis, T_h` (household/GE sizing and calibration); `shock_specs`
-(named list, one `list(rho, sigma)` per exogenous macro shock, e.g.
-\code{list(Z = list(rho = 0.9, sigma = 0.007))}); `observables` (character
-vector, e.g. \code{c("C", "K")}); `rw_shock` (named list, one
-length-`T_h` reweighting shock path per input, e.g. \code{list(r = 0.01 *
-0.8^(seq_len(T_h) - 1))}); `t_star` (integer output date for the snapshot
-reweighting); `N_ref` (reference survey size, used only to document the
-design's intended scale -- the SBC harness passes its own `N`); `degree`
-(basis degree, default 8); `tail_trim` (default 0); `omega` (default
-`c(0.5, 0.5)`, used whenever `"omega1"` is not a `box` coordinate).}
+\item{config}{Fixed HANK configuration list with: \code{n_e, n_a, amax, alpha,
+delta, Z, eis, T_h} (household/GE sizing and calibration); \code{shock_specs}
+(named list, one \code{list(rho, sigma)} per exogenous macro shock, e.g.
+\code{list(Z = list(rho = 0.9, sigma = 0.007))}); \code{observables} (character
+vector, e.g. \code{c("C", "K")}); \code{rw_shock} (named list, one
+length-\code{T_h} reweighting shock path per input, e.g. \code{list(r = 0.01 *
+0.8^(seq_len(T_h) - 1))}); \code{t_star} (integer output date for the snapshot
+reweighting); \code{N_ref} (reference survey size, used only to document the
+design's intended scale -- the SBC harness passes its own \code{N}); \code{degree}
+(basis degree, default 8); \code{tail_trim} (default 0); \code{omega} (default
+\code{c(0.5, 0.5)}, used whenever \code{"omega1"} is not a \code{box} coordinate).}
 
-\item{design}{`"grid"` (default surrogate `"multilinear"`): a tensor
-product of `n_grid` equally-spaced points per coordinate (`n_grid^d`
-nodes total). `"scatter"` (default surrogate `"rbf"`): `n_scatter`
+\item{design}{\code{"grid"} (default surrogate \code{"multilinear"}): a tensor
+product of \code{n_grid} equally-spaced points per coordinate (\code{n_grid^d}
+nodes total). \code{"scatter"} (default surrogate \code{"rbf"}): \code{n_scatter}
 Latin-hypercube points in the box.}
 
-\item{n_grid}{Integer points per axis for `design = "grid"`.}
+\item{n_grid}{Integer points per axis for \code{design = "grid"}.}
 
-\item{n_scatter}{Integer total design points for `design = "scatter"`
+\item{n_scatter}{Integer total design points for \code{design = "scatter"}
 (required in that case).}
 
-\item{surrogate}{`"multilinear"` or `"rbf"`; `NULL` (default) picks
-`"multilinear"` for `design = "grid"` and `"rbf"` for `design =
-"scatter"`. `"multilinear"` REQUIRES `design = "grid"`.}
+\item{surrogate}{\code{"multilinear"} or \code{"rbf"}; \code{NULL} (default) picks
+\code{"multilinear"} for \code{design = "grid"} and \code{"rbf"} for \code{design =
+"scatter"}. \code{"multilinear"} REQUIRES \code{design = "grid"}.}
 
-\item{seed}{RNG seed for the `"scatter"` Latin-hypercube design.}
+\item{seed}{RNG seed for the \code{"scatter"} Latin-hypercube design.}
 }
 \value{
-An object of class `"hank_mixture_emulator"`: a list with `box`,
-  `config`, `design` (`"grid"`/`"scatter"`), `surrogate`, `nodes` (`n x d`
-  matrix of node coordinates in natural units, `colnames = names(box)`),
-  `axis_grids` (named list of per-axis grids, only set for `design =
-  "grid"`), `B_ref` (`n_cell x degree`), `a_cell`, `K` (`= ncol(B_ref)`),
-  `Theta` (array: leading node dimension(s) + `T_h x n_obs` tail),
-  `gref`, `m1` (each: leading node dimension(s) + length-`K` tail), `M2D0`,
-  `M2dD` (each: leading node dimension(s) + `K x K` tail), `r`, `w` (each:
-  an array over nodes), and (for `surrogate = "rbf"`) `rbf_fits` (named
-  list of `.hank_emu_rbf_fit()` results, one per stored field).
+An object of class \code{"hank_mixture_emulator"}: a list with \code{box},
+  \code{config}, \code{design} (\code{"grid"}/\code{"scatter"}), \code{surrogate}, \code{nodes} (\code{n x d}
+  matrix of node coordinates in natural units, \code{colnames = names(box)}),
+  \code{axis_grids} (named list of per-axis grids, only set for \code{design =
+  "grid"}), \code{B_ref} (\code{n_cell x degree}), \code{a_cell}, \code{K} (\code{= ncol(B_ref)}),
+  \code{Theta} (array: leading node dimension(s) + \code{T_h x n_obs} tail),
+  \code{gref}, \code{m1} (each: leading node dimension(s) + length-\code{K} tail), \code{M2D0},
+  \code{M2dD} (each: leading node dimension(s) + \code{K x K} tail), \code{r}, \code{w} (each:
+  an array over nodes), and (for \code{surrogate = "rbf"}) \code{rbf_fits} (named
+  list of \code{.hank_emu_rbf_fit()} results, one per stored field).
 }
 \description{
 Precomputes the data-independent general-equilibrium/Jacobian pieces of a
 2-type discount-factor mixture (steady state, macro state-space MA
 coefficients, distribution-reweighting response) on a DESIGN of theta
-points covering `box`, and returns an interpolator object. The design is
-\strong{D-agnostic}: `box` is a named list of length-2 numeric ranges, one
+points covering \code{box}, and returns an interpolator object. The design is
+\strong{D-agnostic}: \code{box} is a named list of length-2 numeric ranges, one
 per GE-coupled coordinate, and every piece of interpolation/design code
-below is written for a general `d = length(box)` (currently the natural
-choices are a subset of `c("centre", "spread", "omega1")`, but nothing here
-hard-codes `d = 2`).
+below is written for a general \code{d = length(box)} (currently the natural
+choices are a subset of \code{c("centre", "spread", "omega1")}, but nothing here
+hard-codes \code{d = 2}).
 }
 \details{
-\strong{theta -> economics map}: `betas = c(centre - spread, centre +
-spread)`; `omega = c(theta$omega1, 1 - theta$omega1)` if `"omega1" %in%
-names(box)`, else the fixed `config$omega` (default `c(0.5, 0.5)`).
+\strong{theta -> economics map}: \code{betas = c(centre - spread, centre +
+spread)}; \code{omega = c(theta$omega1, 1 - theta$omega1)} if `"omega1" %in%
+names(box)`, else the fixed \code{config$omega} (default \code{c(0.5, 0.5)}).
 
-\strong{Per-node solve} (mirrors the research scratch's `snap_precompute.R`
-`one()`): steady state (\code{\link{hank_mixture_ks_steady}}) -> GE model
+\strong{Per-node solve} (mirrors the research scratch's \code{snap_precompute.R}
+\code{one()}): steady state (\code{\link{hank_mixture_ks_steady}}) -> GE model
 (\code{\link{hank_mixture_ks_model}}) -> truncated-MA state space
-(\code{\link{hank_state_space}}, whose `Theta_list[["Z"]]` is stored) ->
+(\code{\link{hank_state_space}}, whose \code{Theta_list[["Z"]]} is stored) ->
 per-type blocks (\code{\link{hank_mixture_blocks}}) -> stationary
-distribution `D0` (\code{\link{hank_mixture_dist}}) -> distribution
-Jacobian `JD` (\code{\link{hank_mixture_dist_jacobian}}) -> single-date
-snapshot reweighting response `dD_snap`
+distribution \code{D0} (\code{\link{hank_mixture_dist}}) -> distribution
+Jacobian \code{JD} (\code{\link{hank_mixture_dist_jacobian}}) -> single-date
+snapshot reweighting response \code{dD_snap}
 (\code{\link{hank_dist_response_snapshot}}).
 
-\strong{Projected reweighting pieces}: the raw per-cell `dD_snap` does not
+\strong{Projected reweighting pieces}: the raw per-cell \code{dD_snap} does not
 interpolate cleanly (see the file section comment in R/hank-reweighting.R),
-so only its projection onto a FIXED reference basis `B_ref`
+so only its projection onto a FIXED reference basis \code{B_ref}
 (\code{\link{hank_reweight_functional_basis}}, built once at the node
 nearest the box centre) is stored and interpolated: `gref = t(B_ref) \%*\%
-dD_snap` (length `K`), `m1 = t(B_ref) \%*\% D0` (length `K`), `M2D0 =
-t(B_ref) \%*\% (D0 * B_ref)` (`K x K`), `M2dD = t(B_ref) \%*\% (dD_snap *
-B_ref)` (`K x K`) -- exactly the research scratch's `build_proj_grid`.
+dD_snap` (length \code{K}), `m1 = t(B_ref) \%*\% D0` (length \code{K}), `M2D0 =
+t(B_ref) \%*\% (D0 * B_ref)` (\code{K x K}), `M2dD = t(B_ref) \%*\% (dD_snap *
+B_ref)` (\code{K x K}) -- exactly the research scratch's \code{build_proj_grid}.
 }

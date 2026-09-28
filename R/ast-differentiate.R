@@ -180,10 +180,11 @@ ast_differentiate <- function(node, var_name, var_ll = 0L, wrt = "variable") {
                     "normpdf" = .ds_binop("*",
                                     .ds_unaryop("-", g),
                                     ast_funcall("normpdf", list(g))),
+                    # 2/sqrt(pi) as a NUMBER: a symbol `pi` would be read as
+                    # the model's own parameter `pi` (inflation!) when the
+                    # model declares one (review 2026-09-25 C8).
                     "erf"  = .ds_binop("*",
-                                 .ds_binop("/", ast_number(2),
-                                     ast_funcall("sqrt", list(
-                                         ast_parameter("pi")))),
+                                 ast_number(2 / sqrt(pi)),
                                  ast_funcall("exp", list(
                                      .ds_unaryop("-",
                                          .ds_binop("^", g, ast_number(2)))))),
@@ -198,6 +199,28 @@ ast_differentiate <- function(node, var_name, var_ll = 0L, wrt = "variable") {
                 # Chain rule: f'(g) * g'  (children already in normal form, so a
                 # single shallow simplification at the product node suffices).
                 return(.ds_binop("*", outer_deriv, dg))
+            }
+
+            # normcdf(x, mu, sigma) / normpdf(x, mu, sigma) (sigma defaults
+            # to 1 with two arguments): differentiate the equivalent standard
+            # forms, which carry the d/dx, d/dmu AND d/dsigma terms --
+            #   normcdf(x, mu, s) = normcdf((x - mu)/s)
+            #   normpdf(x, mu, s) = normpdf((x - mu)/s) / s
+            # These used to fall through to the multi-argument branch below
+            # and return a ZERO derivative (review 2026-09-25 C8).
+            if (fname %in% c("normcdf", "normpdf")) {
+                if (!length(args) %in% c(2L, 3L))
+                    .dynhr_abort(
+                        "ast_differentiate: ", fname, "() takes 1 argument ",
+                        "or (x, mu, sigma); got ", length(args), ".",
+                        class = "dynhr_error_mod_syntax")
+                s <- if (length(args) == 3L) args[[3L]] else ast_number(1)
+                z <- .ds_binop("/", .ds_binop("-", args[[1L]], args[[2L]]), s)
+                equiv <- if (fname == "normcdf")
+                    ast_funcall("normcdf", list(z))
+                else
+                    .ds_binop("/", ast_funcall("normpdf", list(z)), s)
+                return(ast_differentiate(equiv, var_name, var_ll, wrt))
             }
 
             # max / min: active-regime indicator derivative
@@ -256,7 +279,7 @@ ast_differentiate <- function(node, var_name, var_ll = 0L, wrt = "variable") {
             }
 
             # Other multi-argument functions -- not differentiable
-            warning("ast_differentiate: multi-arg function '", fname,
+            .dynhr_warn("ast_differentiate: multi-arg function '", fname,
                     "' treated as non-differentiable -- returning 0")
             ast_number(0)
         },

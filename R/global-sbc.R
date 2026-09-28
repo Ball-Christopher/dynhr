@@ -161,7 +161,7 @@
   ## the prior can draw.
   dr1 <- tryCatch(
     solve_perturbation(model, compiled, ss_vals, params, verbose = FALSE),
-    error = function(e) NULL)
+    error = function(e) .dynhr_reraise_bug(e, NULL))
   dom <- .auto_state_domain(
     state_names  = sn,
     ss_vals      = ss_vals,
@@ -257,7 +257,7 @@
     list(failed = TRUE, reason = "mclapply_error"))
   failed <- vapply(reps, function(x) isTRUE(x$failed), logical(1))
   if (any(failed))
-    warning(sprintf("global_pf_sbc: %d/%d replications aborted at theta* ",
+    .dynhr_warn(sprintf("global_pf_sbc: %d/%d replications aborted at theta* ",
                     sum(failed), n_repl),
             "and were excluded from the ranks (see $failure_reasons).",
             call. = FALSE)
@@ -447,12 +447,12 @@ global_pf_sbc <- function(n_repl = 100L, T_obs = 60L, n_particles = 600L,
   ## every replication's DGP, and (structurally) by the likelihood closure.
   solve_at <- function(params) {
     ss <- tryCatch(solve_steady(compiled, params, verbose = FALSE),
-                   error = function(e) NULL)
+                   error = function(e) .dynhr_reraise_bug(e, NULL))
     if (is.null(ss) || !isTRUE(ss$converged))
       return(list(reason = "steady_state_at_theta_star"))
     dr <- tryCatch(solve_perturbation(model, compiled, ss$values, params,
                                       verbose = FALSE),
-                   error = function(e) NULL)
+                   error = function(e) .dynhr_reraise_bug(e, NULL))
     if (is.null(dr) || !isTRUE(dr$bk_satisfied))
       return(list(reason = "bk_solve_at_theta_star"))
     g <- tryCatch(
@@ -460,7 +460,7 @@ global_pf_sbc <- function(n_repl = 100L, T_obs = 60L, n_particles = 600L,
                    n_quad = n_quad, n_nodes = n_nodes, state_domain = dom,
                    tol = solve_tol, max_iter = solve_max_iter,
                    verbose = FALSE),
-      error = function(e) NULL)
+      error = function(e) .dynhr_reraise_bug(e, NULL))
     if (is.null(g) || !isTRUE(g$converged))
       return(list(reason = "projection_solve_at_theta_star"))
 
@@ -469,7 +469,8 @@ global_pf_sbc <- function(n_repl = 100L, T_obs = 60L, n_particles = 600L,
     Le <- tryCatch(t(chol(Sigma_e)), error = function(e) .tpf_psd_sqrt(Sigma_e))
     TT <- dr$ghx[dr$state_idx, , drop = FALSE]
     RR <- dr$ghu[dr$state_idx, , drop = FALSE]
-    P0 <- tryCatch(kf_stationary_init(TT, RR, Sigma_e), error = function(e) NULL)
+    P0 <- tryCatch(kf_stationary_init(TT, RR, Sigma_e),
+                   error = function(e) .dynhr_reraise_bug(e, NULL))
     if (is.null(P0) || !all(is.finite(P0)))
       return(list(reason = "stationary_init_at_theta_star"))
     pos <- match(g$state_names, dr$state_vars)
@@ -553,11 +554,11 @@ global_pf_sbc <- function(n_repl = 100L, T_obs = 60L, n_particles = 600L,
         if (!is.finite(lpri)) return(-Inf)
         pp <- apply_theta_to_params(model, th)
         s2 <- tryCatch(solve_steady(compiled, pp, verbose = FALSE),
-                       error = function(e) NULL)
+                       error = function(e) .dynhr_reraise_bug(e, NULL))
         if (is.null(s2) || !isTRUE(s2$converged)) return(-Inf)
         d2 <- tryCatch(solve_perturbation(model, compiled, s2$values, pp,
                                           verbose = FALSE),
-                       error = function(e) NULL)
+                       error = function(e) .dynhr_reraise_bug(e, NULL))
         if (is.null(d2) || !isTRUE(d2$bk_satisfied)) return(-Inf)
         m2 <- model; m2$param_values <- pp
         kf <- tryCatch(kalman_filter(Y, d2, m2, pp, obs_vars,
@@ -565,7 +566,7 @@ global_pf_sbc <- function(n_repl = 100L, T_obs = 60L, n_particles = 600L,
                                      lik_init = "stationary",
                                      method = "univariate",
                                      me_floor_check = FALSE),
-                       error = function(e) NULL)
+                       error = function(e) .dynhr_reraise_bug(e, NULL))
         if (is.null(kf) || !is.finite(kf$loglik)) return(-Inf)
         lpri + kf$loglik
       }
@@ -576,6 +577,9 @@ global_pf_sbc <- function(n_repl = 100L, T_obs = 60L, n_particles = 600L,
     out
   }
 
+  ## run_one() re-seeds (seed + r) in THIS process on the serial path; restore
+  ## the caller's RNG stream when this function exits (C1).
+  .local_seed(seed)
   reps <- if (cores > 1L) {
     parallel::mclapply(seq_len(n_repl), run_one, mc.cores = cores,
                        mc.preschedule = FALSE)

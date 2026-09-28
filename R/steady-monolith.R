@@ -16,21 +16,99 @@
 ## fs2000 -> ~5% of per-draw). Memoise the parsed expressions keyed on the text
 ## so each distinct line is parsed once per session. eval() (the actual
 ## computation) is unchanged, so results are bit-identical.
+##
+## A-SEC (0.9.4): the two parse caches (`.ssm_expr_cache` here and
+## `.dynhr_expr_cache` in stochsimul-monolith.R) are the security CHOKE POINT
+## for .mod text that is re-evaluated at solve time.  An expression is
+## AST-checked against the .mod allowlist when it is FIRST inserted into a
+## cache -- a disallowed call aborts with `dynhr_error_unsafe_mod_expression`
+## before anything is evaluated -- so the check costs nothing per MCMC draw.
+## As defence in depth the evaluation environment is a child of an
+## emptyenv()-rooted allowlist sandbox (built once per session), never of
+## baseenv(): a programmatically built model that skipped parse-time
+## validation still cannot reach system(), file.create(), ...
 .ssm_expr_cache <- new.env(parent = emptyenv())
+.dynhr_mod_sandbox_cache <- new.env(parent = emptyenv())
+
+#' Session-wide allowlist sandbox used as the PARENT of solve-time .mod
+#' evaluation environments (steady_state_model, shocks-block *_expr).
+#' Matrix allowlist plus `=` / `<-`, which only a top-level
+#' `name = rhs` steady_state_model statement may use (the call check rejects
+#' them anywhere else).
+#' @noRd
+.dynhr_mod_sandbox_parent <- function() {
+  env <- .dynhr_mod_sandbox_cache$env
+  if (is.null(env)) {
+    env <- .dynhr_sandbox_env(NULL, c(.dynhr_safe_matrix_fn_names, "=", "<-"))
+    assign("env", env, envir = .dynhr_mod_sandbox_cache)
+  }
+  env
+}
+
+#' Abort unless every call in a parsed .mod expression is allowlisted.
+#'
+#' @param ex      A parsed `expression` vector (from `parse(text = )`).
+#' @param text    The source text, for the error message.
+#' @param context Short label naming the block.
+#' @param assignment When TRUE a top-level `name = rhs` / `name <- rhs` with a
+#'   SYMBOL left-hand side is permitted and only `rhs` is checked.
+#' @noRd
+.dynhr_check_mod_expr <- function(ex, text, context, assignment = FALSE) {
+  allowed <- .dynhr_safe_matrix_fn_names
+  for (e in as.list(ex)) {
+    if (assignment && is.call(e) && length(e) == 3L &&
+        (identical(e[[1L]], as.name("=")) || identical(e[[1L]], as.name("<-"))) &&
+        is.symbol(e[[2L]]))
+      e <- e[[3L]]
+    bad <- setdiff(.dynhr_expr_calls(e), allowed)
+    if (length(bad) > 0L)
+      .dynhr_abort(
+        "dynhr refuses to evaluate ", context, " `", text, "`: it calls `",
+        bad[1L], "`, which is not on the .mod expression allowlist. ",
+        "Evaluating a model must never execute arbitrary code; move any ",
+        "computation that needs `", bad[1L], "` out of the model.",
+        class = "dynhr_error_unsafe_mod_expression")
+  }
+  invisible(TRUE)
+}
+
+#' Error-handler body for call sites that map evaluation errors to a fallback
+#' value: re-raise an unsafe-expression refusal, return `value` otherwise.
+#'
+#' Must be used INSIDE the `error =` handler.  A separate
+#' `dynhr_error_unsafe_mod_expression = function(e) stop(e)` handler in the
+#' same tryCatch() would NOT work: tryCatch nests its handlers so the later
+#' `error =` handler encloses the earlier one and would swallow the re-raise.
+#' @noRd
+.dynhr_reraise_unsafe <- function(e, value) {
+  if (inherits(e, "dynhr_error_unsafe_mod_expression")) stop(e)
+  value
+}
+
 .cached_parse <- function(txt) {
   e <- .ssm_expr_cache[[txt]]
   if (is.null(e)) {
     e <- parse(text = txt)
+    .dynhr_check_mod_expr(e, txt, "the steady_state_model statement",
+                          assignment = TRUE)
     assign(txt, e, envir = .ssm_expr_cache)
   }
   e
 }
 
+#' Fresh steady_state_model evaluation env: `params` bound in a child of the
+#' session allowlist sandbox (never baseenv()).
+#' @noRd
+.ssm_eval_env <- function(params) {
+  env <- new.env(parent = .dynhr_mod_sandbox_parent())
+  for (nm in names(params)) assign(nm, params[[nm]], envir = env)
+  env
+}
+
 solve_steady_state_analytical <- function(model, params) {
   ssm <- model$steady_state_model
   if (is.null(ssm) || length(ssm) == 0) return(NULL)
-  env <- new.env(parent = baseenv())
-  for (nm in names(params)) assign(nm, params[[nm]], envir = env)
+  env <- .ssm_eval_env(params)
   for (assignment in ssm) {
     val <- eval(.cached_parse(assignment$text), envir = env)
     if (is.numeric(val) && length(val) == 1)
@@ -158,7 +236,7 @@ solve_ss_nleqslv <- function(compiled, params, y0 = NULL,
                              exo_init = NULL,
                              tol = 1e-10, verbose = FALSE) {
   if (!requireNamespace("nleqslv", quietly = TRUE)) {
-    if (verbose) cat("  nleqslv not available\n"); return(NULL)
+    if (verbose) .dynhr_cat("  nleqslv not available\n"); return(NULL)
   }
   if (inherits(compiled, "dynhr_compiled")) {
     res_fn <- compiled$static$residuals_fn
@@ -307,8 +385,8 @@ solve_steady_state <- function(model, compiled = NULL, params = NULL,
     stop("No parameter values available. Supply params argument.")
   n_na <- sum(is.na(params))
   if (n_na > 0 && verbose) {
-    cat("WARNING:", n_na, "of", length(params), "parameters have NA values.\n")
-    cat("  NA params:", paste(head(names(params)[is.na(params)], 10),
+    .dynhr_cat("WARNING:", n_na, "of", length(params), "parameters have NA values.\n")
+    .dynhr_cat("  NA params:", paste(head(names(params)[is.na(params)], 10),
                               collapse = ", "),
         if (n_na > 10) ", ..." else "", "\n")
   }
@@ -331,7 +409,7 @@ solve_steady_state <- function(model, compiled = NULL, params = NULL,
       compiled$static$n_eq > length(endo_names)) {
     relax_rows <- compiled$occbin$regime_map[[1L]]$eq_indices  # regime 0
     if (verbose)
-      message(sprintf("OccBin SS: selecting %d relax-regime rows from %d equations",
+      .dynhr_inform(sprintf("OccBin SS: selecting %d relax-regime rows from %d equations",
                       length(relax_rows), compiled$static$n_eq))
     orig_static <- compiled$static
     wrapped_res_fn <- local({
@@ -358,34 +436,107 @@ solve_steady_state <- function(model, compiled = NULL, params = NULL,
   # honest: it requires max|residual| < tol * 100.
   is_linear <- isTRUE(model$model_options$linear)
   if (is_linear) {
-    if (verbose) cat("Linear model detected: checking for steady_state_model block.\n")
+    if (verbose) .dynhr_cat("Linear model detected: checking for steady_state_model block.\n")
     ss <- setNames(rep(0, n), endo_names)
     ss_params <- params  # may be updated by analytical path
     has_ssm <- length(model$steady_state_model) > 0
     if (has_ssm) {
-      if (verbose) cat("  steady_state_model block found - running analytical SS for obs constants.\n")
+      if (verbose) .dynhr_cat("  steady_state_model block found - running analytical SS for obs constants.\n")
       ss_a_result <- solve_steady_state_analytical(model, params)
       if (!is.null(ss_a_result) && all(is.finite(ss_a_result$ss))) {
         ss        <- ss_a_result$ss
         ss_params <- ss_a_result$params
       } else if (verbose) {
-        cat("  Analytical SS did not return finite values; falling back to zero.\n")
+        .dynhr_cat("  Analytical SS did not return finite values; falling back to zero.\n")
       }
     }
     x0 <- .resolve_exo_init(exo_init, exo_names)
     r  <- compiled$static$residuals_fn(ss, x0, ss_params, ss)
     max_r <- max(abs(r))
-    # A genuine `model(linear)` model is expressed in deviations: its steady
-    # state is 0 BY CONVENTION, and the static residual at 0 is the linearisation
-    # constants (dropped in the linear approximation) -- a non-zero value there is
-    # NOT a convergence failure. So the honest residual guard applies ONLY when a
-    # steady_state_model block is present (e.g. SW2007), where the analytical SS
-    # SHOULD drive the residual to ~0 and a large residual means the obs-only
-    # constants were not resolved (the I10 silent-wrong-SS case). Without a
-    # steady_state_model block we keep the linear-convention SS=0 (converged).
-    conv <- if (has_ssm) (max_r < tol * 100) else TRUE
+
+    ## ---- Affine constants (0.9.4, ledger A6) -----------------------------
+    ## `model(linear)` does NOT imply "written in deviations from its own
+    ## steady state". `r = rbar + phi*x` with rbar = 0.03 is a perfectly legal
+    ## linear model whose steady state is r = 0.03; the pre-0.9.4 shortcut
+    ## zero-filled it and reported "converged", so every downstream level
+    ## (OBC bounds, hist decomp, forecasts) was off by the constant.
+    ##
+    ## The static system of a linear model is AFFINE, F(y) = A y + c, with
+    ## c = F(0) = `r` above and A the (constant) static Jacobian. So the
+    ## steady state is the exact linear solve A y = -c. When c = 0 this
+    ## returns y = 0 and the old deviation convention is reproduced bit for
+    ## bit; the branch is only entered when c is non-zero.
+    ##
+    ## A SINGULAR static Jacobian (a unit root: `y = y(-1) + e` contributes a
+    ## zero row and column) used to skip the solve, keep SS = 0 and report
+    ## converged = TRUE with the constant still sitting in the residual --
+    ## `dy = y - y(-1) + 0.4` came back dy = 0, residual -0.4. The singular
+    ## case is now solved in the least-squares / minimum-norm sense through
+    ## the SVD pseudo-inverse, which is exact whenever A y = -c is CONSISTENT
+    ## (dy = 0.4, the indeterminate unit-root level at its minimum-norm 0).
+    ## An INCONSISTENT system (a drift, `y = y(-1) + 0.1 + e`, has no steady
+    ## state) leaves a residual, and is reported as converged = FALSE with a
+    ## classed warning -- never as a converged SS with a non-zero residual.
+    aff_ok <- TRUE
+    if (!has_ssm && all(is.finite(r)) && is.finite(max_r) && max_r > tol) {
+      A <- compiled$static$jacobian_fn(ss, x0, ss_params, ss)
+      A_ok <- is.matrix(A) && all(is.finite(A)) && nrow(A) == ncol(A)
+      rc <- if (A_ok) rcond(A) else 0
+      y_aff <- NULL
+      if (is.finite(rc) && rc > .Machine$double.eps) {
+        y_aff <- as.numeric(solve(A, -r))
+      } else if (A_ok) {
+        y_aff <- as.numeric(.safe_inv(A) %*% (-r))
+        if (verbose)
+          .dynhr_cat(paste0("  Linear model has non-zero constants and a ",
+                            "singular static Jacobian: minimum-norm ",
+                            "least-squares solve.\n"))
+      }
+      r_aff <- if (!is.null(y_aff)) {
+        y_aff <- setNames(y_aff, endo_names)
+        compiled$static$residuals_fn(y_aff, x0, ss_params, y_aff)
+      }
+      ## Accept only if it really is a steady state (guards an inconsistent
+      ## singular system, and a model that is declared linear but is not
+      ## affine in the static variables).
+      if (!is.null(r_aff) && all(is.finite(r_aff)) &&
+          max(abs(r_aff)) <= max(tol, max_r * 1e-8)) {
+        ss    <- y_aff
+        r     <- r_aff
+        max_r <- max(abs(r_aff))
+        if (verbose)
+          .dynhr_cat(sprintf(paste0("  Linear model has non-zero constants: ",
+                                    "solved the affine steady state ",
+                                    "A y = -c (max|r| = %.3e).\n"), max_r))
+      } else {
+        aff_ok <- FALSE
+        if (!is.null(r_aff) && all(is.finite(r_aff)) &&
+            max(abs(r_aff)) < max_r) {
+          ## Report the least-squares point, the closest the system gets.
+          ss    <- y_aff
+          r     <- r_aff
+          max_r <- max(abs(r_aff))
+        }
+        .dynhr_warn(sprintf(paste0(
+          "solve_steady_state: the linear model's static system A y = -c has ",
+          "no solution (max|residual| = %.3e at the least-squares point%s). ",
+          "Returning converged = FALSE. A drift term on a unit-root variable ",
+          "(e.g. `y = y(-1) + c + e`) has no steady state."),
+          max_r, if (A_ok && !(is.finite(rc) && rc > .Machine$double.eps))
+            "; the static Jacobian is singular" else ""),
+          class = "dynhr_warning_steady_state_inconsistent")
+      }
+    }
+
+    # With a steady_state_model block (e.g. SW2007) the analytical SS SHOULD
+    # drive the residual to ~0, and a large residual means the obs-only
+    # constants were not resolved (the I10 silent-wrong-SS case). Without one,
+    # the affine solve above has either zeroed the residual (a zero-constant
+    # model never enters it: its residual at 0 is already 0) or flagged the
+    # system as inconsistent; `converged` is TRUE only in the former case.
+    conv <- if (has_ssm) (max_r < tol * 100) else aff_ok
     if (!conv && verbose)
-      cat(sprintf("  Linear SS (steady_state_model): max|r| = %.3e > tol; unconverged.\n", max_r))
+      .dynhr_cat(sprintf("  Linear SS: max|r| = %.3e > tol; unconverged.\n", max_r))
     result_lin <- list(ss = ss, values = ss, residuals = r,
                        converged = conv,
                        iterations = 0L, max_residual = max_r,
@@ -414,7 +565,7 @@ solve_steady_state <- function(model, compiled = NULL, params = NULL,
   
   # Analytical
   if (method %in% c("auto", "analytical")) {
-    if (verbose) cat("Trying analytical steady state...\n")
+    if (verbose) .dynhr_cat("Trying analytical steady state...\n")
     ss_a_result <- solve_steady_state_analytical(model, params)
     if (!is.null(ss_a_result)) {
       ss_a <- ss_a_result$ss
@@ -427,13 +578,13 @@ solve_steady_state <- function(model, compiled = NULL, params = NULL,
       r <- compiled$static$residuals_fn(ss_a, x0, params, ss_a)
       max_r <- max(abs(r))
       if (max_r < tol * 100) {
-        if (verbose) cat(sprintf("Analytical SS verified: max|r| = %.3e\n", max_r))
+        if (verbose) .dynhr_cat(sprintf("Analytical SS verified: max|r| = %.3e\n", max_r))
         result <- list(ss = ss_a, values = ss_a, residuals = r,
                        converged = TRUE, iterations = 0L,
                        max_residual = max_r, method_used = "analytical",
                        params = ss_a_result$params)
       } else {
-        if (verbose) cat(sprintf("Analytical failed verification: max|r| = %.3e\n", max_r))
+        if (verbose) .dynhr_cat(sprintf("Analytical failed verification: max|r| = %.3e\n", max_r))
         y0 <- ss_a
       }
     } else if (method == "analytical") {
@@ -443,7 +594,7 @@ solve_steady_state <- function(model, compiled = NULL, params = NULL,
   
   # Newton (uses nleqslv as the numerical workhorse)
   if (is.null(result) && method %in% c("auto", "Newton")) {
-    if (verbose) cat("Trying Newton solver (nleqslv)...\n")
+    if (verbose) .dynhr_cat("Trying Newton solver (nleqslv)...\n")
     result <- solve_ss_nleqslv(compiled, params, y0 = y0,
                                endo_names = endo_names, exo_names = exo_names,
                                exo_init = exo_init,
@@ -452,7 +603,7 @@ solve_steady_state <- function(model, compiled = NULL, params = NULL,
       result$method_used <- "Newton"; result$ss <- result$values
     } else {
       if (verbose) {
-        cat("Newton did not converge (max|r| =",
+        .dynhr_cat("Newton did not converge (max|r| =",
             if (!is.null(result)) result$max_residual else "NULL", ")\n")
       }
       if (method == "Newton") {
@@ -467,7 +618,7 @@ solve_steady_state <- function(model, compiled = NULL, params = NULL,
   
   # nleqslv
   if (is.null(result) && method %in% c("auto", "nleqslv")) {
-    if (verbose) cat("Trying nleqslv...\n")
+    if (verbose) .dynhr_cat("Trying nleqslv...\n")
     result <- solve_ss_nleqslv(compiled, params, y0 = y0,
                                endo_names = endo_names, exo_names = exo_names,
                                exo_init = exo_init,
@@ -483,7 +634,7 @@ solve_steady_state <- function(model, compiled = NULL, params = NULL,
   
   # optim
   if (is.null(result) && method %in% c("auto", "optim")) {
-    if (verbose) cat("Trying optim...\n")
+    if (verbose) .dynhr_cat("Trying optim...\n")
     result <- solve_ss_optim(compiled, params, y0 = y0,
                              endo_names = endo_names, exo_names = exo_names,
                              exo_init = exo_init,
@@ -493,7 +644,7 @@ solve_steady_state <- function(model, compiled = NULL, params = NULL,
   
   if (!is.null(result)) break
   if (verbose && .attempt < max_attempts)
-    cat(sprintf("Attempt %d failed, retrying (%d remaining)...\n", .attempt, max_attempts - .attempt))
+    .dynhr_cat(sprintf("Attempt %d failed, retrying (%d remaining)...\n", .attempt, max_attempts - .attempt))
   } # end attempt loop
   
   if (is.null(result)) stop("All steady state methods failed after ", max_attempts, " attempts")

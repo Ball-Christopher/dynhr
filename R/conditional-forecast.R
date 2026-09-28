@@ -74,10 +74,72 @@
 
 
 ## ---------------------------------------------------------------------------
+## Internal: law of the FREE shocks under the full shock covariance Q
+##
+## The conditioning solvers pick the most likely shock path under
+## eps ~ N(0, Q). Only the free shocks move; the others are held at a given
+## value eps_n (zero on the point path, a draw in the unanticipated draws).
+## Given eps_n, the free shocks are Gaussian with
+##   mean  B eps_n,          B = Q_fn Q_nn^+
+##   cov   S = Q_ff - Q_fn Q_nn^+ Q_nf      (Schur complement)
+## so the whitening is eps_f = B eps_n + L eta, eta ~ N(0, I), L L' = S.
+## Whitening with sqrt(diag(Q)) instead (the old code) dropped every
+## shock correlation -- the Q = I bug class one level down. With all shocks
+## free this is exactly the GLS solution eps* = Q A'(A Q A')^+ b.
+##
+## @param Q        n_shock x n_shock covariance, or NULL (unit metric)
+## @param free_idx Integer indices of the free shocks, in the order the
+##   caller stacks them
+## @param n_shk    Number of shocks
+## @return list(L = |free| x |free| square root of S, B = |free| x |nonfree|,
+##   L_n = square root of Q_nn, nonfree_idx)
+## ---------------------------------------------------------------------------
+.cf_sqrt_psd <- function(S) {
+  S <- (S + t(S)) * 0.5
+  n <- nrow(S)
+  if (n == 0L) return(matrix(0, 0L, 0L))
+  off <- S
+  diag(off) <- 0
+  if (all(off == 0)) return(diag(sqrt(pmax(diag(S), 0)), nrow = n))
+  eg <- eigen(S, symmetric = TRUE)
+  d  <- pmax(eg$values, 0)
+  eg$vectors %*% (sqrt(d) * t(eg$vectors))
+}
+
+.cf_free_shock_law <- function(Q, free_idx, n_shk) {
+  nonfree_idx <- setdiff(seq_len(n_shk), free_idx)
+  if (is.null(Q)) Q <- diag(n_shk)
+  Q <- as.matrix(Q)
+  if (!identical(dim(Q), c(n_shk, n_shk)))
+    stop(sprintf("conditional_forecast: Q must be %d x %d (one row/column per shock).",
+                 n_shk, n_shk), call. = FALSE)
+  Q <- (Q + t(Q)) * 0.5
+  Q_ff <- Q[free_idx, free_idx, drop = FALSE]
+  if (length(nonfree_idx) == 0L) {
+    return(list(L = .cf_sqrt_psd(Q_ff),
+                B = matrix(0, length(free_idx), 0L),
+                L_n = matrix(0, 0L, 0L), nonfree_idx = nonfree_idx))
+  }
+  Q_fn <- Q[free_idx, nonfree_idx, drop = FALSE]
+  Q_nn <- Q[nonfree_idx, nonfree_idx, drop = FALSE]
+  if (all(Q_fn == 0)) {
+    B <- matrix(0, length(free_idx), length(nonfree_idx))
+    S <- Q_ff
+  } else {
+    B <- Q_fn %*% MASS::ginv(Q_nn)
+    S <- Q_ff - B %*% t(Q_fn)
+  }
+  list(L = .cf_sqrt_psd(S), B = B, L_n = .cf_sqrt_psd(Q_nn),
+       nonfree_idx = nonfree_idx)
+}
+
+
+## ---------------------------------------------------------------------------
 ## Internal: hard anticipated conditioning (Waggoner-Zha 1999)
 ##
-## Minimum-variance (most likely) shock path under Q_stack = diag(Q_diag),
-## computed in whitened coordinates A_w = A_c W, W = diag(sqrt(Q_diag)):
+## Minimum-variance (most likely) shock path under the free-shock covariance
+## S_stack = W W' (W = I_H (x) L, see .cf_free_shock_law()), computed in
+## whitened coordinates A_w = A_c W:
 ##   eps_star = W A_w' (A_w A_w')^{-1} b_c
 ##
 ## Conditional covariance for draws (eta space, mapped back via W):
@@ -92,11 +154,12 @@
 ## @param b_cond     Numeric vector of condition values minus deterministic mean
 ## @param free_cols  Integer vector indexing COLUMNS of A_full to use (free shocks)
 ## @param n_draws    Number of draws (0 = point only)
-## @param Q_diag     Shock variance diagonal (length n_shock*H or scalar 1)
+## @param W_free     n_free x n_free square root of the stacked free-shock
+##   covariance (columns ordered as free_cols), or NULL for the unit metric
 ## @return List: eps_star (n_shock*H), paths (H x n_obs), draws (list), shock_paths
 ## ---------------------------------------------------------------------------
 .hard_anticipated <- function(A_full, M, s0, cond_rows, b_cond,
-                              free_cols, n_draws, Q_diag, ss, H) {
+                              free_cols, n_draws, W_free, ss, H) {
   n_obs  <- ss$n_obs
   n_shk  <- ss$n_shock
 
@@ -117,15 +180,15 @@
       rk, n_cond), call. = FALSE)
   }
 
-  ## Q-weighted minimum-variance solution (Waggoner-Zha): with stacked shock
-  ## covariance Q_stack = diag(Q_diag), whiten eta = W^{-1} eps with
-  ## W = diag(sqrt(Q_diag[free])) and solve in eta space, so the conditional
-  ## mean is the most likely shock path under the model's shock covariance
-  ## and conditioned directions get exactly zero draw variance for any Q.
-  ## Q_diag = NULL keeps the legacy unit-metric minimum-norm solution.
+  ## Q-weighted minimum-variance solution (Waggoner-Zha): with stacked
+  ## free-shock covariance W W' (FULL, correlations included), write
+  ## eps_free = W eta and solve in eta space, so the conditional mean is the
+  ## most likely shock path under the model's shock covariance and
+  ## conditioned directions get exactly zero draw variance for any Q.
+  ## W_free = NULL keeps the legacy unit-metric minimum-norm solution.
   n_free <- length(free_cols)
-  w   <- if (!is.null(Q_diag)) sqrt(Q_diag[free_cols]) else rep(1, n_free)
-  A_w <- sweep(A_c, 2L, w, "*")
+  W   <- if (!is.null(W_free)) W_free else diag(n_free)
+  A_w <- A_c %*% W
 
   ## eta_star = A_w' (A_w A_w')^{-1} b_cond; eps_star = W eta_star
   AtA  <- tcrossprod(A_w)          ## n_cond x n_cond
@@ -140,7 +203,7 @@
   ## minimum-norm solution, warning when it does.
   AtA_inv <- .safe_inv(AtA, warn_label = "conditional_forecast: condition system")
 
-  eps_free_star <- w * (t(A_w) %*% (AtA_inv %*% b_cond))   ## n_free x 1
+  eps_free_star <- W %*% (t(A_w) %*% (AtA_inv %*% b_cond))   ## n_free x 1
 
   eps_star <- numeric(ncol(A_full))
   eps_star[free_cols] <- eps_free_star
@@ -177,7 +240,7 @@
       z <- rnorm(n_free)
       eps_d <- numeric(ncol(A_full))
       eps_d[free_cols] <- as.numeric(eps_free_star) +
-        w * as.numeric(Sigma_sqrt %*% z)
+        as.numeric(W %*% (Sigma_sqrt %*% z))
       Y_d <- as.numeric(A_full %*% eps_d) + as.numeric(M %*% s0)
       d_mat <- matrix(Y_d, nrow = H, ncol = n_obs, byrow = TRUE)
       colnames(d_mat) <- ss$obs_names_fcst
@@ -221,11 +284,16 @@
   shock_paths <- matrix(0, H, n_shk)
   colnames(shock_paths) <- ss$shock_names
 
-  ## Q-weighted solution, same whitening as .hard_anticipated: with
-  ## eta = W^{-1} eps, W = diag(sqrt(diag(Q))), the minimum-norm eta is the
-  ## most likely shock under N(0, Q). Q = NULL keeps the unit metric.
-  w_all  <- if (!is.null(Q)) sqrt(diag(Q)) else rep(1, n_shk)
-  w_free <- w_all[free_shk_idx]
+  ## Q-weighted solution, same whitening as .hard_anticipated: given the
+  ## non-free shocks eps_n, eps_free = B eps_n + L eta with L L' the FULL
+  ## conditional covariance of the free shocks (.cf_free_shock_law()), and the
+  ## minimum-norm eta is the most likely shock under N(0, Q). Q = NULL keeps
+  ## the unit metric.
+  law         <- .cf_free_shock_law(Q, free_shk_idx, n_shk)
+  L_free      <- law$L
+  B_free      <- law$B
+  L_non       <- law$L_n
+  nonfree_idx <- law$nonfree_idx
 
   s_prev <- s0
   for (h in seq_len(H)) {
@@ -252,14 +320,14 @@
           "conditional_forecast (unanticipated): at horizon %d, rank(%d) < %d conditions -- infeasible with chosen free_shocks.",
           h, rk, n_c), call. = FALSE)
 
-      D_w <- sweep(D_c, 2L, w_free, "*")
+      D_w <- D_c %*% L_free
       DDt <- tcrossprod(D_w)
       DDt <- (DDt + t(DDt)) * 0.5
       ## See the note at the condition-system solve above: DDt loses rank when
-      ## a conditioning shock is switched off (w_free = 0) or the conditions
-      ## outnumber the free shocks. Minimum-norm, not a ridge.
+      ## a conditioning shock is switched off (zero variance) or the
+      ## conditions outnumber the free shocks. Minimum-norm, not a ridge.
       DDt_inv <- .safe_inv(DDt, warn_label = "conditional_forecast: shock system")
-      eps_free <- w_free * as.numeric(t(D_w) %*% (DDt_inv %*% b_h))
+      eps_free <- as.numeric(L_free %*% (t(D_w) %*% (DDt_inv %*% b_h)))
       eps_h[free_shk_idx] <- eps_free
     }
 
@@ -282,17 +350,28 @@
         y_pred_mean_d <- as.numeric(Z_mat %*% s_d)
         h_cond <- cond_df[cond_df$horizon == h, , drop = FALSE]
 
-        ## Draw all shocks from N(0, Q)
-        eps_d <- w_all * rnorm(n_shk)
+        ## Draw all shocks from N(0, Q): the non-free block from its
+        ## marginal, the free block from its law given the non-free draw,
+        ## eps_f = B eps_n + L eta (correlations kept in both pieces).
+        z     <- rnorm(n_shk)
+        eps_d <- numeric(n_shk)
+        if (length(nonfree_idx))
+          eps_d[nonfree_idx] <- as.numeric(L_non %*% z[nonfree_idx])
+        mu_free  <- as.numeric(B_free %*% eps_d[nonfree_idx])
+        eta_free <- z[free_shk_idx]
 
         if (nrow(h_cond) > 0L) {
           cond_idx <- h_cond$var_idx
-          b_h      <- h_cond$value - y_pred_mean_d[cond_idx]
+          ## The condition must hold for the TOTAL shock, so the non-free
+          ## draw's and the conditional mean's loadings come off the target.
+          b_h      <- h_cond$value - y_pred_mean_d[cond_idx] -
+            as.numeric(D_mat[cond_idx, , drop = FALSE] %*% eps_d) -
+            as.numeric(D_mat[cond_idx, free_shk_idx, drop = FALSE] %*% mu_free)
 
           ## Project out in whitened eta space: set free shocks to satisfy
           ## conditions, keep null-space component for the draw
           D_c <- D_mat[cond_idx, free_shk_idx, drop = FALSE]
-          D_w <- sweep(D_c, 2L, w_free, "*")
+          D_w <- D_c %*% L_free
           DDt <- tcrossprod(D_w)
           DDt_inv <- .safe_inv((DDt + t(DDt)) * 0.5,
                                warn_label = "conditional_forecast: shock system")
@@ -301,10 +380,10 @@
           ## Null-space component (keeps random variation on free shocks
           ## orthogonal to the conditions)
           Proj <- t(D_w) %*% DDt_inv %*% D_w   ## n_free x n_free
-          eta_free <- ifelse(w_free > 0, eps_d[free_shk_idx] / w_free, 0)
           eta_null <- (diag(length(free_shk_idx)) - Proj) %*% eta_free
-          eps_d[free_shk_idx] <- w_free * as.numeric(eta_particular + eta_null)
+          eta_free <- as.numeric(eta_particular + eta_null)
         }
+        eps_d[free_shk_idx] <- mu_free + as.numeric(L_free %*% eta_free)
 
         y_d <- y_pred_mean_d + as.numeric(D_mat %*% eps_d)
         paths_d[h, ] <- y_d
@@ -648,7 +727,7 @@
         Pk <- Pk_new
       }
       Pk
-    }, error = function(e) QQ_s)
+    }, error = function(e) .dynhr_reraise_bug(e, QQ_s))
 
     if (!is.null(tpf_seed)) set.seed(tpf_seed)
 
@@ -703,16 +782,15 @@
   if (identical(path, "pskf")) {
     me_var <- if (!is.null(ctx$me_variance)) ctx$me_variance else 0
 
-    state_idx <- dr$state_idx
     obs_idx   <- match(obs_vars, dr$endo_names)
     if (any(is.na(obs_idx)))
       stop("conditional_forecast (pskf): some obs_names not found in dr$endo_names.",
            call. = FALSE)
 
-    TT <- dr$ghx[state_idx, , drop = FALSE]
-    ZZ <- dr$ghx[obs_idx,   , drop = FALSE]
-
-    ## CSN shock parameters
+    ## CSN shock parameters AND the contemporaneous state space they belong
+    ## to (csn$TT / csn$ZZ; see .pskf_order1_statespace in
+    ## R/pskf-likelihood.R). The lagged-convention pair (ghx[state, ],
+    ## ghx[obs, ]) with eps = DD e is not the model's law when DD != 0.
     exo_names <- dr$exo_names
     csn <- tryCatch(
       .get_csn_shock_params(model, exo_names, obs_vars, dr,
@@ -733,8 +811,8 @@
     sm <- tryCatch(
       pskf_smoother(
         Y         = Y_dm,
-        TT        = TT,
-        ZZ        = ZZ,
+        TT        = csn$TT,
+        ZZ        = csn$ZZ,
         mu_eta    = csn$mu_eta,
         Sigma_eta = csn$Sigma_eta,
         Gamma_eta = csn$Gamma_eta,
@@ -752,17 +830,17 @@
       }
     )
 
-    ## PSKF timing: its observation equation is y_t = ZZ x_t (current-state),
-    ## while the forecaster consumes s_T in the lagged convention
-    ## (y_{T+1} = Z s_T).  Matching E[y_{T+1} | y_{1:T}] across the two
-    ## (observationally equivalent) representations requires one transition:
-    ## s0 = TT x_T (E[eta] = 0 by mu_eta construction) and
-    ## P0 = TT P_T TT' + Sigma_eta.
+    ## PSKF timing: the contemporaneous state chi_t CONTAINS s_t (its first
+    ## n_s coordinates, csn$state_pos), and the forecaster consumes s_T in the
+    ## lagged convention (y_{T+1} = Z s_T + D e_{T+1}), so the initial
+    ## condition is the time-T (smoothed == filtered) state block itself --
+    ## no extra transition. (The former s0 = TT x_T, P0 = TT P_T TT' +
+    ## Sigma_eta was the matching step for the old x_t := s_{t-1} reading.)
     T_obs <- nrow(sm$smoothed_means)
-    xT    <- as.numeric(sm$smoothed_means[T_obs, ])
-    PT    <- sm$smoothed_covs[, , T_obs]
-    s0    <- as.numeric(TT %*% xT)
-    P0    <- TT %*% PT %*% t(TT) + csn$Sigma_eta
+    sp    <- csn$state_pos
+    s0    <- as.numeric(sm$smoothed_means[T_obs, sp])
+    P0    <- sm$smoothed_covs[sp, sp, T_obs]
+    P0    <- matrix(P0, length(sp), length(sp))
     return(list(s0 = s0, P0 = P0))
   }
 
@@ -772,7 +850,7 @@
     ## -> .solve_from_system -> obc_ensure_policy.  Either passed via compiled= or
     ## available from model (re-compile as fallback; ~50 ms overhead).
     if (is.null(compiled)) {
-      message(
+      .dynhr_inform(
         "conditional_forecast (pkf): 'compiled' not supplied; re-compiling model.\n",
         "Pass compiled = solved$compiled to avoid this overhead."
       )
@@ -863,7 +941,7 @@
   ## forwarded to ppf_likelihood(); the terminal-state summary is identical.
   if (path %in% c("ppf", "copf")) {
     if (is.null(compiled)) {
-      message(
+      .dynhr_inform(
         "conditional_forecast (", path, "): 'compiled' not supplied; re-compiling model.\n",
         "Pass compiled = solved$compiled to avoid this overhead."
       )
@@ -1087,6 +1165,15 @@ conditional_forecast <- function(model, dr, data, conditions = NULL,
                                  ctx = NULL,
                                  compiled = NULL,
                                  ...) {
+  ## Own the message epoch for this run: repeat-suppressed warnings
+  ## (`.dynhr_warn(once = TRUE)`) are keyed within it and re-arm for the
+  ## next run, and the close reports what it suppressed. A nested call
+  ## inherits this epoch rather than opening a second one.
+  .dynhr_run_epoch <- .dynhr_epoch("conditional_forecast")
+  on.exit(.dynhr_close_epoch(.dynhr_run_epoch), add = TRUE)
+  ## The forecast's filtering step builds the measurement intercept from
+  ## dr$ys and would ignore a deterministic observation trend.
+  .refuse_obs_trends(model, "conditional_forecast()")
   ## ---- Resolve plan= if supplied ----
   if (!is.null(plan)) {
     if (!inherits(plan, "dynhr_plan"))
@@ -1096,7 +1183,7 @@ conditional_forecast <- function(model, dr, data, conditions = NULL,
            call. = FALSE)
     ## Warn if plan has shock_scale entries (out-of-sample scaling unsupported)
     if (length(plan$shock_scales) > 0L)
-      warning(
+      .dynhr_warn(
         "conditional_forecast: plan contains shock_scale entries, but out-of-sample ",
         "per-horizon shock scaling is not supported in this version. The shock_scale ",
         "entries are ignored on the forecast side. Pass a custom Q matrix to ",
@@ -1250,10 +1337,19 @@ conditional_forecast <- function(model, dr, data, conditions = NULL,
       ## Flatten to sorted vector
       free_cols <- sort(as.integer(free_cols))
 
-      Q_diag <- if (!is.null(Q)) rep(diag(Q), H) else NULL
+      ## Stacked free-shock square root: free_cols are period-major with the
+      ## shocks of each period in ascending index order, so W = I_H (x) L
+      ## with L built on sort(free_shk_idx). L carries the FULL covariance
+      ## (correlations included) of the free shocks given the non-free ones
+      ## held at zero -- see .cf_free_shock_law().
+      W_free <- NULL
+      if (!is.null(Q)) {
+        law    <- .cf_free_shock_law(Q, sort(free_shk_idx), ss_raw$n_shock)
+        W_free <- kronecker(diag(H), law$L)
+      }
 
       res_inner <- .hard_anticipated(A_full, M, s0, cond_rows, b_cond,
-                                     free_cols, n_draws, Q_diag, ss_raw, H)
+                                     free_cols, n_draws, W_free, ss_raw, H)
     } else {
       ## Unanticipated: period-by-period
       res_inner <- .hard_unanticipated(ss_raw, s0, H, cond_df, free_shk_idx,

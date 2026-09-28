@@ -62,11 +62,11 @@
   # .d35_score_matrix is in R/diag-deep-d35-softness.R (loaded before us).
   S_mat <- tryCatch(
     .d35_score_matrix(loglik_contrib_fn, theta0, eps = eps),
-    error = function(e) NULL
+    error = function(e) .dynhr_reraise_bug(e, NULL)
   )
 
   if (is.null(S_mat) || !any(is.finite(S_mat))) {
-    warning("LM2: per-period score matrix could not be computed; returning NA.")
+    .dynhr_warn("LM2: per-period score matrix could not be computed; returning NA.")
     return(list(stat = NA_real_, df = k,
                 Vhat = NULL, rank_Vhat = NA_integer_, S_T_used = S_T))
   }
@@ -74,11 +74,11 @@
   # Check for all-NA columns (params where FD failed).
   ok_cols <- which(apply(S_mat, 2, function(col) all(is.finite(col))))
   if (length(ok_cols) < k) {
-    warning(sprintf("LM2: %d/%d score columns finite; using finite subset.",
+    .dynhr_warn(sprintf("LM2: %d/%d score columns finite; using finite subset.",
                     length(ok_cols), k))
   }
   if (length(ok_cols) == 0) {
-    warning("LM2: no finite score columns; returning NA.")
+    .dynhr_warn("LM2: no finite score columns; returning NA.")
     return(list(stat = NA_real_, df = k,
                 Vhat = NULL, rank_Vhat = 0L, S_T_used = S_T))
   }
@@ -91,7 +91,7 @@
   piv <- tryCatch(
     .robust_pinv(Vhat),
     error = function(e) {
-      warning(sprintf("LM2: pseudo-inverse failed (%s); returning NA.", e$message))
+      .dynhr_warn(sprintf("LM2: pseudo-inverse failed (%s); returning NA.", e$message))
       NULL
     }
   )
@@ -231,18 +231,18 @@ robust_confidence_set <- function(theta_mode,
   # ------------------------------------------------------------------
   S_mat_mode <- tryCatch(
     .d35_score_matrix(loglik_contrib_fn, theta_mode, eps = eps),
-    error = function(e) NULL
+    error = function(e) .dynhr_reraise_bug(e, NULL)
   )
   if (is.null(S_mat_mode)) stop("robust_confidence_set: per-period score matrix failed at mode.")
 
   S_T_fd <- colSums(S_mat_mode)   # S_T by summing per-period contributions
 
   if (!is.null(grad_fn)) {
-    S_T_analytic <- tryCatch(grad_fn(theta_mode), error = function(e) NULL)
+    S_T_analytic <- tryCatch(grad_fn(theta_mode), error = function(e) .dynhr_reraise_bug(e, NULL))
     if (!is.null(S_T_analytic) && length(S_T_analytic) == k) {
       consistency_gap <- max(abs(S_T_analytic - S_T_fd))
       if (consistency_gap > score_tol) {
-        warning(sprintf(
+        .dynhr_warn(sprintf(
           "robust_confidence_set: score inconsistency max|S_T_analytic - colSums(S_mat)| = %.2e (> tol %.2e). LM2 computed with colSums. Reconcile prior handling.",
           consistency_gap, score_tol))
       }
@@ -274,7 +274,7 @@ robust_confidence_set <- function(theta_mode,
   for (j in seq_along(params)) {
     nm <- params[j]
     if (!(nm %in% names(theta_mode))) {
-      warning(sprintf("robust_confidence_set: parameter '%s' not in theta_mode; skipping.", nm))
+      .dynhr_warn(sprintf("robust_confidence_set: parameter '%s' not in theta_mode; skipping.", nm))
       next
     }
     idx <- which(names(theta_mode) == nm)
@@ -298,14 +298,14 @@ robust_confidence_set <- function(theta_mode,
     # LM2 at an arbitrary point (full-sample score + OPG meat).
     lm2_at <- function(theta0) {
       if (!is.null(grad_fn)) {
-        S_T_j <- tryCatch(grad_fn(theta0), error = function(e) NULL)
+        S_T_j <- tryCatch(grad_fn(theta0), error = function(e) .dynhr_reraise_bug(e, NULL))
       } else {
         S_T_j <- NULL
       }
       if (is.null(S_T_j) || length(S_T_j) != k) {
         S_mat_j <- tryCatch(
           .d35_score_matrix(loglik_contrib_fn, theta0, eps = eps),
-          error = function(e) NULL
+          error = function(e) .dynhr_reraise_bug(e, NULL)
         )
         S_T_j <- if (!is.null(S_mat_j)) colSums(S_mat_j) else rep(NA_real_, k)
       }
@@ -343,12 +343,12 @@ robust_confidence_set <- function(theta_mode,
       mn <- if (length(free_idx) == 1L) {
         rng <- 10 * (hi_j - lo_j)
         op <- tryCatch(stats::optimize(obj, lower = start - rng, upper = start + rng),
-                       error = function(e) NULL)
+                       error = function(e) .dynhr_reraise_bug(e, NULL))
         if (is.null(op)) lm2_at(theta0) else op$objective
       } else {
         op <- tryCatch(stats::optim(start, obj, method = "Nelder-Mead",
                                     control = list(maxit = 200L)),
-                       error = function(e) NULL)
+                       error = function(e) .dynhr_reraise_bug(e, NULL))
         if (is.null(op)) lm2_at(theta0) else op$value
       }
       mn

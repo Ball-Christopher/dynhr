@@ -16,7 +16,7 @@ A named list of the per-step details, invisibly
 }
 \description{
 Prints the \code{\link{print.dynhr_model}} header, then a per-step detail
-block for every step that has been run (perturbation order and state
-count, the log-posterior at the prior mean, the mode's log-posterior,
-the chain dimensions, the diagnostic names).
+block for every step that has been run (perturbation order, point and
+state count, the log-posterior at the prior mean, the mode's
+log-posterior, the draws and R-hat, the diagnostic names).
 }

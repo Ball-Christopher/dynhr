@@ -20,8 +20,12 @@ historical_decomposition_obc(
 
 \item{regime_path}{Integer vector length T (accepted regime per period)}
 
-\item{regime_cache}{R environment with per-regime policies; must have
-c_full stored (populated by obc_ensure_policy)}
+\item{regime_cache}{R environment seeded by obc_ensure_policy(); when
+it holds the per-period rules of a
+kalman_filter_obc_pkf() run with the same
+regime_path (the filter stores them there) those
+time-varying rules are used, otherwise the rules
+of perfect foresight of regime_path}
 
 \item{dr_slack}{Slack-regime DecisionRules}
 

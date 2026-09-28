@@ -7,12 +7,12 @@
 .hank_emu_rbf_predict(fit, xq)
 }
 \arguments{
-\item{fit}{A `.hank_emu_rbf_fit()` return value.}
+\item{fit}{A \code{.hank_emu_rbf_fit()} return value.}
 
-\item{xq}{Numeric length-`d` normalized query point.}
+\item{xq}{Numeric length-\code{d} normalized query point.}
 }
 \value{
-Numeric length-`m` predicted (flattened) field value.
+Numeric length-\code{m} predicted (flattened) field value.
 }
 \description{
 Predict a fitted thin-plate-spline RBF interpolant at normalized query points

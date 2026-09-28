@@ -136,30 +136,16 @@
   ## Only checked when coh_extra is present (Tier 2), so the NULL/vector
   ## incidence path is a strict no-op here -- no new work, no new warning.
   if (!is.null(coh_extra) && any(c_pol_raw <= tiny))
-    .hank_egm_warn_once(
-      "coh_extra_floor",
-      "hank_egm: a transition-path evaluation with a matrix 'Tr_incidence' ",
+    .dynhr_warn("hank_egm: a transition-path evaluation with a matrix 'Tr_incidence' ",
       "(Tier 2, asset-dependent incidence) drove cash-on-hand to the EGM ",
       "tiny-floor (1e-12) region at some (e, a) point -- consumption there ",
       "is being floored rather than reflecting the true budget. This ",
-      "warning fires at most once per session; if unexpected, check the ",
-      "sign/magnitude of 'Tr' against the incidence weight in that corner.")
+      "warning fires at most once per run; if unexpected, check the ",
+      "sign/magnitude of 'Tr' against the incidence weight in that corner.",
+    once = TRUE, key = "coh_extra_floor")
   c_pol <- pmax(c_pol_raw, tiny)
   Va    <- (1 + r) * c_pol^(-1 / eis)              # envelope condition
   list(Va = Va, a = a_pol, c = c_pol)
-}
-
-
-## Package-private store for one-time warnings (avoids transition/Jacobian
-## sweep warning spam -- the same pattern as .cumulant_warn_once).
-.hank_egm_warn_env <- new.env(parent = emptyenv())
-
-#' Emit a warning at most once per session, keyed by \code{key}.
-#' @keywords internal
-.hank_egm_warn_once <- function(key, ...) {
-  if (isTRUE(.hank_egm_warn_env[[key]])) return(invisible(NULL))
-  .hank_egm_warn_env[[key]] <- TRUE
-  warning(paste0(...), call. = FALSE)
 }
 
 

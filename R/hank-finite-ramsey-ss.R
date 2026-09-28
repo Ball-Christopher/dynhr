@@ -60,7 +60,7 @@
   hh <- hank_egm_solve(a_grid, y = y, r = r_net, beta = beta, eis = eis,
                        Pi = Pi, tol = tol, maxit = maxit)
   if (!hh$converged)
-    warning(".hank_taxed_het_block: household EGM did not converge")
+    .dynhr_warn(".hank_taxed_het_block: household EGM did not converge")
   Lam <- hank_forward_operator(hh$a, a_grid, Pi)
   sd  <- hank_stationary_dist(Lam)
   D   <- sd$d
@@ -144,7 +144,7 @@ hank_ks_taxed_steady <- function(a_grid, Pi, e, beta, eis, alpha, delta,
     r_bracket <- c(r_lo, r_hi)
   }
   sol <- tryCatch(stats::uniroot(f, interval = r_bracket, tol = 1e-10),
-                  error = function(e) e)
+                  error = function(e) .dynhr_reraise_bug(e, e))
   if (inherits(sol, "error")) {
     if (user_bracket) stop(sol)
     ## Retry with a SEQUENCE of candidate lower endpoints between -delta and
@@ -167,7 +167,7 @@ hank_ks_taxed_steady <- function(a_grid, Pi, e, beta, eis, alpha, delta,
     for (r_lo_try in cands) {
       sol <- tryCatch(stats::uniroot(f, interval = c(r_lo_try, r_hi),
                                      tol = 1e-10),
-                      error = function(e) NULL)
+                      error = function(e) .dynhr_reraise_bug(e, NULL))
       if (!is.null(sol)) { ok <- TRUE; break }
     }
     if (!ok)

@@ -681,6 +681,55 @@ BEGIN_RCPP
     return rcpp_result_gen;
 END_RCPP
 }
+// mvn_logcdf_cpp
+Rcpp::NumericVector mvn_logcdf_cpp(Rcpp::NumericVector b_in, Rcpp::NumericMatrix C_in, double abs_tol, double rel_tol, int start_level);
+RcppExport SEXP _dynhr_mvn_logcdf_cpp(SEXP b_inSEXP, SEXP C_inSEXP, SEXP abs_tolSEXP, SEXP rel_tolSEXP, SEXP start_levelSEXP) {
+BEGIN_RCPP
+    Rcpp::RObject rcpp_result_gen;
+    Rcpp::traits::input_parameter< Rcpp::NumericVector >::type b_in(b_inSEXP);
+    Rcpp::traits::input_parameter< Rcpp::NumericMatrix >::type C_in(C_inSEXP);
+    Rcpp::traits::input_parameter< double >::type abs_tol(abs_tolSEXP);
+    Rcpp::traits::input_parameter< double >::type rel_tol(rel_tolSEXP);
+    Rcpp::traits::input_parameter< int >::type start_level(start_levelSEXP);
+    rcpp_result_gen = Rcpp::wrap(mvn_logcdf_cpp(b_in, C_in, abs_tol, rel_tol, start_level));
+    return rcpp_result_gen;
+END_RCPP
+}
+// mvn_logcdf2_cpp
+double mvn_logcdf2_cpp(double h1, double h2, double rho);
+RcppExport SEXP _dynhr_mvn_logcdf2_cpp(SEXP h1SEXP, SEXP h2SEXP, SEXP rhoSEXP) {
+BEGIN_RCPP
+    Rcpp::RObject rcpp_result_gen;
+    Rcpp::traits::input_parameter< double >::type h1(h1SEXP);
+    Rcpp::traits::input_parameter< double >::type h2(h2SEXP);
+    Rcpp::traits::input_parameter< double >::type rho(rhoSEXP);
+    rcpp_result_gen = Rcpp::wrap(mvn_logcdf2_cpp(h1, h2, rho));
+    return rcpp_result_gen;
+END_RCPP
+}
+// mvn_logcdf3_cpp
+double mvn_logcdf3_cpp(Rcpp::NumericVector b, Rcpp::NumericMatrix C);
+RcppExport SEXP _dynhr_mvn_logcdf3_cpp(SEXP bSEXP, SEXP CSEXP) {
+BEGIN_RCPP
+    Rcpp::RObject rcpp_result_gen;
+    Rcpp::traits::input_parameter< Rcpp::NumericVector >::type b(bSEXP);
+    Rcpp::traits::input_parameter< Rcpp::NumericMatrix >::type C(CSEXP);
+    rcpp_result_gen = Rcpp::wrap(mvn_logcdf3_cpp(b, C));
+    return rcpp_result_gen;
+END_RCPP
+}
+// mvn_logcdf_dispatch_cpp
+double mvn_logcdf_dispatch_cpp(Rcpp::NumericVector x, Rcpp::NumericMatrix S, double miwa_qmax);
+RcppExport SEXP _dynhr_mvn_logcdf_dispatch_cpp(SEXP xSEXP, SEXP SSEXP, SEXP miwa_qmaxSEXP) {
+BEGIN_RCPP
+    Rcpp::RObject rcpp_result_gen;
+    Rcpp::traits::input_parameter< Rcpp::NumericVector >::type x(xSEXP);
+    Rcpp::traits::input_parameter< Rcpp::NumericMatrix >::type S(SSEXP);
+    Rcpp::traits::input_parameter< double >::type miwa_qmax(miwa_qmaxSEXP);
+    rcpp_result_gen = Rcpp::wrap(mvn_logcdf_dispatch_cpp(x, S, miwa_qmax));
+    return rcpp_result_gen;
+END_RCPP
+}
 // ordered_qz_cpp
 List ordered_qz_cpp(const arma::mat& E, const arma::mat& D, double critmod);
 RcppExport SEXP _dynhr_ordered_qz_cpp(SEXP ESEXP, SEXP DSEXP, SEXP critmodSEXP) {
@@ -846,6 +895,10 @@ static const R_CallMethodDef CallEntries[] = {
     {"_dynhr_kf_score_sigma_cpp", (DL_FUNC) &_dynhr_kf_score_sigma_cpp, 15},
     {"_dynhr_kf_tangent_cpp", (DL_FUNC) &_dynhr_kf_tangent_cpp, 17},
     {"_dynhr_mcp_sparse_solve_cpp", (DL_FUNC) &_dynhr_mcp_sparse_solve_cpp, 5},
+    {"_dynhr_mvn_logcdf_cpp", (DL_FUNC) &_dynhr_mvn_logcdf_cpp, 5},
+    {"_dynhr_mvn_logcdf2_cpp", (DL_FUNC) &_dynhr_mvn_logcdf2_cpp, 3},
+    {"_dynhr_mvn_logcdf3_cpp", (DL_FUNC) &_dynhr_mvn_logcdf3_cpp, 2},
+    {"_dynhr_mvn_logcdf_dispatch_cpp", (DL_FUNC) &_dynhr_mvn_logcdf_dispatch_cpp, 3},
     {"_dynhr_ordered_qz_cpp", (DL_FUNC) &_dynhr_ordered_qz_cpp, 3},
     {"_dynhr_hank_peak_rss", (DL_FUNC) &_dynhr_hank_peak_rss, 0},
     {"_dynhr_qr_static_transform_cpp", (DL_FUNC) &_dynhr_qr_static_transform_cpp, 5},

@@ -15,8 +15,12 @@
 ## kalman_filter() (R/kalman-filter.R) does not return per-step innovations
 ## or forecast variances to the caller on any path -- only `filtered_states`
 ## and (optionally) `loglik_contrib`. Rather than edit that file, this
-## diagnostic runs its own thin per-step Kalman recursion (mirroring the
-## "dare"/.kf_step textbook formulas) so it can capture v_t and F_t directly.
+## diagnostic runs its own per-step Kalman recursion so it can capture v_t and
+## F_t directly. The per-period update is the SHARED .kf_step_core() of
+## R/kf-step.R (brief 23 D1), so me_variance is true i.i.d. measurement error
+## entering F_t AND the Joseph term K me K' exactly as in kalman_filter()
+## (brief 23 A2: the former hand-rolled update dropped K me K', so at
+## me_variance > 0 the standardized innovations drifted from kalman_filter's).
 ## It reuses the package's own model-setup helpers (.get_shock_cov,
 ## solve_lyapunov) so it always agrees with kalman_filter()'s conventions.
 ## --------------------------------------------------------------------------
@@ -57,8 +61,9 @@
 #'   this thin diagnostic; use a burn-in and stick with \code{"stationary"}
 #'   on near-unit-root models, or pre-filter with \code{\link{kalman_filter}}
 #'   and inspect its residuals directly.
-#' @param me_variance scalar measurement-error jitter added to the
-#'   innovation covariance diagonal, matching \code{\link{kalman_filter}}'s
+#' @param me_variance scalar measurement-error variance: true i.i.d.
+#'   observation noise, entering both the innovation covariance and the
+#'   state-covariance update, matching \code{\link{kalman_filter}}'s
 #'   \code{me_variance} convention (default \code{0}).
 #'
 #' @details
@@ -126,6 +131,7 @@ kf_innovation_diagnostics <- function(data, dr, model, params, obs_vars,
                                       lik_init = c("stationary", "diffuse"),
                                       me_variance = 0) {
   lik_init <- match.arg(lik_init)
+  .refuse_obs_trends(model, "kf_innovation_diagnostics()")
   if (identical(lik_init, "diffuse"))
     stop("kf_innovation_diagnostics: lik_init = \"diffuse\" is not ",
          "supported by this thin diagnostic (no exact-diffuse phase is ",
@@ -153,9 +159,6 @@ kf_innovation_diagnostics <- function(data, dr, model, params, obs_vars,
 
   Sigma_e <- .get_shock_cov(model, exo, params)
   QQ      <- tcrossprod(RR %*% Sigma_e, RR)
-  HH      <- tcrossprod(DD %*% Sigma_e, DD)
-  SS      <- RR %*% Sigma_e %*% t(DD)
-  me_diag <- me_variance * diag(n_obs)
 
   if (is.null(dim(data))) data <- matrix(data, nrow = n_obs)
   data <- as.matrix(data)
@@ -195,36 +198,26 @@ kf_innovation_diagnostics <- function(data, dr, model, params, obs_vars,
       next
     }
 
-    Zo  <- ZZ[obs_ok, , drop = FALSE]
-    Do  <- DD[obs_ok, , drop = FALSE]
     v_o <- v_full[obs_ok]
 
-    PZo <- P %*% t(Zo)
-    HHo <- tcrossprod(Do %*% Sigma_e, Do) + me_diag[obs_ok, obs_ok, drop = FALSE]
-    Fo  <- Zo %*% PZo + HHo
-    Fo  <- (Fo + t(Fo)) * 0.5
-
-    Fc <- tryCatch(chol(Fo), error = function(e) NULL)
-    if (is.null(Fc))
+    ## Shared measurement/prediction update (R/kf-step.R).
+    st <- .kf_step_core(s, P, v_o, TT, ZZ[obs_ok, , drop = FALSE], RR,
+                        DD[obs_ok, , drop = FALSE], Sigma_e,
+                        me_vec = rep(me_variance, length(obs_ok)))
+    if (is.null(st))
       stop("kf_innovation_diagnostics: non-positive-definite innovation ",
            "covariance at period ", t, "; cannot standardize innovations.",
            call. = FALSE)
-    Fi <- chol2inv(Fc)
 
     ## Standardized innovations: z_i = v_i / sqrt(F_ii). Uses the marginal
     ## variance F_ii (diagonal), NOT the full whitening transform F^{-1/2}v,
     ## so that per-observable statistics stay interpretable one series at a
     ## time (matching the CLAUDE.md per-observable convention); cross-
     ## observable correlation in F is not tested by this function.
-    z_mat[obs_ok, t] <- v_o / sqrt(diag(Fo))
+    z_mat[obs_ok, t] <- v_o / sqrt(diag(st$F))
 
-    SSo  <- RR %*% Sigma_e %*% t(Do)
-    K_o  <- (TT %*% PZo + SSo) %*% Fi
-    s    <- as.numeric(TT %*% s) + drop(K_o %*% v_o)
-    TmKZ <- TT - K_o %*% Zo
-    RmKD <- RR - K_o %*% Do
-    P    <- tcrossprod(TmKZ %*% P, TmKZ) + tcrossprod(RmKD %*% Sigma_e, RmKD)
-    P    <- (P + t(P)) * 0.5
+    s <- st$s
+    P <- st$P
   }
 
   by_obs <- data.frame(

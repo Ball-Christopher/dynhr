@@ -171,7 +171,7 @@ hank_mixture_kf_loglik <- function(betas, omega, data, obs_vars = c("C", "K"),
 #' @export
 hank_mixture_simulate <- function(model, shock_specs, obs_vars = c("C", "K"),
                                    T_data, me_variance, seed = NULL, q = NULL) {
-  if (!is.null(seed)) set.seed(seed)
+  .local_seed(seed)  # caller's RNG stream restored on exit (C1)
   ss <- hank_state_space(model, shock_specs, obs_vars, q = q)
   n_obs   <- length(obs_vars)
   exo     <- ss$shock_names
@@ -300,7 +300,7 @@ hank_phase2_recovery <- function(betas = c(0.95, 0.98), omega = c(0.5, 0.5),
   if (length(betas) != 2L) stop("hank_phase2_recovery(): 'betas' must have length 2.")
   if (!is.numeric(lambda) || length(lambda) != 1L || !is.finite(lambda) || lambda < 0)
     stop("hank_phase2_recovery(): 'lambda' must be a single non-negative finite number.")
-  set.seed(seed)
+  .local_seed(seed)  # caller's RNG stream restored on exit (C1)
 
   inc <- hank_income_rouwenhorst(rho = 0.9, sigma = 0.7, n = n_e)
   ag  <- hank_asset_grid(amax = amax, n = n_a, amin = 0)
@@ -735,7 +735,7 @@ hank_mixture_laplace <- function(theta0, config,
                                    m_lev_hat = m_lev_hat,
                                    level_metric = level_metric,
                                    log_prior = log_prior)),
-      error = function(e) NULL)
+      error = function(e) .dynhr_reraise_bug(e, NULL))
     if (is.null(r) || !is.finite(r$logpost)) return(neg_inf_pen)
     r$logpost
   }
@@ -774,7 +774,7 @@ hank_mixture_laplace <- function(theta0, config,
     chol2inv(ch)
   }, error = function(e) NULL)
   if (is.null(cov)) {
-    warning("hank_mixture_laplace(): the observed information at the mode is ",
+    .dynhr_warn("hank_mixture_laplace(): the observed information at the mode is ",
             "not positive definite (mode not a strict maximum, or a coordinate ",
             "is unidentified by the active channels). Returning cov = NULL; add ",
             "an identifying channel (e.g. the LEVEL survey for 'spread') or fix ",

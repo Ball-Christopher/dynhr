@@ -10,7 +10,7 @@
 ##   - PIT values (probability integral transform, calibration diagnostic)
 ##   - Central-interval coverage at user-given levels
 ##
-## plus the Diebold-Mariano test for two score series (dm_test()).
+## plus the Diebold-Mariano test for two score series (diebold_mariano_test()).
 ##
 ## ORIENTATION.  Every score here is NEGATIVELY oriented: LOWER IS BETTER.
 ## That includes the logarithmic score, which is reported as -log f(y) (the
@@ -28,7 +28,7 @@
 ##     mean squared errors" IJF 13(2):281-291.
 ##   Dawid (1984) / Diebold, Gunther & Tay (1998) -- PIT calibration.
 ##
-## Public API: score_forecast(), dm_test()
+## Public API: score_forecast(), diebold_mariano_test()
 ## Internal helpers: .crps_ensemble(), .energy_score(), .variogram_score(),
 ##   .crps_gaussian(), .logs_gaussian_uni(), .logs_gaussian_joint(),
 ##   .logs_kde(), .pit_ensemble(), .pit_gaussian(), .coverage_ensemble(),
@@ -455,7 +455,7 @@
 #' forecasts with applications to financial risk management.
 #' \emph{International Economic Review}, 39(4), 863--883.
 #'
-#' @seealso \code{\link{dm_test}} to compare two score series,
+#' @seealso \code{\link{diebold_mariano_test}} to compare two score series,
 #'   \code{\link{forecast_backtest}} for the recursive expanding-window driver.
 #'
 #' @examples
@@ -555,7 +555,7 @@ score_forecast <- function(predictive_draws = NULL,
 
   if ("variogram" %in% rules) {
     if (n_obs < 2L) {
-      warning("score_forecast: variogram score requires n_obs >= 2; skipping")
+      .dynhr_warn("score_forecast: variogram score requires n_obs >= 2; skipping")
       out$variogram <- NA_real_
     } else {
       out$variogram <- .variogram_score(X, y, p = vs_p, w = vs_weights)
@@ -732,7 +732,7 @@ print.dynhr_forecast_scores <- function(x, ...) {
 #'   BETTER, i.e. \eqn{E[d] < 0}), or \code{"greater"}.
 #' @param small_sample Apply the Harvey-Leybourne-Newbold correction and use
 #'   the \eqn{t_{n-1}} reference distribution (default \code{TRUE}).
-#' @return An object of class \code{"dynhr_dm_test"}: a list with
+#' @return An object of class \code{"dynhr_diebold_mariano_test"}: a list with
 #'   \code{statistic}, \code{p_value}, \code{mean_diff}, \code{var_hac},
 #'   \code{n}, \code{h}, \code{lag}, \code{df}, \code{kernel},
 #'   \code{alternative} and \code{correction}.
@@ -753,8 +753,8 @@ print.dynhr_forecast_scores <- function(x, ...) {
 #' n <- 120
 #' s_good <- rexp(n, rate = 2)          # lower scores = better model
 #' s_bad  <- s_good + rexp(n, rate = 4) # strictly worse at every origin
-#' dm_test(s_good, s_bad, h = 1, alternative = "less")
-dm_test <- function(score1, score2,
+#' diebold_mariano_test(s_good, s_bad, h = 1, alternative = "less")
+diebold_mariano_test <- function(score1, score2,
                     h = 1L,
                     lag = NULL,
                     kernel = c("rectangular", "bartlett"),
@@ -766,7 +766,7 @@ dm_test <- function(score1, score2,
   s1 <- as.numeric(score1)
   s2 <- as.numeric(score2)
   if (length(s1) != length(s2))
-    stop(sprintf(paste0("dm_test: score1 has length %d but score2 has ",
+    stop(sprintf(paste0("diebold_mariano_test: score1 has length %d but score2 has ",
                         "length %d -- the two score series must cover the ",
                         "same forecast origins."), length(s1), length(s2)),
          call. = FALSE)
@@ -776,14 +776,14 @@ dm_test <- function(score1, score2,
   d  <- d[ok]
   n  <- length(d)
   if (n < 3L)
-    stop(sprintf(paste0("dm_test: only %d usable (finite) paired ",
+    stop(sprintf(paste0("diebold_mariano_test: only %d usable (finite) paired ",
                         "observations -- need at least 3."), n), call. = FALSE)
 
   h <- as.integer(h)
-  if (is.na(h) || h < 1L) stop("dm_test: h must be a positive integer.",
+  if (is.na(h) || h < 1L) stop("diebold_mariano_test: h must be a positive integer.",
                                call. = FALSE)
   L <- if (is.null(lag)) h - 1L else as.integer(lag)
-  if (is.na(L) || L < 0L) stop("dm_test: lag must be a non-negative integer.",
+  if (is.na(L) || L < 0L) stop("diebold_mariano_test: lag must be a non-negative integer.",
                                call. = FALSE)
   if (L > n - 1L) L <- n - 1L
 
@@ -800,7 +800,7 @@ dm_test <- function(score1, score2,
     }
   }
   if (!is.finite(V) || V <= 0)
-    stop(sprintf(paste0("dm_test: the HAC long-run variance estimate is ",
+    stop(sprintf(paste0("diebold_mariano_test: the HAC long-run variance estimate is ",
                         "%.6g (not positive). Retry with ",
                         "kernel = \"bartlett\", which is guaranteed ",
                         "non-negative."), V), call. = FALSE)
@@ -810,7 +810,7 @@ dm_test <- function(score1, score2,
     ## Harvey-Leybourne-Newbold (1997) eq. 9.
     adj <- (n + 1 - 2 * h + h * (h - 1) / n) / n
     if (adj <= 0)
-      stop(sprintf(paste0("dm_test: the Harvey-Leybourne-Newbold correction ",
+      stop(sprintf(paste0("diebold_mariano_test: the Harvey-Leybourne-Newbold correction ",
                           "factor is non-positive (n = %d, h = %d): the ",
                           "sample is too short for this horizon. Use ",
                           "small_sample = FALSE or shorten h."), n, h),
@@ -839,11 +839,11 @@ dm_test <- function(score1, score2,
                  kernel      = kernel,
                  alternative = alternative,
                  correction  = if (isTRUE(small_sample)) "HLN" else "none"),
-            class = c("dynhr_dm_test", "list"))
+            class = c("dynhr_diebold_mariano_test", "list"))
 }
 
 #' @export
-print.dynhr_dm_test <- function(x, ...) {
+print.dynhr_diebold_mariano_test <- function(x, ...) {
   cat("Diebold-Mariano test of equal predictive accuracy\n")
   cat(sprintf("  n = %d origins, h = %d, HAC lag = %d (%s), correction = %s\n",
               x$n, x$h, x$lag, x$kernel, x$correction))

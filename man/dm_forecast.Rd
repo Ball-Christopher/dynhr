@@ -4,28 +4,40 @@
 \alias{dm_forecast}
 \title{Conditional forecast from a dynhr_model}
 \usage{
-dm_forecast(dm, conditions = NULL, horizon = 8L, ...)
+dm_forecast(
+  dm,
+  conditions = NULL,
+  horizon = 8L,
+  at = c("params", "mode", "posterior_mean"),
+  ...
+)
 }
 \arguments{
-\item{dm}{A \code{\link{dynhr_model}} carrying `data` and a
-`$solution` (see \code{\link{dm_solve}})}
+\item{dm}{A \code{\link{dynhr_model}} carrying \code{data} and a
+\code{$solution} (see \code{\link{dm_solve}})}
 
 \item{conditions}{Conditioning information, as in
-\code{\link{conditional_forecast}} (`NULL` gives an unconditional
+\code{\link{conditional_forecast}} (\code{NULL} gives an unconditional
 forecast)}
 
-\item{horizon}{Forecast horizon (default `8L`)}
+\item{horizon}{Forecast horizon (default \code{8L})}
+
+\item{at}{\code{"params"} (default), \code{"mode"} or
+\code{"posterior_mean"}, as in \code{\link{dm_irf}}. Away from
+\code{"params"} the model's parameter values (hence the shock covariance
+of the filter and the forecast) are those at that point.}
 
 \item{...}{Further arguments for \code{\link{conditional_forecast}}
-(e.g. `type`, `method`, `n_draws`).}
+(e.g. \code{type}, \code{method}, \code{n_draws}).}
 }
 \value{
-The updated `dynhr_model`, with `$forecast` set.
+The updated \code{dynhr_model}, with \code{$forecast} set.
 }
 \description{
-Re-threads the object's `model`, `solution`, `data`, `obs_vars` and
-`compiled` into \code{\link{conditional_forecast}} and stores the result
-in `$forecast`.
+Re-threads the object's \code{model}, solution, \code{data},
+\code{obs_vars} and \code{compiled} into \code{\link{conditional_forecast}}
+and stores the result in \code{$forecast} (and the point in
+\code{$forecast_at}).
 }
 \examples{
 \donttest{
@@ -36,7 +48,7 @@ dm <- dm_solve(dynhr_model(
   system.file("extdata/models/nk_demo.mod", package = "dynhr"),
   data = Y, obs_vars = obs_vars))
 dm <- dm_forecast(dm, horizon = 4L)
-dim(dm$forecast$forecast)
+dim(dm$forecast$paths_point)
 }
 }
 \seealso{

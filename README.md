@@ -20,10 +20,14 @@ pure R (with optional Rcpp/Armadillo acceleration):
   (`me_variance = 0`) for exact Dynare parity, falling back automatically to the
   univariate filter on a singular innovation covariance; see `?kalman_filter`.)
 - **Estimation** — random-walk Metropolis-Hastings, sequential Monte Carlo,
-  NUTS, DIME, PMMH and SMC² (`dynhr_smc2()`), with mode-finding (csminwel,
-  Nelder-Mead, CMA-ES, JADE), prior tooling, and an
-  exact-Hessian curvature stack (`posterior_hessian()` with finite-difference-
-  free adjoint second-order terms, `laplace_log_marglik()`, `profile_ci()`).
+  NUTS, HMC, MALA, ChEES, DSMH, DIME, PMMH and SMC² (`dynhr_smc2()`), with
+  mode-finding (csminwel, Nelder-Mead, CMA-ES, JADE), prior tooling, an exact
+  (finite-difference-free) posterior gradient, and an exact-Hessian curvature
+  stack (`posterior_hessian()` with adjoint second-order terms,
+  `laplace_log_marglik()`, `profile_ci()`). One versioned estimation spec
+  (`dynhr_estimation_spec()`, run by `run_estimation()`) determines a run and
+  is recorded with its result, so it can be replayed (`dynhr_rerun()`) and
+  checked under another build or machine (`dynhr_verify()`).
 - **Stochastic volatility on shocks** — declare AR(1) log-variance processes on
   any subset of a model's shocks (`stochastic_volatility()`) and estimate them
   with a Rao-Blackwellised particle filter (`make_log_posterior_sv_rbpf()`),
@@ -38,9 +42,10 @@ pure R (with optional Rcpp/Armadillo acceleration):
   (`chain_diagnostics()`) and Blanchard–Kahn determinacy distance
   (`bk_distance()`).
 
-A parity test suite validates the solver and filter against **Dynare 7.0** and
-**Dynare.jl** golden files, and the high-order sigma terms against a closed-form
-ground-truth model.
+In development, a parity test suite validates the solver and filter against
+**Dynare 7.0 / 7.1** and **Dynare.jl** golden files, and the high-order sigma terms
+against a closed-form ground-truth model. (The test suite and the goldens are
+not part of the released package.)
 
 ## Install
 
@@ -195,17 +200,30 @@ from the installed files alone, with no git and no network.
 readLines(system.file("GIT_COMMIT", package = "dynhr"))
 ```
 
+**7. Profiling on Apple M4/M5 with Accelerate: do not use `Rprof()`.** With R
+linked to vecLib, `Rprof()` and `profvis` kill R with SIGILL (exit code 132):
+Accelerate runs its matrix-multiply kernels in the SME streaming mode, and the
+profiler's signal handler executes an instruction that is illegal there. It
+happens with R's own `%*%` and is not specific to dynhr. Profile under the
+reference BLAS, or sample the process from outside
+(`/usr/bin/sample <R pid> 5 1 -file out.txt` gives C-level stacks), or time
+components with `system.time()`.
+
 ## Where things are
 
 - `R/` — package source
 - `src/` — Rcpp/Armadillo backends (folded Faà-di-Bruno compose, Kalman steady
   state, sparse MCP solve), each with a pure-R fallback toggled by
   `options(dynhr.use_rcpp = )`
-- `inst/extdata/models/` — reference DSGE models for examples and tests
-- `inst/extdata/golden/` — Dynare/Dynare.jl reference outputs for parity tests
-- `inst/pipelines/` — full estimation pipeline scripts
-- `inst/julia/`, `inst/octave/` — scripts that regenerate golden files
-- `tests/testthat/` — unit and parity tests
+- `inst/extdata/models/` — the shipped reference models (`rbc`, `rbc2shock`,
+  `nk_demo` with its data, `nk_2obc`, `nk_zlb_dynare`, `sw2007` with data,
+  mode and Hessian); every file has a provenance row in `MODELS_SOURCE.md`
+- `inst/templates/` — the diagnostic report template
+- `vignettes/` — the eight vignettes listed above
+
+The development repository additionally holds the Dynare/Dynare.jl parity
+goldens, the scripts that regenerate them, the estimation pipelines and the
+unit and parity tests; none of these is part of the released package.
 
 ## Reference: capability map and function index
 
@@ -279,6 +297,9 @@ used from this page alone.
 
 ### Bayesian estimation
 - `prior_spec(model)` — extract priors from the `estimated_params` block.
+  Hyperparameters follow Dynare: `p1`/`p2` are the prior mean and standard
+  deviation for every shape, including `uniform_pdf` (write a uniform by its
+  bounds as `name, uniform_pdf, , , lb, ub;`).
 - `make_posterior(model, data, prior_spec, obs_vars, compiled, me_variance = 0)`
   — build a log-posterior closure (`likelihood` ∈ `"gaussian"`, `"cumulant"`,
   `"pruned"`). For the rest — `"whittle"`, `"student_t"`, and the particle /
@@ -288,25 +309,56 @@ used from this page alone.
   the model is never linearised (`global_pf_sbc()` certifies it).
 - `find_mode(log_post_fn, theta_init, prior_spec, method = "newrat")` — posterior
   mode; `method` ∈ `"newrat"` (csminwel, = Dynare `mode_compute 4`), `"cmaes"`,
-  `"nelder"`, `"jade"`, `"combined"`.
-- Samplers: `mcmc()` (random-walk Metropolis), `smc()` (sequential Monte Carlo,
-  returns a log-marginal-likelihood estimate), `nuts()` (plus MALA / HMC / CHEES
-  through `run_full_estimation`), `dynhr_smc2()` (SMC^2: outer theta-tempering
+  `"nelder"`, `"jade"`, `"combined"`, `"cmaes_newrat"`. `run_mode_finding()`
+  adds the exact gradient, the RWMH proposal covariance (`$Sigma_prop`) and a
+  run record.
+- Samplers: `dynhr_mcmc()` (random-walk Metropolis), `smc()` (sequential Monte Carlo,
+  returns a log-marginal-likelihood estimate), `nuts()` (plus MALA / HMC / ChEES
+  through `run_posterior_estimation(methods = ...)`; NUTS adapts a diagonal
+  inverse mass = warmup variance by default, Stan's convention, with opt-in
+  `metric = "fisher_diag"` / `"lowrank"` / `"warmup_dense"` or a fixed
+  `"hessian"`), `dynhr_dsmh()` and `dime()` (prior-initialised, no mode
+  needed), `dynhr_smc2()` (SMC^2: outer theta-tempering
   around an inner noisy-but-unbiased particle-filter likelihood — `tpf` or
-  `sv_rbpf`).
+  `sv_rbpf`). The runners give the gradient samplers the exact gradient by
+  default wherever the likelihood has one (`analytic_grad = TRUE`; `FALSE`
+  finite-differences); a bare `nuts()` needs `grad_fn =
+  make_posterior_grad(...)` for it. Which sampler mixes best is model-dependent: on a 68-parameter
+  DSGE, ChEES had the best worst-parameter ESS, ahead of NUTS (see
+  `vignette("estimation")`); compare ESS on the worst-mixing parameter rather
+  than choosing RWMH for its cheap draws. SBC status per sampler × likelihood
+  is in `vignette("sbc-matrix")` (on the Gaussian likelihood NUTS, HMC,
+  MALA, ChEES, SMC and DIME are certified).
 - `run_full_estimation(...)` — one-call pipeline (mode → sample → diagnostics),
   multi-chain with Gelman–Rubin convergence.
+- `dynhr_estimation_spec()` + `run_estimation()` — the spec runner behind every
+  entry point: one versioned object (model, data, likelihood, mode, sampler,
+  compute, outputs and every result-changing option) that `write_spec()` /
+  `read_spec()` round-trip exactly (YAML, JSON, RDS). Each result carries a
+  `$run_record` that `dynhr_rerun()` replays; `dynhr_verify()` re-checks a
+  result under the current build and environment, and a checkpoint resume is
+  refused across a registered result-changing release.
 - `dynhr_model()` + the `dm_*()` verbs (`dm_solve`, `dm_posterior`, `dm_mode`,
-  `dm_sample`, `dm_diagnostics`, `dm_forecast`, `dm_irf`, `dm_test`) — one
-  pipeline object carrying model/compiled/ss/dr/data/priors, instead of
-  threading six arguments through every call. Numerically identical to the
-  functional API.
-- Long runs: `mcmc(checkpoint_dir =, resume = TRUE, flush_every =)` writes a
+  `dm_sample`, `dm_diagnostics`, `dm_forecast`, `dm_irf`) — one
+  pipeline object that holds an estimation spec (`dm$spec`, the single
+  source of truth for model, data, priors and likelihood) plus the results,
+  instead of threading six arguments through every call. `dm_posterior()`
+  builds the spec runner's objective (`.mod` `heteroskedastic_shocks` /
+  `filter_tunes` / stochastic-volatility / OBC blocks applied), and
+  `dm_mode()` / `dm_sample()` run their stage through `run_estimation()`
+  (every sampler, multi-chain R-hat, `compute$seed`, run records), so
+  `dm_*` equals `run_estimation(dynhr_estimation_spec(dm))`.
+  `update(dm, ...)` edits the spec and clears the results that depend on
+  it; `dm_solve()` / `dm_irf()` / `dm_forecast()` take
+  `at = "params" | "mode" | "posterior_mean"`. The Diebold–Mariano test of
+  equal predictive accuracy is `diebold_mariano_test()` (formerly
+  `dm_test()`; not a `dynhr_model` verb).
+- Long runs: `dynhr_mcmc(checkpoint_dir =, resume = TRUE, flush_every =)` writes a
   checksummed, atomically-written state pack (position, log-posterior,
   adaptation state, `.Random.seed`), so a resumed chain is statistically
   identical to the uninterrupted run. `mcmc_chain_state()` / `_save()` /
   `_restore()` / `_extend()` are the sampler-agnostic primitives.
-- Cheap-then-exact: `mcmc(..., screen_fn = )` — delayed acceptance, where a
+- Cheap-then-exact: `dynhr_mcmc(..., screen_fn = )` — delayed acceptance, where a
   cheap approximate likelihood screens proposals before the expensive one
   runs; the two-stage ratio keeps the exact posterior invariant.
 - Non-likelihood estimation: `method_of_moments()` — GMM or SMM by moment
@@ -321,8 +373,12 @@ used from this page alone.
   derivative, and `"adjoint_solution"` is exact and finite-difference-free.
 - `laplace_log_marglik(mode_result)` — Laplace model evidence, read off a
   `run_mode_finding(use_exact_hessian = TRUE)` result.
-- `make_posterior_grad(grad_method = "adjoint_solution")` — analytic score for
-  gradient samplers.
+- `make_posterior_grad(model, data, prior_spec, obs_vars, compiled)` — exact
+  analytic score for gradient samplers and mode finding. The default
+  `grad_method = "auto"` resolves to the finite-difference-free
+  `"adjoint_solution"` for the Gaussian likelihood (an analytic method for
+  Whittle / cumulant / pruned); `"hybrid"` (the pre-0.9.4 default, part
+  finite-difference) is opt-in.
 - `check_hessian_conditioning()`, `fd_safe_hessian()`, `profile_ci()`,
   `run_estimation_passport()` — weak-identification / ill-conditioning tooling.
 - `chain_diagnostics(draws)` — split-R-hat, bulk/tail ESS, and Monte-Carlo
@@ -421,7 +477,9 @@ drm    <- solve_perturbation(m, cm, solve_steady(cm, pm)$values, pm)
 H      <- posterior_hessian(m, cm, drm, pm, param_names = priors$name,
                             obs_vars = obs, data = Y,
                             t2_method = "adjoint_solution")
-chains <- nuts(log_post_fn = lp, theta0 = mode$theta_mode,
+gr     <- make_posterior_grad(m, data = Y, prior_spec = priors,
+                              obs_vars = obs, compiled = cm)   # exact gradient
+chains <- nuts(log_post_fn = lp, theta0 = mode$theta_mode, grad_fn = gr,
                n_draws = 4000L, n_warmup = 2000L)
 chain_diagnostics(chains$chain)
 ```

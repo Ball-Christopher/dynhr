@@ -246,7 +246,7 @@ hank_het_block <- function(a_grid, Pi, e, beta, eis, r, w,
                           coh_extra = coh_extra)
   elapsed_solve <- proc.time()[["elapsed"]] - t0_solve
   if (!hh$converged)
-    warning("hank_het_block: household EGM did not converge at steady state")
+    .dynhr_warn("hank_het_block: household EGM did not converge at steady state")
   Lam <- hank_forward_operator(hh$a, a_grid, Pi)
   ## Timed separately from the solve, matching hank_het3_block(): the two
   ## stages have very different scaling, and a single combined figure cannot

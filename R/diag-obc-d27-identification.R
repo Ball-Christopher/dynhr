@@ -2,331 +2,392 @@
 ## --------------------------------------------------------------------------
 ## Phase H: D27 — OBC/Piecewise-Linear Identification Diagnostic
 ##
-## Assesses how occasionally binding constraints (OBCs) affect parameter
-## identification. In a piecewise-linear (OccBin) setting with multiple
-## regimes, the identification Jacobian and strength can differ across
-## regimes.  Parameters that are well-identified in the slack regime may
-## become weakly identified (or vice versa) under binding constraints.
+## Assesses how occasionally binding constraints (OBCs) affect local parameter
+## identification. Each OccBin regime (slack, or a subset of constraints
+## binding) has its own linear policy, hence its own model-implied moments
+## and identification Jacobian.
 ##
 ## Algorithm:
-##   1. Build the slack-regime and binding-regime system matrices from
-##      the OBC model (using obc_build_binding_sys, obc_solve_binding).
-##   2. For each regime, compute the identification Jacobian of the
-##      model-implied moments w.r.t. parameters (as in D1/D19).
-##   3. Compare identification strength across regimes — flag parameters
-##      whose identification is regime-dependent.
-##   4. Report the regime-dependent identification matrix and highlight
-##      parameters in danger of losing identification under OBC.
+##   1. At every parameter point the model is re-solved: steady state, slack
+##      first-order policy, system matrices, and (when a tag bound names a
+##      parameter) the OBC specs.  Each binding regime's policy is the OccBin
+##      policy obc_solve_binding() at THAT point, so the regime Jacobian moves
+##      with theta.  (Pre-0.9.4 the binding policy was cached at the
+##      calibration and the binding-regime Jacobian was identically zero.)
+##   2. Regime-conditional moments: mean, variance, contemporaneous covariance
+##      and lag-1 autocovariance of the selected variables, treating the
+##      regime policy as a stationary linear process.  The regime is HELD FIXED
+##      while differentiating, so the moments are smooth in theta and central
+##      differences never straddle the constraint's kink.
+##   3. Regime weights = shadow probability of the regime under the slack
+##      regime's stationary Gaussian distribution (probability that exactly
+##      the regime's constraints would be violated by the unconstrained
+##      solution), or user-supplied frequencies.
+##   4. Rank per regime and of the probability-weighted pooled Fisher
+##      information, with the FD-noise-aware tolerance shared with D1/D20
+##      (.ident_equilibrated_rank).  Parameters identified only through
+##      regimes with probability < rare_prob are flagged.
 ##
 ## References:
 ##   Guerrieri & Iacoviello (2015). OccBin: A toolkit for solving dynamic
-##     models with occasionally binding constraints easily.
-##   Harrison & Waldron (2021). Optimal monetary policy with occasionally
-##     binding constraints. J. Econ. Dyn. Control.
-##   Iskrev, N. (2010). Local identification in DSGE models.
-##   Qu, Z., & Tkachenko, D. (2012). Identification and frequency domain
-##     analysis of DSGE models.
+##     models with occasionally binding constraints easily. JME 70.
+##   Iskrev, N. (2010). Local identification in DSGE models. JME 57.
 ## --------------------------------------------------------------------------
 
 #' D27. OBC/Piecewise-Linear Identification Diagnostic
 #'
-#' Assesses how occasionally binding constraints affect parameter
-#' identification. Each OBC regime (slack vs. binding for each constraint)
-#' induces a different linear state-space representation.  Parameters that
-#' are well-identified in the slack regime may be weakly identified (or
-#' entirely unidentified) when a constraint binds, and vice versa.
+#' Assesses how occasionally binding constraints affect local parameter
+#' identification. Each OBC regime (all slack, or a subset of constraints
+#' binding) induces a different linear policy (OccBin, Guerrieri-Iacoviello
+#' 2015). For each regime the diagnostic differentiates the regime-conditional
+#' moments (mean, variance, contemporaneous covariance and lag-1
+#' autocovariance of the selected variables) with respect to the parameters,
+#' re-solving the model and the binding-regime policy at every
+#' finite-difference point. The regime itself is held fixed while
+#' differentiating, so the moments are smooth and the difference quotient
+#' never crosses the constraint's kink.
 #'
-#' The diagnostic:
-#' \enumerate{
-#'   \item Builds the system matrices for each OBC regime (slack + all
-#'     single-constraint-binding regimes by default, or a user-specified
-#'     subset).
-#'   \item For each regime, computes the first-order perturbation solution
-#'     and the resulting identification Jacobian (moments w.r.t. parameters).
-#'   \item Compares identification strength (D20-style Fisher information)
-#'     across regimes.
-#'   \item Flags parameters whose identification rank or strength changes
-#'     materially across regimes.
-#' }
+#' \strong{Regime weights.} By default each regime is weighted by its shadow
+#' probability: the probability, under the slack regime's stationary Gaussian
+#' distribution, that exactly that regime's constraints are violated by the
+#' unconstrained solution. This approximates the OccBin binding frequency (it
+#' is exact when the constrained variable's shadow value does not feed back
+#' from the constraint). Pass \code{regime_probs} (e.g. simulated or smoothed
+#' binding frequencies) to override it.
 #'
-#' @param model           A dynhr_mod object (must have OBC tags parsed).
-#' @param dr              Decision rules object (slack-regime DecisionRules).
-#' @param params          Named parameter vector at the calibration point.
-#' @param compiled        Compiled model object (from \code{compile_model()}).
-#' @param obc_specs       List of OBC specs (from \code{obc_parse_tags()} or
-#'   \code{obc_collect_specs()}).  If NULL, attempts to parse MCP tags from
-#'   \code{model}.
-#' @param regime_subset   Integer vector of regime indices to evaluate.
-#'   Default evaluates regime 0 (all slack) and all single-binding regimes
-#'   (1, 2, 4, 8, ...). Set to \code{NULL} to evaluate all \code{2^k}
-#'   regimes (may be expensive for large k).
-#' @param param_names     Character vector of parameter names to analyse.
-#'   If NULL, defaults to \code{names(params)}.
-#' @param eps             Step size for finite-difference Jacobian (default 1e-5).
-#' @param strength_threshold Threshold for D20-style \code{|t|-ratio} below
-#'   which a parameter is flagged as weakly identified (default 1.0).
-#' @param strength_ratio_threshold Ratio of max/min strength across regimes
-#'   above which a parameter is flagged as regime-dependent (default 3.0).
+#' \strong{Verdict.} Rank is decided per regime and for the pooled Fisher
+#' information \eqn{\sum_r w_r J_r'J_r}, with the finite-difference-aware
+#' tolerance shared with D1/D20. FAIL when a parameter is unidentified even
+#' after pooling all regimes with positive weight. WARN when every parameter is
+#' identified but some are identified only through regimes whose probability is
+#' below \code{rare_prob} (e.g. a bound that matters only in a rarely binding
+#' regime): that is a statement about how informative the data are, the OBC
+#' analogue of weak instruments, and the OccBin literature treats it
+#' qualitatively rather than as a non-identification result.
+#' A parameter that is unidentified inside one regime but identified
+#' elsewhere (e.g. Taylor-rule coefficients at the ZLB) is expected under
+#' OccBin and is reported, not failed. Strength
+#' \eqn{|\theta_i| / SE_i} uses unit moment weights (D20 \code{"none"}), so it
+#' is unit-dependent and informational.
+#'
+#' @param model           A dynhr_mod object with OBC (MCP) tags.
+#' @param params          Named full parameter vector at the evaluation point.
+#' @param compiled        Compiled model (compiled here when NULL).
+#' @param obc_specs       List of OBC specs. When NULL they are parsed from
+#'   \code{model} at every parameter point, so a bound given by a parameter
+#'   name moves with that parameter; user-supplied specs are held fixed.
+#' @param regime_subset   Integer regime indices (bit j set = constraint j
+#'   binds). NULL (default): all slack plus every single-binding regime.
+#' @param regime_probs    Optional regime weights, one per element of
+#'   \code{regime_subset} (in that order). NULL: shadow probabilities.
+#' @param param_names     Parameters to analyse (default \code{names(params)}).
+#' @param obs_names       Variables whose moments are used (default: all
+#'   endogenous variables).
+#' @param eps             Finite-difference step (a second Jacobian at
+#'   \code{2 * eps} calibrates the rank tolerance).
+#' @param strength_threshold \eqn{|\theta|/SE} below which a parameter is
+#'   listed as weak in a regime (informational).
+#' @param strength_ratio_threshold Max/min cross-regime strength ratio above
+#'   which a parameter is listed as regime-dependent (informational).
+#' @param rare_prob       Regimes with weight below this are "rare"; a
+#'   parameter identified only through rare regimes WARNs. \strong{The default
+#'   0.05 is a package choice with no literature source}: neither Iskrev (2010)
+#'   nor the OccBin literature (Guerrieri & Iacoviello 2015; Cuba-Borda et al.
+#'   2019) proposes any numeric rare-regime cutoff. It borrows the familiar
+#'   5\% tail convention and is meant to be adjusted per application.
 #' @param verbose         Print progress messages.
+#' @param meta            Optional plot metadata.
 #'
-#' @return A \code{dynhr_diagnostic} list with:
-#'   \item{result}{List containing:
-#'     \itemize{
-#'       \item \code{regime_jacobians} — named list of Jacobian matrices,
-#'         one per regime.
-#'       \item \code{regime_strength} — matrix (n_param x n_regimes) of
-#'         identification strength (|t|-ratios).
-#'       \item \code{regime_ranks} — integer vector of rank per regime.
-#'       \item \code{regime_dependent_params} — character vector of
-#'         parameters flagged as regime-dependent.
-#'       \item \code{weak_params_by_regime} — named list of weakly
-#'         identified parameters per regime.
-#'       \item \code{regime_labels} — character vector describing each regime.
-#'     }}
-#'   \item{pass}{Logical — TRUE if no parameters are both regime-dependent
-#'     AND weakly identified in any regime.}
-#'   \item{plots}{List of ggplot2 objects (regime comparison heatmap).}
-#'   \item{summary}{Human-readable summary.}
-#'
+#' @return A \code{dynhr_diagnostic} whose \code{result} holds
+#'   \code{regime_jacobians}, \code{regime_strength} (n_param x (regimes +
+#'   pooled)), \code{regime_ranks}, \code{regime_probs},
+#'   \code{regime_unidentified}, \code{pooled_rank},
+#'   \code{pooled_unidentified}, \code{rare_only_params},
+#'   \code{regime_dependent_params}, \code{weak_params_by_regime},
+#'   \code{regime_labels}, \code{regime_indices}, \code{n_obc_specs}.
 #' @noRd
 d27_obc_identification <- function(model,
-                                    dr,
                                     params,
                                     compiled = NULL,
                                     obc_specs = NULL,
                                     regime_subset = NULL,
+                                    regime_probs = NULL,
                                     param_names = NULL,
+                                    obs_names = NULL,
                                     eps = 1e-5,
                                     strength_threshold = 1.0,
                                     strength_ratio_threshold = 3.0,
+                                    rare_prob = 0.05,
                                     verbose = FALSE,
                                     meta = NULL) {
-  # ---- 1. Validate and defaults ----
+  # ---- 1. Validate inputs ----
   if (!inherits(model, "dynhr_mod")) {
     return(.make_result(
       pass    = NA,
       summary = "D27 OBC Identification: model must be a dynhr_mod object."
     ))
   }
-  if (is.null(params)) {
+  if (is.null(params) || is.null(names(params))) {
     return(.make_result(
       pass    = NA,
-      summary = "D27 OBC Identification: params is required."
+      summary = "D27 OBC Identification: a named params vector is required."
     ))
   }
-    if (is.null(param_names)) param_names <- names(params)
-    n_par <- length(param_names)
+  params <- unlist(params)
+  param_names <- param_names %||% names(params)
+  if (!all(param_names %in% names(params))) {
+    .dynhr_abort("d27: param_names not in names(params): ",
+                 paste(setdiff(param_names, names(params)), collapse = ", "))
+  }
+  n_par <- length(param_names)
 
-    obc_specs <- obc_specs %||% obc_parse_tags(model)
-    if (is.null(obc_specs) || length(obc_specs) == 0L) {
-      return(.make_result(
-        result  = NULL,
-        pass    = NA,
-        plots   = list(),
-        summary = paste(
-          "D27 OBC Identification: No OBC constraints detected or provided.",
-          "Use obc_parse_tags() or the @#obc MCP annotation mechanism",
-          "to define constraints, then re-run."
-        ),
-        llm_summary = paste(
-          "[INFO] D27 OBC Identification status=skipped reason=no_obc_specs",
-          "action: define OBC constraints via obc_parse_tags"
-        )
-      ))
-    }
-
-    k <- length(obc_specs)
-    n_regimes_total <- 2L ^ k
-    if (verbose) cat(sprintf("[d27] %d OBC spec(s) detected, %d total regimes.\n", k, n_regimes_total))
-
-    # ---- 2. Resolve system matrices from DR or compiled ----
-    sys <- NULL
-    if (!is.null(dr) && !is.null(dr$sys_mat)) {
-      sys <- dr$sys_mat
-    } else if (!is.null(compiled) && !is.null(compiled$sys_mat)) {
-      sys <- compiled$sys_mat
-    } else if (!is.null(compiled) && !is.null(dr)) {
-      # Build cache from compiled model structure
-      sc <- cache_system_structure(compiled)
-      ss_vals <- dr$ys %||% rep(0, nrow(dr$ghx))
-      sys <- extract_system_matrices_fast(sc, ss_vals, params)
-    } else {
-      # No system matrices available — fall through to numerical Jacobian
-      sys <- NULL
-    }
-
-    if (is.null(sys)) {
-      # Build a minimal solve_fn for numerical Jacobian instead
-      if (verbose) cat("[d27] No system matrices available; using numerical Jacobian approach.\n")
-      return(.build_d27_via_solve_fn(model, params, obc_specs, dr, compiled,
-                                      regime_subset, param_names, eps,
-                                      strength_threshold, strength_ratio_threshold,
-                                      verbose))
-    }
-
-    # ---- 3. Determine regime subset ----
-    if (is.null(regime_subset)) {
-      # Default: regime 0 (all slack) + all single-binding regimes
-      regime_subset <- c(0L, 2L ^ (seq_len(k) - 1L))
-    }
-    regime_subset <- unique(as.integer(regime_subset))
-    regime_subset <- regime_subset[regime_subset >= 0 & regime_subset < n_regimes_total]
-    n_regimes <- length(regime_subset)
-
-    # Build regime labels
-    regime_labels <- vapply(regime_subset, function(idx) {
-      if (idx == 0L) return("all slack")
-      flags <- obc_regime_flags(idx, k)
-      binding_names <- sprintf("%s(bind)", obc_specs$name %||% paste0("spec", seq_len(k)))[flags]
-      paste(binding_names, collapse = " + ")
-    }, character(1))
-    names(regime_subset) <- regime_labels
-
-    if (verbose) cat(sprintf("[d27] Evaluating %d regime(s): %s\n",
-                             n_regimes, paste(regime_labels, collapse = ", ")))
-
-    # ---- 4. Per-regime identification ----
-    regime_jacobians <- vector("list", n_regimes)
-    regime_strength  <- matrix(NA_real_, nrow = n_par, ncol = n_regimes,
-                               dimnames = list(param_names, regime_labels))
-    regime_ranks     <- integer(n_regimes)
-    names(regime_ranks) <- regime_labels
-
-    # Build a solve function that returns moments for a given theta
-    # under a specific regime
-    for (r in seq_len(n_regimes)) {
-      regime_idx <- regime_subset[r]
-      label <- regime_labels[r]
-
-      if (verbose) cat(sprintf("[d27]   Regime %d (%s)...", regime_idx, label))
-
-      solve_fn <- .make_obc_solve_fn(model, params, obc_specs, dr, compiled,
-                                      regime_idx)
-
-      J <- .numerical_jacobian(function(th) {
-        solve_fn(th)
-      }, params[param_names], eps = eps)
-
-      if (is.null(J)) {
-        if (verbose) cat(" FAILED\n")
-        regime_ranks[r] <- NA_integer_
-        next
-      }
-
-      colnames(J) <- param_names
-      regime_jacobians[[r]] <- J
-      sv_J <- svd(J)
-      regime_ranks[r] <- .svd_rank(sv_J$d, dim(J))
-
-      # Strength (D20-style: |t|-ratio = |theta| / se)
-      I_raw <- crossprod(J)
-      I_reg <- I_raw + diag(1e-10, n_par)
-      # Singular information matrix (collinear shock-std parameters) falls back
-      # to a pseudo-inverse inside .safe_sym_inv().
-      I_inv <- .safe_sym_inv(I_reg)
-      se <- sqrt(pmax(diag(I_inv), 0))
-      regime_strength[, r] <- abs(params[param_names]) / pmax(se, 1e-16)
-
-      if (verbose) cat(sprintf(" rank=%d\n", regime_ranks[r]))
-    }
-
-    # ---- 5. Cross-regime analysis ----
-    # Find regime-dependent parameters
-    regime_dependent <- character(0)
-    weak_by_regime <- list()
-
-    for (i in seq_len(n_par)) {
-      pname <- param_names[i]
-      s_i <- regime_strength[i, ]
-      s_valid <- s_i[is.finite(s_i) & s_i > 0]
-
-      # Check which regimes have weak identification
-      weak_regimes <- which(s_i < strength_threshold)
-      if (length(weak_regimes) > 0) {
-        weak_by_regime[[pname]] <- regime_labels[weak_regimes]
-      }
-
-      # Check regime dependence
-      if (length(s_valid) >= 2) {
-        s_ratio <- max(s_valid) / min(s_valid)
-        if (s_ratio > strength_ratio_threshold) {
-          regime_dependent <- c(regime_dependent, pname)
-        }
-      }
-    }
-
-    # Pass: no parameter is both regime-dependent AND weakly identified anywhere
-    pass <- TRUE
-    for (pname in regime_dependent) {
-      if (pname %in% names(weak_by_regime)) {
-        pass <- FALSE
-        break
-      }
-    }
-
-    # ---- 6. Build result and plots ----
-    plots <- list()
-    if (requireNamespace("ggplot2", quietly = TRUE) && n_regimes > 1) {
-      strength_df <- as.data.frame.table(regime_strength,
-                                          responseName = "Strength",
-                                          stringsAsFactors = FALSE)
-      colnames(strength_df) <- c("Parameter", "Regime", "Strength")
-
-      p_rs <- ggplot2::ggplot(
-        strength_df, ggplot2::aes(x = Regime, y = Parameter, fill = Strength)
-      ) +
-        ggplot2::geom_tile(colour = "white", linewidth = 0.3) +
-        scale_fill_dynhr_cividis(name = "|t|-ratio", na.value = "grey50") +
-        theme_dynhr_diagnostic() +
-        ggplot2::theme(
-          axis.text.x = ggplot2::element_text(angle = 45, hjust = 1)
-        ) +
-        ggplot2::labs(
-          title = "D27: OBC regime-dependent identification strength",
-          subtitle = sprintf("%d OBC spec(s), %d regime(s)", k, n_regimes),
-          x = NULL, y = NULL
-        )
-      plots$regime_strength <- .apply_meta(p_rs, meta)
-    }
-
-    # Build result list
-    result <- list(
-      regime_jacobians          = regime_jacobians,
-      regime_strength           = regime_strength,
-      regime_ranks              = regime_ranks,
-      regime_dependent_params   = regime_dependent,
-      weak_params_by_regime     = weak_by_regime,
-      regime_labels             = regime_labels,
-      regime_indices            = regime_subset,
-      n_obc_specs               = k
-    )
-
-    # Summary text
-    min_rank <- min(regime_ranks, na.rm = TRUE)
-    max_rank <- max(regime_ranks, na.rm = TRUE)
-    rank_str <- if (min_rank == max_rank) sprintf("rank=%d", min_rank)
-                else sprintf("rank range [%d, %d]", min_rank, max_rank)
-
-    dep_str <- if (length(regime_dependent) > 0)
-      sprintf("Regime-dependent: %s", paste(regime_dependent, collapse = ", "))
-    else "No regime-dependent parameters detected."
-
-    summary_str <- sprintf(
-      "D27 OBC Identification: %d spec(s), %d regime(s). %s. %s",
-      k, n_regimes, rank_str, dep_str
-    )
-
-    .make_result(
-      result  = result,
-      pass    = pass,
-      plots   = plots,
-      summary = summary_str,
-      llm_summary = sprintf(
-        "[%s] D27 OBC Identification n_obc_specs=%d n_regimes=%d min_rank=%d max_rank=%d n_regime_dependent=%d",
-        if (isTRUE(pass)) "PASS" else if (is.na(pass)) "INFO" else "FAIL",
-        k, n_regimes, min_rank, max_rank, length(regime_dependent)
+  fixed_specs <- obc_specs
+  specs0 <- fixed_specs %||% .d27_parse_specs(model, params)
+  k <- length(specs0)
+  if (k == 0L) {
+    return(.make_result(
+      pass    = NA,
+      summary = paste(
+        "D27 OBC Identification: No OBC constraints detected or provided.",
+        "Add [mcp = 'var > bound'] equation tags or pass obc_specs."
+      ),
+      llm_summary = paste(
+        "[INFO] D27 OBC Identification status=skipped reason=no_obc_specs",
+        "action: define OBC constraints via mcp tags"
       )
+    ))
+  }
+  n_regimes_total <- 2L ^ k
+  regime_subset <- regime_subset %||% c(0L, 2L ^ (seq_len(k) - 1L))
+  regime_subset <- unique(as.integer(regime_subset))
+  if (anyNA(regime_subset) || any(regime_subset < 0L | regime_subset >= n_regimes_total)) {
+    .dynhr_abort(sprintf("d27: regime_subset must lie in [0, %d] for %d constraint(s).",
+                         n_regimes_total - 1L, k))
+  }
+  if (!is.null(regime_probs) &&
+      (length(regime_probs) != length(regime_subset) ||
+       any(!is.finite(regime_probs)) || any(regime_probs < 0))) {
+    .dynhr_abort("d27: regime_probs must be finite, >= 0, one per regime in regime_subset.")
+  }
+  n_regimes <- length(regime_subset)
+
+  spec_names <- vapply(specs0, function(s) s$name %||% s$var_name %||% "obc",
+                       character(1))
+  regime_labels <- vapply(regime_subset, function(idx) {
+    if (idx == 0L) return("all slack")
+    paste(sprintf("%s binds", spec_names[obc_regime_flags(idx, k)]), collapse = " + ")
+  }, character(1))
+
+  compiled <- compiled %||% compile_model(model, verbose = FALSE)
+  sc <- cache_system_structure(compiled)
+  var_names <- model$var_names
+  obs_names <- obs_names %||% var_names
+  if (!all(obs_names %in% var_names)) {
+    .dynhr_abort("d27: obs_names not among the endogenous variables: ",
+                 paste(setdiff(obs_names, var_names), collapse = ", "))
+  }
+  sel <- match(obs_names, var_names)
+
+  if (verbose) .dynhr_cat(sprintf("[d27] %d OBC spec(s); regimes: %s\n", k,
+                                  paste(regime_labels, collapse = ", ")))
+
+  # ---- 2. Moments for every regime at one parameter point ----
+  # One model solve per point serves all regimes; a failed regime gives NA
+  # rows (fixed length), a failed solve gives an all-NA vector.
+  n_sel <- length(sel)
+  n_mom <- 3L * n_sel + n_sel * (n_sel - 1L) / 2L
+  eval_point <- function(th) {
+    p_full <- params
+    p_full[names(th)] <- th
+    sol <- .d27_solve_point(model, compiled, sc, p_full, fixed_specs)
+    out <- rep(NA_real_, n_mom * n_regimes)
+    if (is.null(sol)) return(out)
+    for (r in seq_len(n_regimes)) {
+      m <- .d27_regime_moments(sol, regime_subset[r], sel)
+      if (!is.null(m)) out[(r - 1L) * n_mom + seq_len(n_mom)] <- m$moments
+    }
+    out
+  }
+
+  theta0 <- params[param_names]
+  sol0 <- .d27_solve_point(model, compiled, sc, params, fixed_specs)
+  if (is.null(sol0)) {
+    return(.make_result(
+      pass = NA,
+      summary = paste("D27 OBC Identification: the slack model could not be solved",
+                      "(steady state or Blanchard-Kahn failure) at params.")
+    ))
+  }
+  slack0 <- .d27_regime_moments(sol0, 0L, sel)
+  if (is.null(slack0)) {
+    return(.make_result(
+      result = list(regime_labels = regime_labels, regime_indices = regime_subset),
+      pass = NA,
+      summary = paste("D27 OBC Identification: the slack regime has no finite",
+                      "stationary moments at params (unit/explosive root).")
+    ))
+  }
+  mom0 <- lapply(regime_subset, function(idx) .d27_regime_moments(sol0, idx, sel))
+  mom_names <- .d27_moment_names(obs_names)
+
+  # ---- 3. Regime weights ----
+  prob_source <- if (is.null(regime_probs)) "shadow" else "user"
+  if (is.null(regime_probs)) {
+    regime_probs <- .d27_shadow_probs(slack0, sol0, regime_subset, k)
+  }
+  regime_probs <- as.numeric(regime_probs)
+  names(regime_probs) <- regime_labels
+
+  # ---- 4. Jacobians (step h and 2h, regime held fixed) ----
+  J_all  <- .numerical_jacobian(eval_point, theta0, eps = eps)
+  J2_all <- .numerical_jacobian(eval_point, theta0, eps = 2 * eps)
+
+  regime_jacobians <- vector("list", n_regimes)
+  regime_J2 <- vector("list", n_regimes)
+  names(regime_jacobians) <- regime_labels
+  regime_ok <- logical(n_regimes)
+  for (r in seq_len(n_regimes)) {
+    rows <- (r - 1L) * n_mom + seq_len(n_mom)
+    J  <- matrix(J_all[rows, ],  n_mom, n_par, dimnames = list(mom_names, param_names))
+    J2 <- matrix(J2_all[rows, ], n_mom, n_par, dimnames = list(mom_names, param_names))
+    regime_ok[r] <- !is.null(mom0[[r]]) && all(is.finite(J))
+    if (regime_ok[r]) {
+      regime_jacobians[[r]] <- J
+      regime_J2[[r]] <- if (all(is.finite(J2))) J2
+    }
+  }
+  if (!any(regime_ok)) {
+    return(.make_result(
+      result = list(regime_labels = regime_labels, regime_indices = regime_subset),
+      pass = NA,
+      summary = paste("D27 OBC Identification: no regime has a finite Jacobian",
+                      "(failed solve or non-stationary policy within eps of params).")
+    ))
+  }
+
+  # ---- 5. Rank + strength per regime and pooled ----
+  cols <- c(regime_labels, "pooled")
+  regime_strength <- matrix(NA_real_, n_par, n_regimes + 1L,
+                            dimnames = list(param_names, cols))
+  regime_ranks <- rep(NA_integer_, n_regimes)
+  names(regime_ranks) <- regime_labels
+  regime_unid <- stats::setNames(vector("list", n_regimes), regime_labels)
+  for (r in which(regime_ok)) {
+    rk <- .ident_equilibrated_rank(regime_jacobians[[r]], regime_J2[[r]])
+    regime_ranks[r] <- rk$rank
+    regime_unid[[r]] <- rk$unidentified_params
+    regime_strength[, r] <- .d27_strength(regime_jacobians[[r]], rk, theta0)
+  }
+
+  pool <- function(use) {
+    use <- use[regime_ok[use]]
+    if (length(use) == 0L) return(NULL)
+    Jw  <- do.call(rbind, lapply(use, function(r) sqrt(regime_probs[r]) * regime_jacobians[[r]]))
+    J2_ok <- all(vapply(regime_J2[use], Negate(is.null), logical(1)))
+    J2w <- if (J2_ok) do.call(rbind, lapply(use, function(r) sqrt(regime_probs[r]) * regime_J2[[r]]))
+    list(Jw = Jw, rk = .ident_equilibrated_rank(Jw, J2w))
+  }
+  probs_ok <- all(is.finite(regime_probs))
+  pooled <- if (probs_ok) pool(which(regime_probs > 0)) else NULL
+  common <- if (probs_ok) pool(which(regime_probs >= rare_prob)) else NULL
+  pooled_unid <- if (!is.null(pooled)) pooled$rk$unidentified_params else NA_character_
+  pooled_rank <- if (!is.null(pooled)) pooled$rk$rank else NA_integer_
+  rare_only <- character(0)
+  if (!is.null(pooled)) {
+    regime_strength[, "pooled"] <- .d27_strength(pooled$Jw, pooled$rk, theta0)
+    common_unid <- if (is.null(common)) param_names else common$rk$unidentified_params
+    rare_only <- setdiff(common_unid, pooled_unid)
+  }
+
+  # ---- 6. Cross-regime (informational) ----
+  regime_dependent <- character(0)
+  weak_by_regime <- list()
+  for (pname in param_names) {
+    s_i <- regime_strength[pname, seq_len(n_regimes)]
+    weak <- which(is.finite(s_i) & s_i < strength_threshold)
+    if (length(weak) > 0L) weak_by_regime[[pname]] <- regime_labels[weak]
+    s_fin <- s_i[is.finite(s_i)]
+    if (length(s_fin) >= 2L &&
+        (min(s_fin) <= 0 && max(s_fin) > 0 ||
+         min(s_fin) > 0 && max(s_fin) / min(s_fin) > strength_ratio_threshold)) {
+      regime_dependent <- c(regime_dependent, pname)
+    }
+  }
+
+  ## A parameter no regime identifies is a hard identification failure. A
+  ## parameter identified only through a rare regime is a weak-identification /
+  ## data-informativeness statement -- the OBC literature treats it the way the
+  ## IV literature treats weak instruments, qualitatively -- so it WARNs.
+  pass <- if (is.null(pooled)) NA else length(pooled_unid) == 0L
+  warn <- isTRUE(pass) && length(rare_only) > 0L
+
+  # ---- 7. Plot ----
+  plots <- list()
+  if (requireNamespace("ggplot2", quietly = TRUE)) {
+    plots$regime_strength <- .apply_meta(
+      .d27_plot_strength(regime_strength, regime_probs, regime_unid,
+                         pooled_unid, rare_only, prob_source, k),
+      meta)
+  }
+
+  result <- list(
+    regime_jacobians        = regime_jacobians,
+    regime_strength         = regime_strength,
+    regime_ranks            = regime_ranks,
+    regime_probs            = regime_probs,
+    prob_source             = prob_source,
+    regime_unidentified     = regime_unid,
+    pooled_rank             = pooled_rank,
+    pooled_unidentified     = pooled_unid,
+    rare_only_params        = rare_only,
+    regime_dependent_params = regime_dependent,
+    weak_params_by_regime   = weak_by_regime,
+    regime_labels           = regime_labels,
+    regime_indices          = stats::setNames(regime_subset, regime_labels),
+    n_obc_specs             = k,
+    n_params                = n_par
+  )
+
+  fmt_list <- function(x) if (length(x)) paste(x, collapse = ", ") else "none"
+  regime_str <- paste(sprintf("%s: p=%.3g rank=%s", regime_labels, regime_probs,
+                              ifelse(is.na(regime_ranks), "failed",
+                                     sprintf("%d/%d", regime_ranks, n_par))),
+                      collapse = "; ")
+  verdict <- if (is.na(pass)) {
+    "Regime weights unavailable; pooled identification not assessed."
+  } else if (warn) {
+    sprintf(paste0("Pooled (probability-weighted) rank %d/%d: all parameters ",
+                   "identified, but %s identified only via regimes with ",
+                   "p < %.3g -- weakly informed by the data."),
+            pooled_rank, n_par, fmt_list(rare_only), rare_prob)
+  } else if (pass) {
+    sprintf("Pooled (probability-weighted) rank %d/%d: all parameters identified.",
+            pooled_rank, n_par)
+  } else {
+    paste0(sprintf("Pooled rank %d/%d.", pooled_rank, n_par),
+           if (length(pooled_unid)) sprintf(" Unidentified in every regime: %s.", fmt_list(pooled_unid)),
+           if (length(rare_only)) sprintf(" Identified only via regimes with p < %.3g: %s.",
+                                          rare_prob, fmt_list(rare_only)))
+  }
+  summary_str <- sprintf(
+    "D27 OBC Identification: %d spec(s), %d regime(s) (%s weights) [%s]. %s Regime-dependent: %s.",
+    k, n_regimes, prob_source, regime_str, verdict, fmt_list(regime_dependent))
+
+  .make_result(
+    result  = result,
+    pass    = pass,
+    warn    = warn,
+    plots   = plots,
+    summary = summary_str,
+    llm_summary = sprintf(
+      "[%s] D27 OBC Identification n_obc_specs=%d n_regimes=%d pooled_rank=%s/%d ranks=[%s] probs=[%s] pooled_unidentified=%s rare_only=%s regime_dependent=%s",
+      .badge_str(list(pass = pass, errored = FALSE, warn = warn)),
+      k, n_regimes, pooled_rank, n_par,
+      paste(regime_ranks, collapse = ","),
+      paste(sprintf("%.3g", regime_probs), collapse = ","),
+      fmt_list(pooled_unid), fmt_list(rare_only), fmt_list(regime_dependent)
     )
+  )
 }
 
 
@@ -334,199 +395,196 @@ d27_obc_identification <- function(model,
 # Internal helpers for D27
 # ==========================================================================
 
-#' Build a regime-specific solve function for D27 numerical Jacobian
+#' Parse MCP tags with the model's parameter values set to `params`
 #'
-#' Creates a closure that, given a parameter vector theta, solves the OBC
-#' model under the specified regime and returns a moment vector (variances
-#' and selected covariances of observables).  When sys matrices are available
-#' (via dr$sys_mat or compiled$sys_mat), uses obc_ensure_policy to obtain
-#' the regime-specific decision rules (slack vs binding).  Otherwise falls
-#' back to re-solving the perturbation for the slack regime only.
-#'
-#' @param model      dynhr_mod
-#' @param params     Full named parameter vector
-#' @param obc_specs  OBC spec list
-#' @param dr         Slack-regime DecisionRules
-#' @param compiled   Compiled model object
-#' @param regime_idx Integer regime index (0 = slack, >0 = binding subset)
-#' @return Function: theta -> named numeric moment vector
+#' A bound given by a parameter name then follows that parameter. Returns an
+#' empty list when the model has no MCP tags.
 #' @noRd
-.make_obc_solve_fn <- function(model, params, obc_specs, dr, compiled,
-                                regime_idx) {
-  # Resolve sys matrices once at closure-creation time
-  sys <- NULL
-  obs_idx <- NULL
-  if (!is.null(dr) && !is.null(dr$sys_mat)) {
-    sys <- dr$sys_mat
-  } else if (!is.null(compiled) && !is.null(compiled$sys_mat)) {
-    sys <- compiled$sys_mat
-  }
-  # Try to build sys from compiled if not pre-stored
-  if (is.null(sys) && !is.null(compiled) && !is.null(dr)) {
-    sc <- cache_system_structure(compiled)
-    ss_vals <- dr$ys %||% rep(0, nrow(dr$ghx))
-    sys <- extract_system_matrices_fast(sc, ss_vals, params)
-  }
-  # obs_idx: all variables for full endo moments, or try dr$obs_idx
-  if (!is.null(dr$obs_idx)) {
-    obs_idx <- dr$obs_idx
-  } else if (!is.null(model$obs_mat)) {
-    obs_idx <- seq_len(nrow(model$obs_mat))
-  }
-
-  # Cache lives in the enclosing function environment so it persists across
-  # Jacobian column evaluations (different theta perturbations of the same regime).
-  regime_cache <- new.env(parent = emptyenv(), hash = TRUE)
-
-  function(theta) {
-    params_new <- params
-    params_new[names(theta)] <- theta
-
-    if (is.null(dr)) return(NULL)
-    # Obtain regime-specific decision rules
-    if (!is.null(sys) && regime_idx > 0L) {
-        # Use occbin binding-regime solver via obc_ensure_policy
-        obc_ensure_policy(regime_idx, regime_cache, sys, dr, obc_specs, obs_idx)
-        entry <- regime_cache[[as.character(regime_idx)]]
-        if (is.null(entry) || is.null(entry$dr)) return(NULL)
-        dr_regime <- entry$dr
-      } else {
-        # Slack regime: re-solve perturbation at new params
-        dr_regime <- .stoch_simul_internal_diag(model, params_new, dr_order = 1L)
-        if (is.null(dr_regime) || is.null(dr_regime$ghx)) return(NULL)
-      }
-
-      # Compute moments from regime-specific DR
-      moments <- .moments_from_dr(dr_regime, model = model, params = params_new)
-      if (is.null(moments)) return(NULL)
-      if (is.null(moments$sigma_y) || is.null(moments$acf_y)) return(NULL)
-
-      # Guard: acf_y may be 2-D or 3-D depending on compute_moments version
-      acf_y_diag <- if (length(dim(moments$acf_y)) == 3L) {
-        diag(moments$acf_y[, , 1])
-      } else {
-        diag(as.matrix(moments$acf_y))
-      }
-
-      m <- c(
-        log_var  = log(pmax(diag(moments$sigma_y), 1e-16)),
-        log_acf1 = log(pmax(acf_y_diag, 1e-16))
-      )
-      if (length(m) == 0) return(NULL)
-      names(m) <- paste0("m_", seq_along(m))
-      m
-  }
+.d27_parse_specs <- function(model, params) {
+  tags <- vapply(model$equations, function(e) {
+    t <- e$tag_raw %||% e$tag
+    if (is.null(t) || is.na(t)) "" else as.character(t)
+  }, character(1))
+  if (!any(grepl("mcp", tags, fixed = TRUE))) return(list())
+  pv <- model$param_values
+  common <- intersect(names(params), names(pv))
+  pv[common] <- params[common]
+  model$param_values <- pv
+  obc_parse_tags(model)
 }
 
-
-#' Alternative D27 implementation using numerical solve_fn
+#' Solve the model (steady state, slack policy, system matrices) at a point
 #'
-#' Used when system matrices are not directly available. Builds a
-#' model_solve_fn compatible with the D1/D19 numerical Jacobian approach.
-#'
+#' @return list(dr, sys, specs, Sigma_e, ys) or NULL when the steady state
+#'   fails or Blanchard-Kahn does not hold.
 #' @noRd
-.build_d27_via_solve_fn <- function(model, params, obc_specs, dr, compiled,
-                                     regime_subset, param_names, eps,
-                                     strength_threshold, strength_ratio_threshold,
-                                     verbose) {
-  k <- length(obc_specs)
-
-  if (is.null(regime_subset)) {
-    regime_subset <- c(0L, 2L ^ (seq_len(k) - 1L))
-  }
-  regime_subset <- unique(as.integer(regime_subset))
-  n_regimes <- length(regime_subset)
-
-  regime_labels <- vapply(regime_subset, function(idx) {
-    if (idx == 0L) return("all slack")
-    flags <- obc_regime_flags(idx, k)
-    binding_names <- sprintf("spec%d", which(flags))
-    paste(binding_names, collapse = " + ")
-  }, character(1))
-
-  # Compute identification per regime
-  regime_strength <- matrix(NA_real_, nrow = length(param_names), ncol = n_regimes,
-                            dimnames = list(param_names, regime_labels))
-  regime_ranks <- integer(n_regimes)
-
-  for (r in seq_len(n_regimes)) {
-    regime_idx <- regime_subset[r]
-    solve_fn <- .make_obc_solve_fn(model, params, obc_specs, dr, compiled,
-                                    regime_idx)
-
-    # Test: solve_fn must return a non-empty vector
-    test_out <- solve_fn(params[param_names])
-    if (is.null(test_out) || length(test_out) == 0L) {
-      if (verbose) cat(sprintf("  Regime %d solve_fn returned empty, skipping.\n", regime_idx))
-      regime_ranks[r] <- NA_integer_
-      next
-    }
-
-    J <- .numerical_jacobian(function(th) solve_fn(th), params[param_names], eps = eps)
-
-    if (is.null(J) || nrow(J) == 0L) {
-      regime_ranks[r] <- NA_integer_
-      next
-    }
-
-    colnames(J) <- param_names
-    sv_J <- svd(J)
-    regime_ranks[r] <- .svd_rank(sv_J$d, dim(J))
-
-    I_raw <- crossprod(J)
-    np_ <- length(param_names)
-    I_reg <- I_raw + diag(1e-10, np_)
-    I_inv <- .safe_sym_inv(I_reg)
-    se <- sqrt(pmax(diag(I_inv), 0))
-    regime_strength[, r] <- abs(params[param_names]) / pmax(se, 1e-16)
-  }
-
-  # Cross-regime analysis (same as main function)
-  regime_dependent <- character(0)
-  weak_by_regime <- list()
-
-  for (i in seq_along(param_names)) {
-    pname <- param_names[i]
-    s_i <- regime_strength[i, ]
-    s_valid <- s_i[is.finite(s_i) & s_i > 0]
-
-    weak_regimes <- which(s_i < strength_threshold)
-    if (length(weak_regimes) > 0) {
-      weak_by_regime[[pname]] <- regime_labels[weak_regimes]
-    }
-    if (length(s_valid) >= 2) {
-      if (max(s_valid) / min(s_valid) > strength_ratio_threshold) {
-        regime_dependent <- c(regime_dependent, pname)
-      }
-    }
-  }
-
-  pass <- TRUE
-  for (pname in regime_dependent) {
-    if (pname %in% names(weak_by_regime)) {
-      pass <- FALSE
-      break
-    }
-  }
-
-  .make_result(
-    result = list(
-      regime_strength           = regime_strength,
-      regime_ranks              = regime_ranks,
-      regime_dependent_params   = regime_dependent,
-      weak_params_by_regime     = weak_by_regime,
-      regime_labels             = regime_labels,
-      regime_indices            = regime_subset
-    ),
-    pass = pass,
-    plots = list(),
-    summary = sprintf(
-      "D27 OBC Identification (%d regimes): ranks = [%s]%s",
-      n_regimes,
-      paste(regime_ranks, collapse = ", "),
-      if (length(regime_dependent) > 0)
-        sprintf("; regime-dependent: %s", paste(regime_dependent, collapse = ", "))
-      else ""
-    )
+.d27_solve_point <- function(model, compiled, sc, p_full, fixed_specs) {
+  ss <- solve_steady(compiled, params = p_full, verbose = FALSE)
+  if (is.null(ss) || !isTRUE(ss$converged)) return(NULL)
+  dr <- solve_perturbation(model, compiled, ss$values, p_full, order = 1L,
+                           verbose = FALSE)
+  if (is.null(dr) || !isTRUE(dr$bk_satisfied)) return(NULL)
+  ys <- if (inherits(dr$ys, "dynhr_steady")) dr$ys$values else dr$ys
+  list(
+    dr      = dr,
+    sys     = extract_system_matrices_fast(sc, ss$values, p_full),
+    specs   = fixed_specs %||% .d27_parse_specs(model, p_full),
+    # Sigma_e from the model's shock block at THIS point (shock-std parameters
+    # move it); never an identity default.
+    Sigma_e = .get_shock_cov(model, dr$exo_names, p_full),
+    ys      = as.numeric(ys)
   )
+}
+
+#' Stationary moments of one regime's linear policy
+#'
+#' Policy y_t = ys + c + G s_{t-1} + H e_t with s = y[state_idx] (deviation).
+#' @param sel Indices of the variables whose moments are returned.
+#' @return list(moments, mean, V) or NULL (singular binding system or
+#'   non-stationary regime policy).
+#' @noRd
+.d27_regime_moments <- function(sol, regime_idx, sel) {
+  dr <- sol$dr
+  si <- dr$state_idx
+  n  <- nrow(dr$ghx)
+  if (regime_idx == 0L) {
+    G <- dr$ghx; H <- dr$ghu; cc <- numeric(n)
+  } else {
+    flags <- obc_regime_flags(regime_idx, length(sol$specs))
+    b <- obc_solve_binding(sol$sys, dr, sol$specs[flags], obs_idx = sel)
+    if (is.null(b)) return(NULL)
+    G <- b$dr$ghx; H <- b$dr$ghu; cc <- as.numeric(b$c_full)
+  }
+  G <- matrix(G, n); H <- matrix(H, n)
+  ns <- length(si)
+  if (ns > 0L) {
+    Ts <- G[si, , drop = FALSE]
+    if (max(Mod(eigen(Ts, only.values = TRUE)$values)) >= 1 - 1e-8) return(NULL)
+    Rs <- H[si, , drop = FALSE]
+    Vs <- solve_lyapunov(Ts, Rs %*% sol$Sigma_e %*% t(Rs))
+    ms <- solve(diag(ns) - Ts, cc[si])
+    mu <- sol$ys + cc + as.numeric(G %*% ms)
+    V  <- G %*% Vs %*% t(G) + H %*% sol$Sigma_e %*% t(H)
+    G1 <- G %*% V[si, , drop = FALSE]          # Cov(y_t, y_{t-1})
+  } else {
+    mu <- sol$ys + cc
+    V  <- H %*% sol$Sigma_e %*% t(H)
+    G1 <- matrix(0, n, n)
+  }
+  Vsel <- V[sel, sel, drop = FALSE]
+  m <- c(mu[sel], diag(Vsel), Vsel[upper.tri(Vsel)],
+         diag(G1[sel, sel, drop = FALSE]))
+  if (!all(is.finite(m))) return(NULL)
+  list(moments = m, mean = mu, V = V)
+}
+
+#' Moment labels matching .d27_regime_moments() order
+#' @noRd
+.d27_moment_names <- function(nm) {
+  pairs <- outer(nm, nm, paste, sep = ",")
+  c(paste0("mean(", nm, ")"), paste0("var(", nm, ")"),
+    paste0("cov(", pairs[upper.tri(pairs)], ")"), paste0("acov1(", nm, ")"))
+}
+
+#' Shadow probability of each regime
+#'
+#' Under the slack regime's stationary Gaussian distribution, the probability
+#' that exactly the regime's constraints are violated. Deterministic
+#' (mvtnorm Miwa algorithm; no RNG draw).
+#' @param slack Output of .d27_regime_moments() for regime 0 (full mean / V).
+#' @noRd
+.d27_shadow_probs <- function(slack, sol, regime_subset, k) {
+  specs <- sol$specs
+  vi  <- vapply(specs, function(s) s$var_idx, integer(1))
+  sgn <- vapply(specs, function(s) if (identical(s$op, ">")) -1 else 1, numeric(1))
+  bnd <- vapply(specs, function(s) as.numeric(s$bound), numeric(1))
+  # u_j = sgn_j * (x_j - bound_j) > 0  <=>  constraint j violated
+  mu_u <- sgn * (slack$mean[vi] - bnd)
+  V_u  <- (sgn %o% sgn) * slack$V[vi, vi, drop = FALSE]
+  sd_u <- sqrt(pmax(diag(V_u), 0))
+  vapply(regime_subset, function(idx) {
+    viol <- obc_regime_flags(idx, k)
+    det <- sd_u <= 1e-12 * max(1, abs(mu_u))
+    # Constraints with no variance are violated deterministically or never.
+    if (any(det & (viol != (mu_u > 0)))) return(0)
+    st <- !det
+    if (!any(st)) return(1)
+    lo <- ifelse(viol[st], 0, -Inf)
+    hi <- ifelse(viol[st], Inf, 0)
+    if (sum(st) == 1L) {
+      return(stats::pnorm(hi, mu_u[st], sd_u[st]) - stats::pnorm(lo, mu_u[st], sd_u[st]))
+    }
+    as.numeric(mvtnorm::pmvnorm(lower = lo, upper = hi, mean = mu_u[st],
+                                sigma = V_u[st, st, drop = FALSE],
+                                algorithm = mvtnorm::Miwa()))
+  }, numeric(1))
+}
+
+#' |theta| / SE from I = J'J on the identified subspace (D20 "none" weighting)
+#'
+#' Parameters loading on an unidentified direction get strength 0.
+#' @noRd
+.d27_strength <- function(J, rk, theta) {
+  n_par <- ncol(J)
+  out <- rep(0, n_par)
+  names(out) <- colnames(J)
+  if (rk$rank == 0L) return(out)
+  cs <- sqrt(colSums(J^2))
+  cs[cs <= 0] <- 1
+  sj <- svd(sweep(J, 2, cs, "/"), nu = 0, nv = n_par)
+  q <- rk$rank
+  Vq <- sj$v[, seq_len(q), drop = FALSE]
+  se <- sqrt(pmax(rowSums(sweep(Vq, 2, sj$d[seq_len(q)], "/")^2), 0)) / cs
+  out <- abs(as.numeric(theta)) / se
+  names(out) <- colnames(J)
+  unid <- union(rk$unidentified_params,
+                colnames(J)[rowSums(rk$null_space^2) >= 0.01])
+  out[unid] <- 0
+  out
+}
+
+#' Heatmap of identification strength by regime (+ pooled column)
+#' @noRd
+.d27_plot_strength <- function(S, probs, regime_unid, pooled_unid, rare_only,
+                               prob_source, k) {
+  col_lab <- c(sprintf("%s\np = %.3g", colnames(S)[-ncol(S)], probs),
+               "pooled\n(p-weighted)")
+  unid <- c(regime_unid, list(pooled = pooled_unid))
+  df <- data.frame(
+    Parameter = factor(rep(rownames(S), ncol(S)), levels = rev(rownames(S))),
+    Regime    = factor(rep(col_lab, each = nrow(S)), levels = col_lab),
+    Strength  = as.vector(S),
+    stringsAsFactors = FALSE
+  )
+  unid_flag <- unlist(lapply(seq_len(ncol(S)), function(j)
+    rownames(S) %in% (unid[[j]] %||% character(0))))
+  df$label <- ifelse(is.na(df$Strength), "failed",
+              ifelse(unid_flag, "unid.", formatC(df$Strength, digits = 2, format = "g")))
+  df$fill <- ifelse(is.finite(df$Strength) & df$Strength > 0, log10(df$Strength), NA_real_)
+  # Light text on the dark (low) half of cividis, dark text on the light half.
+  rng <- range(df$fill, na.rm = TRUE)
+  pos <- if (all(is.finite(rng)) && diff(rng) > 0) (df$fill - rng[1]) / diff(rng) else 0
+  df$txt <- ifelse(is.finite(df$fill) & pos < 0.55, "white", "grey10")
+  df$rare <- df$Regime == col_lab[length(col_lab)] & rownames(S)[
+    (seq_len(nrow(df)) - 1L) %% nrow(S) + 1L] %in% rare_only
+  subtitle <- paste0(
+    sprintf("%d OBC constraint(s); p = %s regime probability.\n", k,
+            if (prob_source == "shadow") "shadow (slack-Gaussian)" else "user-supplied"),
+    "'unid.' = not identified in that regime (FD-aware rank test).",
+    if (length(rare_only)) paste0("\nRed outline: identified only via rare regimes (",
+                                  paste(rare_only, collapse = ", "), ")") else "")
+  ggplot2::ggplot(df, ggplot2::aes(x = .data$Regime, y = .data$Parameter)) +
+    ggplot2::geom_tile(ggplot2::aes(fill = .data$fill), colour = "white", linewidth = 0.6) +
+    ggplot2::geom_tile(data = df[df$rare, , drop = FALSE], fill = NA,
+                       colour = tol_vibrant[["red"]], linewidth = 1.4) +
+    ggplot2::geom_text(ggplot2::aes(label = .data$label, colour = .data$txt), size = 3.4) +
+    ggplot2::scale_colour_identity() +
+    ggplot2::geom_vline(xintercept = ncol(S) - 0.5, colour = "grey20", linewidth = 0.8) +
+    scale_fill_dynhr_cividis(name = "log10 |t|\n(unit weights)") +
+    theme_dynhr_diagnostic() +
+    ggplot2::labs(
+      title = "D27: identification strength by OBC regime",
+      subtitle = subtitle,
+      x = NULL, y = NULL
+    )
 }

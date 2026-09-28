@@ -101,7 +101,7 @@ run_smc_mirai <- function(
 
   n_cores <- .mirai_n_cores(n_cores, n_particles)
   if (verbose)
-    cat(sprintf("  Parallel SMC (mirai): %d particles on %d daemons\n",
+    .dynhr_cat(sprintf("  Parallel SMC (mirai): %d particles on %d daemons\n",
                 n_particles, n_cores))
 
   t_init <- proc.time()
@@ -118,7 +118,7 @@ run_smc_mirai <- function(
   }
   on.exit({ mirai::daemons(NULL); if (!is.null(sh)) rm(sh) }, add = TRUE)
   if (verbose)
-    cat(sprintf("  Daemon init: %.1f sec (load + compile + lp_fn)\n",
+    .dynhr_cat(sprintf("  Daemon init: %.1f sec (load + compile + lp_fn)\n",
                 (proc.time() - t_init)[["elapsed"]]))
 
   prior_sampler <- .smc_make_prior_sampler(prior_spec)
@@ -135,11 +135,14 @@ run_smc_mirai <- function(
   d <- ncol(theta_mat)
 
   ## theta_mat / par_names are FREE variables in eval_task -> pass via `...`.
+  ## A4: return the target's components (see .smc_particle_parts() in
+  ## sampler-smc.R): SMC tempers phi = log system prior + power * loglik from
+  ## the PARAMETER prior, exactly as the serial dynhr_smc() does.
   eval_task <- function(i) {
     lpf <- get0(".worker_lp", envir = globalenv(), inherits = FALSE)
     th  <- theta_mat[i, ]; names(th) <- par_names
     r   <- lpf(th)
-    list(loglik = r$loglik, logprior = r$logprior)
+    .smc_particle_parts(r, -1e300, missing_prior = -Inf)
   }
   ## Sever the task env so mirai_map does NOT serialise run_smc_mirai's frame
   ## (parsed_model / Y, etc.) with every one of the n_particles tasks. Bind the
@@ -150,13 +153,13 @@ run_smc_mirai <- function(
   list2env(list(theta_mat = theta_mat, par_names = par_names), envir = .ev_env)
   environment(eval_task) <- .ev_env
   ev <- mirai::mirai_map(seq_len(n_particles), eval_task)[]
-  log_liks <- vapply(ev, function(z) z$loglik %||% ll_floor, numeric(1))
-  log_pris <- vapply(ev, function(z) z$logprior %||% -Inf, numeric(1))
-  log_liks[!is.finite(log_liks)] <- ll_floor
+  log_liks <- vapply(ev, function(z) z[["loglik"]], numeric(1))
+  log_pris <- vapply(ev, function(z) z[["logprior"]], numeric(1))
+  log_phi  <- vapply(ev, function(z) z[["phi"]], numeric(1))
   n_eval <- n_eval + n_particles
-  n_valid <- sum(log_liks > ll_floor)
+  n_valid <- sum(log_phi > ll_floor)
   if (verbose)
-    cat(sprintf("  SMC: %d/%d particles have finite likelihood\n",
+    .dynhr_cat(sprintf("  SMC: %d/%d particles have finite likelihood\n",
                 n_valid, n_particles))
   ## Fail loud rather than tempering from an all-infeasible population (lambda
   ## would jump to 1 -> meaningless posterior + log_mlik ~ -1e308). n_valid==0
@@ -179,13 +182,17 @@ run_smc_mirai <- function(
 
   while (lambda_curr < 1) {
     stage <- stage + 1L
-    lambda_next <- if (!is.null(lambda_schedule) && stage <= length(lambda_schedule))
+    ## C2: the bisection targets the ESS of the COMBINED weights (incoming
+    ## log_w x increment); see .smc_next_lambda().
+    adaptive_step <- is.null(lambda_schedule) || stage > length(lambda_schedule)
+    lambda_next <- if (!adaptive_step)
       lambda_schedule[stage]
-    else .smc_next_lambda(log_liks, lambda_curr, ess_target, n_particles)
+    else .smc_next_lambda(log_phi, lambda_curr, ess_target, n_particles,
+                          log_w_prev = log_w)
     lambda_next <- min(lambda_next, 1)
     dlambda <- lambda_next - lambda_curr
 
-    inc_log_w <- dlambda * log_liks
+    inc_log_w <- dlambda * log_phi
 
     # p(Y|M) contribution = sum_i W_prev_i * exp(inc_log_w_i), where W_prev are
     # the NORMALISED weights coming INTO this stage (reduces to the old
@@ -201,10 +208,13 @@ run_smc_mirai <- function(
     lambda_trace <- c(lambda_trace, lambda_next)
     ess_trace    <- c(ess_trace, ess)
 
-    if (ess < ess_target * n_particles) {
+    ## C2: an adaptive step short of lambda = 1 put the combined ESS AT the
+    ## target -- resample (see dynhr_smc()).
+    if (ess < ess_target * n_particles || (adaptive_step && lambda_next < 1)) {
       idx <- .smc_systematic_resample(w_norm, n_particles)
       theta_mat <- theta_mat[idx, , drop = FALSE]
       log_liks  <- log_liks[idx]; log_pris <- log_pris[idx]
+      log_phi   <- log_phi[idx]
       log_w     <- rep(0, n_particles)
       w_norm    <- rep(1 / n_particles, n_particles)
     }
@@ -235,8 +245,8 @@ run_smc_mirai <- function(
       RNGkind("Mersenne-Twister", "Inversion", "Rejection")
       set.seed(stage_seed + i)
       theta_i <- theta_mat[i, ]; names(theta_i) <- par_names
-      ll_i <- ll_vec[i]; lp_i <- lp_vec[i]
-      tlp_i <- lp_i + lambda_next * ll_i
+      ll_i <- ll_vec[i]; lp_i <- lp_vec[i]; phi_i <- phi_vec[i]
+      tlp_i <- lp_i + lambda_next * phi_i
       acc <- 0L
       for (s in seq_len(n_mh_steps)) {
         if (use_mixture) {
@@ -256,10 +266,9 @@ run_smc_mirai <- function(
         }
         names(theta_prop) <- par_names
         rp <- lpf(theta_prop)
-        ll_p <- rp$loglik; lp_p <- rp$logprior
-        if (!is.finite(ll_p)) ll_p <- -1e300
-        if (!is.finite(lp_p)) lp_p <- -Inf
-        tlp_p <- lp_p + lambda_next * ll_p
+        pp <- .smc_particle_parts(rp, -1e300, missing_prior = -Inf)
+        ll_p <- pp[["loglik"]]; lp_p <- pp[["logprior"]]; phi_p <- pp[["phi"]]
+        tlp_p <- lp_p + lambda_next * phi_p
         log_alpha <- tlp_p - tlp_i
         if (use_mixture) {
           # Asymmetric proposal (component 3 is independence-style): correct
@@ -271,17 +280,18 @@ run_smc_mirai <- function(
           log_alpha <- log_alpha + (log_q_rev - log_q_fwd)
         }
         if (is.finite(log_alpha) && log(runif(1)) < log_alpha) {
-          theta_i <- theta_prop; ll_i <- ll_p; lp_i <- lp_p
+          theta_i <- theta_prop; ll_i <- ll_p; lp_i <- lp_p; phi_i <- phi_p
           tlp_i <- tlp_p; acc <- acc + 1L
         }
       }
-      list(theta = theta_i, loglik = ll_i, logprior = lp_i, accepted = acc)
+      list(theta = theta_i, loglik = ll_i, logprior = lp_i, phi = phi_i,
+           accepted = acc)
     }
     ## Sever env via a data-bound child of the dynhr namespace (see eval_task);
     ## note `scale` collides with base::scale, so the data binding is essential.
     .mut_env <- new.env(parent = asNamespace("dynhr"))
     list2env(list(theta_mat = theta_mat, ll_vec = log_liks, lp_vec = log_pris,
-                  lambda_next = lambda_next, scale = scale, L_prop = L_prop,
+                  phi_vec = log_phi, lambda_next = lambda_next, scale = scale, L_prop = L_prop,
                   n_mh_steps = n_mh_steps, d = d, par_names = par_names,
                   stage_seed = stage_seed, use_mixture = use_mixture,
                   mixture_weights = mixture_weights, theta_bar = theta_bar,
@@ -294,6 +304,7 @@ run_smc_mirai <- function(
       theta_mat[i, ] <- mut[[i]]$theta
       log_liks[i]    <- mut[[i]]$loglik
       log_pris[i]    <- mut[[i]]$logprior
+      log_phi[i]     <- mut[[i]]$phi
       n_acc <- n_acc + mut[[i]]$accepted
     }
     n_eval <- n_eval + n_particles * n_mh_steps
@@ -303,25 +314,28 @@ run_smc_mirai <- function(
     mh_c <- mh_c * .smc_scale_adjust(accept_rate, target = mut_target)
 
     if (verbose)
-      cat(sprintf("  SMC stage %d: lambda=%.4f ESS=%.0f accept=%.0f%% log_mlik=%.2f\n",
+      .dynhr_cat(sprintf("  SMC stage %d: lambda=%.4f ESS=%.0f accept=%.0f%% log_mlik=%.2f\n",
                   stage, lambda_next, ess, 100 * accept_rate, log_marginal))
     lambda_curr <- lambda_next
   }
 
   elapsed <- as.numeric(difftime(Sys.time(), t_start, units = "secs"))
   colnames(theta_mat) <- par_names
-  logpost_final <- log_liks + log_pris
+  ## Full lambda = 1 target (parameter prior + phi); -Inf when infeasible.
+  logpost_final <- log_pris + log_phi
+  logpost_final[log_phi <= ll_floor] <- -Inf
   ## Final normalised weights: w_norm is still in scope from the tempering
   ## loop (uniform if the last stage resampled; non-uniform otherwise).
   ## Stored so as_posterior_draws() can detect and correct for the
   ## non-uniform case.
   smc_weights_final <- w_norm
-  list(
+  out <- list(
     chain            = theta_mat,
     particles        = theta_mat,
     smc_weights      = smc_weights_final,
     log_liks         = log_liks,
     log_priors       = log_pris,
+    log_phi          = log_phi,
     logpost_trace    = logpost_final,
     post_logpost     = logpost_final,
     log_marginal_lik = log_marginal,
@@ -337,4 +351,10 @@ run_smc_mirai <- function(
     elapsed_secs     = elapsed,
     sampler          = "smc"
   )
+  bnds <- .smc_support_bounds(prior_spec, par_names)
+  if (!is.null(bnds$lower)) {
+    out$support_lower <- bnds$lower
+    out$support_upper <- bnds$upper
+  }
+  out
 }

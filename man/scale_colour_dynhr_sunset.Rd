@@ -12,10 +12,14 @@ scale_color_dynhr_sunset(..., midpoint = 0, na.value = dynhr_na_colour)
 \arguments{
 \item{...}{Passed to \code{ggplot2::scale_colour_gradientn}.}
 
-\item{midpoint}{Numeric midpoint (default 0).}
+\item{midpoint}{Numeric midpoint (default 0). \code{NA}/\code{NULL}
+restores the plain data-range rescaling.}
 
 \item{na.value}{Colour for NA values.}
 }
 \description{
-Diverging colour scale using Paul Tol sunset (continuous)
+\code{midpoint} is the value that gets the ramp's NEUTRAL centre colour.
+Until 0.9.4 the argument was accepted and then ignored, so the centre of the
+ramp landed at the midpoint of the DATA range: a scale asked to centre on 0
+coloured an all-positive variable as if half of it were negative.
 }

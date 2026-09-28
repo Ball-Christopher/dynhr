@@ -2,14 +2,14 @@
 % Please edit documentation in R/hank-mixture-emulator.R
 \name{hank_emulator_metric}
 \alias{hank_emulator_metric}
-\title{Emulated `K x K` covariance of the projected net reweighting at a query theta}
+\title{Emulated \code{K x K} covariance of the projected net reweighting at a query theta}
 \usage{
 hank_emulator_metric(emu, theta, rw_scale, N)
 }
 \arguments{
 \item{emu}{A \code{\link{hank_mixture_emulator}}.}
 
-\item{theta}{Named list or length-`d` named numeric in `names(emu$box)`
+\item{theta}{Named list or length-\code{d} named numeric in \code{names(emu$box)}
 order.}
 
 \item{rw_scale}{Scalar multiplier on the reweighting shock size.}
@@ -17,13 +17,13 @@ order.}
 \item{N}{Sample size of EACH of the two cross-sections.}
 }
 \value{
-A `emu$K x emu$K` numeric covariance matrix.
+A \code{emu$K x emu$K} numeric covariance matrix.
 }
 \description{
-Rebuilds the covariance of `t(B_ref) (Dhat1 - Dhat0)` (two independent
-size-`N` multinomial cross-sections, pre- and post-shock) from the
-interpolated projected pieces `m1, M2D0, M2dD`, EXACTLY as the research
-scratch's `emu_sigma`: with `D1 = D0 + rw_scale * dD_snap`,
+Rebuilds the covariance of \code{t(B_ref) (Dhat1 - Dhat0)} (two independent
+size-\code{N} multinomial cross-sections, pre- and post-shock) from the
+interpolated projected pieces \code{m1, M2D0, M2dD}, EXACTLY as the research
+scratch's \code{emu_sigma}: with \code{D1 = D0 + rw_scale * dD_snap},
 \code{covD0 = M2D0 - m1 m1^T}, \code{covD1 = (M2D0 + rw_scale * M2dD) -
 m1_D1 m1_D1^T} (\code{m1_D1 = m1 + rw_scale * gref}), \code{Sigma = (covD0 +
 covD1) / N}.

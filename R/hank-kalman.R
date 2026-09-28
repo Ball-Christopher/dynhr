@@ -329,7 +329,7 @@ make_log_posterior_hank <- function(model, data, obs_vars, q = NULL,
         hank_loglik_ar(data, Theta_list, rho = rho, sigma = sigma,
                        me_variance = me_variance, q = q, check_boundary = FALSE,
                        cache = ar_cache),
-        error = function(e) -Inf)
+        error = function(e) .dynhr_reraise_bug(e, -Inf))
       if (!is.finite(loglik))
         return(list(logpost = -Inf, loglik = loglik, logprior = logprior))
     }

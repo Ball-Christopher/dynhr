@@ -18,18 +18,40 @@ detects within-chain non-stationarity a plain Rhat misses).}
 }
 \value{
 A \code{data.frame}, one row per parameter, with columns
-  \code{param}, \code{mean}, \code{sd}, \code{ess}, \code{rhat}, \code{mcse}.
+  \code{param}, \code{mean}, \code{sd}, \code{ess} (ESS of the mean: the
+  estimator above on the raw draws, the one \code{mcse} uses),
+  \code{ess_bulk} (the same on rank-normalised draws), \code{ess_tail}
+  (minimum ESS of the 5\% and 95\% quantile indicators), \code{rhat}
+  (maximum of the rank-normalised split-\eqn{\hat R} of the draws and of
+  the draws folded about their median; \code{NA} for a single unsplit
+  chain) and \code{mcse}. Constant draws give \code{NA} ESS and R-hat.
 }
 \description{
-Computes, per parameter, the effective sample size (ESS) via Geyer's initial
-monotone positive sequence on the multi-chain-combined autocorrelation, the
-split-Rhat potential-scale-reduction factor, the posterior mean/sd, and the
-Monte-Carlo standard error (\code{sd / sqrt(ESS)}).
+Computes, per parameter, the rank-normalised split-\eqn{\hat R}, the bulk
+and tail effective sample sizes of Vehtari, Gelman, Simpson, Carpenter &
+Buerkner (2021), the ESS of the posterior mean, the posterior mean/sd, and
+the Monte-Carlo standard error of the mean (\code{sd / sqrt(ess)}).
+}
+\details{
+Every ESS is the multi-chain estimator of Vehtari et al. (2021, eqs 10-11):
+the between-chain-aware autocorrelation
+\eqn{\hat\rho_t = 1 - (W - \bar\gamma_t) / \widehat{var}^+}, truncated by
+Geyer's initial positive sequence on the pairs
+\eqn{(\hat\rho_0 + \hat\rho_1), (\hat\rho_2 + \hat\rho_3), \ldots} and made
+monotone by Geyer's initial monotone sequence. It is NOT capped at the draw
+count: antithetic chains (negative lag-1 autocorrelation, common for NUTS)
+legitimately have ESS > N, bounded as in Stan by \eqn{N \log_{10} N}.
 }
 \examples{
 set.seed(1)
 draws <- matrix(rnorm(4000), ncol = 2, dimnames = list(NULL, c("a", "b")))
 chain_diagnostics(draws)
+}
+\references{
+Vehtari, A., Gelman, A., Simpson, D., Carpenter, B. and
+  Buerkner, P.-C. (2021). Rank-normalization, folding, and localization: an
+  improved \eqn{\hat R} for assessing convergence of MCMC. \emph{Bayesian
+  Analysis} 16(2), 667-718.
 }
 \seealso{
 \code{sbc_uniformity_test} (SBC rank-uniformity diagnostics)

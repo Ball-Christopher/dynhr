@@ -2,13 +2,16 @@
 % Please edit documentation in R/diag-pre-d39-stability-map.R
 \name{diag_stability_map}
 \alias{diag_stability_map}
-\title{D39. BK-feasibility stability mapping (Ratto 2008 / Monte-Carlo filtering)}
+\title{D39. Blanchard-Kahn stability map (Ratto 2008 / Monte-Carlo filtering)}
 \usage{
 diag_stability_map(
   model,
   compiled = NULL,
   prior_spec = NULL,
   n_draws = 2000L,
+  grid = NULL,
+  params = NULL,
+  unit_tol = 1e-06,
   seed = NULL,
   verbose = FALSE,
   ...
@@ -20,52 +23,106 @@ diag_stability_map(
 \item{compiled}{Compiled model (from \code{compile_model()}). If
 \code{NULL}, compiled internally.}
 
-\item{prior_spec}{\code{data.frame} with columns \code{name},
-\code{distribution}, \code{p1}, \code{p2},
-\code{lower}, \code{upper} (as returned by
-\code{extract_prior_spec()}). If \code{NULL}, extracted
+\item{prior_spec}{Prior-mode only: \code{data.frame} as returned by
+\code{extract_prior_spec()}. If \code{NULL}, extracted
 from \code{model}.}
 
-\item{n_draws}{Number of prior draws (default \code{2000L}).}
+\item{n_draws}{Prior-mode only: number of prior draws (default
+\code{2000L}).}
+
+\item{grid}{\code{NULL} (prior mode) or a named list of two finite
+numeric vectors, \code{list(x_param = ..., y_param = ...)}.}
+
+\item{params}{Named base parameter vector (default
+\code{model$param_values}); parameters not being varied
+are held here, and in grid mode it is the calibration
+point marked on the map.}
+
+\item{unit_tol}{Unit-circle tolerance for the \code{unit_root} class
+(default \code{1e-6}, the solver's QZ threshold).}
 
 \item{seed}{Optional integer random seed.}
 
-\item{verbose}{Logical; print progress (default \code{FALSE}).}
+\item{verbose}{Logical; report progress (default \code{FALSE}).}
 
 \item{...}{Passed to \code{compile_model()} if compiling internally.}
 }
 \value{
-A list with elements:
+A \code{dynhr_stability_map} list with elements:
 \describe{
-  \item{\code{feasible_fraction}}{Scalar in \eqn{[0,1]}: fraction of draws
-    that are BK-feasible.}
-  \item{\code{drivers}}{data.frame sorted by \code{ks_stat} (descending):
-    \code{param}, \code{ks_stat}, \code{p_value}, \code{feasible_lo},
-    \code{feasible_hi}.}
-  \item{\code{n_feasible}}{Integer count of feasible draws.}
-  \item{\code{n_total}}{Integer count of attempted draws (= \code{n_draws}).}
+  \item{\code{mode}}{\code{"prior"} or \code{"grid"}.}
+  \item{\code{status}}{factor (levels as above), one per draw / grid point.}
+  \item{\code{class_counts}}{named integer counts of every class.}
+  \item{\code{feasible_fraction}}{fraction of points that are
+    \code{determinate}.}
+  \item{\code{n_feasible}, \code{n_total}}{determinate / total counts.}
+  \item{\code{errors}}{character vector of solver-error messages
+    (one per \code{solver_error} point).}
+  \item{\code{drivers}}{prior mode: data.frame sorted by \code{ks_stat}
+    (descending): \code{param}, \code{ks_stat}, \code{p_value},
+    \code{feasible_lo}, \code{feasible_hi}; \code{NULL} in grid mode.}
+  \item{\code{drivers_by_class}}{prior mode: named list of such tables,
+    determinate vs each failing class with >= 2 draws.}
+  \item{\code{draws}}{prior mode: \code{n_draws x n_par} matrix of draws.}
+  \item{\code{grid}}{grid mode: data.frame with \code{x}, \code{y},
+    \code{status}, \code{n_unstable}, \code{n_forward}.}
+  \item{\code{axes}}{grid mode: \code{c(x = , y = )} parameter names.}
+  \item{\code{calibration}}{grid mode: the marked point (named, x then y).}
+  \item{\code{plots}}{grid mode: \code{list(map = <ggplot>)}; else empty.}
 }
 }
 \description{
-Samples \code{n_draws} parameter vectors from the joint prior and
-classifies each as BK-feasible or infeasible by attempting to solve
-the model's steady state and first-order perturbation. A two-sample
-Kolmogorov-Smirnov test (comparing each parameter's marginal distribution
-across feasible vs infeasible draws) ranks parameters by how strongly they
-drive infeasibility.
+Classifies parameter vectors by the Blanchard-Kahn (BK) properties of the
+first-order solution, re-solving the steady state and the linearised system
+at every point. Each point gets exactly one status:
+\describe{
+  \item{\code{determinate}}{unique stable solution (BK satisfied).}
+  \item{\code{indeterminate}}{fewer explosive roots than forward-looking
+    variables (multiple stable solutions).}
+  \item{\code{explosive}}{more explosive roots than forward-looking
+    variables (no stable solution).}
+  \item{\code{unit_root}}{a finite generalised eigenvalue lies on the unit
+    circle, \eqn{||\lambda| - 1| \le} \code{unit_tol}: the point is on
+    (numerically) the determinacy boundary, where the root count is
+    ambiguous. Models with a structural unit root are \code{unit_root}
+    everywhere.}
+  \item{\code{invalid_rule}}{the root count matches, but the solver's
+    decision rule is not a valid unique solution: either its realised state
+    transition is explosive (the solver's post-solve guard rejected it), or
+    the QZ block \eqn{Z_{11}} is singular -- the BK \emph{rank} condition
+    fails (e.g. an explosive root belongs to a predetermined variable while
+    a jump variable has a stable root), which since 0.9.4
+    \code{solve_perturbation()} reports as \code{bk_satisfied = FALSE}
+    with \code{bk_rank_deficient = TRUE} (it used to report
+    \code{bk_satisfied = TRUE}).}
+  \item{\code{no_steady_state}}{the steady-state solver did not converge.}
+  \item{\code{solver_error}}{the steady-state or perturbation solver
+    raised an error (message kept in \code{$errors}).}
+}
+Forward-looking variables are counted as in \code{solve_perturbation()}:
+forward-only plus mixed variables, less mixed variables declared
+predetermined.
 }
 \details{
-This is the Ratto (2008) Monte-Carlo filtering / GSA approach applied to
-the Blanchard-Kahn determinacy condition. A large KS statistic for a
-parameter means its value strongly separates the feasible and infeasible
-regions: the prior for that parameter is poorly positioned relative to the
-determinacy boundary.
+\strong{Prior mode} (\code{grid = NULL}): samples \code{n_draws} vectors from
+the prior (the same sampler SMC uses, so draws match the density
+\code{log_prior} scores) and ranks parameters by the two-sample
+Kolmogorov-Smirnov statistic between determinate and all other draws
+(\code{$drivers}), and between determinate draws and each failing class
+separately (\code{$drivers_by_class}). A large KS statistic means the
+parameter's value strongly separates the regions (Ratto 2008).
+
+\strong{Grid mode} (\code{grid} a named list of two numeric vectors):
+classifies the Cartesian grid, the FIRST element on the x axis and the
+SECOND on the y axis, with every other parameter at \code{params}. Returns
+the grid table and a tile map (\code{$plots$map}) with the calibration point
+(\code{params} at the two grid parameters) marked.
 }
 \references{
 Ratto, M. (2008). Analysing DSGE models with global sensitivity analysis.
   \emph{Computational Economics}, 31(2), 115--139.
 
-  Saltelli, A., Ratto, M., Andres, T., Campolongo, F., Cariboni, J.,
-  Gatelli, D., Saisana, M., & Tarantola, S. (2008).
-  \emph{Global Sensitivity Analysis: The Primer}. John Wiley & Sons.
+  Blanchard, O. J. and Kahn, C. M. (1980). The solution of linear difference
+  models under rational expectations. \emph{Econometrica}, 48(5),
+  1305--1311.
 }

@@ -39,8 +39,8 @@
 #' type-check, but several do not: \code{hank_sam_reiter_linearize()} guards
 #' with \code{!inherits(block, "hank_het_block") && is.null(block$Pi_fn)} --
 #' an AND, so a two-asset block that HAS a \code{Pi_fn} sails past the class
-#' test and dies downstream.  Reiter is exactly the path
-#' \code{briefs/19-twoasset-hank-scope.md} section 7 defers, so a future caller
+#' test and dies downstream.  Reiter is a path the two-asset
+#' block deliberately does not implement, so a future caller
 #' reaching for it must be told it does not exist rather than shown a shape
 #' error.
 #'
@@ -64,8 +64,7 @@
          paste0("Use ", use, "() instead.")
        else
          paste0("There is no two-asset equivalent: this path is not ",
-                "implemented for two assets (see ",
-                "briefs/19-twoasset-hank-scope.md). Use the sequence-space ",
+                "implemented for two assets. Use the sequence-space ",
                 "route -- hank_het2_jacobian() -> hank_model() -> ",
                 "hank_state_space() -- which is."),
        call. = FALSE)
@@ -197,7 +196,7 @@ hank_het2_block <- function(b_grid, a_grid, Pi, e, beta, eis, rb, ra, w,
                         Vb_init = Vb_init, Va_init = Va_init,
                         threads = threads)
   if (!hh$converged)
-    warning("hank_het2_block: household EGM did not converge at steady state")
+    .dynhr_warn("hank_het2_block: household EGM did not converge at steady state")
 
   ## The distribution lives on the SOLVER's state coordinates -- under
   ## collateral that is the gap x = b + theta*a (hh$b is the x-policy), so the
@@ -526,7 +525,7 @@ hank_td2_nonlinear <- function(block, rb_path = NULL, ra_path = NULL,
 
 #' Decompose a two-asset consumption response into cash-flow and revaluation
 #'
-#' The anti-conflation instrument (briefs/19 sections 9.6-9.7): runs the SAME
+#' The anti-conflation instrument: runs the SAME
 #' household block through \code{\link{hank_td2_nonlinear}} on three
 #' illiquid-return paths -- the FULL path, a caller-supplied CASH-FLOW-ONLY
 #' counterfactual (price frozen; e.g. the dividend-yield component for equity,

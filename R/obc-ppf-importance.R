@@ -146,7 +146,7 @@ ppf_reweight_posterior <- function(chains, model, compiled, data,
   log_w_raw[ok] <- loglik_ppf[ok] - loglik_pkf[ok]
 
   if (sum(ok) == 0L) {
-    warning("ppf_reweight_posterior: no draws with finite PKF and PPF logliks.")
+    .dynhr_warn("ppf_reweight_posterior: no draws with finite PKF and PPF logliks.")
     return(list(
       log_weights  = log_w_raw,
       weights      = rep(1 / n, n),

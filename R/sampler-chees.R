@@ -47,10 +47,13 @@
 #' @param chees_lr     Learning rate for ChEES T-adaptation stochastic gradient.
 #'   Default 0.05.  Smaller = more stable but slower convergence of T.
 #' @param adapt_mass   Adapt diagonal mass matrix during warmup.  Default TRUE.
+#'   Stan's convention: the INVERSE mass is set to the warmup posterior
+#'   variance, i.e. the mass is 1 / variance (before 0.9.3.50 the mass itself
+#'   was set to the variance, which squared the conditioning).
 #' @param grad_fn      Optional analytic gradient function(theta) -> numeric vector.
 #' @param grad_method  "forward" (default) or "central" or "Richardson".
 #' @param delta_max    Maximum energy error before flagging divergence (1000).
-#' @param mass_diag    Optional starting mass diagonal (d-vector).
+#' @param mass_diag    Optional starting MASS diagonal (d-vector; 1 / variance).
 #' @param verbose      Print progress messages.
 #' @param progressor   progressr callback or NULL.
 #' @param chain_id     Label for progress messages.
@@ -72,7 +75,7 @@
 #'     \item{step_size}{Final adapted step size}
 #'     \item{T_adapt}{Final adapted trajectory time}
 #'     \item{T_trace}{Full trace of T_max (warmup + sampling)}
-#'     \item{mass_matrix}{Final diagonal mass matrix}
+#'     \item{mass_matrix}{Final diagonal MASS (1 / adapted variance)}
 #'     \item{divergences}{Logical vector of divergent iterations}
 #'     \item{n_divergent}{Count of divergent post-warmup transitions}
 #'     \item{n_draws, n_burn}{Counts}
@@ -148,6 +151,16 @@ dynhr_chees <- function(
   } else {
     .grad <- grad_fn
   }
+  # --- Fused value + gradient (W92, .hmc_fused_target()): one evaluation per
+  # new position, the gradient carried along the trajectory; NULL = separate
+  # calls exactly as before.
+  fz <- .hmc_fused_target(log_post_fn, grad_fn, state_init, par_names,
+                          transform = transform, verbose = verbose,
+                          sampler = "ChEES")
+  vg_fn <- if (is.null(fz)) NULL else fz$vg
+  ## gradient at state_init when known (fused; W94 also the separate-call
+  ## path once the step-size search has taken it)
+  g_init <- if (is.null(fz)) NULL else fz$g0
 
   # --- Mass matrix ---
   use_dense <- !is.null(M_inv) && is.matrix(M_inv)
@@ -167,20 +180,22 @@ dynhr_chees <- function(
 
   # --- Initial step size ---
   if (is.null(step_size)) {
+    if (is.null(fz)) g_init <- .grad(state_init)   # W94: taken once
     eps0 <- .hmc_find_stepsize(state_init, .lp_scalar, .grad,
                                 M_inv_diag, M_diag,
-                                M_inv = M_inv, chol_M = chol_M)
+                                M_inv = M_inv, chol_M = chol_M,
+                                vg_fn = vg_fn, lp0 = fz$lp0, g0 = g_init)
   } else {
     eps0 <- step_size
   }
-  if (verbose) message(sprintf("ChEES: initial step_size = %.4e", eps0))
+  if (verbose) .dynhr_inform(sprintf("ChEES: initial step_size = %.4e", eps0))
 
   # --- Initial trajectory time T_max ---
   # T_max controls the maximum integration time.  Actual trajectory at each
   # step is jittered: L_actual = max(1, round(runif(1, 0, T_max / eps_m) )).
   T_max <- if (is.null(T_init)) 10 * eps0 else T_init
   log_T <- log(T_max)  # adapt in log space for positivity
-  if (verbose) message(sprintf("ChEES: initial T_max = %.4e", T_max))
+  if (verbose) .dynhr_inform(sprintf("ChEES: initial T_max = %.4e", T_max))
 
   # --- Dual averaging for step size (same as NUTS) ---
   mu       <- log(10 * eps0)
@@ -214,7 +229,12 @@ dynhr_chees <- function(
   n_grad_evals  <- 0L
 
   theta   <- state_init
-  lp_curr <- .lp_scalar(theta)
+  ## Fused (W92): the start value from the same function as every later one;
+  ## g_curr the gradient there.
+  ## W94: the separate-call path carries the gradient as well (NULL until
+  ## first needed; the same values, half the calls).
+  lp_curr <- if (is.null(fz)) .lp_scalar(theta) else fz$lp0
+  g_curr  <- g_init
   ## Running mean of the chain, used to CENTER the ChEES criterion (||theta-mu||^2).
   mu_run  <- state_init
   n_mu    <- 0L
@@ -236,12 +256,18 @@ dynhr_chees <- function(
     theta         <- st$theta
     lp_curr       <- st$lp_curr
     trace_lp_curr <- st$trace_lp_curr
+    ## fused: the gradient at the saved position (deterministic in it)
+    g_curr <- if (!is.null(vg_fn)) vg_fn(theta)$grad else NULL
     eps_m         <- st$step_size
     eps_bar       <- st$step_size   # frozen -- no further dual-averaging
     T_max         <- st$T_adapt
     log_T         <- log(T_max)
     M_diag        <- st$M_mass_diag
-    M_inv_diag    <- if (use_dense) NULL else 1 / M_diag
+    ## Restore the stored inverse mass (as NUTS does): since 0.9.3.50 the
+    ## adaptation sets M_inv_diag <- vars directly, and 1 / (1 / vars) is not
+    ## bit-identical, so recomputing it made a resumed chain drift at 1e-15.
+    ## Checkpoints written before this field existed fall back to 1 / M_diag.
+    M_inv_diag    <- if (use_dense) NULL else (st$M_inv_diag %||% (1 / M_diag))
     M_mass_diag   <- M_diag
     n_warmup      <- st$n_warmup    # original warmup count fixes the retained set
     n_accept      <- st$n_accept
@@ -290,21 +316,27 @@ dynhr_chees <- function(
     T_max_trace[m] <- T_max
 
     # ---- Run leapfrog trajectory ----
+    if (is.null(g_curr)) g_curr <- .grad(theta)
     theta_prop <- theta
     r_prop     <- r0
+    g_prop     <- g_curr
+    lp_last    <- NULL
     divergent  <- FALSE
 
     H0 <- -lp_curr + .hmc_kinetic(r0, M_inv_diag, M_inv = M_inv)
 
     for (l in seq_len(L_actual)) {
       step <- .hmc_leapfrog(theta_prop, r_prop, eps_m, .grad,
-                            M_inv_diag, M_inv = M_inv)
+                            M_inv_diag, M_inv = M_inv,
+                            g0 = g_prop, vg_fn = vg_fn)
       if (is.null(step) || any(!is.finite(step$theta)) || any(!is.finite(step$r))) {
         divergent <- TRUE
         break
       }
       theta_prop <- step$theta
       r_prop     <- step$r
+      g_prop     <- step$g   # carried into the next step (W94: both paths)
+      lp_last    <- step$lp  # NULL on the separate-call path
     }
     n_grad_evals <- n_grad_evals + L_actual
 
@@ -314,7 +346,7 @@ dynhr_chees <- function(
     # ---- Metropolis accept/reject ----
     alpha_m <- 0
     if (!divergent) {
-      lp_prop   <- .lp_scalar(theta_prop)
+      lp_prop   <- if (is.null(vg_fn)) .lp_scalar(theta_prop) else lp_last
       H1        <- -lp_prop + .hmc_kinetic(r_prop, M_inv_diag, M_inv = M_inv)
       log_alpha <- -H1 + H0
       energy_ok <- is.finite(log_alpha) && (H0 - (-lp_prop) < delta_max)
@@ -322,6 +354,7 @@ dynhr_chees <- function(
       if (energy_ok && log(runif(1)) < log_alpha) {
         theta   <- theta_prop
         lp_curr <- lp_prop
+        g_curr  <- g_prop
         accepted[m] <- TRUE
         n_accept    <- n_accept + 1L
       } else {
@@ -354,6 +387,7 @@ dynhr_chees <- function(
           step_size     = eps_m,
           T_adapt       = T_max,
           M_mass_diag   = M_diag,
+          M_inv_diag    = M_inv_diag,
           n_done        = m,
           n_warmup      = n_warmup,
           n_accept      = n_accept,
@@ -434,11 +468,15 @@ dynhr_chees <- function(
         idx  <- max(1L, as.integer(floor(n_warmup * 0.2))):m
         vars <- apply(state_chain[idx, , drop = FALSE], 2, var)
         vars[vars < 1e-12 | !is.finite(vars)] <- 1
-        M_diag     <- vars
-        M_inv_diag <- 1 / M_diag
+        ## Stan's rule: the INVERSE mass is the posterior variance. This used
+        ## to set the MASS to the variance (inverted), squaring the problem's
+        ## conditioning instead of removing it (brief 23 W14 finding).
+        M_inv_diag <- vars
+        M_diag     <- 1 / vars
         M_mass_diag <- M_diag
         # Re-find step size after mass update
-        eps_m <- .hmc_find_stepsize(theta, .lp_scalar, .grad, M_inv_diag, M_diag)
+        eps_m <- .hmc_find_stepsize(theta, .lp_scalar, .grad, M_inv_diag, M_diag,
+                                    vg_fn = vg_fn, lp0 = lp_curr, g0 = g_curr)
         mu      <- log(10 * eps_m)
         eps_bar <- 1
         H_bar   <- 0
@@ -447,7 +485,7 @@ dynhr_chees <- function(
         T_max <- max(10 * eps_m, T_max)
         log_T <- log(T_max)
         if (verbose) {
-          message(sprintf("ChEES: mass adapted, step_size = %.4e, T_max = %.4e",
+          .dynhr_inform(sprintf("ChEES: mass adapted, step_size = %.4e, T_max = %.4e",
                           eps_m, T_max))
         }
       }
@@ -457,7 +495,7 @@ dynhr_chees <- function(
     if (m == n_warmup) {
       eps_m <- eps_bar   # use dual-averaged value (more stable than last iterate)
       if (verbose) {
-        message(sprintf("ChEES: warmup complete: step_size = %.4e, T_max = %.4e",
+        .dynhr_inform(sprintf("ChEES: warmup complete: step_size = %.4e, T_max = %.4e",
                         eps_m, T_max))
       }
     }
@@ -477,7 +515,7 @@ dynhr_chees <- function(
       if (!is.null(progressor)) {
         progressor(message = msg, amount = 1)
       } else if (verbose) {
-        message(msg)
+        .dynhr_inform(msg)
       }
     }
   }

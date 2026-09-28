@@ -124,7 +124,7 @@ hank_mixture_dist <- function(blocks, omega) {
       isTRUE(all.equal(b$e, blocks[[1L]]$e)), logical(1)))
   D <- if (same_income) Reduce(`+`, Map(function(b, wk) wk * b$D, blocks, omega)) else NULL
   if (!same_income)
-    message("hank_mixture_dist(): blocks differ in their income process ",
+    .dynhr_inform("hank_mixture_dist(): blocks differ in their income process ",
             "(Pi/e); a pooled cell-space D is not defined across differing ",
             "income spaces, so D = NULL. Use 'D_by_type' (per-type ",
             "distributions) instead.")
@@ -177,7 +177,7 @@ hank_mixture_dist_jacobian <- function(blocks, omega, T_h, inputs = c("r", "w"))
     isTRUE(all.equal(b$Pi, blocks[[1L]]$Pi)) &&
       isTRUE(all.equal(b$e, blocks[[1L]]$e)), logical(1)))
   if (!same_income) {
-    message("hank_mixture_dist_jacobian(): blocks differ in their income ",
+    .dynhr_inform("hank_mixture_dist_jacobian(): blocks differ in their income ",
             "process (Pi/e); a pooled cell-space distribution Jacobian is ",
             "not defined across differing income spaces. Returning ",
             "'by_type' (per-type Jacobians) with same_income = FALSE and no ",
@@ -247,7 +247,7 @@ hank_mixture_td_nonlinear <- function(blocks, omega, r_path = NULL,
   Dpath <- if (same_income)
     Reduce(`+`, Map(function(p, wk) wk * p$Dpath, per, omega)) else NULL
   if (!same_income)
-    message("hank_mixture_td_nonlinear(): blocks differ in their income ",
+    .dynhr_inform("hank_mixture_td_nonlinear(): blocks differ in their income ",
             "process (Pi/e); a pooled cell-space Dpath is not defined ",
             "across differing income spaces, so Dpath = NULL. Use ",
             "'Dpath_by_type' (per-type paths) instead.")
@@ -448,7 +448,7 @@ hank_phase0_reweight_gate <- function(betas = c(0.95, 0.98),
                                        spread_grid = seq(0.005, 0.035, length.out = 7L),
                                        seed = 1L) {
   if (length(betas) != 2L) stop("hank_phase0_reweight_gate(): 'betas' must have length 2.")
-  set.seed(seed)
+  .local_seed(seed)  # caller's RNG stream restored on exit (C1)
 
   inc <- hank_income_rouwenhorst(rho = 0.9, sigma = 0.7, n = n_e)
   ag  <- hank_asset_grid(amax = amax, n = n_a, amin = 0)
@@ -920,7 +920,7 @@ hank_phase1_joint_gate <- function(betas = c(0.95, 0.98),
   if (length(betas) != 2L) stop("hank_phase1_joint_gate(): 'betas' must have length 2.")
   if (!is.numeric(lambda) || length(lambda) != 1L || !is.finite(lambda) || lambda < 0)
     stop("hank_phase1_joint_gate(): 'lambda' must be a single non-negative finite number.")
-  set.seed(seed)
+  .local_seed(seed)  # caller's RNG stream restored on exit (C1)
 
   inc <- hank_income_rouwenhorst(rho = 0.9, sigma = 0.7, n = n_e)
   ag  <- hank_asset_grid(amax = amax, n = n_a, amin = 0)

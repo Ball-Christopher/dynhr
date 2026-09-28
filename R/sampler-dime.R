@@ -197,7 +197,7 @@ run_dime <- function(log_post_fn,
   ## On RESUME this is overwritten from the saved state below; we still probe
   ## the prior once to validate n_par before loading the state.
   if (!ckpt_resume) {
-    if (verbose) message(sprintf("DIME: initialising %d walkers x %d params...",
+    if (verbose) .dynhr_inform(sprintf("DIME: initialising %d walkers x %d params...",
                                  n_chain, n_par))
   }
   ensemble  <- matrix(NA_real_, nrow = n_chain, ncol = n_par)
@@ -208,7 +208,7 @@ run_dime <- function(log_post_fn,
       tries <- 0L
       repeat {
         th  <- prior_sampler()
-        lp  <- tryCatch(log_post_fn(th)$logpost, error = function(e) -Inf)
+        lp  <- tryCatch(log_post_fn(th)$logpost, error = function(e) .dynhr_reraise_bug(e, -Inf))
         tries <- tries + 1L
         if (is.finite(lp) || tries >= max_tries) break
       }
@@ -320,7 +320,7 @@ run_dime <- function(log_post_fn,
     lp_prop <- vapply(seq_len(n_chain), function(i) {
       th <- proposals[i, ]
       names(th) <- par_names
-      r <- tryCatch(log_post_fn(th)$logpost, error = function(e) -Inf)
+      r <- tryCatch(log_post_fn(th)$logpost, error = function(e) .dynhr_reraise_bug(e, -Inf))
       if (is.na(r) || !is.finite(r)) -Inf else r
     }, numeric(1))
     n_eval <- n_eval + n_chain
@@ -400,7 +400,7 @@ run_dime <- function(log_post_fn,
                        mean(lp_vec[is.finite(lp_vec)]),
                        if (is.na(rate)) NA else rate * 100)
       if (!is.null(progressor)) progressor(message = msg, amount = n_chain)
-      else if (verbose) message(msg)
+      else if (verbose) .dynhr_inform(msg)
     }
   }
 
@@ -517,7 +517,7 @@ run_dime <- function(log_post_fn,
   ## ---- Initialise ensemble (serial, prior draws) --------------------------
   if (!ckpt_resume) {
     if (verbose)
-      cat(sprintf("  DIME: initialising %d walkers (serial)...\n", n_chain))
+      .dynhr_cat(sprintf("  DIME: initialising %d walkers (serial)...\n", n_chain))
   }
   ensemble <- matrix(NA_real_, nrow = n_chain, ncol = n_par)
   lp_vec   <- rep(-Inf, n_chain)
@@ -526,7 +526,7 @@ run_dime <- function(log_post_fn,
       tries <- 0L
       repeat {
         th  <- prior_sampler()
-        lp  <- tryCatch(log_post_fn(th)$logpost, error = function(e) -Inf)
+        lp  <- tryCatch(log_post_fn(th)$logpost, error = function(e) .dynhr_reraise_bug(e, -Inf))
         tries <- tries + 1L
         if (is.finite(lp) || tries >= 200L) break
       }
@@ -623,7 +623,7 @@ run_dime <- function(log_post_fn,
       RNGkind("Mersenne-Twister", "Inversion", "Rejection")
       set.seed(iter_seed + i)
       th <- proposals[i, ]; names(th) <- par_names
-      lp <- tryCatch(lpf(th)$logpost, error = function(e) -Inf)
+      lp <- tryCatch(lpf(th)$logpost, error = function(e) .dynhr_reraise_bug(e, -Inf))
       if (is.na(lp) || !is.finite(lp)) -Inf else lp
     }
     ## Sever env via a data-bound child of the dynhr namespace (see the SMC
@@ -695,7 +695,7 @@ run_dime <- function(log_post_fn,
     if (verbose && (t %% 100 == 0 || t == total_iter)) {
       phase <- if (t <= n_burn) "burn" else "post"
       rate  <- if (t > n_burn) n_accept / max(1L, (t - n_burn) * n_chain) else NA
-      cat(sprintf("  DIME [%s] iter %d/%d  lp=%.1f  accept=%.0f%%\n",
+      .dynhr_cat(sprintf("  DIME [%s] iter %d/%d  lp=%.1f  accept=%.0f%%\n",
                   phase, t, total_iter,
                   mean(lp_vec[is.finite(lp_vec)]),
                   if (is.na(rate)) NA else rate * 100))
@@ -809,7 +809,7 @@ run_dime_mirai <- function(
   ## Cap daemons at n_chain (can't usefully have more daemons than walkers)
   n_cores <- .mirai_n_cores(n_cores, n_chain)
   if (verbose)
-    cat(sprintf("  Parallel DIME (mirai): %d walkers on %d daemons\n",
+    .dynhr_cat(sprintf("  Parallel DIME (mirai): %d walkers on %d daemons\n",
                 n_chain, n_cores))
 
   t_init <- proc.time()
@@ -826,7 +826,7 @@ run_dime_mirai <- function(
   }
   on.exit({ mirai::daemons(NULL); if (!is.null(sh)) rm(sh) }, add = TRUE)
   if (verbose)
-    cat(sprintf("  Daemon init: %.1f sec\n",
+    .dynhr_cat(sprintf("  Daemon init: %.1f sec\n",
                 (proc.time() - t_init)[["elapsed"]]))
 
   ## Need a concrete log_post_fn for the host-side initialisation.

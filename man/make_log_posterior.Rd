@@ -39,7 +39,12 @@ make_log_posterior(
 
 \item{me_variance}{Measurement error variance (default 0). Use 0 for
 exactly-identified models (n_obs == n_shocks); HH = DD*Sigma_e*DD'
-already regularises F_t. Set > 0 for stochastically-singular models.}
+already regularises F_t. Set > 0 for stochastically-singular models.
+A scalar applies to every observable; with \code{likelihood = "gaussian"}
+(no Markov switching) or \code{"pskf"} it may also be one variance per
+observable (named, or in \code{obs_vars} order), giving
+\eqn{H = diag(me)}. The other likelihoods refuse a non-constant vector
+with an error of class \code{dynhr_error_me_variance_vector}.}
 
 \item{likelihood}{Likelihood type: \code{"gaussian"} (Kalman filter,
 default), \code{"cumulant"} (cumulant-matching, Mutschler 2015),
@@ -111,7 +116,7 @@ forwarded to each likelihood's factory, which resolves it once at build
 time, so the exponent is a fixed property of the returned closure and
 cannot drift mid-run if some other code changes the option.}
 
-\item{student_df}{Positive finite scalar: degrees of freedom for
+\item{student_df}{Finite scalar > 2: degrees of freedom for
 \code{likelihood = "student_t"}. Ignored by the other likelihoods.}
 
 \item{pruned_order}{For \code{likelihood = "pruned"} or \code{"tpf"}: the
@@ -124,12 +129,27 @@ augmented state). Ignored for other likelihoods.}
 constructor when \code{likelihood = "cumulant"} (e.g. \code{order},
 \code{cumulant_orders}, \code{cumulant_weight}), or to
 \code{make_log_posterior_tpf} when \code{likelihood = "tpf"} (e.g.
-\code{n_particles}, \code{ess_target}, \code{n_mh}, \code{seed}).}
+\code{n_particles}, \code{ess_target}, \code{n_mh}, \code{seed}); the
+Whittle likelihood takes \code{debias}, the PSKF \code{cut_tol},
+\code{max_q} and \code{pskf_cdf}, and the particle likelihoods their
+filter settings. A name that no likelihood takes is an error of class
+\code{dynhr_error_unknown_argument}. A name that another likelihood takes
+(e.g. \code{order} with \code{likelihood = "gaussian"}), and
+\code{freq_band}, \code{pruned_order}, \code{student_df} or
+\code{lik_init} set away from their defaults for a likelihood that does
+not use them, is ignored with a warning of class
+\code{dynhr_warning_inapplicable_argument}.}
 }
 \value{
 A closure \code{function(theta)} returning
   \code{list(logpost, loglik, logprior)}, where \code{theta} is the named
   vector of ESTIMATED parameters described by \code{prior_spec}.
+  \code{theta} is read by name, in any order. An UNNAMED \code{theta} of
+  length \code{nrow(prior_spec)} is taken in \code{prior_spec$name} order
+  (how \code{numDeriv::grad()} and \code{optim()} call a function); an
+  unnamed \code{theta} of another length, or a named one whose names are
+  not exactly \code{prior_spec$name}, is an error of class
+  \code{dynhr_error_theta_names}.
 
   The closure captures a compiled model, so it holds external pointers and
   **does not survive \code{saveRDS}/\code{readRDS} or transport to a worker
@@ -141,6 +161,22 @@ Call this ONCE before MCMC. Returns a closure that evaluates the
 log-posterior for any parameter vector theta, using pre-cached
 system structure to avoid repeated compilation.
 }
+\section{.mod blocks}{
+
+This constructor applies only its arguments. A model whose \code{.mod}
+carries a \code{filter_tunes} or \code{heteroskedastic_shocks} block
+(applied here only through \code{me_extra} / \code{shock_scale}), a
+\code{stochastic_volatility} block (applied only by
+\code{likelihood = "sv_rbpf"}) or \code{mcp} occasionally-binding
+constraints (the OBC filters; \code{likelihood = "ppf"} / \code{"copf"}
+here) is evaluated WITHOUT the blocks the call does not apply, and a
+warning of class \code{dynhr_warning_mod_blocks_ignored} names them. The
+spec runner (\code{\link{run_estimation}}, \code{\link{run_mode_finding}},
+\code{\link{run_full_estimation}}) applies every block. The same holds for
+\code{\link{make_posterior}} and \code{\link{dm_posterior}}, which call
+this constructor.
+}
+
 \seealso{
 \code{\link{estimation_context}}, \code{\link{extract_prior_spec}},
   \code{\link{log_prior}}

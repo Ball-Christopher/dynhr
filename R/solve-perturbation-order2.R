@@ -154,9 +154,9 @@
       dy_m[c2] <- dy_ss[c2] - step
 
       Jp <- tryCatch(dyn$jacobian_fn(dy_p, params, ss),
-                     error = function(e) NULL)
+                     error = function(e) .dynhr_reraise_bug(e, NULL))
       Jm <- tryCatch(dyn$jacobian_fn(dy_m, params, ss),
-                     error = function(e) NULL)
+                     error = function(e) .dynhr_reraise_bug(e, NULL))
 
       if (!is.null(Jp) && !is.null(Jm)) {
         H[, , c2] <- (Jp - Jm) / (2 * step)
@@ -211,7 +211,7 @@
     values <- tryCatch(
       dyn$hessian2_fn(dy_ss, params, ss),
       error = function(e) {
-        warning(sprintf("Symbolic Hessian evaluation failed: %s. Falling back to numerical.",
+        .dynhr_warn(sprintf("Symbolic Hessian evaluation failed: %s. Falling back to numerical.",
                         conditionMessage(e)))
         NULL
       }
@@ -425,13 +425,16 @@ solve_perturbation_order2 <- function(model, compiled, ss, params,
   hx  <- ghx[state_idx, , drop = FALSE]  # n_s x n_s  (state transition)
   hu  <- ghu[state_idx, , drop = FALSE]  # n_s x n_u  (shock-to-state)
 
-  if (n_s == 0L) {
-    if (verbose) message("No state variables; second-order terms are all zero.")
-    return(.trivial_dr2(dr1, model = model, params = params, Sigma_e = Sigma_e))
-  }
+  ## A model with NO state variables is NOT trivial at second order: its
+  ## decision rule is the static map y = g(u, sigma), whose Taylor
+  ## coefficients ghuu = g''(0) (and ghss, when there are leads) are generally
+  ## non-zero -- y = exp(e) has ghuu = 1. The old `.trivial_dr2()` short-
+  ## circuit returned all zeros (and compute_moments_order2 then crashed on
+  ## the zero-column blocks). The general path below handles n_s = 0: the
+  ## state blocks (ghxx, ghxu) are empty and ghuu / ghss are solved as usual.
 
   if (isTRUE(model$model_options$linear)) {
-    if (verbose) message("Linear model: all second-order terms are exactly zero; skipping Kronecker solve.")
+    if (verbose) .dynhr_inform("Linear model: all second-order terms are exactly zero; skipping Kronecker solve.")
     return(.linear_dr2(dr1, n_s, n_u, endo_names, state_idx, exo_names, model,
                        params, Sigma_e = Sigma_e))
   }
@@ -452,11 +455,11 @@ solve_perturbation_order2 <- function(model, compiled, ss, params,
   A_L <- f0 + fp %*% ghx %*% t(S)   # n x n
 
   if (verbose) {
-    cat("Second-order perturbation:\n")
-    cat("  n_endo =", n, "  n_state =", n_s, "  n_exo =", n_u, "\n")
-    cat("  Kronecker system size:", n * n_s^2, "x", n * n_s^2, "\n")
+    .dynhr_cat("Second-order perturbation:\n")
+    .dynhr_cat("  n_endo =", n, "  n_state =", n_s, "  n_exo =", n_u, "\n")
+    .dynhr_cat("  Kronecker system size:", n * n_s^2, "x", n * n_s^2, "\n")
     n_hess_sym <- compiled$dynamic$n_hess %||% 0L
-    cat("  Hessian: symbolic triplets =", n_hess_sym, "\n")
+    .dynhr_cat("  Hessian: symbolic triplets =", n_hess_sym, "\n")
   }
 
   # ----------------------------------------------------------------
@@ -467,7 +470,7 @@ solve_perturbation_order2 <- function(model, compiled, ss, params,
   # Warn if model has higher-order lags/leads (aux expansion should prevent)
   all_ll <- dyn$dyn_col_map$lead_lag
   if (any(abs(all_ll) > 1L)) {
-    warning(paste(
+    .dynhr_warn(paste(
       "Model has leads/lags beyond +/-1 in dynamic Jacobian columns.",
       "Transfer matrices for |lead_lag| > 1 are set to zero.",
       "Ensure aux-expansion was applied to the model."))
@@ -478,11 +481,11 @@ solve_perturbation_order2 <- function(model, compiled, ss, params,
   H <- .compute_model_hessian_symbolic(compiled, dy_ss, params, ss)
   hessian_method <- "symbolic"
   if (is.null(H)) {
-    if (verbose) cat("  Symbolic Hessian unavailable; using numerical (h=", h, ")...\n")
+    if (verbose) .dynhr_cat("  Symbolic Hessian unavailable; using numerical (h=", h, ")...\n")
     H <- .compute_model_hessian(dyn, dy_ss, params, ss, h)
     hessian_method <- "numerical"
   }
-  if (verbose) cat("  Hessian method:", hessian_method, "\n")
+  if (verbose) .dynhr_cat("  Hessian method:", hessian_method, "\n")
 
   # ----------------------------------------------------------------
   # Reorder Hessian rows from compiled-equation order to
@@ -510,11 +513,11 @@ solve_perturbation_order2 <- function(model, compiled, ss, params,
       H_perm <- array(0, dim = dim(H))
       for (k in seq_len(n)) H_perm[k, , ] <- H[perm[k], , ]
       H <- H_perm
-      if (verbose) cat("  Hessian rows reordered: compiled -> declaration order.\n")
+      if (verbose) .dynhr_cat("  Hessian rows reordered: compiled -> declaration order.\n")
     }
   }
 
-  if (verbose) cat("  Building transfer matrices...\n")
+  if (verbose) .dynhr_cat("  Building transfer matrices...\n")
 
   # ----------------------------------------------------------------
   # Transfer matrices
@@ -527,7 +530,7 @@ solve_perturbation_order2 <- function(model, compiled, ss, params,
   # ----------------------------------------------------------------
   # Forcing terms Phi_xx, Phi_xu, Phi_uu
   # ----------------------------------------------------------------
-  if (verbose) cat("  Computing forcing terms (Phi matrices)...\n")
+  if (verbose) .dynhr_cat("  Computing forcing terms (Phi matrices)...\n")
   phi <- .compute_phi_matrices(H, T_x, T_u, n)
 
   Phi_xx <- phi$Phi_xx  # n x n_s^2
@@ -538,7 +541,7 @@ solve_perturbation_order2 <- function(model, compiled, ss, params,
   # Solve for ghxx: Kronecker system
   #   (I_{n_s^2} ⊗ A_L + (hx'⊗hx') ⊗ fp) * vec(ghxx) = -vec(Phi_xx)
   # ----------------------------------------------------------------
-  if (verbose) cat("  Solving Kronecker system for ghxx (compact Sylvester)...\n")
+  if (verbose) .dynhr_cat("  Solving Kronecker system for ghxx (compact Sylvester)...\n")
 
   ns2 <- n_s * n_s
 
@@ -568,25 +571,29 @@ solve_perturbation_order2 <- function(model, compiled, ss, params,
   # (hu %x% hx) cols: (hu-col=exo SLOW, hx-col=state FAST) → same. ✓
   # The naive (hx %x% hx) would give (state SLOW, exo FAST) — wrong for n_u > 1.
   # ----------------------------------------------------------------
-  if (verbose) cat("  Solving for ghxu...\n")
-  rhs_xu <- -(Phi_xu + fp %*% ghxx %*% (hu %x% hx))  # n x n_s*n_u
-  ghxu   <- tryCatch(
-    solve(A_L, rhs_xu),
-    error = function(e) {
-      warning("solve(A_L, rhs_xu) failed; using least-squares fallback.")
-      qr.solve(A_L, rhs_xu)
-    })
+  if (verbose) .dynhr_cat("  Solving for ghxu...\n")
+  if (n_s == 0L) {
+    ghxu <- matrix(0, n, 0L)          # no states: the x-u block is empty
+  } else {
+    rhs_xu <- -(Phi_xu + fp %*% ghxx %*% (hu %x% hx))  # n x n_s*n_u
+    ghxu   <- tryCatch(
+      solve(A_L, rhs_xu),
+      error = function(e) {
+        .dynhr_warn("solve(A_L, rhs_xu) failed; using least-squares fallback.")
+        qr.solve(A_L, rhs_xu)
+      })
+  }
 
   # ----------------------------------------------------------------
   # Solve for ghuu (direct solve given ghxx)
   #   A_L * ghuu = -(Phi_uu + fp * ghxx * (hu ⊗ hu))
   # ----------------------------------------------------------------
-  if (verbose) cat("  Solving for ghuu...\n")
+  if (verbose) .dynhr_cat("  Solving for ghuu...\n")
   rhs_uu <- -(Phi_uu + fp %*% ghxx %*% (hu %x% hu))  # n x n_u^2
   ghuu   <- tryCatch(
     solve(A_L, rhs_uu),
     error = function(e) {
-      warning("solve(A_L, rhs_uu) failed; using least-squares fallback.")
+      .dynhr_warn("solve(A_L, rhs_uu) failed; using least-squares fallback.")
       qr.solve(A_L, rhs_uu)
     })
 
@@ -606,14 +613,14 @@ solve_perturbation_order2 <- function(model, compiled, ss, params,
   # Mutschler (2022) eqs. 95-99; matches Dynare oo_.dr.ghs2. See
   # .solve_ghss() in R/solve-perturbation-order3-sigma.R.
   # ----------------------------------------------------------------
-  if (verbose) cat("  Solving for ghss (uncertainty correction)...\n")
+  if (verbose) .dynhr_cat("  Solving for ghss (uncertainty correction)...\n")
 
   has_lead <- sys$is_fwd | sys$is_mixed
   T_up <- .build_T_up(dyn, ghu, endo_names, exo_names, has_lead)
   ghss <- tryCatch(
     .solve_ghss(A_L, fp, ghuu, T_up, H, Sigma_e),
     error = function(e) {
-      warning(sprintf(".solve_ghss failed (%s); ghss set to zero.",
+      .dynhr_warn(sprintf(".solve_ghss failed (%s); ghss set to zero.",
                       conditionMessage(e)))
       numeric(n)
     })
@@ -652,7 +659,7 @@ solve_perturbation_order2 <- function(model, compiled, ss, params,
   ## would leave TWO entries named "Sigma_e" in the list, and `dr2$Sigma_e`
   ## returns the FIRST -- i.e. dr1's -- silently discarding the value computed
   ## here (and any explicit `Sigma_e` argument to this function). Assigning by
-  ## name replaces in place instead. Same idiom in .linear_dr2/.trivial_dr2.
+  ## name replaces in place instead. Same idiom in .linear_dr2.
   dr2 <- unclass(dr1)          # all first-order fields
   dr2[c("ghxx", "ghxu", "ghuu", "ghss", "Sigma_e", "order",
         "hessian_method", "hessian_step", "second_order_ok")] <-
@@ -660,11 +667,11 @@ solve_perturbation_order2 <- function(model, compiled, ss, params,
   class(dr2) <- c("DecisionRules2", "DecisionRules")
 
   if (verbose) {
-    cat("Second-order solution complete.\n")
-    cat("  ghxx:", nrow(ghxx), "x", ncol(ghxx), "\n")
-    cat("  ghxu:", nrow(ghxu), "x", ncol(ghxu), "\n")
-    cat("  ghuu:", nrow(ghuu), "x", ncol(ghuu), "\n")
-    cat("  max|ghss|:", round(max(abs(ghss)), 6), "\n")
+    .dynhr_cat("Second-order solution complete.\n")
+    .dynhr_cat("  ghxx:", nrow(ghxx), "x", ncol(ghxx), "\n")
+    .dynhr_cat("  ghxu:", nrow(ghxu), "x", ncol(ghxu), "\n")
+    .dynhr_cat("  ghuu:", nrow(ghuu), "x", ncol(ghuu), "\n")
+    .dynhr_cat("  max|ghss|:", round(max(abs(ghss)), 6), "\n")
   }
 
   dr2
@@ -704,37 +711,6 @@ solve_perturbation_order2 <- function(model, compiled, ss, params,
         "hessian_method", "hessian_step", "second_order_ok")] <-
     list(ghxx, ghxu, ghuu, setNames(numeric(n), endo_names), Sigma_e, 2L,
          "linear_shortcircuit", NA_real_, TRUE)
-  class(dr2) <- c("DecisionRules2", "DecisionRules")
-  dr2
-}
-
-
-#' Trivial second-order solution (no state variables)
-#' @noRd
-.trivial_dr2 <- function(dr1, model = NULL, params = NULL, Sigma_e = NULL) {
-  n   <- length(dr1$endo_names)
-  n_u <- length(dr1$exo_names)
-  ## Same convention as .linear_dr2 / the main path: explicit `Sigma_e` wins,
-  ## otherwise derive it from the shocks block. The literal `diag(n_u)` that
-  ## used to sit here discarded BOTH the declared shock stderrs and every
-  ## cross-shock correlation (the "ghu Q = I default" failure mode in
-  ## CLAUDE.md), so a stateless model reported unit-variance shock moments.
-  if (is.null(Sigma_e)) {
-    Sigma_e <- if (!is.null(model))
-      .get_shock_cov(model, dr1$exo_names, params)
-    else
-      dr1$Sigma_e
-    if (is.null(Sigma_e)) {
-      Sigma_e <- diag(1, n_u, n_u)
-      if (n_u > 0L)
-        rownames(Sigma_e) <- colnames(Sigma_e) <- dr1$exo_names
-    }
-  }
-  dr2 <- unclass(dr1)
-  dr2[c("ghxx", "ghxu", "ghuu", "ghss", "Sigma_e", "order",
-        "hessian_step", "second_order_ok")] <-
-    list(matrix(0, n, 0), matrix(0, n, 0), matrix(0, n, n_u^2), numeric(n),
-         Sigma_e, 2L, NA_real_, TRUE)
   class(dr2) <- c("DecisionRules2", "DecisionRules")
   dr2
 }
@@ -839,8 +815,15 @@ compute_irfs_order2 <- function(dr2, model, n_periods = 40L,
   n_exo     <- length(exo)
   n_s       <- length(state_idx)
 
+  ## A10 (0.9.4): use the SAME shock-scale rule as compute_irfs() --
+  ## .irf_shock_scale() (params wins over dr2$Sigma_e) plus the lower Cholesky
+  ## factor of the FULL Sigma_e.  Previously this path rebuilt a diagonal
+  ## covariance from `params` via .get_shock_stderr(), so order-1 and order-2
+  ## IRFs of the same model disagreed whenever dr$Sigma_e and params differed,
+  ## and correlated shocks were silently ignored at order 2.
+  Sigma_e_irf <- .irf_shock_scale(dr2, model, params)
+  L_chol      <- .sigma_e_chol_lower(Sigma_e_irf)
   if (is.null(params)) params <- model$param_values
-  shock_stderr <- .get_shock_stderr(model, exo, params)
 
   hx  <- ghx[state_idx, , drop = FALSE]
   hu  <- ghu[state_idx, , drop = FALSE]
@@ -864,8 +847,16 @@ compute_irfs_order2 <- function(dr2, model, n_periods = 40L,
     colnames(irf_mat) <- endo
     rownames(irf_mat) <- paste0("t", seq_len(n_periods))
 
-    eps    <- numeric(n_exo)
-    eps[k] <- shock_stderr[shock_name] * shock_size
+    ## Impulse = k-th column of the lower Cholesky factor, scaled by shock_size
+    ## (identical to compute_irfs()).  Reduces to stderr_k * shock_size when
+    ## Sigma_e is diagonal.
+    eps <- as.numeric(L_chol[, k]) * shock_size
+    ## Mirror compute_irfs()'s M26 rule: a shock declared with zero variance
+    ## still gets a UNIT impulse, so IRF-only exercises keep working.
+    if (all(eps == 0) && shock_size != 0) {
+      eps <- numeric(n_exo)
+      eps[k] <- shock_size
+    }
 
     # Pruned state-space: compute DEVIATIONS from the stochastic steady state.
     # ghss/hss are constant mean corrections already embedded in the baseline,
@@ -931,7 +922,13 @@ compute_irfs_order2 <- function(dr2, model, n_periods = 40L,
 #' @param shocks      Matrix (n_periods + burn_in) x n_exo. If NULL, draws random.
 #' @param model       dynhr_mod (for shock variances)
 #' @param burn_in     Burn-in periods to discard
-#' @param pruning     Use pruned state-space (default TRUE)
+#' @param pruning     Use the AFVRR (2018) pruned state space (default
+#'   \code{TRUE}).  \code{FALSE} runs the genuine \strong{unpruned} order-2
+#'   recursion on a single full state -- the quadratic terms are evaluated at
+#'   the full state rather than at its first-order component.  That recursion
+#'   has no stationary distribution in general and can explode on long
+#'   simulations; it is provided for comparison, not for estimation.  (Before
+#'   0.9.4 this argument silently returned an order-ONE state path.)
 #' @param init_state  Optional named numeric vector of initial state deviations
 #'   loaded into the pruned first-order component; pair with \code{burn_in = 0}.
 #'   \code{NULL} starts at the steady state.
@@ -973,7 +970,7 @@ simulate_model_order2 <- function(dr2, n_periods = 200L, shocks = NULL,
   ## the default burn-in + n_periods is adequate.
   if (isTRUE(getOption("dynhr.warn_near_unit_root", TRUE)) &&
       max_eig > 0.99) {
-    warning(sprintf(
+    .dynhr_warn(sprintf(
       paste0("simulate_model_order2(): near-unit-root state ",
              "(max |eigenvalue(hx)| = %.4f > 0.95). ",
              "Pruned simulation may require many more than %d periods to reach ",
@@ -987,8 +984,28 @@ simulate_model_order2 <- function(dr2, n_periods = 200L, shocks = NULL,
 
   shock_stderr <- .get_shock_stderr(model, exo, params)
   if (is.null(shocks)) {
-    shocks <- matrix(rnorm(total_periods * n_exo), ncol = n_exo)
-    for (k in seq_along(exo)) shocks[, k] <- shocks[, k] * shock_stderr[exo[k]]
+    ## A9 (0.9.4): honour cross-shock correlations, exactly as simulate_model()
+    ## now does.  Diagonal Sigma_e keeps the old RNG stream byte-for-byte.
+    Sigma_e_sim <- .get_shock_cov(model, exo, params)
+    off_sim <- Sigma_e_sim
+    diag(off_sim) <- 0
+    ## L2 follow-up (0.9.4): a `skew` alpha used to be ignored here entirely --
+    ## the order-2 simulator drew GAUSSIAN shocks even for a model whose
+    ## declared shocks are skewed, and whose PSKF likelihood evaluates the
+    ## joint closed skew-normal.  Route those through the shared sampler
+    ## (R/stochsimul-monolith.R), which also carries the full Sigma_e.
+    ## All-Gaussian models keep their exact RNG stream below.
+    alpha_sim <- .get_shock_skewness(model, exo, params)
+    if (any(alpha_sim != 0)) {
+      shocks <- .draw_csn_shocks(total_periods, Sigma_e_sim, alpha_sim,
+                                 sqrt(diag(Sigma_e_sim)))
+    } else if (any(abs(off_sim) > 0)) {
+      L_sim  <- .sigma_e_chol_lower(Sigma_e_sim)
+      shocks <- matrix(rnorm(total_periods * n_exo), ncol = n_exo) %*% t(L_sim)
+    } else {
+      shocks <- matrix(rnorm(total_periods * n_exo), ncol = n_exo)
+      for (k in seq_along(exo)) shocks[, k] <- shocks[, k] * shock_stderr[exo[k]]
+    }
   }
 
   sim <- matrix(0, total_periods, n_endo)
@@ -1006,17 +1023,17 @@ simulate_model_order2 <- function(dr2, n_periods = 200L, shocks = NULL,
     if (any(ok)) x1[ok] <- as.numeric(init_state[idx[ok]])
   }
 
-  for (t in seq_len(total_periods)) {
-    e  <- shocks[t, ]
-    x1_prev <- x1
-    x2_prev <- x2
+  if (pruning) {
+    for (t in seq_len(total_periods)) {
+      e  <- shocks[t, ]
+      x1_prev <- x1
+      x2_prev <- x2
 
-    # Update states.  ghxu / hxu cols are (state FAST, exo SLOW) from
-    # outer(state_vars, exo_names), so the matching Kronecker vector is
-    # (e %x% x), giving rows (exo SLOW, state FAST).  (x %x% e) would mix
-    # the indices and silently produce wrong values for n_s>1, n_u>1.
-    x1 <- as.numeric(hx %*% x1_prev + hu %*% e)
-    if (pruning) {
+      # Update states.  ghxu / hxu cols are (state FAST, exo SLOW) from
+      # outer(state_vars, exo_names), so the matching Kronecker vector is
+      # (e %x% x), giving rows (exo SLOW, state FAST).  (x %x% e) would mix
+      # the indices and silently produce wrong values for n_s>1, n_u>1.
+      x1 <- as.numeric(hx %*% x1_prev + hu %*% e)
       x2 <- as.numeric(
         hx  %*% x2_prev +
         0.5 * hxx %*% (x1_prev %x% x1_prev) +
@@ -1024,21 +1041,54 @@ simulate_model_order2 <- function(dr2, n_periods = 200L, shocks = NULL,
         0.5 * huu %*% (e %x% e) +
         0.5 * hss
       )
-    } else {
-      x2 <- numeric(n_s)
+
+      # Output: first-order + second-order correction
+      y1 <- as.numeric(ghx %*% x1_prev + ghu %*% e)
+      y2 <- as.numeric(
+        ghx  %*% x2_prev +
+        0.5 * ghxx %*% (x1_prev %x% x1_prev) +
+        ghxu %*% (e %x% x1_prev) +
+        0.5 * ghuu %*% (e %x% e) +
+        0.5 * ghss
+      )
+
+      sim[t, ] <- y1 + y2
     }
+  } else {
+    ## A9 (0.9.4): GENUINE unpruned order-2 recursion.  Before 0.9.4 this
+    ## branch simply forced x2 = 0, which is the ORDER-ONE law of motion with a
+    ## second-order observation slapped on top -- not an unpruned simulation.
+    ## The unpruned recursion carries ONE state x_t (no x1/x2 split) and feeds
+    ## the FULL state into the quadratic terms:
+    ##   x_t = hx x_{t-1} + hu e_t
+    ##         + 0.5 hxx (x_{t-1} (x) x_{t-1}) + hxu (e_t (x) x_{t-1})
+    ##         + 0.5 huu (e_t (x) e_t) + 0.5 hss
+    ## (the package folds the factor 2 of the cross term into ghxu/hxu, so hxu
+    ##  carries coefficient 1 -- same convention as the pruned branch above).
+    ## This recursion can and does explode for large draws; that instability is
+    ## exactly why AFVRR pruning exists and why pruning = TRUE is the default.
+    x <- x1                                  # single full state (init_state)
+    for (t in seq_len(total_periods)) {
+      e     <- shocks[t, ]
+      x_prev <- x
+      xx     <- x_prev %x% x_prev
 
-    # Output: first-order + second-order correction
-    y1 <- as.numeric(ghx %*% x1_prev + ghu %*% e)
-    y2 <- as.numeric(
-      ghx  %*% x2_prev +
-      0.5 * ghxx %*% (x1_prev %x% x1_prev) +
-      ghxu %*% (e %x% x1_prev) +
-      0.5 * ghuu %*% (e %x% e) +
-      0.5 * ghss
-    )
+      x <- as.numeric(
+        hx  %*% x_prev + hu %*% e +
+        0.5 * hxx %*% xx +
+        hxu %*% (e %x% x_prev) +
+        0.5 * huu %*% (e %x% e) +
+        0.5 * hss
+      )
 
-    sim[t, ] <- y1 + y2
+      sim[t, ] <- as.numeric(
+        ghx  %*% x_prev + ghu %*% e +
+        0.5 * ghxx %*% xx +
+        ghxu %*% (e %x% x_prev) +
+        0.5 * ghuu %*% (e %x% e) +
+        0.5 * ghss
+      )
+    }
   }
 
   sim <- sim[(burn_in + 1L):total_periods, , drop = FALSE]

@@ -25,8 +25,8 @@
 depends on (order matches the vector passed to the returned function).}
 
 \item{base_params}{Full named parameter vector (all model parameters,
-including any not being sampled) used as the template; `wall_param` and
-`other_names` entries are overridden per call.}
+including any not being sampled) used as the template; \code{wall_param} and
+\code{other_names} entries are overridden per call.}
 
 \item{bracket}{length-2 numeric, the theta_j search bracket for uniroot().}
 

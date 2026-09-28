@@ -30,4 +30,11 @@ Computes:
 \details{
 Requires order-4 sigma terms (\code{ghxxss}, \code{ghss2}) from
 \code{solve_sigma_order4()}.
+
+Same convention as \code{\link{solve_sigma_order4}}: plain derivatives
+(\code{ghxxxss} = \eqn{\partial^5 g/\partial x^3\partial\sigma^2}, Taylor
+weight \eqn{1/12}; \code{ghxss2} = \eqn{\partial^5 g/\partial x\,
+\partial\sigma^4}, Taylor weight \eqn{1/24}), \eqn{\Sigma_e} absorbed, only
+the future shock scaled by \eqn{\sigma}.  Stateless models (no
+predetermined variable) are supported; both blocks then have 0 columns.
 }

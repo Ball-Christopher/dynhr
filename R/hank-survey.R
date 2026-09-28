@@ -219,7 +219,7 @@ hank_calibrate_weights <- function(d, Z, X,
     w <- d * exp(eta)
     if (!converged) {
       resid <- as.numeric(crossprod(Z, w)) - X
-      warning(sprintf(paste0(
+      .dynhr_warn(sprintf(paste0(
         "hank_calibrate_weights(): entropy/raking Newton iteration did not ",
         "converge within maxit = %d steps (max|residual| = %.3e, tol = ",
         "%.3e). Returning the best-effort weights from the final ",

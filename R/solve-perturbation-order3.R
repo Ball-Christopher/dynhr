@@ -67,7 +67,7 @@
   if (is.null(values))
     values <- tryCatch(dyn$hessian3_fn(dy_ss, params, ss),
                       error = function(e) {
-                        warning(sprintf(
+                        .dynhr_warn(sprintf(
                           "Symbolic Hessian3 evaluation failed: %s.",
                           conditionMessage(e)))
                         NULL
@@ -296,7 +296,7 @@
 
 #' Solve the deterministic third-order perturbation of a DSGE model
 #'
-#' Given the first-/second-order decision rules in `dr2`, computes the
+#' Given the first-/second-order decision rules in \code{dr2}, computes the
 #' third-order terms ghxxx, ghxxu, ghxuu, ghuuu.  Does NOT compute the
 #' sigma-correction terms (ghxss, ghuss, ghsss) -- those terms (which
 #' capture time-varying risk premia and the third-cumulant correction)
@@ -310,28 +310,28 @@
 #' @param dr2      Second-order DecisionRules2 object
 #' @param verbose  Print progress
 #' @param solver_method Deprecated and ignored (retained for back-compat). The
-#'   order-3 Kronecker system now uses the shared `.solve_kron_compact` solver
+#'   order-3 Kronecker system now uses the shared \code{.solve_kron_compact} solver
 #'   (the same one orders 4/5 use), which self-selects an eigenbasis fast path
 #'   or a robust real-Schur dense fallback; there is no longer a user choice.
-#' @param backend Computation backend: `"auto"` selects `"fd"` for
-#'   tractable model sizes (when eligible) and `"symbolic"` otherwise;
-#'   `"symbolic"` uses the Faà di Bruno chain-rule expansion; `"fd"` uses
+#' @param backend Computation backend: \code{"auto"} selects \code{"fd"} for
+#'   tractable model sizes (when eligible) and \code{"symbolic"} otherwise;
+#'   \code{"symbolic"} uses the Faà di Bruno chain-rule expansion; \code{"fd"} uses
 #'   a finite-difference oracle (requires single-period leads/lags and no
 #'   AUX variables).
-#' @param sparse Logical or `NULL` (default). Controls the ghxxx Kronecker
-#'   solve. `FALSE` uses the default dense-eligible `.solve_kron_compact`
+#' @param sparse Logical or \code{NULL} (default). Controls the ghxxx Kronecker
+#'   solve. \code{FALSE} uses the default dense-eligible \code{.solve_kron_compact}
 #'   solver (eigenbasis fast path + dense real-Schur fallback) — unchanged
-#'   numerical output. `TRUE` uses the memory-light complex-Schur Kronecker
-#'   Bartels–Stewart solver `.solve_kron_compact_sparse`, which never
+#'   numerical output. \code{TRUE} uses the memory-light complex-Schur Kronecker
+#'   Bartels–Stewart solver \code{.solve_kron_compact_sparse}, which never
 #'   materialises the ns^3 × ns^3 Kronecker matrix and so breaks the dense
 #'   order-3 wall on high-dimensional-but-sparse state blocks (e.g. the
-#'   emitted finite HANK, n_s approx. 32). `NULL` (auto) turns the sparse route on
-#'   automatically once `n_state^3` exceeds `sparse_threshold`. The sparse
+#'   emitted finite HANK, n_s approx. 32). \code{NULL} (auto) turns the sparse route on
+#'   automatically once \code{n_state^3} exceeds \code{sparse_threshold}. The sparse
 #'   route is bit-parity to the dense path on well-conditioned models and
 #'   residual-verified (with dense fallback) otherwise.
-#' @param sparse_threshold Integer. When `sparse = NULL`, the sparse ghxxx
-#'   solve is used iff `n_state^3 >= sparse_threshold` (default 8000, i.e.
-#'   n_state >= 20). Ignored when `sparse` is `TRUE`/`FALSE`.
+#' @param sparse_threshold Integer. When \code{sparse = NULL}, the sparse ghxxx
+#'   solve is used iff \code{n_state^3 >= sparse_threshold} (default 8000, i.e.
+#'   n_state >= 20). Ignored when \code{sparse} is \code{TRUE}/\code{FALSE}.
 #' @return A DecisionRules3 object extending DecisionRules2 with fields
 #'   ghxxx, ghxxu, ghxuu, ghuuu (and all lower-order fields preserved)
 #'
@@ -380,7 +380,7 @@ solve_perturbation_order3 <- function(model, compiled, ss, params, dr2,
   use_fd <- (backend == "fd")
   if (use_fd) {
     if (!fd_eligible) stop("FD backend requires single-period leads/lags and no AUX variables.")
-    if (verbose) cat("Using FD backend for order-3 (fd_cost=", fd_cost, ").\n")
+    if (verbose) .dynhr_cat("Using FD backend for order-3 (fd_cost=", fd_cost, ").\n")
     return(.solve_perturbation_order3_fd(model, compiled, ss, params, dr2,
                                           verbose = verbose))
   }
@@ -405,13 +405,12 @@ solve_perturbation_order3 <- function(model, compiled, ss, params, dr2,
   hxu <- ghxu[state_idx, , drop = FALSE]
   huu <- ghuu[state_idx, , drop = FALSE]
 
-  if (n_s == 0L) {
-    if (verbose) message("No state variables; third-order x-terms are zero.")
-    return(.trivial_dr3(dr2))
-  }
+  ## No `n_s == 0` short-circuit: a stateless model's ghuuu is the third
+  ## Taylor coefficient of its static map (y = exp(e) -> 1), not zero. The
+  ## general path below runs with empty state blocks.
 
   if (isTRUE(model$model_options$linear)) {
-    if (verbose) message("Linear model: all third-order terms are exactly zero; skipping Kronecker solve.")
+    if (verbose) .dynhr_inform("Linear model: all third-order terms are exactly zero; skipping Kronecker solve.")
     return(.linear_dr3(dr2))
   }
 
@@ -425,10 +424,10 @@ solve_perturbation_order3 <- function(model, compiled, ss, params, dr2,
   A_L <- f0 + fp %*% ghx %*% t(S)
 
   if (verbose) {
-    cat("Third-order perturbation (deterministic):\n")
-    cat(sprintf("  n_endo=%d  n_state=%d  n_exo=%d  n_hess3=%d\n",
+    .dynhr_cat("Third-order perturbation (deterministic):\n")
+    .dynhr_cat(sprintf("  n_endo=%d  n_state=%d  n_exo=%d  n_hess3=%d\n",
                 n, n_s, n_u, dyn$n_hess3 %||% 0L))
-    cat(sprintf("  Kronecker system size: %d x %d\n",
+    .dynhr_cat(sprintf("  Kronecker system size: %d x %d\n",
                 n * n_s^3, n * n_s^3))
   }
 
@@ -446,7 +445,7 @@ solve_perturbation_order3 <- function(model, compiled, ss, params, dr2,
   # Third-order Hessian (sparse)
   H3 <- .compute_model_hessian3_symbolic(compiled, dy_ss, params, ss)
   if (is.null(H3)) {
-    if (verbose) cat("  Hessian3 unavailable (log-linear model). Phi_direct = 0.\n")
+    if (verbose) .dynhr_cat("  Hessian3 unavailable (log-linear model). Phi_direct = 0.\n")
   }
 
   # ----------------------------------------------------------------
@@ -480,7 +479,7 @@ solve_perturbation_order3 <- function(model, compiled, ss, params, dr2,
           H3$triplets[[k]]$eq <- inv_perm[H3$triplets[[k]]$eq]
         }
       }
-      if (verbose) cat("  Hessian rows reordered: compiled -> declaration order.\n")
+      if (verbose) .dynhr_cat("  Hessian rows reordered: compiled -> declaration order.\n")
     }
   }
 
@@ -497,7 +496,7 @@ solve_perturbation_order3 <- function(model, compiled, ss, params, dr2,
   # = F_www[T_x, T_x, T_x]                              (direct cubic)
   # + F_ww[W_xx, T_x] summed over 3 pair-singleton permutations
   # ----------------------------------------------------------------
-  if (verbose) cat("  Computing Phi_xxx forcing term...\n")
+  if (verbose) .dynhr_cat("  Computing Phi_xxx forcing term...\n")
 
   ns3 <- n_s^3
 
@@ -561,7 +560,7 @@ solve_perturbation_order3 <- function(model, compiled, ss, params, dr2,
   #   pair23: (s_A, s_B, s_C) = (s2, s3, s1) -> array dim (s1, s2, s3)
   #           -> aperm(_, c(3, 2, 1))
   # ----------------------------------------------------------------
-  if (verbose) cat("  Adding chain-rule cross-terms from y_{t+1}...\n")
+  if (verbose) .dynhr_cat("  Adding chain-rule cross-terms from y_{t+1}...\n")
 
   raw_chain    <- ghxx %*% (hxx %x% hx)      # n x n_s^3 raw
   cross_pair12 <- matrix(0, n, ns3)
@@ -582,7 +581,7 @@ solve_perturbation_order3 <- function(model, compiled, ss, params, dr2,
   #   (I_{n_s^3} \otimes A_L + (hx' \otimes hx' \otimes hx') \otimes fp) vec(ghxxx)
   #     = -vec(Phi_xxx)
   # ----------------------------------------------------------------
-  if (verbose) cat("  Solving Kronecker system for ghxxx...\n")
+  if (verbose) .dynhr_cat("  Solving Kronecker system for ghxxx...\n")
 
   # Shared generalized-Sylvester solver (same one orders 4/5 use):
   # eigenbasis fast path with a kappa(V)^k conditioning guard that falls back
@@ -602,7 +601,7 @@ solve_perturbation_order3 <- function(model, compiled, ss, params, dr2,
   # well-conditioned models and residual-verified (dense fallback) otherwise.
   use_sparse <- if (is.null(sparse)) (n_s^3 >= sparse_threshold) else isTRUE(sparse)
   if (use_sparse) {
-    if (verbose) cat(sprintf(
+    if (verbose) .dynhr_cat(sprintf(
       "  ghxxx: sparse Kronecker solve (n_s=%d, ns^3=%d cols).\n", n_s, n_s^3))
     ghxxx <- .solve_kron_compact_sparse(A_L, fp, hx, 3L, -Phi_xxx,
                                         verbose = verbose)
@@ -624,7 +623,7 @@ solve_perturbation_order3 <- function(model, compiled, ss, params, dr2,
   # NOTE: ghxxu, ghxuu, ghuuu still receive known chain-rule contributions
   # from y_{t+1} = g(h(x,u), ...) involving the propagated hxx, hxu, huu.
   # ----------------------------------------------------------------
-  if (verbose) cat("  Solving for ghxxu, ghxuu, ghuuu...\n")
+  if (verbose) .dynhr_cat("  Solving for ghxxu, ghxuu, ghuuu...\n")
 
   # Helper: contract H3 once with (Ta, Tb, Tc) summing the appropriate orbit.
   #
@@ -917,35 +916,17 @@ solve_perturbation_order3 <- function(model, compiled, ss, params, dr2,
   class(dr3) <- c("DecisionRules3", "DecisionRules2", "DecisionRules")
 
   if (verbose) {
-    cat("Third-order solution complete.\n")
-    cat(sprintf("  ghxxx: %d x %d  max|.| = %.3g\n",
+    .dynhr_cat("Third-order solution complete.\n")
+    .dynhr_cat(sprintf("  ghxxx: %d x %d  max|.| = %.3g\n",
                 nrow(ghxxx), ncol(ghxxx), max(abs(ghxxx))))
-    cat(sprintf("  ghxxu: %d x %d  max|.| = %.3g\n",
+    .dynhr_cat(sprintf("  ghxxu: %d x %d  max|.| = %.3g\n",
                 nrow(ghxxu), ncol(ghxxu), max(abs(ghxxu))))
-    cat(sprintf("  ghxuu: %d x %d  max|.| = %.3g\n",
+    .dynhr_cat(sprintf("  ghxuu: %d x %d  max|.| = %.3g\n",
                 nrow(ghxuu), ncol(ghxuu), max(abs(ghxuu))))
-    cat(sprintf("  ghuuu: %d x %d  max|.| = %.3g\n",
+    .dynhr_cat(sprintf("  ghuuu: %d x %d  max|.| = %.3g\n",
                 nrow(ghuuu), ncol(ghuuu), max(abs(ghuuu))))
   }
 
-  dr3
-}
-
-
-#' Trivial third-order solution (no state variables).
-#' @noRd
-.trivial_dr3 <- function(dr2) {
-  n   <- length(dr2$endo_names)
-  n_u <- length(dr2$exo_names)
-  dr3       <- unclass(dr2)
-  dr3$ghxxx <- matrix(0, n, 0)
-  dr3$ghxxu <- matrix(0, n, 0)
-  dr3$ghxuu <- matrix(0, n, 0)
-  dr3$ghuuu <- matrix(0, n, n_u^3)
-  dr3$order <- 3L
-  dr3$third_order_method <- "trivial_no_states"
-  dr3$sigma_correction   <- "not_implemented"
-  class(dr3) <- c("DecisionRules3", "DecisionRules2", "DecisionRules")
   dr3
 }
 
@@ -1198,8 +1179,13 @@ compute_irfs_order3 <- function(dr3, model, n_periods = 40L,
 #'   deviations when \code{shocks = NULL}.
 #' @param burn_in Integer.  Number of initial periods to discard.
 #' @param pruning Logical.  If \code{TRUE} (default), run the full pruned
-#'   three-layer recursion.  If \code{FALSE}, set x^s = x^rd = 0 every
-#'   period, reducing to a first-order simulation.
+#'   three-layer recursion.  \code{FALSE} runs the genuine \strong{unpruned}
+#'   order-3 recursion on a single full state -- the quadratic and cubic terms
+#'   are evaluated at the full state rather than at its first-order component.
+#'   That recursion has no stationary distribution in general and can explode
+#'   on long simulations; it is provided for comparison, not for estimation.
+#'   (Before 0.9.4 this argument set x^s = x^rd = 0 every period, i.e. it
+#'   silently propagated the state with the ORDER-ONE law of motion.)
 #' @param init_state Optional named numeric vector of initial state deviations
 #'   loaded into the first-order pruned component x^f; pair with
 #'   \code{burn_in = 0}.  \code{NULL} starts at the steady state.
@@ -1264,8 +1250,32 @@ simulate_model_order3 <- function(dr3, n_periods = 200L, shocks = NULL,
 
   shock_stderr <- .get_shock_stderr(model, exo, params)
   if (is.null(shocks)) {
-    shocks <- matrix(rnorm(total_periods * n_exo), ncol = n_exo)
-    for (k in seq_along(exo)) shocks[, k] <- shocks[, k] * shock_stderr[exo[k]]
+    ## L2 follow-up (0.9.4): a `skew` alpha used to be ignored here entirely --
+    ## the order-3 simulator drew GAUSSIAN shocks even for a model whose
+    ## declared shocks are skewed.  Route those through the shared joint-CSN
+    ## sampler (R/stochsimul-monolith.R), which is the law the PSKF likelihood
+    ## evaluates and which also carries the full Sigma_e.  All-Gaussian models
+    ## keep their exact RNG stream on the branch below.
+    alpha_sim <- .get_shock_skewness(model, exo, params)
+    if (any(alpha_sim != 0)) {
+      Sigma_e_sim <- .get_shock_cov(model, exo, params)
+      shocks <- .draw_csn_shocks(total_periods, Sigma_e_sim, alpha_sim,
+                                 sqrt(diag(Sigma_e_sim)))
+    } else {
+      ## Gaussian path: honour the declared cross-shock correlations exactly as
+      ## simulate_model() / simulate_model_order2() do (Dynare lower Cholesky
+      ## in declared order).  For a diagonal Sigma_e the per-column scaling
+      ## below is kept because it is bit-identical to the pre-0.9.4 stream
+      ## that seeded regression tests depend on.
+      Sigma_e_sim <- .get_shock_cov(model, exo, params)
+      off <- Sigma_e_sim; diag(off) <- 0
+      shocks <- matrix(rnorm(total_periods * n_exo), ncol = n_exo)
+      if (any(abs(off) > 0)) {
+        shocks <- shocks %*% t(.sigma_e_chol_lower(Sigma_e_sim))
+      } else {
+        for (k in seq_along(exo)) shocks[, k] <- shocks[, k] * shock_stderr[exo[k]]
+      }
+    }
   }
 
   sim <- matrix(0, total_periods, n_endo)
@@ -1295,16 +1305,16 @@ simulate_model_order3 <- function(dr3, n_periods = 200L, shocks = NULL,
   #   state FASTEST, exo1 MIDDLE, exo2 SLOWEST
   #   => matching kron vector is (e %x% e %x% x): exo2 SLOW, state FAST
 
-  for (t in seq_len(total_periods)) {
-    e       <- shocks[t, ]
-    x1_prev <- x1
-    x2_prev <- x2
-    x3_prev <- x3
+  if (pruning) {
+    for (t in seq_len(total_periods)) {
+      e       <- shocks[t, ]
+      x1_prev <- x1
+      x2_prev <- x2
+      x3_prev <- x3
 
-    # (A) First-order component
-    x1 <- as.numeric(hx %*% x1_prev + hu %*% e)
+      # (A) First-order component
+      x1 <- as.numeric(hx %*% x1_prev + hu %*% e)
 
-    if (pruning) {
       # (B) Second-order component
       x2 <- as.numeric(
         hx  %*% x2_prev +
@@ -1330,39 +1340,103 @@ simulate_model_order3 <- function(dr3, n_periods = 200L, shocks = NULL,
       if (!is.null(huss)) x3_new <- x3_new + 0.5 * as.numeric(huss %*% e)
       if (!is.null(hs3))  x3_new <- x3_new + (1/6) * hs3
       x3 <- x3_new
-    } else {
-      x2 <- numeric(n_s)
-      x3 <- numeric(n_s)
+
+      # ---- Observable reconstruction --------------------------------------
+      # y^(1): linear terms using x^f_{t-1} and e_t
+      y1 <- as.numeric(ghx %*% x1_prev + ghu %*% e)
+
+      # y^(2): second-order correction
+      y2 <- as.numeric(
+        ghx  %*% x2_prev +
+        0.5 * ghxx %*% (x1_prev %x% x1_prev) +
+        ghxu %*% (e %x% x1_prev) +
+        0.5 * ghuu %*% (e %x% e) +
+        0.5 * ghss
+      )
+
+      # y^(3): third-order correction
+      y3_val <- as.numeric(
+        ghx  %*% x3_prev +
+        ghxx %*% (x1_prev %x% x2_prev) +
+        ghxu %*% (e %x% x2_prev) +
+        0.5 * ghxxu %*% (e %x% x1_prev %x% x1_prev) +
+        0.5 * ghxuu %*% (e %x% e %x% x1_prev) +
+        (1/6) * ghxxx %*% (x1_prev %x% x1_prev %x% x1_prev) +
+        (1/6) * ghuuu %*% (e %x% e %x% e)
+      )
+      if (has_xss) y3_val <- y3_val + 0.5 * as.numeric(dr3$ghxss %*% x1_prev)
+      if (has_uss) y3_val <- y3_val + 0.5 * as.numeric(dr3$ghuss %*% e)
+      if (has_s3)  y3_val <- y3_val + (1/6) * dr3$ghs3
+
+      sim[t, ] <- y1 + y2 + y3_val
     }
+  } else {
+    ## 0.9.4 (WS4, follow-up to WS2's A9): GENUINE unpruned order-3 recursion.
+    ## Before 0.9.4 this branch forced x^s = x^rd = 0 every period, which is the
+    ## ORDER-ONE law of motion with a second/third-order observation equation
+    ## bolted on -- not an unpruned simulation (WS2 fixed the identical bug at
+    ## order 2 in R/solve-perturbation-order2.R).
+    ##
+    ## The unpruned recursion carries ONE state x_t (no x^f/x^s/x^rd split) and
+    ## feeds the FULL state into every nonlinear term.  It is exactly the
+    ## third-order Taylor polynomial of the policy function evaluated at
+    ## (x_{t-1}, e_t, sigma = 1):
+    ##
+    ##   x_t = hx x + hu e
+    ##         + 1/2 hxx (x(x)x) + hxu (e(x)x) + 1/2 huu (e(x)e) + 1/2 hss
+    ##         + 1/6 hxxx (x(x)x(x)x) + 1/2 hxxu (e(x)x(x)x)
+    ##         + 1/2 hxuu (e(x)e(x)x) + 1/6 huuu (e(x)e(x)e)
+    ##         + 1/2 hxss x + 1/2 huss e + 1/6 hs3
+    ##
+    ## (the package folds the multiplicities of the cross terms into
+    ##  ghxu/ghxxu/ghxuu, so those carry 1, 1/2, 1/2 -- the same convention the
+    ##  pruned branch above uses.)  Substituting x = x^f + x^s + x^rd into the
+    ##  quadratic term reproduces the pruned 1/2 hxx (x^f(x)x^f) and
+    ##  hxx (x^f(x)x^s) pieces, so the two branches agree to third order and
+    ##  differ only by the higher-order terms pruning discards.
+    ##
+    ## This recursion can and does explode for large draws; that instability is
+    ## exactly why AFVRR pruning exists and why pruning = TRUE is the default.
+    x <- x1                                    # single full state (init_state)
+    for (t in seq_len(total_periods)) {
+      e      <- shocks[t, ]
+      x_prev <- x
+      xx     <- x_prev %x% x_prev
+      ee     <- e %x% e
 
-    # ---- Observable reconstruction ----------------------------------------
-    # y^(1): linear terms using x^f_{t-1} and e_t
-    y1 <- as.numeric(ghx %*% x1_prev + ghu %*% e)
+      x_new <- as.numeric(
+        hx  %*% x_prev + hu %*% e +
+        0.5 * hxx %*% xx +
+        hxu %*% (e %x% x_prev) +
+        0.5 * huu %*% ee +
+        0.5 * hss +
+        (1/6) * hxxx %*% (xx %x% x_prev) +
+        0.5 * hxxu %*% (e %x% xx) +
+        0.5 * hxuu %*% (ee %x% x_prev) +
+        (1/6) * huuu %*% (ee %x% e)
+      )
+      if (!is.null(hxss)) x_new <- x_new + 0.5 * as.numeric(hxss %*% x_prev)
+      if (!is.null(huss)) x_new <- x_new + 0.5 * as.numeric(huss %*% e)
+      if (!is.null(hs3))  x_new <- x_new + (1/6) * hs3
+      x <- x_new
 
-    # y^(2): second-order correction
-    y2 <- as.numeric(
-      ghx  %*% x2_prev +
-      0.5 * ghxx %*% (x1_prev %x% x1_prev) +
-      ghxu %*% (e %x% x1_prev) +
-      0.5 * ghuu %*% (e %x% e) +
-      0.5 * ghss
-    )
+      y_val <- as.numeric(
+        ghx  %*% x_prev + ghu %*% e +
+        0.5 * ghxx %*% xx +
+        ghxu %*% (e %x% x_prev) +
+        0.5 * ghuu %*% ee +
+        0.5 * ghss +
+        (1/6) * ghxxx %*% (xx %x% x_prev) +
+        0.5 * ghxxu %*% (e %x% xx) +
+        0.5 * ghxuu %*% (ee %x% x_prev) +
+        (1/6) * ghuuu %*% (ee %x% e)
+      )
+      if (has_xss) y_val <- y_val + 0.5 * as.numeric(dr3$ghxss %*% x_prev)
+      if (has_uss) y_val <- y_val + 0.5 * as.numeric(dr3$ghuss %*% e)
+      if (has_s3)  y_val <- y_val + (1/6) * dr3$ghs3
 
-    # y^(3): third-order correction
-    y3_val <- as.numeric(
-      ghx  %*% x3_prev +
-      ghxx %*% (x1_prev %x% x2_prev) +
-      ghxu %*% (e %x% x2_prev) +
-      0.5 * ghxxu %*% (e %x% x1_prev %x% x1_prev) +
-      0.5 * ghxuu %*% (e %x% e %x% x1_prev) +
-      (1/6) * ghxxx %*% (x1_prev %x% x1_prev %x% x1_prev) +
-      (1/6) * ghuuu %*% (e %x% e %x% e)
-    )
-    if (has_xss) y3_val <- y3_val + 0.5 * as.numeric(dr3$ghxss %*% x1_prev)
-    if (has_uss) y3_val <- y3_val + 0.5 * as.numeric(dr3$ghuss %*% e)
-    if (has_s3)  y3_val <- y3_val + (1/6) * dr3$ghs3
-
-    sim[t, ] <- y1 + y2 + y3_val
+      sim[t, ] <- y_val
+    }
   }
 
   sim <- sim[(burn_in + 1L):total_periods, , drop = FALSE]

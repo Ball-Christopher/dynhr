@@ -34,7 +34,7 @@ A DecisionRules4 object extending DecisionRules3 with fields
   ghxxxx, ghxxxu, ghxxuu, ghxuuu, ghuuuu
 }
 \description{
-Given first-, second-, and third-order decision rules from `dr3`,
+Given first-, second-, and third-order decision rules from \code{dr3},
 computes the 4th-order terms ghxxxx, ghxxxu, ghxxuu, ghxuuu, ghuuuu
 using Levintal (2017) compact tensor notation.
 }

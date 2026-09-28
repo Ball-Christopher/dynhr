@@ -54,6 +54,12 @@
 #'   dr$ys[obs_vars]} (with the full steady state in \code{ys}). The
 #'   intercept is what makes a state space self-contained: everything that
 #'   consumes one takes observables in LEVELS and subtracts \code{d}.
+#'   When the model has an \code{observation_trends} block, \code{obs_trend}
+#'   holds the per-observable trend slopes evaluated at \code{params} and
+#'   \code{obs_trend_first_obs} the trend index of the first data row, so the
+#'   intercept of data row \eqn{t} is
+#'   \code{d + obs_trend * (obs_trend_first_obs + t - 1)} (\code{obs_trend}
+#'   is \code{NULL} otherwise).
 #' @export
 # ---------------------------------------------------------------------------
 build_dsge_state_space <- function(m, dr, obs_vars, verbose = TRUE,
@@ -85,11 +91,11 @@ build_dsge_state_space <- function(m, dr, obs_vars, verbose = TRUE,
       
       if (verbose) {
         state_names_ordered <- endo_names[ghx_col_to_endo]
-        cat(sprintf("  ghx column order (from lli): %s\n",
+        .dynhr_cat(sprintf("  ghx column order (from lli): %s\n",
                     paste(state_names_ordered, collapse = ", ")))
       }
     } else {
-      warning(sprintf(
+      .dynhr_warn(sprintf(
         "lead_lag_incidence lag count (%d) != ghx columns (%d). Falling back.",
         length(has_lag), n_state
       ))
@@ -124,12 +130,12 @@ build_dsge_state_space <- function(m, dr, obs_vars, verbose = TRUE,
     
     if (eig_decl < 1.0) {
       ghx_col_to_endo <- decl_order
-      if (verbose) cat("  ghx column order: declaration order (verified by eigenvalues)\n")
+      if (verbose) .dynhr_cat("  ghx column order: declaration order (verified by eigenvalues)\n")
     } else if (eig_pm < 1.0) {
       ghx_col_to_endo <- pred_mixed_order
-      if (verbose) cat("  ghx column order: [predetermined, mixed] (verified by eigenvalues)\n")
+      if (verbose) .dynhr_cat("  ghx column order: [predetermined, mixed] (verified by eigenvalues)\n")
     } else {
-      warning(sprintf(
+      .dynhr_warn(sprintf(
         "Neither ordering gives stable T. max|eig|: decl=%.4f, pred_mixed=%.4f",
         eig_decl, eig_pm
       ))
@@ -158,17 +164,17 @@ build_dsge_state_space <- function(m, dr, obs_vars, verbose = TRUE,
   state_names_ordered <- endo_names[ghx_col_to_endo]
   
   if (verbose) {
-    cat(sprintf("  State-space: %d states, %d obs, %d shocks\n",
+    .dynhr_cat(sprintf("  State-space: %d states, %d obs, %d shocks\n",
                 n_state, length(obs_vars), n_shock))
-    cat(sprintf("  State vars: %s\n", paste(state_names_ordered, collapse = ", ")))
-    cat(sprintf("  T eigenvalues: [%.4f, %.4f]",
+    .dynhr_cat(sprintf("  State vars: %s\n", paste(state_names_ordered, collapse = ", ")))
+    .dynhr_cat(sprintf("  T eigenvalues: [%.4f, %.4f]",
                 min(eig_mod), max(eig_mod)))
-    if (all(eig_mod < 1.0)) cat(" -- all stable [OK]\n")
-    else cat(sprintf(" -- UNSTABLE (max=%.4f) [X]\n", max(eig_mod)))
+    if (all(eig_mod < 1.0)) .dynhr_cat(" -- all stable [OK]\n")
+    else .dynhr_cat(sprintf(" -- UNSTABLE (max=%.4f) [X]\n", max(eig_mod)))
   }
   
   if (any(eig_mod >= 1.0)) {
-    warning(sprintf(
+    .dynhr_warn(sprintf(
       "T matrix has unstable eigenvalues (max |lambda| = %.4f).",
       max(eig_mod)
     ))
@@ -214,6 +220,10 @@ build_dsge_state_space <- function(m, dr, obs_vars, verbose = TRUE,
       ## something actually fails to add up.
       zero_variance_shocks = m$varexo_names[diag(as.matrix(Sigma_e)) == 0],
       d                 = ys_obs,               # obs intercept: ys[obs_vars]
+      ## observation_trends: the intercept of period t (t-th data row) is
+      ## d + obs_trend * (obs_trend_first_obs + t - 1). NULL = no trend.
+      obs_trend         = .obs_trend_slopes(m, params, obs_vars),
+      obs_trend_first_obs = m$observation_trends$first_obs %||% 1L,
       ys                = dr$ys,                # full steady state (all endo)
       ghx               = dr$ghx,
       ghu               = dr$ghu,
@@ -327,13 +337,48 @@ build_dsge_state_space <- function(m, dr, obs_vars, verbose = TRUE,
 #' \eqn{s_{t|T} = T s_{t-1|T} + R \varepsilon_{t|T}} identically (~1e-16),
 #' and the smoothed shocks are unchanged by this route.
 #'
-#' \strong{Exact diffuse initialisation is NOT supported.}  There is no
-#' \code{lik_init} argument: \eqn{P_{0|0}} is the unconditional (Lyapunov)
-#' covariance, with a large-\eqn{\kappa} diagonal fallback when the Lyapunov
-#' solve fails on a unit root.  The smoothed moments are then exact for that
-#' proper large-variance prior, not for the exact-diffuse limit; use
-#' \code{kalman_filter(lik_init = "diffuse")} when the diffuse likelihood is
-#' what is needed.
+#' \strong{Initialisation.}  \eqn{P_{0|0}} is the unconditional (Lyapunov)
+#' covariance on a stationary model; on a unit-root model the default runs
+#' the EXACT diffuse smoother (sequential Koopman--Durbin form) rather than a
+#' large-\eqn{\kappa} approximation.  See \code{lik_init}.
+#'
+#' \strong{Singular innovation covariance.}  When \eqn{F_t} is singular in
+#' some period -- stochastic singularity (more observables than shocks and
+#' no measurement error), a shock switched off by \code{shock_scale} or a
+#' hard \code{filter_tunes} tune -- the multivariate recursion cannot invert
+#' it.  Under \code{method = "auto"} the smoother then restarts on the
+#' UNIVARIATE (Koopman--Durbin sequential) smoother, which processes the
+#' observables one at a time and skips a component whose conditional
+#' variance is below \code{kalman_tol}: that component is an exact linear
+#' function of what has already been processed and carries no information.
+#' This is Dynare's \code{use_univariate_smoother_if_singularity_is_detected}
+#' (7.0) and the same decision \code{\link{kalman_filter}} makes when it
+#' falls back to its univariate filter.  A warning says so, and
+#' \code{diagnostics$routing} records the switch; the log-likelihood is then
+#' the density of the retained components.  \code{method = "durbin-koopman"}
+#' refuses a singular \eqn{F_t} instead (Dynare's default), and
+#' \code{method = "univariate"} runs the sequential smoother throughout --
+#' on a non-singular system the two recursions agree to machine precision.
+#'
+#' \strong{Frequentist (point-estimate) smoother.}  Dynare 7's
+#' \code{frequentist_smoother} option runs the Kalman smoother at a single
+#' parameter vector (the ML estimate, or the posterior mode when no
+#' Metropolis draws are available) and reports the smoothed variables with
+#' their uncertainty from the smoothed state covariance, instead of the
+#' Bayesian smoother's quantiles over posterior draws.  In dynhr that is
+#' simply this function called at the point estimate:
+#' \preformatted{
+#'   sm <- kalman_smoother(Y, dr_at_mode, model, params_at_mode,
+#'                         obs_vars = obs)
+#'   se <- sqrt(apply(sm$smoothed_cov, 3, diag))   # n_state x T
+#'   lo <- t(sm$smoothed_states) - 1.96 * se       # 95\% bands
+#'   hi <- t(sm$smoothed_states) + 1.96 * se
+#' }
+#' \code{smoothed_cov} is \eqn{V_{t|T} = \mathrm{Var}(s_t \mid y_{1:T})}
+#' at those parameters -- Dynare's \code{smoothed_state_uncertainty} -- so
+#' the bands carry filtering uncertainty only, not parameter uncertainty
+#' (which is what the posterior-draw smoother adds).  It is always
+#' returned; there is no option to switch on.
 #'
 #' @param data   \code{T x n_obs} matrix of observables in \strong{levels},
 #'   in the column order of \code{obs_vars}. The model's own steady state is
@@ -347,8 +392,9 @@ build_dsge_state_space <- function(m, dr, obs_vars, verbose = TRUE,
 #' @param obs_vars Character vector naming the observables, in the column
 #'   order of \code{data}.
 #' @param me_variance Base measurement-error variance, added to the diagonal
-#'   of the innovation covariance for every observable and period -- the same
-#'   argument, with the same meaning, as in \code{\link{kalman_filter}()}.
+#'   of the innovation covariance for every period -- the same argument, with
+#'   the same meaning, as in \code{\link{kalman_filter}()}: a scalar for
+#'   every observable, or one variance per observable (\eqn{H = diag(me)}).
 #'   Default \code{0}. Set it to the value you filtered with, or the two will
 #'   describe different noise models.
 #' @param d      Observation-intercept override, length \code{n_obs}.
@@ -382,6 +428,30 @@ build_dsge_state_space <- function(m, dr, obs_vars, verbose = TRUE,
 #' @param kalman_tol Conditional-variance floor below which an observation
 #'   component is treated as carrying no information and dropped for that
 #'   period, matching \code{\link{kalman_filter}}'s univariate fallback.
+#' @param method Smoothing recursion when the initialisation is proper
+#'   (stationary, \code{"kappa"} or a supplied \code{P0}):
+#'   \describe{
+#'     \item{\code{"auto"}}{(default) the multivariate Durbin--Koopman
+#'       recursion, restarting on the univariate smoother, with a warning,
+#'       if the innovation covariance is singular in any period -- Dynare's
+#'       \code{use_univariate_smoother_if_singularity_is_detected}.}
+#'     \item{\code{"durbin-koopman"}}{the multivariate recursion only; a
+#'       singular innovation covariance is an error (class
+#'       \code{dynhr_error_smoother_singular}), which is what Dynare does
+#'       without that option.}
+#'     \item{\code{"univariate"}}{the univariate (Koopman--Durbin
+#'       sequential) smoother throughout.}
+#'   }
+#'   The exact diffuse initialisation is sequential by construction, so a
+#'   unit-root model under \code{lik_init = "auto"} or \code{"diffuse"} runs
+#'   it whatever \code{method} says; an explicit \code{"durbin-koopman"}
+#'   there is recorded in \code{diagnostics$routing}.
+#'   \strong{Changed:} a singular innovation covariance used to be
+#'   handled by dropping the zero-variance components from that period's
+#'   multivariate update. That is the same answer (the univariate smoother
+#'   skips exactly those components), so results are unchanged beyond
+#'   rounding; what changed is that the routing is now explicit and can be
+#'   refused.
 #' @param a0 Initial state mean \eqn{s_{0|0}}, length \code{n_state}, in
 #'   \strong{deviations from the steady state} (the convention
 #'   \code{smoothed_states} is in -- \code{data} is in levels, the states are
@@ -488,9 +558,10 @@ build_dsge_state_space <- function(m, dr, obs_vars, verbose = TRUE,
 #'   \code{smoothed_initial_cov} (\eqn{V_{0|T}}), \code{loglik}, and
 #'   \code{diagnostics} -- the same machine-readable record
 #'   \code{\link{kalman_filter}} returns (see its \code{Value} section),
-#'   with \code{method_requested = NA} because the smoother takes no
-#'   \code{method} argument and \code{method_used} naming the recursion that
-#'   ran (\code{"durbin-koopman"} or \code{"sequential-diffuse"}).
+#'   with \code{method_requested} the \code{method} argument and
+#'   \code{method_used} naming the recursion that ran
+#'   (\code{"durbin-koopman"}, \code{"univariate"} or
+#'   \code{"sequential-diffuse"}).
 #'
 #'   During a diffuse phase the reported \code{filtered_cov} /
 #'   \code{predicted_cov} are the PROPER (\eqn{P_{star}}) part; the diffuse
@@ -535,9 +606,12 @@ kalman_smoother <- function(data, dr, model, params = NULL,
                             kalman_tol = 1e-10, a0 = NULL, P0 = NULL,
                             pre_sample = 0L, known_shocks = NULL,
                             shock_means = NULL,
-                            shock_timing = c("dated", "transition_next")) {
+                            shock_timing = c("dated", "transition_next"),
+                            method = c("auto", "durbin-koopman",
+                                       "univariate")) {
   lik_init <- match.arg(lik_init)
   shock_timing <- match.arg(shock_timing)
+  method <- match.arg(method)
 
   ## ---- One shape, one data convention -----------------------------------
   ## Up to 0.9.3 this function took a pre-built `dsge_ss` as its second
@@ -574,7 +648,7 @@ kalman_smoother <- function(data, dr, model, params = NULL,
                       lik_init = lik_init, kalman_tol = kalman_tol,
                       a0 = a0, P0 = P0, pre_sample = pre_sample,
                       known_shocks = known_shocks, shock_means = shock_means,
-                      shock_timing = shock_timing)
+                      shock_timing = shock_timing, method = method)
 }
 
 
@@ -603,10 +677,29 @@ kalman_smoother <- function(data, dr, model, params = NULL,
                                 kalman_tol = 1e-10, a0 = NULL, P0 = NULL,
                                 pre_sample = 0L, known_shocks = NULL,
                                 shock_means = NULL,
-                                shock_timing = c("dated", "transition_next")) {
+                                shock_timing = c("dated", "transition_next"),
+                                method = c("auto", "durbin-koopman",
+                                           "univariate")) {
   lik_init <- match.arg(lik_init)
   shock_timing <- match.arg(shock_timing)
+  method <- match.arg(method)
   lik_init_orig <- lik_init        # for $diagnostics (R4)
+
+  ## ---- Deterministic observation trends (Dynare `observation_trends`) ----
+  ## Same statement kalman_filter() makes: the trend is a time-varying part of
+  ## the observation intercept, so it comes off the data (row t is period
+  ## first_obs + t - 1 of the CALLER's sample -- before any pre-sample padding,
+  ## whose rows are all missing anyway).
+  if (!is.null(ss$obs_trend)) {
+    data <- as.matrix(data)
+    if (length(ss$obs_trend) != ncol(data))
+      stop(sprintf(paste0("kalman_smoother: the state space carries %d ",
+                          "observation-trend slope(s) but the data has %d ",
+                          "column(s)."), length(ss$obs_trend), ncol(data)),
+           call. = FALSE)
+    fo <- ss$obs_trend_first_obs %||% 1L
+    data <- data - outer(fo - 1 + seq_len(nrow(data)), ss$obs_trend)
+  }
 
   ## ---- Pre-sample backfill ------------------------------------------------
   ## Latent states BEFORE the first observation, which is what a "backcast" of
@@ -747,9 +840,10 @@ kalman_smoother <- function(data, dr, model, params = NULL,
 
   ## ---- Structured run diagnostics (R4) -----------------------------------
   ## Same field names as kalman_filter()$diagnostics, so a parity harness can
-  ## read either without a special case. `method_requested` is NA here because
-  ## the smoother takes no `method` argument -- which recursion ran is reported
-  ## in `method_used`.
+  ## read either without a special case. `method_requested` is the `method`
+  ## argument; which recursion actually ran is reported in `method_used`, and
+  ## a switch between them (singular F, or the exact diffuse phase) is a row
+  ## of `routing`.
   .smoother_diagnostics <- function(lik_init_used, d_diffuse = NA_integer_,
                                     dropped = NULL, data = NULL,
                                     method_used = "sequential-diffuse",
@@ -769,7 +863,7 @@ kalman_smoother <- function(data, dr, model, params = NULL,
     routing <- .kf_routing_df(routing)
     dd <- if (length(d_diffuse) != 1L || is.na(d_diffuse)) NA_integer_
           else as.integer(d_diffuse)
-    list(method_requested   = NA_character_,
+    list(method_requested   = method,
          method_used        = method_used,
          lik_init_requested = lik_init_orig,
          lik_init_used      = lik_init_used,
@@ -861,10 +955,10 @@ kalman_smoother <- function(data, dr, model, params = NULL,
     out
   }
 
-  ## Counters for the singular-F diagnostic raised after the forward pass.
-  n_sing_periods <- 0L
-  n_sing_dropped <- 0L
-  sing_by_period <- integer(nrow(data))
+  ## First period at which the multivariate pass met a singular innovation
+  ## covariance (NA: never). Under method = "auto" the pass stops there and
+  ## the whole smoother restarts on the univariate recursion.
+  sing_t <- NA_integer_
 
   ## Convert current-state dsge_ss to lagged-state before extracting matrices.
   ## ss_convert_timing() is a no-op when ss$timing == "lagged".
@@ -885,7 +979,7 @@ kalman_smoother <- function(data, dr, model, params = NULL,
     if (!is.null(ss$Sigma_e)) {
       Q <- ss$Sigma_e
     } else {
-      warning("kalman_smoother: ss has no Sigma_e (hand-built list?); ",
+      .dynhr_warn("kalman_smoother: ss has no Sigma_e (hand-built list?); ",
               "using Q = identity, which assumes all shocks have stderr 1.",
               call. = FALSE)
       Q <- diag(n_shk)
@@ -923,11 +1017,12 @@ kalman_smoother <- function(data, dr, model, params = NULL,
   ## through F. (kf_step() needs an explicit Joseph term because it is written
   ## in a form where the gain is not the optimal one for the noise-inclusive
   ## F; here it is.)
-  if (!is.numeric(me_variance) || length(me_variance) != 1L ||
-      !is.finite(me_variance) || me_variance < 0)
-    stop("kalman_smoother: `me_variance` must be a non-negative finite ",
-         "scalar.", call. = FALSE)
-  has_me_var <- me_variance > 0
+  ## A scalar or one variance per observable (H = diag(me)), validated and
+  ## name-matched by the SAME helper kalman_filter() uses.
+  me_variance <- .kf_me_variance(me_variance,
+                                 ss$obs_names %||% paste0("obs", seq_len(n_obs)),
+                                 "kalman_smoother")
+  has_me_var <- any(me_variance > 0)
 
   ## ---- shock_scale validation ----------------------------------------------
   ## shock_scale (n_shk x T) holds per-period shock std scale factors.
@@ -991,11 +1086,79 @@ kalman_smoother <- function(data, dr, model, params = NULL,
     else                              lik_init <- "diffuse"
   }
 
-  ## ---- Exact diffuse smoothing -------------------------------------------
+  ## ---- Sequential (univariate) smoothing ---------------------------------
   ## The sequential smoother in R/smoother-diffuse.R does the whole job --
-  ## forward and backward -- on the augmented state, so this branch builds its
-  ## inputs and leaves through the shared exit rather than continuing into the
-  ## multivariate DK pass below.
+  ## forward and backward -- on the augmented state x_t = [s_{t-1}; eps_t].
+  ## It serves three callers, which differ only in the prior they hand it:
+  ##   * the exact diffuse initialisation (P_inf != 0), which is sequential
+  ##     by construction;
+  ##   * method = "univariate", on a proper prior (P_inf = 0);
+  ##   * method = "auto" after the multivariate pass hit a singular F -- the
+  ##     analogue of Dynare 7's use_univariate_smoother_if_singularity_is_
+  ##     detected. With P_inf = 0 it is the plain Koopman-Durbin univariate
+  ##     smoother: one observable at a time, a component whose conditional
+  ##     variance is below `kalman_tol` skipped -- the same rule
+  ##     .kf_univariate_loop_R applies in the filter.
+  ## Each builds its inputs here and leaves through the shared exit.
+  .smoother_sequential <- function(P_star_s, P_inf_s, lik_init_used,
+                                   method_used, routing = list()) {
+    nb   <- n_s + n_shk
+    s_ix <- seq_len(n_s); e_ix <- n_s + seq_len(n_shk)
+    Sig_list <- lapply(seq_len(TT), function(t)
+      if (has_shock_scale) { sc <- shock_scale[, t]; Q * outer(sc, sc) } else Q)
+    Zb  <- cbind(Z_mat, D_mat)
+    Tb  <- rbind(cbind(TT_mat, R_mat), matrix(0, n_shk, nb))
+    Gm  <- cbind(TT_mat, R_mat)
+    Ps1 <- matrix(0, nb, nb)
+    Ps1[s_ix, s_ix] <- P_star_s; Ps1[e_ix, e_ix] <- Sig_list[[1L]]
+    Pi1 <- matrix(0, nb, nb); Pi1[s_ix, s_ix] <- P_inf_s
+    me_mat <- matrix(me_variance, n_obs, TT)
+    if (has_me_extra) me_mat <- me_mat + me_extra
+    Ydev <- t(as.matrix(data))
+    if (!is.null(d_obs)) Ydev <- Ydev - d_obs
+    ds <- .smoother_diffuse_seq(Ydev, Zb, Tb, Gm, Sig_list,
+                                c(a0_user, numeric(n_shk)), Ps1, Pi1,
+                                me_mat, s_ix, e_ix, kalman_tol = kalman_tol)
+    if (isTRUE(ds$diffuse_failed))
+      .dynhr_warn("kalman_smoother: the diffuse phase did not end within the ",
+              "sample -- P_inf never decayed, so some diffuse direction is ",
+              "not identified by the data. The smoothed states are the ",
+              "minimum-norm answer in that direction and the reported ",
+              "covariances carry the proper part only. This usually means ",
+              "an unobserved unit root: check that every nonstationary ",
+              "state is loaded by some observable.", call. = FALSE)
+    nm  <- ss$state_names; shk <- ss$shock_names
+    dn3 <- list(nm, nm, NULL)
+    colnames(ds$smoothed_states)  <- nm
+    colnames(ds$filtered_states)  <- nm
+    colnames(ds$predicted_states) <- nm
+    colnames(ds$smoothed_shocks) <- shk
+    names(ds$smoothed_initial)   <- nm
+    dimnames(ds$smoothed_initial_cov) <- list(nm, nm)
+    dimnames(ds$filtered_cov)  <- dn3
+    dimnames(ds$predicted_cov) <- dn3
+    dimnames(ds$smoothed_cov)  <- dn3
+    out <- list(
+      smoothed_states = ds$smoothed_states,
+      smoothed_shocks = ds$smoothed_shocks,
+      filtered_states = ds$filtered_states,
+      predicted_states = ds$predicted_states,
+      filtered_cov    = ds$filtered_cov,
+      predicted_cov   = ds$predicted_cov,
+      smoothed_cov    = ds$smoothed_cov,
+      P_filt_last     = ds$filtered_cov[, , TT],
+      smoothed_initial     = ds$smoothed_initial,
+      smoothed_initial_cov = ds$smoothed_initial_cov,
+      loglik          = ds$loglik,
+      diagnostics     = .smoother_diagnostics(
+        lik_init_used = lik_init_used,
+        ## An unfinished diffuse phase means EVERY period is still in it.
+        d_diffuse = if (isTRUE(ds$diffuse_failed)) TT else ds$d_diffuse,
+        dropped = ds$n_skipped, data = data, method_used = method_used,
+        routing = routing))
+    .smoother_finish(out)
+  }
+
   if (identical(lik_init, "diffuse")) {
     dp <- .kf_diffuse_P0(TT_mat, RQR)
     if (dp$nunit == 0L) {
@@ -1003,62 +1166,26 @@ kalman_smoother <- function(data, dr, model, params = NULL,
       lik_init <- "stationary"
       P_ss     <- solve_lyapunov(TT_mat, RQR)
     } else {
-      nb   <- n_s + n_shk
-      s_ix <- seq_len(n_s); e_ix <- n_s + seq_len(n_shk)
-      Sig_list <- lapply(seq_len(TT), function(t)
-        if (has_shock_scale) { sc <- shock_scale[, t]; Q * outer(sc, sc) } else Q)
-      Zb  <- cbind(Z_mat, D_mat)
-      Tb  <- rbind(cbind(TT_mat, R_mat), matrix(0, n_shk, nb))
-      Gm  <- cbind(TT_mat, R_mat)
-      Ps1 <- matrix(0, nb, nb)
-      Ps1[s_ix, s_ix] <- dp$P_star; Ps1[e_ix, e_ix] <- Sig_list[[1L]]
-      Pi1 <- matrix(0, nb, nb); Pi1[s_ix, s_ix] <- dp$P_inf
-      me_mat <- matrix(me_variance, n_obs, TT)
-      if (has_me_extra) me_mat <- me_mat + me_extra
-      Ydev <- t(as.matrix(data))
-      if (!is.null(d_obs)) Ydev <- Ydev - d_obs
-      ds <- .smoother_diffuse_seq(Ydev, Zb, Tb, Gm, Sig_list,
-                                  c(a0_user, numeric(n_shk)), Ps1, Pi1,
-                                  me_mat, s_ix, e_ix, kalman_tol = kalman_tol)
-      if (isTRUE(ds$diffuse_failed))
-        warning("kalman_smoother: the diffuse phase did not end within the ",
-                "sample -- P_inf never decayed, so some diffuse direction is ",
-                "not identified by the data. The smoothed states are the ",
-                "minimum-norm answer in that direction and the reported ",
-                "covariances carry the proper part only. This usually means ",
-                "an unobserved unit root: check that every nonstationary ",
-                "state is loaded by some observable.", call. = FALSE)
-      nm  <- ss$state_names; shk <- ss$shock_names
-      dn3 <- list(nm, nm, NULL)
-      colnames(ds$smoothed_states)  <- nm
-      colnames(ds$filtered_states)  <- nm
-      colnames(ds$predicted_states) <- nm
-      colnames(ds$smoothed_shocks) <- shk
-      names(ds$smoothed_initial)   <- nm
-      dimnames(ds$smoothed_initial_cov) <- list(nm, nm)
-      dimnames(ds$filtered_cov)  <- dn3
-      dimnames(ds$predicted_cov) <- dn3
-      dimnames(ds$smoothed_cov)  <- dn3
-      out <- list(
-        smoothed_states = ds$smoothed_states,
-        smoothed_shocks = ds$smoothed_shocks,
-        filtered_states = ds$filtered_states,
-        predicted_states = ds$predicted_states,
-        filtered_cov    = ds$filtered_cov,
-        predicted_cov   = ds$predicted_cov,
-        smoothed_cov    = ds$smoothed_cov,
-        P_filt_last     = ds$filtered_cov[, , TT],
-        smoothed_initial     = ds$smoothed_initial,
-        smoothed_initial_cov = ds$smoothed_initial_cov,
-        loglik          = ds$loglik,
-        diagnostics     = .smoother_diagnostics(
-          lik_init_used = "diffuse",
-          ## An unfinished diffuse phase means EVERY period is still in it.
-          d_diffuse = if (isTRUE(ds$diffuse_failed)) TT else ds$d_diffuse,
-          dropped = ds$n_skipped, data = data))
-      return(.smoother_finish(out))
+      ## There is no multivariate exact-diffuse smoother here, so an explicit
+      ## "durbin-koopman" is routed -- and says so -- rather than refused: the
+      ## sequential recursion answers the same question.
+      rt <- if (identical(method, "durbin-koopman"))
+        list(c(from = "durbin-koopman", to = "sequential-diffuse",
+               reason = paste("the exact diffuse initialisation is only",
+                              "implemented in sequential form")))
+      else list()
+      return(.smoother_sequential(dp$P_star, dp$P_inf, "diffuse",
+                                  "sequential-diffuse", routing = rt))
     }
   }
+
+  ## The proper-prior initialisation the rest of this function runs on, as
+  ## $diagnostics reports it.
+  lik_init_proper <- if (!is.null(P0_user)) "user" else
+                     if (identical(lik_init, "kappa")) "kappa" else "stationary"
+  if (identical(method, "univariate"))
+    return(.smoother_sequential(P_ss, matrix(0, n_s, n_s), lik_init_proper,
+                                "univariate"))
 
   ## ---- Forward pass (Kalman filter) ----
   ## Per-period NA observations are handled by dropping the NA rows from
@@ -1149,7 +1276,8 @@ kalman_smoother <- function(data, dr, model, params = NULL,
 
     ## Innovation covariance: F_t = Z_t P_{t-1|t-1} Z_t' + DQD_t [+ me_extra_t]
     F_t  <- Zt %*% P_tt %*% t(Zt) + DQDt
-    if (has_me_var)   diag(F_t) <- diag(F_t) + me_variance
+    if (has_me_var)   diag(F_t) <- diag(F_t) +
+      (if (length(me_variance) == 1L) me_variance else me_variance[obs_ok])
     if (has_me_extra) diag(F_t) <- diag(F_t) + me_extra[obs_ok, t]
     F_t  <- (F_t + t(F_t)) * 0.5
 
@@ -1168,71 +1296,35 @@ kalman_smoother <- function(data, dr, model, params = NULL,
 
     if (is.null(F_ch)) {
       ## ---- SINGULAR / NON-PD INNOVATION COVARIANCE ------------------------
-      ## This used to add JITTER on an absolute ladder (1e-8 ... 1e-2, then an
-      ## UNGUARDED chol(F_t + 0.1 * I)). Two things were wrong with that.
-      ##
-      ## (1) The jitter was absolute while F_t is not O(1). On a unit-root
-      ##     model this smoother initialises P at .DIFFUSE_SCALE * I = 1e6 * I,
-      ##     and `shock_scale` multiplies Q on top, so F_t can be many orders
-      ##     of magnitude larger -- a 0.1 nudge means nothing. Where it did
-      ##     "work" it silently corrupted the answer instead: switching one
-      ##     shock off via shock_scale (the u_k = 0 hard-tune idiom) moved the
-      ##     loglik from -63.7 to -8.5e+09 while kalman_filter returned -63.7.
-      ## (2) The last rung had no tryCatch, so when +0.1*I was still not PD it
-      ##     THREW -- the filter succeeding where the smoother rejects.
-      ##
       ## A singular F means some observation component has zero forecast
-      ## variance: it is predictable exactly and carries no new information.
-      ## kalman_filter already handles this the right way, by falling back to
-      ## the univariate (Koopman-Durbin) filter, which processes observables
-      ## one at a time and SKIPS a component whose conditional variance is
-      ## below `kalman_tol` (R/kalman-filter.R, .kf_univariate_loop_R:185).
+      ## variance: it is an exact linear function of the components already
+      ## seen and carries no new information. The multivariate recursion
+      ## cannot invert F; the UNIVARIATE (Koopman-Durbin) smoother processes
+      ## the observables one at a time and skips such a component, which is
+      ## exactly what kalman_filter's univariate fallback does
+      ## (.kf_univariate_loop_R). "auto" therefore stops here and restarts the
+      ## whole smoother on that recursion -- Dynare 7's
+      ## use_univariate_smoother_if_singularity_is_detected, which also
+      ## restarts rather than patching the one period. "durbin-koopman" is
+      ## Dynare's default without that option: refuse.
       ##
-      ## The smoother now makes the same decision. A zero-variance component
-      ## is dropped for this period -- which is exactly how the smoother
-      ## already treats a MISSING observable -- and the multivariate update
-      ## proceeds on the informative subset, whose F is positive definite by
-      ## construction (its Cholesky pivots are the retained conditional
-      ## variances). `n_ok` shrinks with it, so the log(2*pi) term in the
-      ## likelihood adjusts automatically, matching the filter's convention
-      ## that a skipped component contributes nothing.
-      keep <- .smoother_informative_obs(F_t, kalman_tol)
-      n_sing_periods <- n_sing_periods + 1L
-      n_sing_dropped <- n_sing_dropped + sum(!keep)
-      sing_by_period[t] <- sum(!keep)
-
-      if (!any(keep)) {
-        ## No component carries information: predict-only, exactly as for an
-        ## all-missing period.
-        s_tt <- s_tp
-        P_tt <- P_tp
-        s_filt[t, ]   <- s_tt
-        P_filt[, , t] <- P_tt
-        n_obs_t_vec[t] <- 0L
-        dk_Q[[t]] <- Q_t
-        next
-      }
-
-      obs_ok <- obs_ok[keep]
-      n_ok   <- length(obs_ok)
-      n_obs_t_vec[t] <- n_ok
-      v_t    <- v_t[keep]
-      Zt     <- Z_mat[obs_ok, , drop = FALSE]
-      Dt     <- D_mat[obs_ok, , drop = FALSE]
-      DQDt   <- tcrossprod(Dt %*% Q_t, Dt)
-      RQDt   <- RQD_t[, obs_ok, drop = FALSE]
-      F_t    <- Zt %*% P_tt %*% t(Zt) + DQDt
-      if (has_me_var)   diag(F_t) <- diag(F_t) + me_variance
-      if (has_me_extra) diag(F_t) <- diag(F_t) + me_extra[obs_ok, t]
-      F_t    <- (F_t + t(F_t)) * 0.5
-      F_ch   <- tryCatch(chol(F_t), error = function(e) NULL)
-      if (is.null(F_ch))
-        stop("kalman_smoother: the innovation covariance at period ", t,
-             " is not positive definite even after dropping every ",
-             "zero-variance observation component. This should not happen -- ",
-             "the retained components' conditional variances are the Cholesky ",
-             "pivots and were all above the tolerance. Please report it with ",
-             "a reproducible model.", call. = FALSE)
+      ## (History: this branch first added absolute jitter -- which on a
+      ## unit-root kappa prior either threw or moved the loglik from -63.7 to
+      ## -8.5e+09 -- and then dropped the zero-variance components from the
+      ## period's multivariate update. The drop gave the univariate answer,
+      ## as it must, but as a private recursion of its own.)
+      if (identical(method, "durbin-koopman"))
+        .dynhr_abort(sprintf(paste0(
+          "kalman_smoother: the innovation covariance is singular at period ",
+          "%d (stochastic singularity: more observables than shocks and ",
+          "measurement error, or a shock switched off by `shock_scale` / a ",
+          "hard filter tune). method = \"durbin-koopman\" does not fall back; ",
+          "use method = \"auto\" (restart on the univariate smoother, as ",
+          "Dynare's use_univariate_smoother_if_singularity_is_detected does) ",
+          "or method = \"univariate\"."), t - pre_sample),
+          class = "dynhr_error_smoother_singular")
+      sing_t <- t
+      break
     }
 
     F_inv     <- chol2inv(F_ch)
@@ -1262,23 +1354,38 @@ kalman_smoother <- function(data, dr, model, params = NULL,
                                 as.numeric(t(v_t) %*% F_inv %*% v_t))
   }
 
-  ## ---- Singular-F diagnostic (once, after the forward pass) -------------
-  ## Loud by construction: dropping a component is the CORRECT treatment (it
+  ## ---- Univariate restart after a singular F ----------------------------
+  ## Loud by construction: skipping a component is the CORRECT treatment (it
   ## carries no information), but it also means the model implies some
   ## observable is predictable exactly -- usually a switched-off shock via
   ## `shock_scale`, a hard `filter_tunes` tune, or stochastic singularity --
   ## and the caller should know rather than discover it in a loglik that is
-  ## not comparable with a run where nothing was dropped.
-  if (n_sing_periods > 0L)
-    warning(sprintf(paste0(
-      "kalman_smoother: the innovation covariance was singular in %d of %d ",
-      "period(s); %d zero-variance observation component(s) were dropped in ",
-      "total. Those components are predictable exactly and carry no ",
-      "information, so they are skipped -- the same decision kalman_filter ",
-      "makes when it falls back to the univariate filter. Smoothed states ",
-      "and shocks remain valid; the log-likelihood is conditioned on fewer ",
-      "components and is NOT comparable with a run in which none were ",
-      "dropped."), n_sing_periods, TT, n_sing_dropped), call. = FALSE)
+  ## not comparable with a run where nothing was skipped.
+  if (!is.na(sing_t)) {
+    res <- .smoother_sequential(
+      P_ss, matrix(0, n_s, n_s), lik_init_proper, "univariate",
+      routing = list(c(from = "durbin-koopman", to = "univariate",
+                       reason = sprintf(paste(
+                         "singular innovation covariance at period %d",
+                         "(use_univariate_smoother_if_singularity_is_detected)"),
+                         sing_t - pre_sample))))
+    dg <- res$diagnostics
+    .dynhr_warn(sprintf(paste0(
+      "kalman_smoother: the innovation covariance was singular (first at ",
+      "period %d), so the smoother restarted on the univariate ",
+      "(Koopman-Durbin) recursion, as Dynare's ",
+      "use_univariate_smoother_if_singularity_is_detected does; %d ",
+      "zero-variance observation component(s) in %d of %d period(s) were ",
+      "skipped. Those components are predictable exactly and carry no ",
+      "information -- the same decision kalman_filter makes when it falls ",
+      "back to the univariate filter. Smoothed states and shocks remain ",
+      "valid; the log-likelihood is conditioned on fewer components and is ",
+      "NOT comparable with a run in which none were dropped. Pass method = ",
+      "\"durbin-koopman\" to refuse instead."),
+      sing_t - pre_sample, dg$n_dropped, sum(dg$dropped_by_period > 0L),
+      length(dg$dropped_by_period)), call. = FALSE)
+    return(res)
+  }
 
   ## ---- DK backward pass: smoothed shocks, states and state covariances ----
   ## Uses the Durbin-Koopman (2012) adjoint backward recursion to compute
@@ -1419,9 +1526,7 @@ kalman_smoother <- function(data, dr, model, params = NULL,
     smoothed_initial_cov = V0_smooth,    # V_{0|T}
     loglik          = loglik,
     diagnostics     = .smoother_diagnostics(
-      lik_init_used = if (!is.null(P0_user)) "user" else
-                      if (identical(lik_init, "kappa")) "kappa" else "stationary",
-      dropped = sing_by_period, data = data,
+      lik_init_used = lik_init_proper, data = data,
       method_used = "durbin-koopman")
   )
 
@@ -1783,18 +1888,24 @@ historical_decomposition <- function(smoothed_shocks, ss, s0 = NULL,
     colnames(smoothed)     <- ss$endo_names
     out$smoothed           <- smoothed
     resid                  <- max(abs(total - smoothed))
-    scale                  <- max(1, max(abs(smoothed)))
+    ## Scales RELATIVE to the path (W77): a max(1, .) floor made both checks
+    ## absolute for paths below 1, so at small scale (a model in small units,
+    ## or every shock std x 1e-4) an incoherence of 1e-4 of the path passed.
+    ## (1 only for an all-zero path, where the residual is zero too.)
+    scale                  <- max(abs(smoothed))
+    if (!(scale > 0)) scale <- 1
     out$adding_up_residual <- resid
     out$adding_up_relative <- resid / scale
     out$adding_up_ok       <- resid <= tol * scale
 
-    sscale <- max(1, max(abs(smoothed_states)))
+    sscale <- max(abs(smoothed_states))
+    if (!(sscale > 0)) sscale <- 1
     out$transition_residual            <- max(tres)
     out$transition_residual_by_period  <- tres
     out$transition_worst_period        <- which.max(tres)
     out$transition_ok <- max(tres) <= tol * sscale
     if (!isTRUE(out$transition_ok))
-      warning(sprintf(paste0(
+      .dynhr_warn(sprintf(paste0(
         "historical_decomposition: the smoother's own states and shocks do ",
         "not satisfy the transition -- max |s_t - T s_{t-1} - R eps_t| = ",
         "%.3g (%.3g relative), worst at period %d of %d, against a tolerance ",
@@ -1812,7 +1923,7 @@ historical_decomposition <- function(smoothed_shocks, ss, s0 = NULL,
         call. = FALSE)
 
     if (!isTRUE(out$adding_up_ok))
-      warning(sprintf(paste0(
+      .dynhr_warn(sprintf(paste0(
         "historical_decomposition: the components do not add up -- residual ",
         "%.3g (%.3g relative to the path's scale), against a tolerance of ",
         "%.3g. For a LINEAR model this should be round-off (~1e-15). The ",

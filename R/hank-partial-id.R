@@ -186,10 +186,8 @@ hank_partial_id_contamination_f <- function(a_cell, D0, D1,
 
   f <- switch(which,
     random = {
-      old_seed <- if (exists(".Random.seed", envir = .GlobalEnv)) get(".Random.seed", envir = .GlobalEnv) else NULL
-      set.seed(seed)
-      raw <- stats::rnorm(n_cell)
-      if (!is.null(old_seed)) assign(".Random.seed", old_seed, envir = .GlobalEnv)
+      ## Local seed; the caller's stream (or its absence) is restored (C1).
+      raw <- .with_local_seed(seed, stats::rnorm(n_cell))
       ord <- order(a_cell)
       sm <- function(x, k = 2) {
         n <- length(x); y <- x

@@ -111,7 +111,9 @@
       Mi <- if (diffuse) drop(P_inf %*% z) else numeric(nb)
       Fi <- if (diffuse) sum(z * Mi) else 0
 
-      if (diffuse && Fi > diffuse_tol * max(1, Fs)) {
+      ## Fi and P_inf are unit-free: tested on their own, as in the filter
+      ## (W77; see R/kalman-filter.R above .HAS_RCPP_KALMAN_UNI).
+      if (diffuse && Fi > diffuse_tol) {
         K0 <- Mi / Fi
         K1 <- (Ms - K0 * Fs) / Fi
         a  <- a + K0 * v
@@ -147,7 +149,7 @@
     if (diffuse) {
       P_inf <- Tb %*% P_inf %*% tTb
       P_inf <- (P_inf + t(P_inf)) * 0.5
-      if (max(abs(P_inf)) < conv_tol * max(1, max(abs(P_star)))) {
+      if (max(abs(P_inf)) < conv_tol) {
         diffuse <- FALSE
         d_diffuse <- t
       }

@@ -166,46 +166,27 @@ pruned_ss_moments <- function(pss, n_ar = 5L) {
   colnames(corr_mat) <- pss$endo_names
 
   ## Autocovariances (lag τ ≥ 1)
-  n_endo <- pss$n_endo
-  ghx    <- sys$hx  # n_s x n_s -- but we need the full ghx
-  ## Reconstruct the full ghx from Dxi: Dxi = cbind(ghx_full, ghx_full, 0.5*ghxx_full)
-  ## The first n_s columns of Dxi are ghx_full (n_endo x n_s).
-  ## Actually Dxi is built from the full ghx, ghx, ghxx so extract correctly:
-  ## Dxi[, ix1] = ghx[endo, ], Dxi[, ix2] = ghx[endo, ] (see .order2_aug_system)
-  ## We only need ghx for the autocovariance propagation (same as compute_moments_order2).
-  ## In compute_moments_order2 the full ghx is available directly from dr$ghx.
-  ## Here we recover it from sys$Dxi: columns 1:n_s are ghx, n_s+1:2n_s are ghx again.
-  n_s   <- sys$n_s
-  ix1   <- sys$ix1
-  ix2   <- sys$ix2
-  ghx_full <- sys$Dxi[, ix1, drop = FALSE]   # n_endo x n_s
-
-  ## S_sel: maps n_s x 1 state to n_s x n_endo (same as in compute_moments_order2)
+  ##
+  ## A13a (0.9.4): this used to propagate Γ(τ) = ghx S_sel Γ(τ-1) from a seed
+  ## ghx (Σ_x + Var(x2)) ghx' -- an order-1 recursion with the contemporaneous
+  ## shock term missing from the seed, so a state with AR coefficient ρ came
+  ## out with autocorrelation ρ^(τ+1) (rbc-ish toy, ρ = 0.85: 0.614 at lag 1
+  ## against 0.8486 from a 4e5-period MC of the pruned recursion, MCSE ~
+  ## 0.0016). The pruned system is exactly linear in the AUGMENTED state, so
+  ## the exact Γ(τ) comes from .order2_autocov(); the two entry points now
+  ## share it, as compute_moments_order2()/pruned_ss_moments() are documented
+  ## to agree.
   n_endo_full <- pss$n_endo
-  sidx  <- pss$state_idx
-  S_sel <- matrix(0, nrow = n_s, ncol = n_endo_full)
-  for (i in seq_along(sidx)) S_sel[i, sidx[i]] <- 1
-
-  autocorr <- array(0, dim = c(n_endo_full, n_endo_full, n_ar))
   endo <- pss$endo_names
+  autocov  <- .order2_autocov(sys, st, n_ar)
+  autocorr <- array(0, dim = c(n_endo_full, n_endo_full, n_ar))
   dimnames(autocorr) <- list(endo, endo, paste0("lag", seq_len(n_ar)))
-
-  Gamma_prev_x1 <- ghx_full %*% Sigma_x %*% t(ghx_full)
-  Gamma_prev_x2 <- ghx_full %*% Var_x2  %*% t(ghx_full)
-
-  for (lag in seq_len(n_ar)) {
-    Gamma_lag_x1 <- ghx_full %*% S_sel %*% Gamma_prev_x1
-    Gamma_lag_x2 <- ghx_full %*% S_sel %*% Gamma_prev_x2
-    Gamma_lag <- Gamma_lag_x1 + Gamma_lag_x2
-    autocorr[, , lag] <- Gamma_lag / sd_outer
-    Gamma_prev_x1 <- Gamma_lag_x1
-    Gamma_prev_x2 <- Gamma_lag_x2
-  }
+  for (lag in seq_len(n_ar)) autocorr[, , lag] <- autocov[, , lag] / sd_outer
 
   ## Third cumulant (skewness) -- delegate to compute_third_cumulant()
   skewness <- tryCatch(
     compute_third_cumulant(pss$dr, pss$model)$skewness,
-    error = function(e) NULL
+    error = function(e) .dynhr_reraise_bug(e, NULL)
   )
 
   list(
@@ -226,6 +207,39 @@ pruned_ss_moments <- function(pss, n_ar = 5L) {
 # ============================================================================
 # Gaussian Kalman likelihood on the augmented state
 # ============================================================================
+
+## ---------------------------------------------------------------------------
+## Block-balanced Lyapunov solve for a pruned augmented state (W77, 2026-09-26).
+##
+## The AFVRR augmented state stacks blocks of different ORDER in the shocks:
+## x1 ~ sigma; x2 and x1 (x) x1 ~ sigma^2; x3, x1 (x) x2 and x1 (x) x1 (x) x1
+## ~ sigma^3. Its covariance block (i, j) therefore scales as
+## sigma^(k_i + k_j): with every shock std x c the blocks move by c^2 ... c^6,
+## so max|Sxi| is set by the highest-order block once sigma > 1 (by x1 below
+## it), and solve_lyapunov()'s convergence test -- relative to max|X| --
+## stopped with the SMALL blocks unconverged. Measured on a linear two-shock
+## model: with every shock std x 100 the x1 block of the order-3 Sxi was
+## 1.4e-6 relative off (5.2e-7 nats of loglik; exact below c = 1). Solving
+## in the balanced basis D^-1 X D^-1, D = diag(s^k_i) with s the first-order
+## scale, puts every block at O(1): the solve is scale-equivariant and each
+## block converges to the solver's relative tolerance. s is rounded to a
+## power of 2, so the rescaling itself is exact in floating point.
+##
+## order_k: integer block order of each augmented coordinate; s: the
+## first-order scale sqrt(max diag Sigma_x). Returns the diagonal of D
+## (all ones when s is unusable, i.e. the plain relative solve).
+.pruned_block_scale <- function(order_k, s) {
+  if (!is.finite(s) || s <= 0) return(rep(1, length(order_k)))
+  dsc <- (2^round(log2(s)))^order_k
+  if (any(!is.finite(dsc)) || any(dsc == 0)) return(rep(1, length(order_k)))
+  dsc
+}
+.pruned_lyap_balanced <- function(A, B, dsc) {
+  DD <- outer(dsc, dsc)
+  solve_lyapunov(A * outer(1 / dsc, dsc), B / DD) * DD
+}
+## Block orders of the order-2 augmented state [x1; x2; x1 (x) x1].
+.pruned_order2_k <- function(n_s) c(rep(1L, n_s), rep(2L, n_s), rep(2L, n_s^2))
 
 ## ---------------------------------------------------------------------------
 ## Measurement-error floor guard (the near-degenerate-F hazard).
@@ -282,7 +296,11 @@ pruned_ss_moments <- function(pss, n_ar = 5L) {
     ## Converged-to-steady-state early exit: the detector only needs the
     ## fixed-point F, and stable systems typically converge in far fewer
     ## than n_iter steps.
-    done <- max(abs(P_new - P)) <= 1e-12 * max(1, max(abs(P_new)))
+    ## RELATIVE (W77): with a max(1, .) floor the test was absolute below
+    ## max|P| = 1 and a small-scale model stopped long before its steady state.
+    ## Scaled by the terms' size, max(|P|, |QQ|), so a fixed point at P = 0
+    ## still exits early (the DARE diagnostic's rule).
+    done <- max(abs(P_new - P)) <= 1e-12 * max(abs(P_new), abs(QQ))
     P <- P_new
     if (done) break
   }
@@ -308,7 +326,7 @@ pruned_ss_moments <- function(pss, n_ar = 5L) {
     return(invisible(FALSE))
   main <- obs_vars[chk$loadings > 0.3]
   if (!length(main)) main <- obs_vars[which.max(chk$loadings)]
-  warning(sprintf(paste0(
+  .dynhr_warn(sprintf(paste0(
     "me_variance = %g is large relative to the smallest eigenvalue of the ",
     "model-implied (noise-free) one-step innovation covariance (inflates it ",
     "by factor %.2f): a linear combination of the observables (loading ",
@@ -493,8 +511,13 @@ pruned_ss_loglik <- function(pss, Y, obs_vars, me_variance = 0,
   st  <- .order2_stationary_moments(sys)
   ## Stationary augmented-state mean
   mu0 <- as.numeric(solve(diag(d_dim) - Tlin, c_drift))
-  ## Stationary augmented-state covariance (Lyapunov fixed point)
-  Sxi0 <- solve_lyapunov(Tlin, QQ)
+  ## Stationary augmented-state covariance (Lyapunov fixed point), solved in
+  ## the block-balanced basis (W77; see .pruned_lyap_balanced).
+  dsc0 <- if (d_dim == 2L * sys$n_s + sys$n_s^2)
+    .pruned_block_scale(.pruned_order2_k(sys$n_s),
+                        sqrt(max(diag(Sigma_x), 0)))
+  else rep(1, d_dim)
+  Sxi0 <- .pruned_lyap_balanced(Tlin, QQ, dsc0)
   Sxi0 <- (Sxi0 + t(Sxi0)) * 0.5
 
   ## -- Measurement-error floor guard ------------------------------------------
@@ -773,11 +796,11 @@ make_log_posterior_pruned <- function(model, data, prior_spec, obs_vars,
       dr2 <- tryCatch(
         solve_perturbation_order2(model, compiled, ss, params, s1$dr,
                                   verbose = FALSE),
-        error = function(e) NULL
+        error = function(e) .dynhr_reraise_bug(e, NULL)
       )
       if (is.null(dr2)) return(NULL)
       pss <- tryCatch(pruned_state_space(dr2, model, params),
-                      error = function(e) NULL)
+                      error = function(e) .dynhr_reraise_bug(e, NULL))
       if (is.null(pss)) return(NULL)
       list(dr = dr2, pss = pss)
     },
@@ -785,7 +808,7 @@ make_log_posterior_pruned <- function(model, data, prior_spec, obs_vars,
       loglik <- tryCatch(
         pruned_ss_loglik(sol$pss, Y, obs_vars, me_variance = me_variance,
                          me_floor_check = me_floor_check),
-        error = function(e) -Inf
+        error = function(e) .dynhr_reraise_bug(e, -Inf)
       )
       if (!is.finite(loglik)) return(NULL)
       list(loglik = loglik, Sigma_e = sol$pss$Sigma_e)

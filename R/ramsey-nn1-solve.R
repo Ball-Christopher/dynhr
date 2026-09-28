@@ -9,10 +9,10 @@
   n_endo <- length(endo_names)
   n_eq <- length(model$equations)
 
-  if (verbose) cat("[nn1_solve] Building modified objective expression...
+  if (verbose) .dynhr_cat("[nn1_solve] Building modified objective expression...
 ")
   obj_expr <- .nn1_build_objective_expr(nn1_objective[["coefficients"]], endo_names, ss, n)
-  if (verbose) cat(sprintf("  Objective: %s ...
+  if (verbose) .dynhr_cat(sprintf("  Objective: %s ...
 ", substr(obj_expr, 1, 150)))
 
   modified_model <- model
@@ -62,7 +62,7 @@
     instruments_added <- inst_candidates
     if (length(instruments_added) > 0) {
       if (verbose) {
-        cat(sprintf("  Adding %d placeholder equation(s) for instrument(s): %s
+        .dynhr_cat(sprintf("  Adding %d placeholder equation(s) for instrument(s): %s
 ",
                     length(instruments_added),
                     paste(instruments_added, collapse = ", ")))
@@ -85,12 +85,12 @@
   }
 
   modified_compiled <- compile_model(modified_model, verbose = verbose)
-  if (verbose) cat(sprintf("[nn1_solve] Running perturbation(order=%d)...
+  if (verbose) .dynhr_cat(sprintf("[nn1_solve] Running perturbation(order=%d)...
 ", n))
   dr <- solve_perturbation(modified_model, modified_compiled, ss, params,
                             order = as.integer(n), verbose = verbose, ...)
   bk_ok <- isTRUE(dr$bk_satisfied)
-  if (verbose) cat(sprintf("  BK: %s
+  if (verbose) .dynhr_cat(sprintf("  BK: %s
 ", if (bk_ok) "PASSED" else "FAILED"))
   list(dr = dr, modified_model = modified_model,
        modified_compiled = modified_compiled,
@@ -99,13 +99,21 @@
 }
 
 .nn1_build_objective_expr <- function(coefficients, endo_names, ss, n) {
+  # Steady-state values and coefficients are written with the shortest text
+  # that round-trips the double exactly (.wm_num, up to 17 significant
+  # digits; %.10g lost ~7 digits, e.g. 1/3 -> 0.3333333333).  Negative
+  # literals are parenthesised so `x-(-0.5)` never relies on `--` parsing.
+  num <- function(v) {
+    s <- .wm_num(v, "NN1 objective coefficient")
+    if (v < 0) paste0("(", s, ")") else s
+  }
   terms <- character(0)
   n_endo <- length(endo_names)
   dev_vars <- character(n_endo)
   for (i in seq_len(n_endo)) {
     nm <- endo_names[i]
     ssv <- ss[[nm]] %||% 0
-    dev_vars[i] <- if (abs(ssv) < 1e-15) nm else sprintf("(%s-%.10g)", nm, ssv)
+    dev_vars[i] <- if (abs(ssv) < 1e-15) nm else sprintf("(%s-%s)", nm, num(ssv))
   }
   quad <- coefficients[["quad"]]
   if (!is.null(quad)) {
@@ -117,9 +125,9 @@
         cv <- coeff * (if (i == j) 0.5 else 1.0)
         if (abs(cv) < 1e-14) next
         if (i == j) {
-          terms <- c(terms, sprintf("%.10g*%s^2", cv, dev_vars[i]))
+          terms <- c(terms, sprintf("%s*%s^2", num(cv), dev_vars[i]))
         } else {
-          terms <- c(terms, sprintf("%.10g*%s*%s", cv, dev_vars[i], dev_vars[j]))
+          terms <- c(terms, sprintf("%s*%s*%s", num(cv), dev_vars[i], dev_vars[j]))
         }
       }
     }
@@ -140,7 +148,7 @@
           for (nm in names(vc)) {
             factors <- c(factors, if (vc[[nm]] == 1) nm else sprintf("%s^%d", nm, vc[[nm]]))
           }
-          terms <- c(terms, sprintf("%.10g*%s", cv, paste(factors, collapse = "*")))
+          terms <- c(terms, sprintf("%s*%s", num(cv), paste(factors, collapse = "*")))
         }
       }
     }
@@ -162,7 +170,7 @@
             for (nm in names(vc)) {
               factors <- c(factors, if (vc[[nm]] == 1) nm else sprintf("%s^%d", nm, vc[[nm]]))
             }
-            terms <- c(terms, sprintf("%.10g*%s", cv, paste(factors, collapse = "*")))
+            terms <- c(terms, sprintf("%s*%s", num(cv), paste(factors, collapse = "*")))
           }
         }
       }

@@ -207,7 +207,7 @@
   full <- data.table::copy(attr(est, "full_data"))
   dt <- full[order(date)]
   
-  message("=== dynhr_transform v3: Building gap dataset ===")
+  .dynhr_inform("=== dynhr_transform v3: Building gap dataset ===")
   
   ## -- Calibrated NZSIM share parameters ---------------------------
   S <- list(cy = 0.577793, xy = 0.286209, my = 0.279613,
@@ -227,7 +227,7 @@
   ## STEP 1: Construct intermediate variables
   ## ----------------------------------------------------------------
   
-  message("-- Step 1: Intermediate variables --")
+  .dynhr_inform("-- Step 1: Intermediate variables --")
   
   dt[is.na(r_constructed) & !is.na(r90d), r_constructed := r90d]
   
@@ -256,13 +256,13 @@
   dt[, ln_norm := lmig_z / (lhpwa_z * 1000)]
   
   n_vars <- sum(!is.na(dt$r_q) & !is.na(dt$rh_q) & !is.na(dt$c_sh))
-  message(sprintf("  %d quarters with core variables available", n_vars))
+  .dynhr_inform(sprintf("  %d quarters with core variables available", n_vars))
   
   ## ----------------------------------------------------------------
   ## STEP 2: Trends
   ## ----------------------------------------------------------------
   
-  message("-- Step 2: Trends --")
+  .dynhr_inform("-- Step 2: Trends --")
   
   ## ==============================================================
   ## y_trend: three paths (in priority order)
@@ -276,13 +276,13 @@
     dt[yt, y_trend := i.y_trend, on = .(date)]
     n_filled <- dt[!is.na(y_trend), .N]
     n_total  <- dt[!is.na(ngdpp_z), .N]
-    message(sprintf("  y_trend: using override (%d/%d quarters)", n_filled, n_total))
+    .dynhr_inform(sprintf("  y_trend: using override (%d/%d quarters)", n_filled, n_total))
     
     ## Fill gaps with HP fallback
     if (n_filled < n_total) {
       dt[is.na(y_trend), y_trend := .hp_trend_log(ngdpp_z, L$y)]
       n_hp <- n_total - n_filled
-      message(sprintf("  Filling %d y_trend gaps with HP fallback", n_hp))
+      .dynhr_inform(sprintf("  Filling %d y_trend gaps with HP fallback", n_hp))
     }
     
   } else if (!is.null(potential_params)) {
@@ -299,12 +299,12 @@
          "the HP-filter fallback instead.", call. = FALSE)
   } else {
     ## -- PATH C: HP filter (default) --------------------------
-    message("  y_trend: using HP filter (lambda=200000)")
+    .dynhr_inform("  y_trend: using HP filter (lambda=200000)")
     dt[, y_trend := .hp_trend_log(ngdpp_z, L$y)]
   }
   
   ## -- Interest rates: judged neutrals -------------------------
-  message("  Building judged neutral rates (batch_2c anchors)")
+  .dynhr_inform("  Building judged neutral rates (batch_2c anchors)")
   .build_neutral_r(dt)
   .build_neutral_rh(dt)
   .build_neutral_rstar(dt)
@@ -325,7 +325,7 @@
   if ("iwgdp_pt" %in% names(dt)) {
     dt[, ystar_trend := iwgdp_pt]
     dt[is.na(ystar_trend), ystar_trend := .hp_trend_log(iwgdp_z, L$y)]
-    message("  ystar: using iwgdp_pt as trend (batch_2 equivalent)")
+    .dynhr_inform("  ystar: using iwgdp_pt as trend (batch_2 equivalent)")
   } else {
     dt[, ystar_trend := .hp_trend_log(iwgdp_z, L$y)]
   }
@@ -354,13 +354,13 @@
   dt[, m_trend := m_sh_trend * y_trend]
   dt[, g_trend := g_sh_trend * y_trend]
   
-  message("  Trends computed for all 20 varobs")
+  .dynhr_inform("  Trends computed for all 20 varobs")
   
   ## ----------------------------------------------------------------
   ## STEP 3: Compute gaps
   ## ----------------------------------------------------------------
   
-  message("-- Step 3: Gaps --")
+  .dynhr_inform("-- Step 3: Gaps --")
   
   dt[, r_ := r_q - r_trend]
   dt[, rh_ := rh_q - rh_trend]
@@ -397,7 +397,7 @@
   ## STEP 4: Assemble estimation matrix
   ## ----------------------------------------------------------------
   
-  message("-- Step 4: Assemble --")
+  .dynhr_inform("-- Step 4: Assemble --")
   
   gap_cols <- c("r_", "dp_", "rs_", "y_", "c_", "x_", "m_",
                 "ik_", "ih_", "ln_", "b_", "ph_p_", "pn_p_",
@@ -415,15 +415,15 @@
     if (any(complete)) gaps <- gaps[1:max(which(complete))]
   }
   
-  message(sprintf("  Final: %d quarters (%s to %s)",
+  .dynhr_inform(sprintf("  Final: %d quarters (%s to %s)",
                   nrow(gaps), min(gaps$date), max(gaps$date)))
   
   na_check <- sapply(gaps[, -"date"], function(x) sum(is.na(x)))
   if (any(na_check > 0)) {
-    message("  WARNING: Missing data:")
+    .dynhr_inform("  WARNING: Missing data:")
     print(na_check[na_check > 0])
   } else {
-    message("  [OK] No missing data in estimation window")
+    .dynhr_inform("  [OK] No missing data in estimation window")
   }
   
   ## ----------------------------------------------------------------
@@ -431,7 +431,7 @@
   ## ----------------------------------------------------------------
   
   if (!is.null(nzsim_ref_path) && file.exists(nzsim_ref_path)) {
-    message("-- Step 5: Comparison to nzsim_data.csv --")
+    .dynhr_inform("-- Step 5: Comparison to nzsim_data.csv --")
     comp <- .compare_gaps(gaps, nzsim_ref_path)
     attr(gaps, "comparison") <- comp
   }
@@ -439,7 +439,7 @@
   attr(gaps, "trends") <- dt
   attr(gaps, "lambdas") <- L
   attr(gaps, "shares") <- S
-  message("=== Done ===")
+  .dynhr_inform("=== Done ===")
   return(gaps)
 }
 
@@ -451,10 +451,10 @@
   .ensure_dt()
   ref    <- data.table::fread(ref_path)
   n_ref  <- nrow(ref)
-  message(sprintf("  Reference: %d rows, %d columns", n_ref, ncol(ref)))
+  .dynhr_inform(sprintf("  Reference: %d rows, %d columns", n_ref, ncol(ref)))
   
   gap_cols <- intersect(names(gaps), names(ref))
-  message(sprintf("  Matching columns: %d/%d", length(gap_cols), ncol(ref)))
+  .dynhr_inform(sprintf("  Matching columns: %d/%d", length(gap_cols), ncol(ref)))
   
   ## ---- Date alignment via r_ correlation scan ----
   candidate_starts <- gaps[, unique(date)]
@@ -470,7 +470,7 @@
       best_corr <- cc; best_start <- sd
     }
   }
-  message(sprintf("  Best alignment: start = %s (r_ corr = %.4f)",
+  .dynhr_inform(sprintf("  Best alignment: start = %s (r_ corr = %.4f)",
                   best_start, best_corr))
   
   ## ---- Extract aligned window ----
@@ -508,8 +508,8 @@
   summary_dt <- data.table::rbindlist(results)
   
   ## ---- Print summary ----
-  message("\n  == Gap comparison summary ==")
-  message(sprintf("  Aligned: %s to %s (%d quarters)\n",
+  .dynhr_inform("\n  == Gap comparison summary ==")
+  .dynhr_inform(sprintf("  Aligned: %s to %s (%d quarters)\n",
                   our_aligned$date[1], our_aligned$date[n_comp], n_comp))
   
   print(summary_dt[order(corr)])
@@ -519,13 +519,13 @@
   bad     <- summary_dt[!is.na(corr) & corr <= 0.80]
   missing <- summary_dt[is.na(corr)]
   
-  if (nrow(good) > 0) message(sprintf("\n  GOOD (>0.95): %s",
+  if (nrow(good) > 0) .dynhr_inform(sprintf("\n  GOOD (>0.95): %s",
                                       paste(good$varobs, collapse = ", ")))
-  if (nrow(ok) > 0) message(sprintf("  OK (0.80-0.95): %s",
+  if (nrow(ok) > 0) .dynhr_inform(sprintf("  OK (0.80-0.95): %s",
                                     paste(ok$varobs, collapse = ", ")))
-  if (nrow(bad) > 0) message(sprintf("  POOR (<0.80): %s",
+  if (nrow(bad) > 0) .dynhr_inform(sprintf("  POOR (<0.80): %s",
                                      paste(bad$varobs, collapse = ", ")))
-  if (nrow(missing) > 0) message(sprintf("  MISSING: %s",
+  if (nrow(missing) > 0) .dynhr_inform(sprintf("  MISSING: %s",
                                          paste(missing$varobs, collapse = ", ")))
   
   ## Worst-3 dates for flagged series
@@ -536,7 +536,7 @@
     diffs <- abs(ours[valid] - refs[valid])
     worst_idx <- head(order(-diffs), 3)
     worst_dates <- our_aligned$date[which(valid)[worst_idx]]
-    message(sprintf("  %s: worst at %s (diff=%.4f, %.4f, %.4f)",
+    .dynhr_inform(sprintf("  %s: worst at %s (diff=%.4f, %.4f, %.4f)",
                     col, paste(worst_dates, collapse = ", "),
                     diffs[worst_idx[1]],
                     ifelse(length(worst_idx) > 1, diffs[worst_idx[2]], NA),
@@ -597,7 +597,7 @@
   ## 2. Interpolate through NAs (on levels, matching interp_iris default)
   valid <- which(!is.na(xs) & is.finite(xs))
   if (length(valid) < 4) {
-    warning("lockdown_smooth: too few valid obs after exclusion")
+    .dynhr_warn("lockdown_smooth: too few valid obs after exclusion")
     return(list(smoothed = x, ratio = rep(1, length(x)),
                 n_excluded = 0L))
   }
@@ -661,7 +661,7 @@ dynhr_transform <- function(est,
   full <- data.table::copy(attr(est, "full_data"))
   dt <- full[order(date)]
   
-  message("=== dynhr_transform v3: Building gap dataset ===")
+  .dynhr_inform("=== dynhr_transform v3: Building gap dataset ===")
   
   ## -- Calibrated NZSIM share parameters ---------------------------
   S <- list(cy = 0.577793, xy = 0.286209, my = 0.279613,
@@ -686,7 +686,7 @@ dynhr_transform <- function(est,
   ## ----------------------------------------------------------------
   ## STEP 1: Construct intermediate variables
   ## ----------------------------------------------------------------
-  message("-- Step 1: Intermediate variables --")
+  .dynhr_inform("-- Step 1: Intermediate variables --")
   
   dt[is.na(r_constructed) & !is.na(r90d), r_constructed := r90d]
   
@@ -712,7 +712,7 @@ dynhr_transform <- function(est,
   ##          lockdown   = y / ypsmoothed
   ##          temp_t_ngdp[>=2020Q1] = ngdp / lockdown
   if (!is.null(lockdown_periods) && length(lockdown_periods) > 0) {
-    message("-- Step 1b: COVID lockdown smoothing --")
+    .dynhr_inform("-- Step 1b: COVID lockdown smoothing --")
     
     ## Smooth real GDP (production side)
     ld <- .lockdown_smooth(dt$ngdpp_z, dt$date, lockdown_periods)
@@ -723,7 +723,7 @@ dynhr_transform <- function(est,
     ## lockdown = y / ypsmoothed, so ngdp / lockdown = ngdp * ypsmoothed / y
     dt[, ngdpz_smooth := ngdpz / lockdown_ratio]
     
-    message(sprintf("  %d lockdown obs excluded, ratio range [%.4f, %.4f]",
+    .dynhr_inform(sprintf("  %d lockdown obs excluded, ratio range [%.4f, %.4f]",
                     ld$n_excluded,
                     min(dt$lockdown_ratio, na.rm = TRUE),
                     max(dt$lockdown_ratio, na.rm = TRUE)))
@@ -731,7 +731,7 @@ dynhr_transform <- function(est,
     dt[, ngdpp_z_smooth := ngdpp_z]
     dt[, ngdpz_smooth   := ngdpz]
     dt[, lockdown_ratio  := 1]
-    message("  Lockdown smoothing: disabled")
+    .dynhr_inform("  Lockdown smoothing: disabled")
   }
   
   ## GDP expenditure shares -- smoothed GDP denominator
@@ -749,12 +749,12 @@ dynhr_transform <- function(est,
   dt[, ln_norm := lmig_z / (lhpwa_z * 1000)]
   
   n_vars <- sum(!is.na(dt$r_q) & !is.na(dt$rh_q) & !is.na(dt$c_sh))
-  message(sprintf("  %d quarters with core variables available", n_vars))
+  .dynhr_inform(sprintf("  %d quarters with core variables available", n_vars))
   
   ## ----------------------------------------------------------------
   ## STEP 2: Trends
   ## ----------------------------------------------------------------
-  message("-- Step 2: Trends --")
+  .dynhr_inform("-- Step 2: Trends --")
   
   ## -- Potential output: three paths (A/B/C) --
   if (!is.null(potential_y_trend_override)) {
@@ -763,7 +763,7 @@ dynhr_transform <- function(est,
                 by = "date", all.x = TRUE)
     ## HP fallback for dates outside override
     dt[is.na(y_trend), y_trend := .hp_trend_log(ngdpp_z_smooth, L$y)]
-    message("  y_trend: Path A (override + HP fallback for gaps)")
+    .dynhr_inform("  y_trend: Path A (override + HP fallback for gaps)")
     
   } else if (!is.null(potential_params)) {
     ## Path B: Kalman potential model pipeline
@@ -780,14 +780,14 @@ dynhr_transform <- function(est,
   } else {
     ## Path C: HP filter on lockdown-smoothed GDP
     dt[, y_trend := .hp_trend_log(ngdpp_z_smooth, L$y)]
-    message("  y_trend: Path C (HP filter on lockdown-smoothed GDP)")
+    .dynhr_inform("  y_trend: Path C (HP filter on lockdown-smoothed GDP)")
   }
   
   ## -- Judged neutral interest rates --
   .build_neutral_r(dt)
   .build_neutral_rh(dt)
   .build_neutral_rstar(dt)
-  message("  Interest rates: judged neutrals (batch_2c anchors)")
+  .dynhr_inform("  Interest rates: judged neutrals (batch_2c anchors)")
   
   ## -- Real exchange rate --
   dt[, rs_trend := .hp_trend_log(rs_real, L$rs)]
@@ -815,7 +815,7 @@ dynhr_transform <- function(est,
   if ("iwgdp_pt" %in% names(dt)) {
     dt[, ystar_trend := iwgdp_pt]
     dt[is.na(ystar_trend), ystar_trend := .hp_trend_log(iwgdp_z, L$y)]
-    message("  ystar: using iwgdp_pt as trend")
+    .dynhr_inform("  ystar: using iwgdp_pt as trend")
   } else {
     dt[, ystar_trend := .hp_trend_log(iwgdp_z, L$y)]
   }
@@ -849,12 +849,12 @@ dynhr_transform <- function(est,
   dt[, m_trend  := m_sh_trend  * y_trend]
   dt[, g_trend  := g_sh_trend  * y_trend]
   
-  message("  Trends computed for all 20 varobs")
+  .dynhr_inform("  Trends computed for all 20 varobs")
   
   ## ----------------------------------------------------------------
   ## STEP 3: Compute gaps
   ## ----------------------------------------------------------------
-  message("-- Step 3: Gaps --")
+  .dynhr_inform("-- Step 3: Gaps --")
   
   ## Interest rate gaps
   dt[, r_    := r_q - r_trend]
@@ -903,7 +903,7 @@ dynhr_transform <- function(est,
   ## ----------------------------------------------------------------
   ## STEP 4: Assemble estimation matrix
   ## ----------------------------------------------------------------
-  message("-- Step 4: Assemble --")
+  .dynhr_inform("-- Step 4: Assemble --")
   
   gap_cols <- c("r_", "dp_", "rs_", "y_", "c_", "x_", "m_",
                 "ik_", "ih_", "ln_", "b_", "ph_p_", "pn_p_",
@@ -920,22 +920,22 @@ dynhr_transform <- function(est,
     if (any(complete)) gaps <- gaps[1:max(which(complete))]
   }
   
-  message(sprintf("  Final: %d quarters (%s to %s)",
+  .dynhr_inform(sprintf("  Final: %d quarters (%s to %s)",
                   nrow(gaps), min(gaps$date), max(gaps$date)))
   
   na_check <- sapply(gaps[, -"date"], function(x) sum(is.na(x)))
   if (any(na_check > 0)) {
-    message("  [!] Missing data:")
+    .dynhr_inform("  [!] Missing data:")
     print(na_check[na_check > 0])
   } else {
-    message("  [OK] No missing data in estimation window")
+    .dynhr_inform("  [OK] No missing data in estimation window")
   }
   
   ## ----------------------------------------------------------------
   ## STEP 5: Compare to nzsim_data.csv reference
   ## ----------------------------------------------------------------
   if (!is.null(nzsim_ref_path) && file.exists(nzsim_ref_path)) {
-    message("-- Step 5: Comparison to nzsim_data.csv --")
+    .dynhr_inform("-- Step 5: Comparison to nzsim_data.csv --")
     comp <- .compare_gaps(gaps, nzsim_ref_path)
     attr(gaps, "comparison") <- comp
   }
@@ -944,6 +944,6 @@ dynhr_transform <- function(est,
   attr(gaps, "lambdas") <- L
   attr(gaps, "shares") <- S
   attr(gaps, "lockdown_ratio") <- dt[, .(date, lockdown_ratio)]
-  message("=== Done ===")
+  .dynhr_inform("=== Done ===")
   return(gaps)
 }

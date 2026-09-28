@@ -379,7 +379,7 @@
       .pruned_aug_system_deriv(sys, dr2, obs_idx, d1$dG, d1$dH,
                                d2$d_ghxx, d2$d_ghxu, d2$d_ghuu, d2$d_ghss,
                                dSigma_e, Sigma_x, d2$d_Sigma_x),
-      error = function(e) NULL)
+      error = function(e) .dynhr_reraise_bug(e, NULL))
     if (is.null(chn)) next
 
     d_dy_full <- chn$d_dy_no_ys + d1$dys[obs_vars]

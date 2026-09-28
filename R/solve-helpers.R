@@ -52,7 +52,7 @@
   d_inv[dropped] <- 0
   if (!is.null(warn_label) && any(dropped)) {
     n_drop <- sum(dropped)
-    warning(sprintf(
+    .dynhr_warn(sprintf(
       paste0("%s: .safe_inv() truncated %d of %d singular value%s at the ",
              "relative cutoff %.3g (max singular value %.3g); the result is a ",
              "PSEUDO-inverse, so the decision rule is NOT the unique solution ",
@@ -89,7 +89,11 @@
 #' @param A Square matrix
 #' @param B Symmetric positive semi-definite matrix
 #' @param max_iter Maximum iterations
-#' @param tol Convergence tolerance
+#' @param tol Convergence tolerance, RELATIVE to \code{max(abs(X))}: the
+#'   doubling iteration stops once the largest change in \code{X} is at most
+#'   \code{tol * max(abs(X))}, so the solution is scale-equivariant
+#'   (\code{solve_lyapunov(A, c * B) = c * solve_lyapunov(A, B)} to round-off
+#'   for any \code{c > 0}).
 #' @return Solution matrix X
 #' @export
 solve_lyapunov <- function(A, B, max_iter = 500L, tol = 1e-14) {
@@ -113,8 +117,15 @@ solve_lyapunov <- function(A, B, max_iter = 500L, tol = 1e-14) {
     ## therefore never converges for near-unit-root systems -> the loop runs all
     ## max_iter steps and falls through to the O(n^6) kronecker solve (~0.5 s for
     ## n = 37). Scaling by max|X| makes it converge in the proper ~log2(mixing)
-    ## steps for ANY stable A. (Harmless for well-damped A where max|X| ~ O(1).)
-    if (diff < tol * max(1, max(abs(X_new)))) { converged <- TRUE; break }
+    ## steps for ANY stable A.
+    ## Purely relative -- no max(1, .) floor (W76, 2026-09-26). With the floor
+    ## the test was ABSOLUTE whenever max|X| < 1, so a small-scale model
+    ## stopped early: art_zlb_mcp with every shock std x 1e-3 (P ~1e-15) got a
+    ## P0 3.3e-4 off in relative terms (~6e-6 nats of loglik), breaking the
+    ## rescale identity loglik(c y, c sigma) + N log(c) = const. Relative, the
+    ## solve is scale-equivariant: X(c^2 B) = c^2 X(B) to round-off. (`<=`: an
+    ## all-zero X_new -- only reachable through underflow -- stops at once.)
+    if (diff <= tol * max(abs(X_new))) { converged <- TRUE; break }
     A_pow <- A_pow %*% A_pow
     if (any(!is.finite(A_pow))) break
     X <- X_new
@@ -152,7 +163,7 @@ solve_lyapunov <- function(A, B, max_iter = 500L, tol = 1e-14) {
     # Unit root detected (e.g. NN1 placeholder equations). Not an error;
     # the caller can fall back to simulation-based computations.
     if (getOption("dynhr.warn_lyapunov", FALSE)) {
-      warning("solve_lyapunov: system is singular (unit root detected). Returning NaN.")
+      .dynhr_warn("solve_lyapunov: system is singular (unit root detected). Returning NaN.")
     }
     return(matrix(NaN, n, n))
   }

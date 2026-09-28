@@ -81,7 +81,7 @@ ms_dsge_spec <- function(n_regimes,
 
   ## ---- initial distribution pi0 (default: ergodic) -----------------------
   if (is.null(pi0)) {
-    pi0 <- .ms_ergodic_dist(transition)
+    pi0 <- unname(.ergodic_dist(transition, "ms spec transition", reducible = "uniform"))
   } else {
     if (!is.numeric(pi0) || length(pi0) != n_regimes)
       stop(sprintf("ms_dsge_spec: pi0 must be a numeric vector of length %d.",
@@ -224,7 +224,7 @@ ms_struct_spec <- function(n_regimes,
 
   ## ---- initial distribution pi0 (default: ergodic) -----------------------
   if (is.null(pi0)) {
-    pi0 <- .ms_ergodic_dist(transition)
+    pi0 <- unname(.ergodic_dist(transition, "ms spec transition", reducible = "uniform"))
   } else {
     if (!is.numeric(pi0) || length(pi0) != n_regimes)
       stop(sprintf("ms_struct_spec: pi0 must be a numeric vector of length %d.",
@@ -272,19 +272,67 @@ print.ms_struct_spec <- function(x, ...) {
 }
 
 
-## Internal: power-iteration ergodic distribution.
-## (Replicates .compute_ergodic_dist_ms from R/diag-pre-d28-regime-ident.R
-## but is self-contained here so ms-spec.R has no ordering dependency.)
+## Internal: ergodic (stationary) distribution of a row-stochastic chain.
+##
+## THE one implementation in the package: solves pi' P = pi' DIRECTLY as the
+## null space of (I - P)' with the normalisation row sum(pi) = 1.  Power
+## iteration (the pre-0.9.4 implementation here, in ramsey-regime.R and in
+## diag-pre-d28-regime-ident.R) converges at rate |lambda_2|, so for a very
+## persistent chain (p_stay = 1 - 1e-9) it never leaves its uniform start and
+## returns an answer that is wrong by orders of magnitude.
+##
+## Reducible chains have no unique stationary distribution and abort.
+##
+## @param P     Row-stochastic transition matrix (n x n).
+## @param what  Label for the matrix, used in error messages.
+## @param reducible What to do when the chain is reducible (the stationary
+##   distribution is then NOT unique): "abort", or "uniform" to warn and
+##   return the uniform distribution.  "uniform" reproduces what the old
+##   uniform-seeded power iteration happened to return, and is what the
+##   degenerate P = I Markov-switching paths rely on.
+## @return Named numeric vector of ergodic probabilities (length n).
 ## @noRd
-.ms_ergodic_dist <- function(P, tol = 1e-14, max_iter = 10000L) {
-  n  <- nrow(P)
-  pi <- rep(1 / n, n)
-  for (i in seq_len(max_iter)) {
-    pi_new <- drop(pi %*% P)
-    if (max(abs(pi_new - pi)) < tol) break
-    pi <- pi_new
+.ergodic_dist <- function(P, what = "transition_matrix",
+                          reducible = c("abort", "uniform")) {
+  reducible <- match.arg(reducible)
+  P <- as.matrix(P)
+  n <- nrow(P)
+  if (n < 1L || ncol(P) != n)
+    .dynhr_abort(sprintf("%s must be a square matrix.", what))
+  nms <- rownames(P) %||% colnames(P) %||% paste0("s", seq_len(n))
+  if (n == 1L) return(stats::setNames(1, nms))
+
+  ## Null space of (I - P)' via SVD.  Solving the bordered system
+  ## rbind((I - P)', 1') pi = (0, 1) with qr.solve() looks equivalent but is
+  ## NOT: for p_stay = 1 - 1e-9 the entries of I - P are ~1e-9 and QR's
+  ## relative rank tolerance (1e-7) declares the system singular.  The SVD
+  ## null vector is scale invariant and stays exact there.
+  A  <- diag(n) - P
+  sv <- svd(t(A))
+  d  <- sv$d
+  if (d[n - 1L] <= n * .Machine$double.eps * max(1, d[1]) * 1e3) {
+    if (reducible == "abort")
+      .dynhr_abort(sprintf(
+        "%s is reducible; the ergodic distribution is not unique.", what))
+    .dynhr_warn(sprintf(
+      paste0("%s is reducible; the ergodic distribution is not unique -- ",
+             "falling back to the uniform distribution."), what), once = TRUE)
+    return(stats::setNames(rep(1 / n, n), nms))
   }
-  pi_new / sum(pi_new)
+
+  pi <- sv$v[, n]
+  s  <- sum(pi)
+  if (!is.finite(s) || abs(s) < .Machine$double.eps)
+    .dynhr_abort(sprintf(
+      "could not compute a valid ergodic distribution from %s.", what))
+  pi <- pi / s
+  pi[pi < 0 & pi > -1e-12] <- 0
+  if (any(pi < 0))
+    .dynhr_abort(sprintf(
+      "could not compute a valid ergodic distribution from %s.", what))
+  pi <- pi / sum(pi)
+  names(pi) <- nms
+  pi
 }
 
 

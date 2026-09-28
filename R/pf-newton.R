@@ -142,7 +142,8 @@
 #' @param regime     n_spec x T logical matrix
 #' @param spec_cur_dc Integer vector: current-period dyn column per OBC spec
 #' @param trip_buf   Pre-allocated triplet buffer from .pf_preallocate_triplets()
-#' @return List($R, $J)
+#' @return List($R, $J, $mag) -- $mag the magnitude of each stacked equation's
+#'   terms (.pf_term_mag())
 #' @noRd
 .pf_build_sparse_system <- function(Y, y0_num, y_ss_num, eps_mat,
                                      meta, dyn, params, y_ss,
@@ -153,6 +154,7 @@
   n_total <- T * n_eq
   n_exo   <- length(dyn$exo_names)
   R_full  <- numeric(n_total)
+  mag     <- numeric(n_total)
 
   pre <- trip_buf$preallocated
   if (pre) {
@@ -175,6 +177,7 @@
     dy <- .pf_make_dy_exo(meta, Y, y0_num, y_ss_num, eps_mat, t, T, n_exo)
     Rt <- dyn$residuals_fn(dy, params, y_ss)
     Jt <- dyn$jacobian_fn(dy, params, y_ss)
+    Mt <- .pf_term_mag(Jt, dy)
 
     # OBC: replace binding equations in Rt/Jt BEFORE scatter (Landmine 2)
     if (n_spec > 0L) {
@@ -185,12 +188,14 @@
         vi   <- spec$var_idx
         bnd  <- spec$bound
         Rt[ei]    <- Y[t, vi] - bnd
+        Mt[ei]    <- abs(Y[t, vi]) + abs(bnd)
         Jt[ei, ]  <- 0
         Jt[ei, spec_cur_dc[s]] <- 1
       }
     }
 
     R_full[row_off + seq_len(n_eq)] <- Rt
+    mag[row_off + seq_len(n_eq)]    <- Mt
 
     # Scatter Jt columns into sparse triplets
     for (k in seq_along(meta$kind)) {
@@ -252,7 +257,28 @@
     )
   }
 
-  list(R = R_full, J = J)
+  list(R = R_full, J = J, mag = mag)
+}
+
+
+## Newton stop (W80).  RELATIVE part, as occbin_solve_path() since W79: every
+## stacked equation's residual within tol times the magnitude of its own
+## terms (.pf_term_mag()), plus a round-off floor relative to the largest one
+## (an equation whose terms are all round-off).  Without it, in small units
+## the stop max|R| < tol passed while a period just switched to binding was
+## still off its bound (its residual below tol): the path stayed put and the
+## rescaled solution was off by 20 percent at 1e-6 x the natural units
+## (ramsey_obc_pf(), tol = 1e-8, two ramsey_constraints).
+## The ABSOLUTE part max|R| < tol is kept as well (stop = both): the
+## relative test alone passes a residual of 1-4e-10 on O(1-10) terms, one
+## Newton iteration earlier than the absolute test, which moved 22 of the
+## 444 stop decisions of the perfect-foresight / Ramsey-OBC suites (and
+## their results, at 1e-10) -- with both, none moved.  The price: in units
+## so large that the round-off of the biggest terms exceeds tol (terms
+## ~ 1e5 at tol = 1e-10) the absolute part cannot pass, as before W80.
+.pf_newton_stop <- function(R, mag, tol) {
+  max(abs(R)) < tol &&
+    all(abs(R) <= tol * mag + 64 * .Machine$double.eps * max(mag))
 }
 
 
@@ -291,7 +317,14 @@
 #' }
 #' with \eqn{y_0} = y0 (given) and \eqn{y_{T+1}} = y_ss (terminal transversality),
 #' subject to optional occasionally-binding constraints handled via active-set
-#' (complementarity-flip) iteration over the regime path.
+#' (complementarity-flip) iteration over the regime path.  A slack period
+#' becomes binding when the constrained variable violates its bound; a binding
+#' period is released when the residual \eqn{F} (lhs minus rhs) of the
+#' constraint's own equation, evaluated on the current path, has the wrong
+#' sign for a binding constraint (Dynare's MCP convention: \eqn{F \ge 0} at a
+#' lower bound, \eqn{F \le 0} at an upper bound).  For an equation of the form
+#' \code{x = <notional>} this releases the period once the notional (shadow)
+#' value is back inside the bound, as in OccBin.
 #'
 #' Unlike the perturbation + LCP solvers (pf-lcp.R, obc-lcp.R), this operates
 #' directly on the nonlinear dynamic residuals and therefore does NOT require
@@ -308,7 +341,20 @@
 #'                  obc_collect_specs() (empty list = no OBCs). Each spec must
 #'                  have $eq_idx, $var_idx, $var_name, $op, $bound.
 #' @param max_iter        Maximum Newton iterations per regime (default 50).
-#' @param tol             Newton convergence tolerance on max|R| (default 1e-10).
+#' @param tol             Tolerance (default 1e-10).  Newton stops when every
+#'                        stacked equation's residual is within \code{tol}
+#'                        times the magnitude of its terms (sum over the terms
+#'                        of \eqn{|dF/dy| |y|}, shocks included; plus a
+#'                        round-off floor) AND \eqn{\max|R| < } \code{tol}.
+#'                        The regime decisions use \code{tol} as a RELATIVE
+#'                        round-off band: a slack
+#'                        period binds when the bound is violated by more than
+#'                        \code{tol} \eqn{(|y| + |bound|)}, and a binding
+#'                        period is released when the relaxed equation's
+#'                        residual \eqn{F} has the wrong sign by more than
+#'                        \code{tol} times the sum of the absolute values of
+#'                        its terms, so the regimes do not depend on the units
+#'                        of the model (an absolute band before 0.9.3.127).
 #' @param max_regime_iter Maximum active-set regime switches (default 30).
 #' @param step_size       Newton step-length (default 1; reduce for ill-conditioned
 #'                        problems or strong nonlinearities).
@@ -323,7 +369,8 @@
 #'     \item \code{Y} — T x n_endo solution matrix (rows = periods, cols = variables)
 #'     \item \code{regime} — n_spec x T logical matrix (TRUE = binding)
 #'     \item \code{irf} — T x n_endo deviation from steady state
-#'     \item \code{converged} — Logical: TRUE if Newton converged on the final regime
+#'     \item \code{converged} — Logical: TRUE if Newton converged on the final
+#'       regime AND that regime satisfies complementarity in every period
 #'     \item \code{n_iter} — Integer: Newton iterations on the final regime
 #'     \item \code{endo_names} — Character: variable ordering of Y columns
 #'   }
@@ -415,7 +462,7 @@ pf_newton_solve <- function(compiled,
     rn_interp <- .pf_resnorm(Y, y0_num, y_ss_num, eps_mat, meta, dyn,
                               params, y_ss, T, list(), matrix(FALSE, 1L, T), 0L)
     if (!is.finite(rn_interp)) {
-      warning("pf_newton_solve: interpolated initial path is off-domain ",
+      .dynhr_warn("pf_newton_solve: interpolated initial path is off-domain ",
               "(residual non-finite); falling back to flat-SS init. ",
               "Consider supplying a feasible Y_init or using ",
               "perfect_foresight_solve(line_search = TRUE).")
@@ -428,10 +475,12 @@ pf_newton_solve <- function(compiled,
 
   converged_newton <- FALSE
   n_iter_final     <- 0L
+  regime_converged <- n_spec == 0L
+  regime_seen      <- paste(as.integer(regime), collapse = "")
 
   for (regime_iter in seq_len(max_regime_iter)) {
 
-    if (verbose) cat(sprintf("== Regime iter %d ==\n", regime_iter))
+    if (verbose) .dynhr_cat(sprintf("== Regime iter %d ==\n", regime_iter))
 
     # ------------------------------------------------------------------
     # Newton iterations for fixed regime
@@ -457,18 +506,21 @@ pf_newton_solve <- function(compiled,
         )
         R_full   <- sys$R
         J_sparse <- sys$J
+        mag_full <- sys$mag
 
         res_norm <- max(abs(R_full))
         n_iter_final <- iter
-        if (verbose) cat(sprintf("  Newton iter %d: max|R| = %.3e\n", iter, res_norm))
+        if (verbose) .dynhr_cat(sprintf("  Newton iter %d: max|R| = %.3e\n", iter, res_norm))
         if (!is.finite(res_norm)) {
-          warning("pf_newton_solve: non-finite residual at iter ", iter,
+          .dynhr_warn("pf_newton_solve: non-finite residual at iter ", iter,
                   " (the initial path left the model domain, e.g. log/sqrt of a ",
                   "non-positive value). Supply a feasible initial path or use ",
                   "perfect_foresight_solve(line_search = TRUE).")
           break
         }
-        if (res_norm < tol) { converged_newton <- TRUE; break }
+        if (.pf_newton_stop(R_full, mag_full, tol)) {
+          converged_newton <- TRUE; break
+        }
 
         # Compute (or reuse) LU factorisation.
         # Always recompute on iter == 1 (start of each Newton loop) — Landmine 1.
@@ -491,8 +543,9 @@ pf_newton_solve <- function(compiled,
 
       } else {
         # ---- Dense path (byte-for-byte identical to original) ----
-        R_full <- numeric(T * n_eq)
-        J_full <- matrix(0, nrow = T * n_eq, ncol = T * n_endo)
+        R_full   <- numeric(T * n_eq)
+        mag_full <- numeric(T * n_eq)
+        J_full   <- matrix(0, nrow = T * n_eq, ncol = T * n_endo)
 
         for (t in seq_len(T)) {
           row_off <- (t - 1L) * n_eq
@@ -503,6 +556,7 @@ pf_newton_solve <- function(compiled,
           dy <- .pf_make_dy_exo(meta, Y, y0_num, y_ss_num, eps_mat, t, T, n_exo)
           Rt <- dyn$residuals_fn(dy, params, y_ss)
           Jt <- dyn$jacobian_fn(dy, params, y_ss)
+          Mt <- .pf_term_mag(Jt, dy)
 
           # OBC: replace binding equations
           if (n_spec > 0L) {
@@ -513,12 +567,14 @@ pf_newton_solve <- function(compiled,
               vi   <- spec$var_idx
               bnd  <- spec$bound
               Rt[ei]    <- Y[t, vi] - bnd
+              Mt[ei]    <- abs(Y[t, vi]) + abs(bnd)
               Jt[ei, ]  <- 0
               Jt[ei, spec_cur_dc[s]] <- 1
             }
           }
 
-          R_full[rows_t] <- Rt
+          R_full[rows_t]   <- Rt
+          mag_full[rows_t] <- Mt
 
           # Assemble Jacobian columns into global J
           for (k in seq_along(meta$kind)) {
@@ -539,22 +595,24 @@ pf_newton_solve <- function(compiled,
 
         res_norm <- max(abs(R_full))
         n_iter_final <- iter
-        if (verbose) cat(sprintf("  Newton iter %d: max|R| = %.3e\n", iter, res_norm))
+        if (verbose) .dynhr_cat(sprintf("  Newton iter %d: max|R| = %.3e\n", iter, res_norm))
         if (!is.finite(res_norm)) {
-          warning("pf_newton_solve: non-finite residual at iter ", iter,
+          .dynhr_warn("pf_newton_solve: non-finite residual at iter ", iter,
                   " (the initial path left the model domain, e.g. log/sqrt of a ",
                   "non-positive value). Supply a feasible initial path or use ",
                   "perfect_foresight_solve(line_search = TRUE).")
           break
         }
-        if (res_norm < tol) { converged_newton <- TRUE; break }
+        if (.pf_newton_stop(R_full, mag_full, tol)) {
+          converged_newton <- TRUE; break
+        }
 
         # Newton step: J * delta = -R
         delta_vec <- solve(J_full, -R_full)
       }
 
       if (anyNA(delta_vec)) {
-        warning("pf_newton_solve: singular Jacobian at iter ", iter,
+        .dynhr_warn("pf_newton_solve: singular Jacobian at iter ", iter,
                 "; aborting Newton.")
         break
       }
@@ -579,7 +637,7 @@ pf_newton_solve <- function(compiled,
         alpha <- alpha / 2
       }
       if (!accepted) {
-        warning("pf_newton_solve: no finite-residual Newton step at iter ",
+        .dynhr_warn("pf_newton_solve: no finite-residual Newton step at iter ",
                 iter, " even after backtracking; aborting Newton. Try ",
                 "perfect_foresight_solve(line_search = TRUE) or a feasible ",
                 "initial path.")
@@ -590,31 +648,34 @@ pf_newton_solve <- function(compiled,
     if (n_spec == 0L) break  # no OBCs: done after Newton
 
     # ------------------------------------------------------------------
-    # Active-set complementarity check
+    # Active-set complementarity check (both directions)
     # ------------------------------------------------------------------
-    new_regime <- regime
-    any_flip   <- FALSE
+    new_regime <- .pf_obc_update_regime(Y, y0_num, y_ss_num, eps_mat, meta,
+                                        dyn, params, y_ss, T, obc_specs,
+                                        regime, tol)
+    if (identical(new_regime, regime)) { regime_converged <- TRUE; break }
 
-    for (s in seq_len(n_spec)) {
-      spec  <- obc_specs[[s]]
-      vi    <- spec$var_idx
-      bnd   <- spec$bound
-      sgn   <- if (spec$op == ">") 1 else -1  # >: lower bound; <: upper bound
+    # The regime path is non-monotone (periods can bind and later be
+    # released), so the active-set iteration can cycle between regime paths.
+    key <- paste(as.integer(new_regime), collapse = "")
+    if (key %in% regime_seen) {
+      .dynhr_warn("pf_newton_solve: the OBC regime iteration cycles (regime ",
+                  "path revisited at iteration ", regime_iter, "); returning ",
+                  "the last regime, which does not satisfy complementarity.",
+                  class = "dynhr_warning_obc_regime_cycle")
+      break
+    }
+    regime_seen <- c(regime_seen, key)
 
-      for (t in seq_len(T)) {
-        slack_val <- sgn * (Y[t, vi] - bnd)   # > 0 means constraint satisfied
-
-        if (!regime[s, t]) {
-          # Slack period: flip to binding if variable violates bound
-          if (slack_val < 0) { new_regime[s, t] <- TRUE; any_flip <- TRUE }
-        } else {
-          # Binding period: flip to slack if bound is already satisfied
-          if (slack_val > 0) { new_regime[s, t] <- FALSE; any_flip <- TRUE }
-        }
-      }
+    if (regime_iter == max_regime_iter) {
+      .dynhr_warn("pf_newton_solve: OBC regime iteration did not converge in ",
+                  "max_regime_iter = ", max_regime_iter, " iterations; ",
+                  "returning the last regime, which does not satisfy ",
+                  "complementarity.",
+                  class = "dynhr_warning_obc_regime_noconv")
+      break
     }
 
-    if (!any_flip) break
     # Regime changed: invalidate LU cache (Landmine 1)
     lu_cache <- NULL
     lu_valid <- FALSE
@@ -623,9 +684,9 @@ pf_newton_solve <- function(compiled,
 
   if (verbose) {
     if (converged_newton)
-      cat(sprintf("  pf_newton_solve converged in %d Newton iter(s).\n", n_iter_final))
+      .dynhr_cat(sprintf("  pf_newton_solve converged in %d Newton iter(s).\n", n_iter_final))
     else
-      cat(sprintf("  pf_newton_solve did NOT converge (max_iter=%d, max_regime_iter=%d).\n",
+      .dynhr_cat(sprintf("  pf_newton_solve did NOT converge (max_iter=%d, max_regime_iter=%d).\n",
                   max_iter, max_regime_iter))
   }
 
@@ -633,11 +694,78 @@ pf_newton_solve <- function(compiled,
   colnames(Y) <- dyn$endo_names
 
   list(
-    Y          = Y,
-    regime     = regime[seq_len(n_spec), , drop = FALSE],
-    irf        = Y - y_ss_mat,
-    converged  = converged_newton,
-    n_iter     = n_iter_final,
-    endo_names = dyn$endo_names
+    Y                = Y,
+    regime           = regime[seq_len(n_spec), , drop = FALSE],
+    irf              = Y - y_ss_mat,
+    converged        = converged_newton && regime_converged,
+    n_iter           = n_iter_final,
+    endo_names       = dyn$endo_names
   )
+}
+
+
+## Complementarity update of the OBC regime path after a Newton solve.
+## Both decisions take Dynare's plain inequalities up to a round-off band
+## RELATIVE to the magnitude of the quantities compared (.obc_gap_binds() /
+## .obc_mult_keeps(), R/obc-binding.R, as the OccBin guess-and-verify since
+## W78), so the regimes do not depend on the units of the model.  (Before W80
+## the band was an absolute tol in level units: with the shocks and the bound
+## scaled by 1e-4, a violation smaller than 1e4 * tol was ignored.)
+##
+## Slack period: bind when the variable violates its bound,
+##   sgn * (y - bound) < -tol * (|y| + |bound|)
+##   (sgn = +1 for a lower bound ">", -1 for "<").
+## Binding period: the bound equation pins y to the bound exactly, so y
+##   itself carries no information.  The complementarity check is on the
+##   ORIGINAL (relaxed) equation's residual F = lhs - rhs evaluated on the
+##   current path, i.e. its multiplier (Dynare's MCP / lmmcp convention
+##   F(x) _|_ L < x < U: F >= 0 at a lower bound, F <= 0 at an upper bound).
+##   Release when that sign is violated, sgn * F < -tol * M, with M the sum
+##   of the absolute terms of F (.pf_term_mag()).  For the usual
+##   `x = <notional>` form, F = bound - notional, so this is the OccBin test
+##   "release when the notional (shadow) value is back inside the bound".
+## Returns the new n_spec x T logical regime matrix.
+## @noRd
+.pf_obc_update_regime <- function(Y, y0_num, y_ss_num, eps_mat, meta, dyn,
+                                  params, y_ss, T, obc_specs, regime, tol) {
+  n_spec <- length(obc_specs)
+  n_exo  <- length(dyn$exo_names)
+  new_regime <- regime
+  for (t in seq_len(T)) {
+    Rt <- NULL
+    Mt <- NULL
+    for (s in seq_len(n_spec)) {
+      spec <- obc_specs[[s]]
+      sgn  <- if (spec$op == ">") 1 else -1  # >: lower bound; <: upper bound
+      if (!regime[s, t]) {
+        x_t <- Y[t, spec$var_idx]
+        if (.obc_gap_binds(sgn * (x_t - spec$bound), x_t, spec$bound, tol))
+          new_regime[s, t] <- TRUE
+      } else {
+        if (is.null(Rt)) {
+          dy <- .pf_make_dy_exo(meta, Y, y0_num, y_ss_num, eps_mat, t, T, n_exo)
+          Rt <- dyn$residuals_fn(dy, params, y_ss)
+          Mt <- .pf_term_mag(dyn$jacobian_fn(dy, params, y_ss), dy)
+        }
+        F_relax <- Rt[spec$eq_idx]
+        if (is.finite(F_relax) &&
+            !.obc_mult_keeps(sgn * F_relax, Mt[spec$eq_idx], tol))
+          new_regime[s, t] <- FALSE
+      }
+    }
+  }
+  new_regime
+}
+
+
+## Magnitude of each equation's terms at dy: sum_k |dF/d dy_k| |dy_k| over
+## the dynamic columns (shocks included) -- the scale of the equation's
+## round-off, as the term magnitudes M of .obc_mult_keeps() (R/obc-binding.R)
+## and of occbin_solve_path()'s stacked Newton stop.  A non-finite entry (an
+## infinite derivative) counts as 0.
+## @noRd
+.pf_term_mag <- function(Jt, dy) {
+  m <- as.numeric(abs(Jt) %*% abs(dy[seq_len(ncol(Jt))]))
+  m[!is.finite(m)] <- 0
+  m
 }

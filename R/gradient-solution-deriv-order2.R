@@ -63,7 +63,7 @@
 
   ## Fallback: numerical FD
   H <- tryCatch(.compute_model_hessian(dyn, dy, params, ss),
-                error = function(e) NULL)
+                error = function(e) .dynhr_reraise_bug(e, NULL))
   H
 }
 
@@ -109,7 +109,7 @@
 
   ## --- Explicit term: param_hessian2_fn sparse values (eq,c1,c2,param) ---
   ph2_vals <- tryCatch(dyn$param_hessian2_fn(dy, params, ys),
-                       error = function(e) NULL)
+                       error = function(e) .dynhr_reraise_bug(e, NULL))
   if (is.null(ph2_vals)) return(NULL)
   if (length(ph2_vals) && any(!is.finite(ph2_vals))) return(NULL)
   trip2 <- dyn$param_hess2_triplets
@@ -140,8 +140,11 @@
   ## hess3 stored canonical c1<=c2<=c3 but fully symmetric: expand the orbit
   ## with `.orbit_3`, contract the THIRD slot of each placement against V and
   ## scatter into the (first,second) pair -- matches `.contract_h3(h3,I,I,V)`.
+  ## An absent hessian3_fn is an explicit "no analytic dH" (FD fallback), not
+  ## an error to be caught: calling NULL would now re-raise as a bug.
+  if (is.null(dyn$hessian3_fn)) return(NULL)
   h3vals <- tryCatch(dyn$hessian3_fn(dy, params, ys),
-                     error = function(e) NULL)
+                     error = function(e) .dynhr_reraise_bug(e, NULL))
   if (is.null(h3vals)) return(NULL)
   if (length(h3vals) && any(!is.finite(h3vals))) return(NULL)
   trip3 <- dyn$hess3_triplets
@@ -199,14 +202,57 @@
 
 
 ## ---------------------------------------------------------------------------
-## Helper: d(Sigma_e)/dθ_j via central FD of .get_shock_cov (same convention
-## as .dSigma_e_fd in R/analytic-gradient.R and .pruned_d_ghss_sigma_channel's
-## caller in R/pruned-grad-chain.R). Returns a zero matrix for parameters
-## that are not model params / exo shock names (i.e. that .get_shock_cov
-## cannot possibly react to), avoiding a wasted FD pair.
+## Helper: d(Sigma_e)/d params[pnm] (all other entries held fixed).
+##
+## W93 (2026-09-28): EXACT, via the same plan/eval pair make_posterior_grad()
+## uses since W91 (.shock_cov_deriv_plan / .shock_cov_deriv_eval,
+## R/posterior.R: a forward-mode walk of .get_shock_cov's priority chain with
+## stats::D() on the shocks-block expressions). The central FD of
+## .get_shock_cov (step h) is kept ONLY where no exact derivative exists --
+## the same rule as .dSigma_e_d in R/analytic-gradient.R: the plan is NULL
+## (an expression D() cannot differentiate exactly, e.g. abs()), the eval does
+## not apply at this point, or the entry is non-finite (sqrt of a zero
+## variance). Parameters that cannot reach .get_shock_cov() at all
+## (.sigma_e_param_deps) get an exact zero, which is what their FD returned.
+##
+## The callers (solution_derivatives_order2, the order-2 adjoint, the
+## cumulant and method-of-moments gradients) call this once per parameter
+## per gradient, so the plan is built ONCE per (shocks block, shock order,
+## params names) and the eval once per params vector; both are memoised in
+## .o2sd_dSe_cache below (a one-slot cache: a new model / parameter vector
+## simply rebuilds). The plan depends on nothing else -- and the eval's drift
+## guard (it must reproduce .get_shock_cov() at every point) returns NULL,
+## i.e. the FD, if it ever did.
 ## ---------------------------------------------------------------------------
+.o2sd_dSe_cache <- new.env(parent = emptyenv())
+
+.o2sd_dSigma_e_exact <- function(model, exo, params, pnm) {
+  C  <- .o2sd_dSe_cache
+  pn <- names(params)
+  if (!identical(C$exo, exo) || !identical(C$pn, pn) ||
+      !identical(C$shocks, model$shocks)) {
+    deps <- .sigma_e_param_deps(model, exo, pn)
+    C$plan <- if (length(deps))
+      .shock_cov_deriv_plan(model, exo, params, deps) else NULL
+    C$deps <- deps
+    C$zero <- matrix(0, length(exo), length(exo), dimnames = list(exo, exo))
+    C$exo <- exo; C$pn <- pn; C$shocks <- model$shocks
+    C$params <- NULL; C$val <- NULL
+  }
+  if (!(pnm %in% C$deps)) return(C$zero)
+  if (is.null(C$plan)) return(NULL)
+  if (!identical(C$params, params)) {
+    C$val <- .shock_cov_deriv_eval(C$plan, model, exo, params,
+                                   .get_shock_cov(model, exo, params))
+    C$params <- params
+  }
+  C$val[[pnm]]
+}
+
 .o2sd_dSigma_e <- function(model, params, pnm, h, n_u) {
   exo <- model$varexo_names
+  d <- .o2sd_dSigma_e_exact(model, exo, params, pnm)
+  if (!is.null(d)) return(d)
   pp <- params; pp[[pnm]] <- params[[pnm]] + h
   pm <- params; pm[[pnm]] <- params[[pnm]] - h
   Sp <- .get_shock_cov(model, exo, pp)
@@ -319,9 +365,13 @@ solution_derivatives_order2 <- function(model, compiled, dr2, params, param_name
   if (is.null(H_base))
     stop("solution_derivatives_order2: could not compute model Hessian at base")
 
-  ## Reorder Hessian rows from compiled to declaration order (mirrors order2 solver)
+  ## Reorder Hessian rows from compiled to declaration order (mirrors order2
+  ## solver). The map MUST be the one sys0's level blocks (A_L, fp) were
+  ## reordered by -- sys0$eq_to_decl -- not a bare .build_eq_to_decl(model),
+  ## which omits the f_zero compound-LHS refinement and misaligns the Hessian
+  ## rows against A_L on fs2000 / sw2007 / art_zlb_mcp.
   if (!is.null(compiled$model$equations)) {
-    eq_to_decl <- .build_eq_to_decl(compiled$model)
+    eq_to_decl <- sys0$eq_to_decl %||% .build_eq_to_decl(compiled$model)
     if (all(eq_to_decl > 0L) && !identical(eq_to_decl, seq_len(n))) {
       perm <- order(eq_to_decl)
       H_perm <- array(0, dim = dim(H_base))
@@ -370,13 +420,28 @@ solution_derivatives_order2 <- function(model, compiled, dr2, params, param_name
       ## analytic dH so its rows are in declaration order to match H_base.
       perm_dh <- NULL
       if (!is.null(compiled$model$equations)) {
-        e2d <- .build_eq_to_decl(compiled$model)
+        e2d <- sys0$eq_to_decl %||% .build_eq_to_decl(compiled$model)
         if (all(e2d > 0L) && !identical(e2d, seq_len(n))) perm_dh <- order(e2d)
       }
       dprim_an <- vector("list", np); names(dprim_an) <- param_names
       dH_an    <- vector("list", np); names(dH_an)    <- param_names
+      ## Names that are not model parameters (estimated shock stds, injected
+      ## into `params` under the shock name) enter no residual function: all
+      ## their structural primitives are exactly zero, and their only channel
+      ## is d(Sigma_e) (the dvSe term below). The analytic tensors are indexed
+      ## by the model parameters only (dH_all[, , , <shock>] was a subscript
+      ## crash -- W68, the order-2 twin of solution_derivatives()' fix).
+      model_pars <- compiled$model$param_names %||% names(model$param_values)
       for (k in seq_len(np)) {
         pnm <- param_names[k]
+        if (!(pnm %in% model_pars)) {
+          dprim_an[[pnm]] <- list(df_plus  = matrix(0, n, n),
+                                  df_zero  = matrix(0, n, n),
+                                  df_minus = matrix(0, n, n),
+                                  df_exo   = matrix(0, n, n_u))
+          dH_an[[pnm]] <- array(0, dim = dim(dH_all)[1:3])
+          next
+        }
         dprim_an[[pnm]] <- dprim_all[[pnm]]
         dHk <- dH_all[, , , pnm]                 # n_eq x total_cols x total_cols
         if (!is.null(perm_dh)) {
@@ -405,13 +470,13 @@ solution_derivatives_order2 <- function(model, compiled, dr2, params, param_name
     ss_p <- tryCatch(
       solve_steady(compiled, tp, y0 = ys, endo_names = model$var_names,
                    exo_names = model$varexo_names, verbose = FALSE),
-      error = function(e) list(converged = FALSE))
+      error = function(e) .dynhr_reraise_bug(e, list(converged = FALSE)))
     ss_m <- tryCatch(
       solve_steady(compiled, tm_, y0 = ys, endo_names = model$var_names,
                    exo_names = model$varexo_names, verbose = FALSE),
-      error = function(e) list(converged = FALSE))
+      error = function(e) .dynhr_reraise_bug(e, list(converged = FALSE)))
     if (!isTRUE(ss_p$converged) || !isTRUE(ss_m$converged)) {
-      prim_p[[k]] <- NULL; prim_m[[k]] <- NULL; next
+      prim_p[k] <- list(NULL); prim_m[k] <- list(NULL); next  # keep slot k
     }
     ## Re-derive SSM-computed parameters so the system matrices use the
     ## consistent (not stale) p_c (no-op for non-SSM-parameter models).
@@ -437,7 +502,7 @@ solution_derivatives_order2 <- function(model, compiled, dr2, params, param_name
     h   <- hvec[k]
 
     if (!use_analytic && (is.null(prim_p[[k]]) || is.null(prim_m[[k]]))) {
-      warning(sprintf("solution_derivatives_order2: steady state failed at %s; NA", pnm))
+      .dynhr_warn(sprintf("solution_derivatives_order2: steady state failed at %s; NA", pnm))
       derivs[[pnm]] <- list(
         d_ghxx = matrix(NA_real_, n, ns2),
         d_ghxu = matrix(NA_real_, n, n_s * n_u),
@@ -466,7 +531,7 @@ solution_derivatives_order2 <- function(model, compiled, dr2, params, param_name
     ## ---- dG_j, dH_j from first-order layer ----
     d1 <- first$derivs[[pnm]]
     if (!isTRUE(d1$ok)) {
-      warning(sprintf("solution_derivatives_order2: first-order deriv failed at %s; NA", pnm))
+      .dynhr_warn(sprintf("solution_derivatives_order2: first-order deriv failed at %s; NA", pnm))
       derivs[[pnm]] <- list(
         d_ghxx = matrix(NA_real_, n, ns2),
         d_ghxu = matrix(NA_real_, n, n_s * n_u),
@@ -515,7 +580,7 @@ solution_derivatives_order2 <- function(model, compiled, dr2, params, param_name
       H_p <- .o2sd_hessian_at(compiled, params_p, ys_p)
       H_m <- .o2sd_hessian_at(compiled, params_m, ys_m)
       if (is.null(H_p) || is.null(H_m)) {
-        warning(sprintf("solution_derivatives_order2: Hessian FD failed at %s", pnm))
+        .dynhr_warn(sprintf("solution_derivatives_order2: Hessian FD failed at %s", pnm))
         derivs[[pnm]] <- list(
           d_ghxx = matrix(NA_real_, n, ns2),
           d_ghxu = matrix(NA_real_, n, n_s * n_u),
@@ -529,7 +594,7 @@ solution_derivatives_order2 <- function(model, compiled, dr2, params, param_name
 
       ## Reorder H_p and H_m (same permutation as H_base)
       if (!is.null(compiled$model$equations)) {
-        eq_to_decl <- .build_eq_to_decl(compiled$model)
+        eq_to_decl <- sys0$eq_to_decl %||% .build_eq_to_decl(compiled$model)
         if (all(eq_to_decl > 0L) && !identical(eq_to_decl, seq_len(n))) {
           perm <- order(eq_to_decl)
           Hp_perm <- array(0, dim = dim(H_p)); Hm_perm <- array(0, dim = dim(H_m))
@@ -645,9 +710,9 @@ solution_derivatives_order2 <- function(model, compiled, dr2, params, param_name
     d_ghuu <- qr.solve(AL_qr, rhs_uu)
 
     ## ---- d(Sigma_e)_j ----  (C5: the shock-covariance channel)
-    ## Central FD of .get_shock_cov, same convention as .dSigma_e_fd
-    ## (R/analytic-gradient.R) and the caller of
-    ## .pruned_d_ghss_sigma_channel (R/pruned-grad-chain.R). Zero for
+    ## Exact (W93; central FD of .get_shock_cov only where no exact
+    ## derivative exists -- see .o2sd_dSigma_e), same convention as
+    ## .dSigma_e_d (R/analytic-gradient.R). Zero for
     ## parameters that do not enter Sigma_e (structural/persistence params),
     ## in which case every term added below vanishes and this branch is a
     ## no-op (verified against the pre-C5 output on a literal-stderr model).

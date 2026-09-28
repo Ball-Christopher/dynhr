@@ -7,7 +7,7 @@
 filter_tunes(...)
 }
 \arguments{
-\item{...}{One or more tune entries created by \code{\link{tune}()}.}
+\item{...}{One or more tune entries created by \code{\link{filter_tune}()}.}
 }
 \value{
 An object of class \code{"filter_tunes_spec"}: a list with one
@@ -42,13 +42,13 @@ across all periods when \code{periods} has length > 1, matching the
 \dontrun{
 ## Hard tune: pin z at 0.1 for periods 3-5
 tunes <- filter_tunes(
-  tune("z", 3:5, 0.1)
+  filter_tune("z", 3:5, 0.1)
 )
 
 ## Mixed: hard tune on z, soft tune on a (per-period value, global stderr)
 tunes <- filter_tunes(
-  tune("z", 3:5, 0.1),
-  tune("a", 7L, -0.2, stderr = 0.05)
+  filter_tune("z", 3:5, 0.1),
+  filter_tune("a", 7L, -0.2, stderr = 0.05)
 )
 
 ## Override the mod-file block at estimation time:
@@ -70,6 +70,6 @@ result <- run_full_estimation(
 
 }
 \seealso{
-\code{\link{tune}}, \code{\link{run_full_estimation}},
+\code{\link{filter_tune}}, \code{\link{run_full_estimation}},
   \code{\link{run_mode_finding}}
 }

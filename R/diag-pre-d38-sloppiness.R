@@ -3,7 +3,10 @@
 ## D38. Posterior-curvature "sloppiness" spectrum
 ##
 ## Diagnoses ridge/flat-direction difficulty by the eigen-spectrum of the
-## negative log-posterior Hessian at a supplied or found mode.
+## negative log-posterior Hessian at a supplied or found mode, taken with
+## respect to LOG parameters (Gutenkunst et al. 2007) so that the spectrum is
+## unit-free: rescaling a parameter (theta_i -> c * theta_i) is a shift of
+## log(theta_i) and leaves every eigenvalue unchanged.
 ##
 ## References:
 ##   Gutenkunst et al. (2007) PLoS Comput Biol 3(10):e189 — sloppy models
@@ -13,65 +16,109 @@
 
 #' D38. Posterior-curvature sloppiness spectrum (Gutenkunst et al. 2007)
 #'
-#' Diagnoses ridge/flat-direction difficulty by the eigen-spectrum of the
-#' negative log-posterior Hessian H = -d2 log p(theta|Y) at \code{theta}.
-#' Small eigenvalues of H correspond to "sloppy" (flat/ridged) directions in
-#' parameter space where the posterior is nearly uninformative.
+#' Eigen-spectrum of the negative log-posterior Hessian
+#' \eqn{H = -\partial^2 \log p(\theta \mid Y)} at \code{theta}. Small
+#' eigenvalues are "sloppy" (flat/ridged) directions, large ones "stiff".
 #'
-#' @section Hessian strategy:
-#' The function tries sources in order:
+#' @section Coordinates:
+#' With \code{scale = "log"} (default) the Hessian is taken with respect to
+#' \eqn{u_i = \log|\theta_i|}, i.e. \eqn{H_u = D H_\theta D} with
+#' \eqn{D = \mathrm{diag}(\theta)} at a stationary point. This is the
+#' Gutenkunst et al. convention and makes eigenvalues unit-free. A parameter
+#' that is exactly zero has no log coordinate; it is kept on
+#' its raw scale, listed in \code{$result$raw_scale_params}, and a warning is
+#' raised because its row/column of \eqn{H_u} then carries units.
+#' With \code{scale = "raw"} the raw-parameter Hessian is decomposed (its
+#' spectrum depends on the units of each parameter).
+#'
+#' @section Hessian sources:
 #' \enumerate{
-#'   \item If \code{hessian} is supplied directly (numeric matrix), use it.
-#'   \item If \code{log_post_fn} is supplied, apply \code{num_hessian()} to
-#'     it at \code{theta} (central-difference, O(n^2) evaluations).
-#'   \item Otherwise error — one of the two must be supplied.
+#'   \item \code{hessian} supplied: the RAW-parameter negative log-posterior
+#'     Hessian; for \code{scale = "log"} it is transformed as \eqn{D H D}
+#'     (exact at a mode; off-mode the gradient term is not available).
+#'   \item \code{log_post_fn} supplied: central differences of
+#'     \code{log_post_fn} directly in the chosen coordinates (step \code{h}
+#'     in log units for \code{scale = "log"}), repeated at step \code{2h};
+#'     the spectral norm of the difference is the finite-difference noise
+#'     estimate (the idea of \code{.ident_equilibrated_rank()}).
 #' }
-#' The returned Hessian is the NEGATIVE log-posterior curvature (positive
-#' definite at the mode), so eigenvalues are the curvatures; large eigenvalue
-#' = stiff/identified direction, small eigenvalue = sloppy/flat direction.
 #'
-#' @param theta         Named numeric vector — the evaluation point (mode or
-#'   any other point). Must be supplied.
+#' @section Eigenvalue classes:
+#' The noise floor is \code{max(n * eps * max|lambda|, 10 * fd_noise)}.
+#' Each eigenvalue is classed \code{"negative"} (\eqn{\lambda < -}floor: not
+#' a local maximum of the posterior), \code{"unresolved"}
+#' (\eqn{|\lambda| \le} floor: indistinguishable from zero / FD noise),
+#' \code{"sloppy"} (floor \eqn{< \lambda <} \code{sloppy_cutoff}), or
+#' \code{"stiff"}. \code{sloppy_cutoff = lambda_max * sloppy_threshold}.
+#'
+#' @section Where the six decades come from, and what they are worth:
+#' Gutenkunst et al. (2007) established the empirical regularity that
+#' sensitivity/Fisher eigenvalues in nonlinear models are roughly
+#' log-uniformly spaced over many orders of magnitude -- commonly six or
+#' more. Transtrum, Machta & Sethna (2011) give the information-geometric
+#' account of the same picture. Neither fixes a universal numeric cutoff
+#' separating "sloppy" from "stiff": sloppiness is a property of the
+#' spectrum's spread, not of one eigenvalue. \code{sloppy_threshold = 1e-6}
+#' simply encodes the six-decade Gutenkunst convention and is a package
+#' choice, not a value taken from a paper -- which is why this diagnostic is
+#' INFO and reports \code{spread_decades}, \code{condition_number} and
+#' \code{participation_ratio} alongside the counts rather than a verdict.
+#'
+#' This is a transplant from the physics / systems-biology sloppiness
+#' literature: no DSGE paper or toolbox (Dynare, IRIS, MacroModelling.jl,
+#' RISE) uses the sloppy/stiff framework. Applied Bayesian DSGE work
+#' diagnoses the same underlying problem through the mode Hessian's condition
+#' number or through poor MCMC mixing / low effective sample size.
+#'
+#' \strong{A meaningful "sloppy" verdict needs an ANALYTIC Hessian.} With a
+#' finite-difference Hessian the noise floor
+#' \code{max(n * eps * max|lambda|, 10 * fd_noise)} is typically far above
+#' the eigenvalues that make a model sloppy, so genuinely sloppy directions
+#' are returned as \code{"unresolved"} rather than \code{"sloppy"} and only
+#' the most extreme sloppiness survives. That is the correct behaviour --
+#' the floor exists precisely so the diagnostic cannot mistake FD noise for
+#' flatness -- but it means a high \code{n_unresolved} under
+#' \code{log_post_fn} is a statement about the differencing, not about the
+#' posterior. Supply \code{hessian} from an analytic/AD source when the
+#' spread itself is the question.
+#'
+#' @param theta         Named numeric vector — the evaluation point.
 #' @param log_post_fn   Function \code{theta -> scalar} log-posterior (or
-#'   list with \code{$logpost}). Used for numerical Hessian when
-#'   \code{hessian} is not supplied.
-#' @param hessian       Optional pre-computed negative log-posterior Hessian
-#'   (n x n numeric matrix). When supplied, \code{log_post_fn} is ignored.
+#'   list with \code{$logpost}), evaluated on the RAW parameter scale.
+#' @param hessian       Optional pre-computed RAW-scale negative
+#'   log-posterior Hessian (n x n). When supplied, \code{log_post_fn} is
+#'   ignored.
 #' @param param_names   Character vector of parameter names (length n).
 #'   Defaults to \code{names(theta)}.
-#' @param n_flat        Integer. Number of flattest eigendirections for which
-#'   to report parameter loadings (default 3L).
+#' @param n_flat        Integer. Number of flattest (smallest |lambda|)
+#'   eigendirections, and of stiffest ones, to tabulate (default 3L).
 #' @param sloppy_threshold  Numeric in (0, 1). Eigenvalues below
-#'   \code{lambda_max * sloppy_threshold} are classified as sloppy
-#'   (default 1e-6).
-#' @param n_top_loadings Integer. Number of top parameter loadings to report
-#'   per flat direction (default 5L).
-#' @param h             Step-size fraction for \code{num_hessian} (default
-#'   1e-4; each step is \code{h * max(1, |theta_i|)}).
+#'   \code{lambda_max * sloppy_threshold} are sloppy (default 1e-6, i.e. a
+#'   spread of six decades, the Gutenkunst et al. scale). A package choice
+#'   following that convention; the sloppiness literature specifies no
+#'   universal cutoff. It never gates -- D38 is INFO.
+#' @param n_top_loadings Integer. Number of top parameter loadings kept per
+#'   tabulated direction (default 5L). Full eigenvectors are always in
+#'   \code{$result$eigenvectors}.
+#' @param h             Finite-difference step (default 1e-4; in log units
+#'   for \code{scale = "log"}; each step is \code{h * max(1, |coord|)}).
+#' @param scale         \code{"log"} (default) or \code{"raw"}.
 #' @param meta          Optional metadata list (passed to \code{.apply_meta}).
 #'
-#' @return A \code{dynhr_diagnostic} with \code{$result} containing:
-#'   \describe{
-#'     \item{\code{eigenvalues}}{Numeric vector (length n), sorted descending.
-#'       These are curvatures of the negative log-posterior.}
-#'     \item{\code{condition_number}}{lambda_max / lambda_min_positive.
-#'       Large condition number => ill-conditioned Hessian / sloppy model.}
-#'     \item{\code{participation_ratio}}{(sum lambda)^2 / sum(lambda^2).
-#'       Effective number of stiff/identified directions (between 1 and n).
-#'       Values well below n indicate most stiffness is concentrated in few
-#'       directions.}
-#'     \item{\code{spectral_gap}}{lambda_1 / lambda_2 (ratio of largest to
-#'       second-largest eigenvalue); large gap means one dominant curvature.}
-#'     \item{\code{n_sloppy}}{Number of eigenvalues below
-#'       \code{lambda_max * sloppy_threshold}.}
-#'     \item{\code{flat_directions}}{A list of length \code{n_flat} (or fewer
-#'       if n < n_flat). Each element is a data.frame with columns
-#'       \code{parameter} (character), \code{loading} (signed eigenvector
-#'       component), and \code{abs_loading}, sorted by \code{abs_loading}
-#'       descending. Attribute \code{eigenvalue} gives the curvature for that
-#'       direction.}
-#'     \item{\code{hessian}}{The n x n negative log-posterior Hessian used.}
-#'   }
+#' @return A \code{dynhr_diagnostic} (\code{pass = NA}, informational) with
+#'   \code{$result} containing \code{eigenvalues} (descending),
+#'   \code{eigenvectors} (n x n, rows named by parameter), \code{class},
+#'   \code{condition_number} (\code{Inf} if any eigenvalue is unresolved or
+#'   negative, else lambda_max / lambda_min), \code{spread_decades}
+#'   (log10 of lambda_max over the smallest resolved positive eigenvalue),
+#'   \code{participation_ratio} (on eigenvalues clipped at 0; in [1, n]),
+#'   \code{spectral_gap}, \code{n_sloppy}, \code{n_unresolved},
+#'   \code{n_negative}, \code{sloppy_cutoff}, \code{noise_floor},
+#'   \code{fd_noise}, \code{scale}, \code{raw_scale_params},
+#'   \code{flat_directions} / \code{stiff_directions} (lists of loading
+#'   data.frames with attributes \code{eigenvalue}, \code{class_label}),
+#'   \code{hessian} (the matrix decomposed) and \code{hessian_raw}
+#'   (supplied path only).
 #'
 #' @references
 #'   Gutenkunst, R. N., Waterfall, J. J., Casey, F. P., Brown, K. S.,
@@ -91,261 +138,356 @@ d38_sloppiness <- function(theta,
                            sloppy_threshold = 1e-6,
                            n_top_loadings   = 5L,
                            h                = 1e-4,
+                           scale            = c("log", "raw"),
                            meta             = NULL) {
 
+  scale <- match.arg(scale)
+
   ## ------------------------------------------------------------------
-  ## 0. Setup
+  ## 0. Setup / validation
   ## ------------------------------------------------------------------
+  if (!is.numeric(theta) || length(theta) < 1L || !all(is.finite(theta)))
+    .dynhr_abort("d38: `theta` must be a non-empty, finite numeric vector")
   n <- length(theta)
   if (is.null(param_names))
     param_names <- if (!is.null(names(theta))) names(theta) else paste0("theta_", seq_len(n))
   if (length(param_names) != n)
-    stop(sprintf("d38: param_names length (%d) != length(theta) (%d)",
-                 length(param_names), n))
+    .dynhr_abort(sprintf("d38: param_names length (%d) != length(theta) (%d)",
+                         length(param_names), n))
+  if (!is.numeric(sloppy_threshold) || length(sloppy_threshold) != 1L ||
+      !is.finite(sloppy_threshold) || sloppy_threshold <= 0 || sloppy_threshold >= 1)
+    .dynhr_abort("d38: `sloppy_threshold` must be a single number in (0, 1)")
+  if (!is.numeric(h) || length(h) != 1L || !is.finite(h) || h <= 0)
+    .dynhr_abort("d38: `h` must be a single positive number")
 
-  n_flat <- min(as.integer(n_flat), n)
+  n_flat <- max(0L, min(as.integer(n_flat), n))
+  n_top_loadings <- max(1L, as.integer(n_top_loadings))
+
+  ## Log coordinates: u_i = log|theta_i|, theta_i = sign_i * exp(u_i),
+  ## d theta_i / d u_i = theta_i. Zero / non-finite params stay raw.
+  use_log <- if (scale == "log") theta != 0 else rep(FALSE, n)
+  raw_scale_params <- if (scale == "log") param_names[!use_log] else character(0)
+  if (length(raw_scale_params) > 0L)
+    .dynhr_warn(sprintf(paste0(
+      "d38: parameter(s) %s are exactly zero and have no log ",
+      "coordinate; kept on the raw scale, so the spectrum is not unit-free ",
+      "in those directions."), paste(raw_scale_params, collapse = ", ")))
 
   ## ------------------------------------------------------------------
-  ## 1. Obtain the negative log-posterior Hessian
+  ## 1. Obtain the negative log-posterior Hessian in the chosen coordinates
   ## ------------------------------------------------------------------
-  H <- NULL
+  H_raw    <- NULL
+  fd_noise <- NA_real_
 
   if (!is.null(hessian)) {
-    ## Caller-supplied matrix
     if (!is.matrix(hessian) || nrow(hessian) != n || ncol(hessian) != n)
-      stop("d38: `hessian` must be an n x n matrix where n = length(theta)")
-    H <- hessian
+      .dynhr_abort("d38: `hessian` must be an n x n matrix where n = length(theta)")
+    if (!all(is.finite(hessian)))
+      .dynhr_abort("d38: `hessian` contains non-finite entries")
+    H_raw <- 0.5 * (hessian + t(hessian))
+    dimnames(H_raw) <- list(param_names, param_names)
+    d <- ifelse(use_log, theta, 1)
+    H <- H_raw * outer(d, d)
   } else if (!is.null(log_post_fn)) {
-    ## Numerical Hessian of the log-posterior; num_hessian returns H of logpost
-    ## (curvatures in log-posterior), so negate to get curvatures of -logpost.
-    H_logpost <- num_hessian(log_post_fn, theta, h = h)
-    H <- -H_logpost
+    if (!is.function(log_post_fn))
+      .dynhr_abort("d38: `log_post_fn` must be a function")
+    sgn <- sign(theta)
+    u0  <- ifelse(use_log, log(abs(theta)), theta)
+    names(u0) <- names(theta)
+    to_theta <- function(u) {
+      th <- ifelse(use_log, sgn * exp(u), u)
+      names(th) <- names(theta)
+      th
+    }
+    g <- function(u) log_post_fn(to_theta(u))
+    H1 <- -num_hessian(g, u0, h = h)
+    H2 <- -num_hessian(g, u0, h = 2 * h)
+    if (!all(is.finite(H1)))
+      .dynhr_abort(paste0(
+        "d38: the finite-difference Hessian is non-finite; log_post_fn ",
+        "returned a non-finite value near theta (reduce `h` or move theta ",
+        "away from a boundary)"))
+    H1 <- 0.5 * (H1 + t(H1))
+    if (all(is.finite(H2))) {
+      H2 <- 0.5 * (H2 + t(H2))
+      fd_noise <- max(abs(eigen(H1 - H2, symmetric = TRUE, only.values = TRUE)$values))
+    }
+    H <- H1
   } else {
-    stop("d38: supply either `hessian` (pre-computed) or `log_post_fn`")
+    .dynhr_abort("d38: supply either `hessian` (pre-computed) or `log_post_fn`")
   }
 
-  ## Symmetrise (guard against tiny numerical asymmetry)
-  H <- 0.5 * (H + t(H))
-  rownames(H) <- colnames(H) <- param_names
+  dimnames(H) <- list(param_names, param_names)
 
   ## ------------------------------------------------------------------
   ## 2. Eigen-decomposition of the symmetric Hessian
   ## ------------------------------------------------------------------
-  ev <- tryCatch(
-    eigen(H, symmetric = TRUE),
-    error = function(e)
-      stop(sprintf("d38: eigen() failed: %s", conditionMessage(e)))
-  )
-
-  ## eigen() returns eigenvalues sorted DESCENDING for symmetric matrices.
-  lambdas   <- ev$values   # length n, descending
-  evectors  <- ev$vectors  # n x n
+  ev       <- eigen(H, symmetric = TRUE)
+  lambdas  <- ev$values                       # descending
+  evectors <- ev$vectors
+  dimnames(evectors) <- list(param_names, paste0("lambda_", seq_len(n)))
 
   ## ------------------------------------------------------------------
-  ## 3. Scalar summaries
+  ## 3. Noise floor, classes and scalar summaries
   ## ------------------------------------------------------------------
-  ## Work with eigenvalues; some may be negative (if not at the mode, or
-  ## near-singular prior). Report but handle gracefully.
-  lambda_pos <- lambdas[lambdas > 0]
+  abs_max     <- max(abs(lambdas))
+  noise_floor <- max(n * .Machine$double.eps * abs_max,
+                     if (is.finite(fd_noise)) 10 * fd_noise else 0)
+  lambda_max  <- lambdas[1]
+  sloppy_cutoff <- if (lambda_max > noise_floor) lambda_max * sloppy_threshold else NA_real_
 
-  lambda_max <- if (length(lambda_pos) > 0) max(lambda_pos) else NA_real_
-  lambda_min <- if (length(lambda_pos) > 0) min(lambda_pos) else NA_real_
+  cls <- ifelse(lambdas < -noise_floor, "negative",
+         ifelse(abs(lambdas) <= noise_floor, "unresolved",
+         ifelse(!is.na(sloppy_cutoff) & lambdas < sloppy_cutoff, "sloppy", "stiff")))
+  names(cls) <- colnames(evectors)
 
-  condition_number <- if (!is.na(lambda_max) && !is.na(lambda_min) &&
-                          lambda_min > 0)
-    lambda_max / lambda_min
-  else
-    Inf
+  n_sloppy     <- sum(cls == "sloppy")
+  n_unresolved <- sum(cls == "unresolved")
+  n_negative   <- sum(cls == "negative")
 
-  ## Participation ratio: (sum lambda)^2 / sum(lambda^2)
-  ## Use all eigenvalues (can be negative off-mode); clamp to [1, n].
-  sum_lam  <- sum(lambdas)
-  sum_lam2 <- sum(lambdas^2)
-  participation_ratio <- if (sum_lam2 > 0)
-    sum_lam^2 / sum_lam2
-  else
-    NA_real_
+  resolved_pos <- lambdas[lambdas > noise_floor]
+  spread_decades <- if (length(resolved_pos) >= 1L)
+    log10(max(resolved_pos) / min(resolved_pos)) else NA_real_
+  condition_number <- if (length(resolved_pos) == 0L || n_unresolved + n_negative > 0L)
+    Inf else max(resolved_pos) / min(resolved_pos)
 
-  spectral_gap <- if (length(lambdas) >= 2 && lambdas[2] != 0)
-    lambdas[1] / lambdas[2]
-  else
-    NA_real_
+  lam_clip <- pmax(lambdas, 0)
+  participation_ratio <- if (sum(lam_clip^2) > 0)
+    sum(lam_clip)^2 / sum(lam_clip^2) else NA_real_
 
-  ## Sloppy count: eigenvalues below lambda_max * sloppy_threshold
-  sloppy_cutoff <- if (!is.na(lambda_max)) lambda_max * sloppy_threshold else NA_real_
-  n_sloppy <- if (!is.na(sloppy_cutoff))
-    sum(lambdas < sloppy_cutoff)
-  else
-    NA_integer_
+  spectral_gap <- if (n >= 2L && lambdas[2] > noise_floor)
+    lambdas[1] / lambdas[2] else NA_real_
 
   ## ------------------------------------------------------------------
-  ## 4. Attribution — flat-direction loading tables
+  ## 4. Attribution — loading tables (flattest = smallest |lambda|)
   ## ------------------------------------------------------------------
-  ## The flattest directions are the LAST columns of ev$vectors
-  ## (eigenvalues sorted descending => last = smallest).
-  flat_directions <- vector("list", n_flat)
-
-  for (k in seq_len(n_flat)) {
-    col_idx   <- n - k + 1L        # last column = flattest
-    eigenval  <- lambdas[col_idx]
-    evec      <- evectors[, col_idx]
-
-    df <- data.frame(
-      parameter   = param_names,
-      loading     = evec,
-      abs_loading = abs(evec),
-      stringsAsFactors = FALSE
-    )
-    df <- df[order(df$abs_loading, decreasing = TRUE), ]
+  loading_table <- function(col_idx) {
+    evec <- evectors[, col_idx]
+    df <- data.frame(parameter = param_names, loading = unname(evec),
+                     abs_loading = unname(abs(evec)), stringsAsFactors = FALSE)
+    df <- df[order(df$abs_loading, decreasing = TRUE), , drop = FALSE]
+    df <- df[seq_len(min(n_top_loadings, nrow(df))), , drop = FALSE]
     rownames(df) <- NULL
-
-    if (n_top_loadings < n)
-      df <- df[seq_len(min(n_top_loadings, nrow(df))), ]
-
-    attr(df, "eigenvalue") <- eigenval
-    attr(df, "direction")  <- k          # 1 = flattest
-    flat_directions[[k]]   <- df
+    attr(df, "eigenvalue") <- lambdas[col_idx]
+    attr(df, "class_label") <- cls[[col_idx]]
+    attr(df, "index") <- col_idx
+    df
   }
-  names(flat_directions) <- paste0("flat_", seq_len(n_flat))
+  flat_order  <- order(abs(lambdas))[seq_len(n_flat)]
+  stiff_order <- seq_len(n_flat)
+  flat_directions  <- lapply(flat_order, loading_table)
+  stiff_directions <- lapply(stiff_order, loading_table)
+  for (k in seq_along(flat_directions)) attr(flat_directions[[k]], "direction") <- k
+  names(flat_directions)  <- sprintf("flat_%d", seq_len(n_flat))
+  names(stiff_directions) <- sprintf("stiff_%d", seq_len(n_flat))
 
   ## ------------------------------------------------------------------
-  ## 5. Plots (optional, ggplot2)
+  ## 5. Plots
   ## ------------------------------------------------------------------
+  coord_lab <- if (scale == "log") "log-parameters" else "raw parameters"
   plots <- list()
   if (requireNamespace("ggplot2", quietly = TRUE)) {
-
-    ## (a) Eigenvalue spectrum (log scale)
-    eig_df <- data.frame(
-      index  = seq_along(lambdas),
-      lambda = lambdas
-    )
-    eig_df$sloppy <- if (!is.na(sloppy_cutoff))
-      eig_df$lambda < sloppy_cutoff
-    else
-      FALSE
-
-    p_spec <- ggplot2::ggplot(
-      eig_df,
-      ggplot2::aes(x = index, y = pmax(lambda, .Machine$double.eps),
-                   colour = sloppy)
-    ) +
-      ggplot2::geom_point(size = 2) +
-      ggplot2::geom_line(linewidth = 0.4, colour = "grey70") +
-      ggplot2::scale_y_log10() +
-      ggplot2::scale_colour_manual(
-        values = c("FALSE" = "#1A5276", "TRUE" = "#C0392B"),
-        labels = c("FALSE" = "Stiff", "TRUE" = "Sloppy"),
-        name   = NULL
-      ) +
-      theme_dynhr_diagnostic() +
-      ggplot2::labs(
-        title    = "D38: Posterior Hessian eigenvalue spectrum",
-        subtitle = sprintf(
-          "cond = %.2e | PR = %.2f / %d | n_sloppy = %d",
-          condition_number, participation_ratio %||% NA_real_, n, n_sloppy
-        ),
-        x = "Eigenvalue index (1 = stiffest)",
-        y = "Eigenvalue (log scale)"
-      )
-    plots$spectrum <- .apply_meta(p_spec, meta)
-
-    ## (b) Loading bar chart for the flattest direction
-    if (n_flat >= 1L && nrow(flat_directions[[1]]) > 0) {
-      fd1 <- flat_directions[[1]]
-      p_load <- ggplot2::ggplot(
-        fd1[seq_len(min(10L, nrow(fd1))), ],
-        ggplot2::aes(
-          x    = stats::reorder(parameter, abs_loading),
-          y    = loading,
-          fill = loading > 0
-        )
-      ) +
-        ggplot2::geom_col(width = 0.7) +
-        ggplot2::coord_flip() +
-        ggplot2::scale_fill_manual(
-          values = c("TRUE" = "#1A5276", "FALSE" = "#C0392B"),
-          guide  = "none"
-        ) +
-        theme_dynhr_diagnostic() +
-        ggplot2::labs(
-          title    = sprintf("D38: Flattest eigendirection (lambda = %.3e)",
-                             attr(flat_directions[[1]], "eigenvalue")),
-          subtitle = "Parameters with largest absolute loading define the flat ridge",
-          x = NULL, y = "Eigenvector loading"
-        )
-      plots$flat_direction_1 <- .apply_meta(p_load, meta)
-    }
+    plots <- .d38_plots(lambdas, cls, evectors, flat_order, n_flat,
+                        noise_floor, sloppy_cutoff, sloppy_threshold,
+                        coord_lab, n, n_sloppy, n_unresolved, n_negative,
+                        spread_decades, meta)
   }
 
   ## ------------------------------------------------------------------
   ## 6. Assemble result
   ## ------------------------------------------------------------------
-  ## pass = NA (informational) — sloppiness is a spectrum, not pass/fail.
-  ## Flag as WARN if condition_number is extreme (>1e8) or n_sloppy > 0.
-  is_sloppy <- isTRUE(n_sloppy > 0)
+  fmt_dir <- function(fd) {
+    top <- head(fd, 3L)
+    paste(sprintf("%s%s(%.2f)", ifelse(top$loading >= 0, "+", "-"),
+                  top$parameter, top$abs_loading), collapse = " ")
+  }
+  flagged <- n_sloppy + n_unresolved + n_negative > 0L
+  flat_txt <- if (flagged && n_flat >= 1L)
+    sprintf(" | flattest (lambda=%.3g, %s): %s",
+            attr(flat_directions[[1]], "eigenvalue"),
+            attr(flat_directions[[1]], "class_label"),
+            fmt_dir(flat_directions[[1]]))
+  else ""
+  raw_txt <- if (length(raw_scale_params))
+    sprintf(" | raw-scale: %s", paste(raw_scale_params, collapse = ", ")) else ""
 
-  summary_text <- sprintf(
-    paste0(
-      "D38 Sloppiness spectrum: n=%d params | ",
-      "cond=%.2e | PR=%.2f | n_sloppy=%d | spectral_gap=%.2f%s"
-    ),
-    n,
-    condition_number,
-    participation_ratio %||% NA_real_,
-    n_sloppy %||% 0L,
-    spectral_gap %||% NA_real_,
-    if (is_sloppy) {
-      top_flat <- flat_directions[[1]]
-      top2 <- head(top_flat$parameter, 2)
-      sprintf(" | flattest ridge: %s", paste(top2, collapse = " + "))
-    } else ""
-  )
+  summary_text <- sprintf(paste0(
+    "D38 Sloppiness spectrum (%s): n=%d | spread=%.1f decades | cond=%.2e | ",
+    "PR=%.2f | sloppy=%d unresolved=%d negative=%d%s%s"),
+    coord_lab, n, spread_decades, condition_number, participation_ratio,
+    n_sloppy, n_unresolved, n_negative, flat_txt, raw_txt)
+
+  action <- if (n_negative > 0L)
+    "Hessian has negative curvature: theta is not a posterior mode; re-run the mode finder before reading the spectrum."
+  else if (n_unresolved > 0L)
+    "Some curvature is indistinguishable from zero/FD noise: the listed combination is (locally) unidentified; add information or fix a parameter."
+  else if (n_sloppy > 0L)
+    sprintf("Sloppy model: %d direction(s) below lambda_max*%.0e. Consider tightening priors, reparameterising, or adding observables for the flat combination.",
+            n_sloppy, sloppy_threshold)
+  else
+    "No eigenvalue below the sloppy cutoff; posterior curvature spread is moderate."
+
+  llm_summary <- paste(c(
+    "D38 | Sloppiness Spectrum | INFO",
+    sprintf("  coords=%s n_params=%d spread_decades=%.2f cond=%.2e PR=%.2f",
+            coord_lab, n, spread_decades, condition_number, participation_ratio),
+    sprintf("  n_sloppy=%d n_unresolved=%d n_negative=%d cutoff=%.3e noise_floor=%.3e",
+            n_sloppy, n_unresolved, n_negative, sloppy_cutoff, noise_floor),
+    sprintf("  eigenvalues: %s",
+            paste(sprintf("%.3e", head(lambdas, 10L)), collapse = ", ")),
+    if (n_flat >= 1L)
+      sprintf("  flattest direction (lambda=%.3e, %s): %s",
+              attr(flat_directions[[1]], "eigenvalue"),
+              attr(flat_directions[[1]], "class_label"),
+              fmt_dir(flat_directions[[1]])),
+    if (n_flat >= 1L)
+      sprintf("  stiffest direction (lambda=%.3e): %s",
+              attr(stiff_directions[[1]], "eigenvalue"),
+              fmt_dir(stiff_directions[[1]])),
+    if (length(raw_scale_params))
+      sprintf("  raw_scale_params (zero-valued, not unit-free): %s",
+              paste(raw_scale_params, collapse = ", ")),
+    sprintf("  action: %s", action)
+  ), collapse = "\n")
 
   .make_result(
     result  = list(
       eigenvalues         = lambdas,
+      eigenvectors        = evectors,
+      class               = cls,
       condition_number    = condition_number,
+      spread_decades      = spread_decades,
       participation_ratio = participation_ratio,
       spectral_gap        = spectral_gap,
       n_sloppy            = n_sloppy,
+      n_unresolved        = n_unresolved,
+      n_negative          = n_negative,
       sloppy_cutoff       = sloppy_cutoff,
+      noise_floor         = noise_floor,
+      fd_noise            = fd_noise,
+      scale               = scale,
+      raw_scale_params    = raw_scale_params,
       flat_directions     = flat_directions,
-      hessian             = H
+      stiff_directions    = stiff_directions,
+      hessian             = H,
+      hessian_raw         = H_raw
     ),
-    pass    = NA,   # informational: no binary pass/fail threshold
-    plots   = plots,
-    summary = summary_text,
-    llm_summary = {
-      paste(c(
-        sprintf("D38 | Sloppiness Spectrum | INFO"),
-        sprintf("  n_params=%d  cond=%.2e  participation_ratio=%.2f  n_sloppy=%d",
-                n, condition_number, participation_ratio %||% NA_real_,
-                n_sloppy %||% 0L),
-        sprintf("  eigenvalues (top 5): %s",
-                paste(sprintf("%.3e", head(lambdas, 5)), collapse = ", ")),
-        sprintf("  eigenvalues (bot 5): %s",
-                paste(sprintf("%.3e", tail(lambdas, 5)), collapse = ", ")),
-        if (is_sloppy && length(flat_directions) >= 1L) {
-          fd <- flat_directions[[1]]
-          sprintf("  flattest direction (lambda=%.3e): %s",
-                  attr(fd, "eigenvalue"),
-                  paste(head(fd$parameter, 3), collapse = " + "))
-        } else
-          "  no sloppy directions detected at threshold",
-        sprintf(
-          "  action: %s",
-          if (!is_sloppy)
-            "Posterior well-curvated in all directions; no flat ridges detected."
-          else
-            sprintf(paste0(
-              "Sloppy model: %d flat direction(s). ",
-              "Consider tightening priors, reparameterising, ",
-              "or adding observables for the flat combination."
-            ), n_sloppy)
-        )
-      ), collapse = "\n")
-    }
+    pass        = NA,   # informational: sloppiness is a spectrum
+    plots       = plots,
+    summary     = summary_text,
+    llm_summary = llm_summary
   )
+}
+
+
+## Plot builder for D38: eigenvalue ladder + flat-direction loadings.
+#' @noRd
+.d38_plots <- function(lambdas, cls, evectors, flat_order, n_flat,
+                       noise_floor, sloppy_cutoff, sloppy_threshold,
+                       coord_lab, n, n_sloppy, n_unresolved, n_negative,
+                       spread_decades, meta) {
+  cls_cols <- c(stiff      = unname(tol_vibrant["blue"]),
+                sloppy     = unname(tol_vibrant["orange"]),
+                unresolved = unname(tol_vibrant["grey"]),
+                negative   = unname(tol_vibrant["red"]))
+  cls_shapes <- c(stiff = 16, sloppy = 16, unresolved = 1, negative = 4)
+  cls_labs <- c(stiff = "stiff", sloppy = "sloppy",
+                unresolved = "unresolved (<= noise floor)",
+                negative = "negative (magnitude shown)")
+  present <- intersect(names(cls_cols), unique(cls))
+
+  abs_l <- abs(lambdas)
+  pos   <- abs_l[abs_l > 0]
+  y_min <- min(c(pos, noise_floor[noise_floor > 0], sloppy_cutoff[is.finite(sloppy_cutoff)],
+                 if (!length(pos)) 1)) / 10
+  eig_df <- data.frame(index = seq_along(lambdas),
+                       y     = pmax(abs_l, y_min),
+                       class = factor(cls, levels = names(cls_cols)))
+
+  ## Reference lines: cutoff labelled above-right, noise floor below-left so
+  ## the two labels never collide when the lines are close.
+  ref <- data.frame(y = numeric(0), lab = character(0), lt = character(0),
+                    x = numeric(0), hj = numeric(0), vj = numeric(0))
+  if (is.finite(sloppy_cutoff))
+    ref <- rbind(ref, data.frame(
+      y = sloppy_cutoff, lt = "dashed", x = n + 0.45, hj = 1, vj = -0.4,
+      lab = sprintf("sloppy cutoff = lambda_max x %.0e", sloppy_threshold)))
+  if (noise_floor > 0)
+    ref <- rbind(ref, data.frame(y = noise_floor, lt = "dotted",
+                                 x = 0.55, hj = 0, vj = 1.4,
+                                 lab = "noise floor"))
+
+  p_spec <- ggplot2::ggplot(eig_df, ggplot2::aes(x = index, y = y)) +
+    ggplot2::geom_segment(ggplot2::aes(x = index - 0.35, xend = index + 0.35,
+                                       yend = y, colour = class),
+                          linewidth = 1.1) +
+    ggplot2::geom_point(ggplot2::aes(colour = class, shape = class), size = 2.4)
+  if (nrow(ref) > 0L) {
+    p_spec <- p_spec +
+      ggplot2::geom_hline(data = ref, ggplot2::aes(yintercept = y),
+                          linetype = ref$lt, colour = dynhr_colours$grey) +
+      ggplot2::annotate("text", x = ref$x, y = ref$y, label = ref$lab,
+                        hjust = ref$hj, vjust = ref$vj, size = 3.2,
+                        colour = "grey30")
+  }
+  p_spec <- p_spec +
+    ggplot2::scale_y_log10() +
+    ggplot2::scale_x_continuous(breaks = seq_len(n),
+                                limits = c(0.5, n + 0.5)) +
+    ggplot2::scale_colour_manual(values = cls_cols[present],
+                                 labels = cls_labs[present],
+                                 breaks = present, name = NULL, drop = TRUE) +
+    ggplot2::scale_shape_manual(values = cls_shapes[present],
+                                labels = cls_labs[present],
+                                breaks = present, name = NULL, drop = TRUE) +
+    theme_dynhr_diagnostic() +
+    ggplot2::theme(legend.position = "bottom") +
+    ggplot2::labs(
+      title    = sprintf("D38: Hessian eigenvalue ladder (%s)", coord_lab),
+      subtitle = sprintf(
+        "spread = %.1f decades | sloppy = %d, unresolved = %d, negative = %d",
+        spread_decades, n_sloppy, n_unresolved, n_negative),
+      x = "Eigen-direction (1 = stiffest)",
+      y = "Eigenvalue magnitude of -Hessian (log scale)")
+  plots <- list(spectrum = .apply_meta(p_spec, meta))
+
+  if (n_flat >= 1L) {
+    pn <- rownames(evectors)
+    ld <- do.call(rbind, lapply(seq_len(n_flat), function(k) {
+      j <- flat_order[k]
+      v <- evectors[, j]
+      keep <- order(abs(v), decreasing = TRUE)[seq_len(min(10L, length(v)))]
+      data.frame(
+        panel = sprintf("flat %d (%s)\nlambda = %.3g", k, cls[[j]], lambdas[j]),
+        k = k, parameter = pn[keep], loading = unname(v[keep]),
+        key = sprintf("%s___%d", pn[keep], k),
+        stringsAsFactors = FALSE)
+    }))
+    ld$panel <- factor(ld$panel, levels = unique(ld$panel[order(ld$k)]))
+    ld$key   <- factor(ld$key, levels = ld$key[order(ld$k, abs(ld$loading))])
+    ld$sign  <- factor(ifelse(ld$loading >= 0, "positive", "negative"),
+                       levels = c("positive", "negative"))
+    p_load <- ggplot2::ggplot(ld, ggplot2::aes(x = loading, y = key, fill = sign)) +
+      ggplot2::geom_col(width = 0.7) +
+      ggplot2::geom_vline(xintercept = 0, colour = dynhr_colours$grey,
+                          linewidth = 0.3) +
+      ggplot2::facet_wrap(~panel, scales = "free_y",
+                          ncol = min(3L, n_flat)) +
+      ggplot2::scale_y_discrete(labels = function(x) sub("___[0-9]+$", "", x)) +
+      ggplot2::scale_x_continuous(limits = c(-1, 1)) +
+      ggplot2::scale_fill_manual(
+        values = c(positive = unname(tol_vibrant["blue"]),
+                   negative = unname(tol_vibrant["orange"])),
+        drop = FALSE, name = "loading sign") +
+      theme_dynhr_diagnostic() +
+      ggplot2::theme(legend.position = "bottom") +
+      ggplot2::labs(
+        title    = sprintf("D38: Flattest eigen-directions (%s)", coord_lab),
+        subtitle = "Unit eigenvector loadings; the overall sign of each direction is arbitrary",
+        x = "Eigenvector loading", y = NULL)
+    plots$flat_directions <- .apply_meta(p_load, meta)
+  }
+  plots
 }
 
 
@@ -357,24 +499,34 @@ d38_sloppiness <- function(theta,
 #'
 #' Compute the eigen-spectrum of the negative log-posterior Hessian at
 #' \code{theta} to diagnose parameter-space ridge / flat-direction difficulty
-#' ("sloppy" directions following Gutenkunst et al. 2007).
+#' ("sloppy" directions following Gutenkunst et al. 2007). By default the
+#' Hessian is taken with respect to log-parameters, so the eigenvalues are
+#' unit-free; zero-valued parameters stay on their raw scale (with a warning).
+#' Eigenvalues are classed stiff / sloppy / unresolved (below the
+#' finite-difference noise floor) / negative (theta is not a mode).
 #'
-#' @inheritParams d38_sloppiness
-#' @param theta       Numeric parameter vector at which to assess sloppiness.
-#' @param log_post_fn Optional log-posterior function of \code{theta}; if
-#'   supplied (or built from \code{model}), the Hessian is formed numerically.
-#' @param hessian     Optional pre-computed Hessian of the negative
+#' @param theta       Named numeric parameter vector at which to assess
+#'   sloppiness (raw scale).
+#' @param log_post_fn Optional log-posterior function of raw \code{theta}; if
+#'   supplied (or built from \code{model}), the Hessian is formed numerically
+#'   in the coordinates given by \code{scale}, at steps \code{h} and
+#'   \code{2h} (their difference sets the noise floor).
+#' @param hessian     Optional pre-computed RAW-scale Hessian of the negative
 #'   log-posterior at \code{theta}; supplied instead of \code{log_post_fn}.
+#'   With \code{scale = "log"} it is transformed to
+#'   \code{diag(theta) \%*\% hessian \%*\% diag(theta)} (exact at a mode).
 #' @param param_names Optional character vector of parameter names (for
 #'   labelling the eigenvector loadings).
-#' @param n_flat      Integer number of flattest (sloppiest) eigendirections
-#'   to report (default 3).
-#' @param sloppy_threshold Eigenvalue below which a direction is deemed
-#'   "sloppy" (default 1e-6).
-#' @param n_top_loadings Integer number of top parameter loadings to report
-#'   per sloppy direction (default 5).
-#' @param h           Finite-difference step for the numerical Hessian
-#'   (default 1e-4).
+#' @param n_flat      Integer number of flattest (smallest |eigenvalue|) and
+#'   stiffest eigendirections to tabulate (default 3).
+#' @param sloppy_threshold Relative threshold in (0, 1): eigenvalues below
+#'   \code{lambda_max * sloppy_threshold} are "sloppy" (default 1e-6).
+#' @param n_top_loadings Integer number of top parameter loadings kept per
+#'   tabulated direction (default 5).
+#' @param h           Finite-difference step (default 1e-4; log units when
+#'   \code{scale = "log"}).
+#' @param scale       \code{"log"} (default; unit-free) or \code{"raw"}.
+#' @param meta        Optional \code{diag_meta()} list for plot captions.
 #' @param model       Optional parsed dynhr model (used to build
 #'   \code{log_post_fn} when neither \code{hessian} nor \code{log_post_fn}
 #'   are supplied).
@@ -390,9 +542,16 @@ d38_sloppiness <- function(theta,
 #' @param \dots       Passed to \code{make_log_posterior} when constructing
 #'   the log-posterior internally.
 #'
-#' @return A \code{dynhr_diagnostic} (see \code{d38_sloppiness} for
-#'   the full \code{$result} structure). Pass is always \code{NA}
-#'   (informational).
+#' @return A \code{dynhr_diagnostic} with \code{pass = NA} (informational).
+#'   \code{$result} holds \code{eigenvalues}, \code{eigenvectors} (rows named
+#'   by parameter), \code{class}, \code{condition_number},
+#'   \code{spread_decades}, \code{participation_ratio}, \code{spectral_gap},
+#'   \code{n_sloppy}, \code{n_unresolved}, \code{n_negative},
+#'   \code{sloppy_cutoff}, \code{noise_floor}, \code{fd_noise}, \code{scale},
+#'   \code{raw_scale_params}, \code{flat_directions},
+#'   \code{stiff_directions}, \code{hessian} and \code{hessian_raw}.
+#'   Plots: \code{spectrum} (eigenvalue ladder with the cutoff and noise
+#'   floor drawn) and \code{flat_directions} (loadings).
 #'
 #' @seealso \code{d1_local_identification},
 #'   \code{d20_fisher_identification_strength}
@@ -411,13 +570,13 @@ diag_sloppiness <- function(theta,
                             sloppy_threshold = 1e-6,
                             n_top_loadings   = 5L,
                             h                = 1e-4,
+                            scale            = c("log", "raw"),
+                            meta             = NULL,
                             ...) {
 
-  ## If none of hessian or log_post_fn are supplied, try to build log_post_fn
-  ## from model + data.
   if (is.null(hessian) && is.null(log_post_fn)) {
     if (is.null(model) || is.null(data) || is.null(obs_vars) || is.null(compiled))
-      stop(paste0(
+      .dynhr_abort(paste0(
         "diag_sloppiness: supply either `hessian`, `log_post_fn`, ",
         "or (model + data + obs_vars + compiled)"
       ))
@@ -440,6 +599,8 @@ diag_sloppiness <- function(theta,
     n_flat           = n_flat,
     sloppy_threshold = sloppy_threshold,
     n_top_loadings   = n_top_loadings,
-    h                = h
+    h                = h,
+    scale            = match.arg(scale),
+    meta             = meta
   )
 }

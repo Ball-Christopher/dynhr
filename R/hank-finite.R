@@ -44,8 +44,7 @@
 
 #' Emit the anchored coarse-grid finite-state HANK as a dynhr .mod
 #'
-#' Direct port of the Tier-18/m5 prototype emitter
-#' (\code{.claude/orchestration/truncation/m5_mod_emit.R}). Writes the
+#' Direct port of the Tier-18/m5 prototype emitter. Writes the
 #' finite-state HANK's EQUILIBRIUM CONDITIONS directly (the standard way
 #' Reiter-style models are fed to Dynare-style parsers), rather than
 #' symbolically differentiating the EGM backward step (which is not
@@ -357,8 +356,7 @@ hank_finite_mod <- function(ks, rho_z, sigma_z, path = NULL, order = 1L,
 #' \code{stoch_simul()} itself is order-1-only, so orders 2/3 MUST go through
 #' \code{compile_model(max_order = k)} followed by the explicit
 #' \code{solve_perturbation() -> solve_perturbation_order2(dr1=) ->
-#' solve_perturbation_order3(dr2=)} chain (see
-#' \code{.claude/orchestration/truncation/m5_orders23_SCOPE.md}).
+#' solve_perturbation_order3(dr2=)} chain.
 #'
 #' Order 3 requires the SPARSE Kronecker route (\code{sparse = TRUE}): the
 #' emitted system's DENSE third-order solve (\code{ghxxx}) is a documented cost
@@ -421,10 +419,10 @@ hank_finite_solve <- function(ks, order = 1L, rho_z = 0.9, sigma_z = 0.01,
     # must knowingly choose the sparse route.
     stop("hank_finite_solve(): order = 3 is not supported for the emitted ",
          "finite HANK via the DENSE path -- the dense third-order solve ",
-         "(ghxxx) is a documented cost wall (>4h CPU / 27GB RSS at 38 vars: ",
-         "see .claude/orchestration/truncation/m5_orders23_SCOPE.md). Pass ",
+         "(ghxxx) is prohibitively expensive (measured > 4 h CPU and 27 GB ",
+         "RSS at 38 variables). Pass ",
          "sparse = TRUE to use the memory-light sparse Kronecker route ",
-         "(deferred wall now feasible, ~20-90 s at n_a = 8).")
+         "(about 20-90 s at n_a = 8).")
   }
   if (!order %in% c(1L, 2L, 3L))
     stop("hank_finite_solve(): `order` must be 1, 2, or 3 (order 3 requires ",

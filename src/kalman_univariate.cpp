@@ -21,6 +21,8 @@
 // one-for-one; parity is asserted in test-kalman-univariate.R.
 
 #include <RcppArmadillo.h>
+#include <algorithm>
+#include <cmath>
 // [[Rcpp::depends(RcppArmadillo)]]
 
 using Rcpp::List;
@@ -56,6 +58,12 @@ List kalman_univariate_loop_cpp(const arma::mat& Y_minus_d,
   // Per-period count of observation components skipped because their
   // forecast variance was (numerically) zero (see the skip branch below).
   arma::ivec n_skipped(n_T, arma::fill::zeros);
+  // ...and how many of those carried a NON-NEGLIGIBLE innovation (a skipped
+  // component the model says is impossible, not one it predicts exactly).
+  // Same rule as .kf_informative_skip() in R/kalman-filter.R:
+  //   |v| > sqrt(kalman_tol) * max(1, |y|).
+  arma::ivec n_skipped_inf(n_T, arma::fill::zeros);
+  const double sqrt_ktol = std::sqrt(kalman_tol);
   arma::mat filtered;
   if (return_filtered) filtered.zeros(n_state, n_T);
 
@@ -93,6 +101,11 @@ List kalman_univariate_loop_cpp(const arma::mat& Y_minus_d,
   std::vector<double>      invF_seq;  // 1 / F_i
   std::vector<double>      cst_seq;   // 0.5 * (log2pi + log F_i)
   std::vector<arma::uword> idx_seq;   // observable index i
+  // Observables SKIPPED (F_star <= kalman_tol) in the capture period. The
+  // frozen pattern skips them in every locked period too, so they are still
+  // counted -- and their innovation checked -- there (the locked
+  // path used to drop them without incrementing n_skipped).
+  std::vector<arma::uword> skip_seq;
 
   for (arma::uword t = 0; t < n_T; ++t) {
     if (ss_engaged) {
@@ -103,6 +116,17 @@ List kalman_univariate_loop_cpp(const arma::mat& Y_minus_d,
         const double v   = y_i - arma::dot(Zb.row(idx_seq[s]), a);
         ll_t -= cst_seq[s] + 0.5 * v * v * invF_seq[s];
         a    += g_seq[s] * (v * invF_seq[s]);
+      }
+      // Skipped components of the frozen pattern. Taking their innovation
+      // after ALL processed updates (rather than at their slot in the
+      // processing order) gives the same Z_i a: F_i = Z_i P Z_i' = 0 with P
+      // PSD forces Z_i P = 0, so no later gain K_j = P Z_j' moves Z_i a.
+      for (std::size_t s = 0; s < skip_seq.size(); ++s) {
+        const double y_i = Y_minus_d(skip_seq[s], t);
+        const double v   = y_i - arma::dot(Zb.row(skip_seq[s]), a);
+        n_skipped(t) += 1;
+        if (std::abs(v) > sqrt_ktol * std::max(1.0, std::abs(y_i)))
+          n_skipped_inf(t) += 1;
       }
       if (!std::isfinite(ll_t) || ll_t < ll_min) { ok = false; break; }
       loglik += ll_t; ll_contrib(t) = ll_t;
@@ -131,7 +155,9 @@ List kalman_univariate_loop_cpp(const arma::mat& Y_minus_d,
       if (diffuse) {
         K_inf = P_inf * Zi.t();
         const double F_inf = arma::dot(Zi, K_inf);
-        if (F_inf > diffuse_tol * std::max(1.0, F_star)) {
+        // F_inf is unit-free (P_inf = A_inf A_inf'): tested on its own, as in
+        // the R loop (W77; a max(1, F_star) scale grew with the data's units).
+        if (F_inf > diffuse_tol) {
           // Diffuse update (DK 2012 sec. 7.2.5). No 2*pi and no quadratic
           // term: same renormalization convention as the multivariate
           // Case B in .kf_diffuse_phase (see the NOTE there).
@@ -171,6 +197,9 @@ List kalman_univariate_loop_cpp(const arma::mat& Y_minus_d,
         // kalman_filter() can report it as structured diagnostics rather than
         // leaving the caller to infer it.
         n_skipped(t) += 1;
+        if (std::abs(v) > sqrt_ktol * std::max(1.0, std::abs(y_i)))
+          n_skipped_inf(t) += 1;
+        if (ss_capture) skip_seq.push_back(i);
       }
     }
 
@@ -200,8 +229,7 @@ List kalman_univariate_loop_cpp(const arma::mat& Y_minus_d,
       P_inf.zeros();
       P_inf.submat(0, 0, ns - 1, ns - 1) = Mi;
       P_inf = 0.5 * (P_inf + P_inf.t());
-      if (arma::abs(P_inf).max() <
-          conv_tol * std::max(1.0, arma::abs(P_star).max())) {
+      if (arma::abs(P_inf).max() < conv_tol) {    // unit-free (W77)
         diffuse   = false;
         d_diffuse = static_cast<int>(t) + 1;  // 1-based, as in R
       }
@@ -215,10 +243,13 @@ List kalman_univariate_loop_cpp(const arma::mat& Y_minus_d,
         ss_capture = false;
       } else if (have_prev &&
                  arma::abs(P_star - P_prev).max() <
-                   conv_tol * std::max(1.0, arma::abs(P_star).max())) {
+                   conv_tol * arma::abs(P_star).max()) {
         // RELATIVE tolerance: a near-unit-root model has a large stationary
-        // covariance, so an absolute test never converges (cf. the diffuse
-        // collapse check above and the solve_lyapunov relative-tol fix).
+        // covariance, so an absolute test never converges (cf. the
+        // solve_lyapunov relative-tol fix). Purely relative -- no max(1, .)
+        // floor, which made it absolute for max|P| < 1 and froze a
+        // small-scale model's gains early (W76, 2026-09-26; the multivariate
+        // lock in kalman_standard_loop_cpp is relative the same way).
         ss_capture = true;            // capture the gain sequence next period
       }
       P_prev    = P_star;             // start-of-next-period covariance
@@ -241,5 +272,6 @@ List kalman_univariate_loop_cpp(const arma::mat& Y_minus_d,
                       _["d_diffuse"]      = d_diffuse,
                       _["diffuse_failed"] = diffuse_failed,
                       _["ll_contrib"]     = ll_contrib,
-                      _["n_skipped"]      = n_skipped);
+                      _["n_skipped"]      = n_skipped,
+                      _["n_skipped_informative"] = n_skipped_inf);
 }

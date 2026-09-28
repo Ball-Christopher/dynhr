@@ -143,7 +143,7 @@
   if (is.null(H_base))
     stop(".solution_adjoint_order2: could not compute model Hessian at base")
   if (!is.null(compiled$model$equations)) {
-    eq_to_decl <- .build_eq_to_decl(compiled$model)
+    eq_to_decl <- sys0$eq_to_decl %||% .build_eq_to_decl(compiled$model)
     if (all(eq_to_decl > 0L) && !identical(eq_to_decl, seq_len(n))) {
       perm <- order(eq_to_decl)
       H_perm <- array(0, dim = dim(H_base))
@@ -481,13 +481,31 @@
                                     H_base, h_rel, h_hess, n, n_s, n_u,
                                     endo_names, exo_names, state_idx) {
   np <- length(param_names)
+  ## Requested names that are NOT model parameters (estimated shock stds,
+  ## injected into `params` under the shock name by apply_theta_to_params())
+  ## enter no residual function: dfp/df0/dfu/dG/dH/dHmat are exactly zero and
+  ## only their d(Sigma_e) -- which moves ghss through vSe -- is non-zero. The
+  ## first-order layer and the analytic tensors are indexed by
+  ## compiled$model$param_names only, so they are asked for the model
+  ## parameters alone (asking for a shock name was a subscript-out-of-bounds
+  ## crash; ls2003 cumulant, W65).
+  model_pars <- compiled$model$param_names %||% names(model$param_values)
+  struct_names <- param_names[param_names %in% model_pars]
   ## dG/dH from the first-order layer (shared with the forward path).
-  first <- solution_derivatives(model, compiled, dr2, params, param_names,
-                                obs_vars = endo_names, h_rel = h_rel)
+  first <- if (length(struct_names))
+    solution_derivatives(model, compiled, dr2, params, struct_names,
+                         obs_vars = endo_names, h_rel = h_rel)
+  else list(derivs = list())
 
   use_analytic <- .can_use_analytic_primitive_deriv(compiled) &&
     isTRUE(compiled$dynamic$param_hess2_built) &&
     isTRUE(compiled$dynamic$hessian3_built)
+
+  ## Hessian-derivative row map: the one H_base / the level blocks were
+  ## reordered by (extract_system_matrices' eq_to_decl, incl. the f_zero
+  ## compound-LHS refinement), not a bare .build_eq_to_decl(model).
+  e2d_base <- if (!is.null(compiled$model$equations))
+    .extract_eq_to_decl(compiled, dr2$ys, params) else NULL
 
   dprim_an <- NULL; dH_an <- NULL
   if (use_analytic) {
@@ -501,12 +519,12 @@
     } else {
       perm_dh <- NULL
       if (!is.null(compiled$model$equations)) {
-        e2d <- .build_eq_to_decl(compiled$model)
+        e2d <- e2d_base
         if (all(e2d > 0L) && !identical(e2d, seq_len(n))) perm_dh <- order(e2d)
       }
       dprim_an <- dprim_all
       dH_an <- vector("list", np); names(dH_an) <- param_names
-      for (pnm in param_names) {
+      for (pnm in struct_names) {
         dHk <- dH_all[, , , pnm]
         if (!is.null(perm_dh)) {
           dHk_perm <- array(0, dim = dim(dHk))
@@ -524,6 +542,15 @@
   derivs <- vector("list", np); names(derivs) <- param_names
   for (k in seq_len(np)) {
     pnm <- param_names[k]; h <- hvec[k]
+    if (!(pnm %in% struct_names)) {
+      total_cols <- compiled$dynamic$total_cols
+      derivs[[pnm]] <- list(
+        dfp = matrix(0, n, n), df0 = matrix(0, n, n), dfu = matrix(0, n, n_u),
+        dG = matrix(0, n, n_s), dH = matrix(0, n, n_u),
+        dvSe = .o2sd_dSigma_e(model, params, pnm, h, n_u),
+        dHmat = array(0, dim = c(n, total_cols, total_cols)), ok = TRUE)
+      next
+    }
     d1 <- first$derivs[[pnm]]
     if (!isTRUE(d1$ok)) { derivs[[pnm]] <- list(ok = FALSE); next }
 
@@ -537,11 +564,11 @@
       ss_p <- tryCatch(solve_steady(compiled, tp, y0 = dr2$ys,
                                     endo_names = model$var_names,
                                     exo_names = model$varexo_names, verbose = FALSE),
-                       error = function(e) list(converged = FALSE))
+                       error = function(e) .dynhr_reraise_bug(e, list(converged = FALSE)))
       ss_m <- tryCatch(solve_steady(compiled, tm_, y0 = dr2$ys,
                                     endo_names = model$var_names,
                                     exo_names = model$varexo_names, verbose = FALSE),
-                       error = function(e) list(converged = FALSE))
+                       error = function(e) .dynhr_reraise_bug(e, list(converged = FALSE)))
       if (!isTRUE(ss_p$converged) || !isTRUE(ss_m$converged)) {
         derivs[[pnm]] <- list(ok = FALSE); next
       }
@@ -555,7 +582,7 @@
       H_m <- .o2sd_hessian_at(compiled, pm, ss_m$values)
       if (is.null(H_p) || is.null(H_m)) { derivs[[pnm]] <- list(ok = FALSE); next }
       if (!is.null(compiled$model$equations)) {
-        e2d <- .build_eq_to_decl(compiled$model)
+        e2d <- e2d_base
         if (all(e2d > 0L) && !identical(e2d, seq_len(n))) {
           perm <- order(e2d)
           Hp <- array(0, dim = dim(H_p)); Hm <- array(0, dim = dim(H_m))

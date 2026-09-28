@@ -145,7 +145,7 @@
     list(failed = TRUE, reason = "mclapply_error"))
   failed <- vapply(reps, function(x) isTRUE(x$failed), logical(1))
   if (any(failed))
-    warning(sprintf("tpf_order3_sbc: %d/%d replications aborted at theta* ",
+    .dynhr_warn(sprintf("tpf_order3_sbc: %d/%d replications aborted at theta* ",
                     sum(failed), n_repl),
            "and were excluded from the ranks (see $failure_reasons).",
            call. = FALSE)
@@ -302,13 +302,13 @@ tpf_order3_sbc <- function(n_repl = 100L, T_obs = 20L, n_particles = 150L,
     ##    than a silent redraw.
     params <- apply_theta_to_params(model, theta_star)
     ss <- tryCatch(solve_steady(compiled, params, verbose = FALSE),
-                   error = function(e) NULL)
+                   error = function(e) .dynhr_reraise_bug(e, NULL))
     if (is.null(ss) || !isTRUE(ss$converged))
       return(list(failed = TRUE, reason = "steady_state_at_theta_star"))
     dr3 <- tryCatch(
       solve_perturbation(model, compiled, ss$values, params, order = 3L,
                         verbose = FALSE),
-      error = function(e) NULL)
+      error = function(e) .dynhr_reraise_bug(e, NULL))
     if (is.null(dr3) || !isTRUE(dr3$bk_satisfied))
       return(list(failed = TRUE, reason = "order3_bk_solve_at_theta_star"))
 
@@ -396,6 +396,9 @@ tpf_order3_sbc <- function(n_repl = 100L, T_obs = 20L, n_particles = 150L,
         ll_sd = ll_sd, L = k_i)
   }
 
+  ## run_one() re-seeds (seed + r) in THIS process on the serial path; restore
+  ## the caller's RNG stream when this function exits (C1).
+  .local_seed(seed)
   reps <- if (cores > 1L) {
     parallel::mclapply(seq_len(n_repl), run_one, mc.cores = cores,
                        mc.preschedule = FALSE)

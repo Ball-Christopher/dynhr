@@ -65,7 +65,7 @@ knitr::kable(
   display_mat,
   caption = paste0(
     "SBC coverage matrix. ",
-    if (file.exists(rds_path %||% "")) {
+    if (nzchar(rds_path) && file.exists(rds_path)) {
       sprintf("Generated %s.", format(file.info(rds_path)$mtime, "%Y-%m-%d"))
     } else {
       "(Static placeholder — run battery to populate.)"
@@ -88,7 +88,7 @@ differentiable in principle, but with no analytic-gradient path implemented yet)
 
 - **gaussian_kf**: Linear Gaussian state space via the Kalman filter. Exact
   posterior; the benchmark column. Analytic gradient → every sampler supported.
-- **tpf**: Truncated/pruned particle filter (second-order DGP). Pseudo-marginal
+- **tpf**: Tempered particle filter (Herbst & Schorfheide 2019; second-order DGP). Pseudo-marginal
   `rwmh`/`smc`/`dime` are valid because the estimator is unbiased (Beaumont 2003;
   Andrieu & Roberts 2009). Gradient samplers are unsupported — the log-likelihood
   is stochastic and non-differentiable.
@@ -96,8 +96,11 @@ differentiable in principle, but with no analytic-gradient path implemented yet)
   spectral density S(ω) ∈ ℂ^{n×n} (Hermitian positive definite for multi-observable
   models). Asymptotically approximate (O(1/T) bias), so every cell is
   **characterized** — p-values are stored as provenance, never gated. An analytic
-  Whittle gradient exists, so the gradient samplers run; the debiased Whittle fixes
-  the posterior mean but not its curvature (min p < 1e-4 at T = 200). Any multi-obs
+  Whittle gradient exists, so the gradient samplers run. The earlier
+  miscalibration of NUTS × Whittle at T = 200 (min p < 1e-4, posterior width)
+  was the Whittle ×0.5 / 2π definition bug fixed in 0.9.3.35: re-run
+  2026-09-27, 100 replications, min p = 0.35, calibrated (still not gated —
+  the approximation is fixture-dependent). Any multi-obs
   cell must use the exact complex path (the default); 1-obs cells (S real) are
   bit-identical to it.
 - **pskf**: Pruned Skewed Kalman Filter (CSN state-space recursion for skew-normal
@@ -114,25 +117,58 @@ differentiable in principle, but with no analytic-gradient path implemented yet)
 
 ### Sampler caveats
 
-- **chees** (`gaussian_kf` cell remains `to-certify`). A 50-replication AR(1)
-  battery was attempted (2026-06-27) but abandoned after ~3 h. Two distinct
-  findings came out of investigating it:
+- **chees** (`gaussian_kf` cell **certified** 2026-09-27: AR(1), T = 100,
+  200 replications, min p = 0.44, 0 failed, on the corrected mass
+  adaptation; batched runs, 7.6 h). An earlier 50-replication attempt
+  (2026-06-27) was abandoned after ~3 h. Investigating it, and re-checking
+  after the 0.9.3.50 mass-adaptation fix, gave three findings:
   - The cost is **not** the sampler: it is the per-evaluation Kalman/diffuse
     filter on near-unit-root prior draws (`rho → 0.999`), comparable to `hmc`'s
     2.6 h. chees itself uses short trajectories and is fast per draw.
   - On **ill-conditioned, correlated** posteriors — which the near-unit-root
     replications are — chees is **slow-mixing but not biased**. Its ChEES
-    trajectory-length adaptation under-shoots (≈5 leapfrog steps where ≈√κ are
-    needed), so the chain converges to the target only with many draws. On a
-    κ=1000 correlated Gaussian the large-axis variance recovers as
-    0.58 → 0.69 → 0.77 at n = 1.5k / 6k / 24k (truth 1.0), whereas NUTS — with the
-    same diagonal mass — reaches 2 % error in 6k draws.
+    trajectory-length adaptation under-shoots (≈6 leapfrog steps where ≈√κ ≈ 32
+    are needed). Re-checked 2026-09-25 on the corrected mass adaptation
+    (0.9.3.50), 10 seeds, on a κ=1000 Gaussian rotated 45° (so no diagonal mass
+    can precondition it):
+    - chees large-axis variance is 0.81 / 0.86 / 0.96 (seed sd 0.16 / 0.11 /
+      0.08) at n = 1.5k / 6k / 24k (truth 1.0). Its large-axis ESS is 16 / 50 /
+      192.
+    - NUTS reaches 1.01 (sd 0.11) at n = 1.5k with ESS ≈ 200. Per gradient,
+      chees is about half as efficient (0.0013–0.0022 vs NUTS 0.0027–0.0043
+      ESS/grad).
 
-  The **gap** in this certification attempt: the AR(1) fixture is simultaneously
-  too expensive *and* stresses exactly chees's weak region, so a frozen battery
-  verdict would conflate "slow mixing" with "miscalibration". A clean
-  certification needs a cheaper, better-conditioned fixture (or tuned chees
-  adaptation). For near-unit-root / stiff posteriors, prefer NUTS.
+    The earlier single-seed figures (0.58 → 0.69 → 0.77) were mostly seed
+    noise, not the mass inversion. Both marginal variances of this target are
+    equal, so the inverted diagonal mass was only a scalar rescaling (10-seed
+    re-run with the inversion restored: 0.84 / 0.84 / 1.00).
+  - Where the inversion **did** matter is heterogeneous *scales*. On an
+    axis-aligned κ=1000 Gaussian, corrected chees recovers both variances
+    (1.007 ± 0.046) with ESS ≈ 950 of 1500 draws. That is ≈ 2.5× NUTS's ESS per
+    gradient on the same target. The inverted adaptation left the large axis
+    at 0.03 of its variance.
+
+  The 2026-06 attempt's concern -- that the AR(1) fixture stresses exactly
+  chees's weak region (correlated stiffness), so slow mixing could look like
+  miscalibration -- did not materialise with enough draws: the batched
+  200-replication run is calibrated. Slow mixing costs draws, not validity.
+
+  Which gradient sampler mixes best is **model-dependent**. On the synthetic
+  rotated κ=1000 Gaussian above, NUTS beats chees per gradient. On a real
+  68-parameter New Zealand DSGE (NZSIM: 20 simulated observables, T = 132; 300 warmup +
+  300 draws each, re-measured 2026-09-25 on the corrected mass adaptation),
+  chees gave the best worst-parameter mixing of all the gradient samplers:
+
+  | Sampler | Min bulk ESS | Min ESS per gradient |
+  |---|---|---|
+  | chees | 132 | 0.0078 |
+  | NUTS, `"lowrank"` | 88 | 0.0022 |
+  | NUTS, `"diagonal"` | 57 | 0.0022 |
+  | hmc | 43 | 0.0014 |
+  | NUTS, `"fisher_diag"` | 15 | 0.0006 |
+
+  So do not rule out chees on stiff posteriors. Try it alongside NUTS and
+  compare the minimum ESS.
 
 ## References
 

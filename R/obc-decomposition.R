@@ -53,8 +53,12 @@
 #' @param smoothed_shocks  n_exo x T matrix from pkf_smoother_obc()
 #'                         (rows = shocks, columns = time periods)
 #' @param regime_path      Integer vector length T (accepted regime per period)
-#' @param regime_cache     R environment with per-regime policies; must have
-#'                         c_full stored (populated by obc_ensure_policy)
+#' @param regime_cache     R environment seeded by obc_ensure_policy(); when
+#'                         it holds the per-period rules of a
+#'                         kalman_filter_obc_pkf() run with the same
+#'                         regime_path (the filter stores them there) those
+#'                         time-varying rules are used, otherwise the rules
+#'                         of perfect foresight of regime_path
 #' @param dr_slack         Slack-regime DecisionRules
 #' @param s0               Numeric length-n_state smoothed initial state, or
 #'                         NULL (zero). State ordering is
@@ -92,6 +96,19 @@ historical_decomposition_obc <- function(smoothed_shocks, regime_path,
       length(regime_path), n_T
     ))
 
+  # Per-period piecewise-linear rules: the PKF's (kalman_filter_obc_pkf()
+  # stores them in the cache) or perfect foresight of regime_path.  Before
+  # W49 (0.9.3.93) every binding period used the one-period policy of
+  # obc_ensure_policy() (next period slack).
+  si    <- dr_slack$state_idx
+  rules <- .obc_path_rules(regime_cache, regime_path)
+  per <- lapply(seq_len(n_T), function(t) {
+    ru <- rules[[t]]
+    if (is.null(ru))
+      list(ghx = dr_slack$ghx, ghu = dr_slack$ghu, c = numeric(n_endo))
+    else list(ghx = ru$ghx, ghu = ru$ghu, c = as.numeric(ru$c))
+  })
+
   # Initialize contributions: one n_endo x T per shock + "constraint"
   contributions <- c(
     setNames(lapply(seq_len(n_exo), function(j) matrix(0, n_endo, n_T)),
@@ -103,12 +120,10 @@ historical_decomposition_obc <- function(smoothed_shocks, regime_path,
   for (j in seq_len(n_exo)) {
     s_j <- numeric(n_state)
     for (t in seq_len(n_T)) {
-      pol   <- get(as.character(regime_path[t]), envir = regime_cache,
-                   inherits = FALSE)
-      ghx_t <- pol$dr$ghx    # n_endo x n_state
-      ghu_t <- pol$dr$ghu    # n_endo x n_exo
-      TT_t  <- pol$TT        # n_state x n_state
-      RR_t  <- pol$RR        # n_state x n_exo
+      ghx_t <- per[[t]]$ghx                    # n_endo x n_state
+      ghu_t <- per[[t]]$ghu                    # n_endo x n_exo
+      TT_t  <- ghx_t[si, , drop = FALSE]       # n_state x n_state
+      RR_t  <- ghu_t[si, , drop = FALSE]       # n_state x n_exo
       eps_j <- smoothed_shocks[j, t]
 
       # Contribution to all endo vars from shock j at period t
@@ -123,12 +138,10 @@ historical_decomposition_obc <- function(smoothed_shocks, regime_path,
   # ---- Constraint contribution (accumulated binding-regime intercepts) -----
   s_c <- numeric(n_state)
   for (t in seq_len(n_T)) {
-    pol     <- get(as.character(regime_path[t]), envir = regime_cache,
-                   inherits = FALSE)
-    ghx_t   <- pol$dr$ghx
-    TT_t    <- pol$TT
-    c_full  <- pol$c_full    # n_endo (stored by obc_ensure_policy; zero for slack)
-    c_state <- pol$c_state   # n_state
+    ghx_t   <- per[[t]]$ghx
+    TT_t    <- ghx_t[si, , drop = FALSE]
+    c_full  <- per[[t]]$c    # n_endo (zero for the slack rule)
+    c_state <- c_full[si]    # n_state
 
     # Contribution: accumulated constant in state-space + direct intercept
     contributions$constraint[, t] <- drop(ghx_t %*% s_c) + c_full
@@ -151,10 +164,9 @@ historical_decomposition_obc <- function(smoothed_shocks, regime_path,
   initial <- matrix(0, n_endo, n_T)
   s_i     <- s0
   for (t in seq_len(n_T)) {
-    pol   <- get(as.character(regime_path[t]), envir = regime_cache,
-                 inherits = FALSE)
-    initial[, t] <- drop(pol$dr$ghx %*% s_i)
-    s_i          <- drop(pol$TT %*% s_i)
+    ghx_t        <- per[[t]]$ghx
+    initial[, t] <- drop(ghx_t %*% s_i)
+    s_i          <- drop(ghx_t[si, , drop = FALSE] %*% s_i)
   }
   rownames(initial) <- endo_names
 

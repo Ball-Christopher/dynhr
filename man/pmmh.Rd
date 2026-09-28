@@ -78,9 +78,10 @@ at fixed \eqn{N}. This is handled automatically by
 \examples{
 \dontrun{
 ## 1. Find the mode under a particle likelihood:
-mode_res <- find_mode(model, data, prior_spec, obs_vars,
-                      likelihood = "tpf", me_variance = 0.01,
-                      tpf_options = list(n_particles = 2000L))
+mode_res <- run_mode_finding(solve_model(model), data = data,
+                             obs_vars = obs_vars, likelihood = "tpf",
+                             me_variance = 0.01,
+                             posterior_options = list(n_particles = 2000L))
 
 ## 2. Run PMMH (RWMH over the unbiased TPF loglik). The variance preflight
 ##    runs automatically and warns if more particles are needed.

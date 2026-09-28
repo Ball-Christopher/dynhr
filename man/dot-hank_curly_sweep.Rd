@@ -2,11 +2,7 @@
 % Please edit documentation in R/hank-jacobian.R
 \name{.hank_curly_sweep}
 \alias{.hank_curly_sweep}
-\title{Backward sweep shared by \code{hank_het_jacobian} and
-\code{hank_het_dist_jacobian}: curly-Y (per-output date-0 outcome response)
-and curly-D (induced one-period-ahead distribution change) to an anticipated
-shock to input \code{i} at horizon \code{s = 1 .. T_h} (s=1 is the direct
-current-period shock; s>=2 propagate via the value-function derivative).}
+\title{Backward sweep shared by the one-asset Jacobians}
 \usage{
 .hank_curly_sweep(block, T_h, i, outputs, delta_in, delta_va, delta_d)
 }
@@ -16,6 +12,13 @@ List with \code{curlyY} (named list over \code{outputs}, each a
   matrix, column \code{s}).
 }
 \description{
+Backward sweep shared by \code{hank_het_jacobian} and
+\code{hank_het_dist_jacobian}: curly-Y (per-output date-0 outcome response)
+and curly-D (induced one-period-ahead distribution change) to an anticipated
+shock to input \code{i} at horizon \code{s = 1 .. T_h} (s=1 is the direct
+current-period shock; s>=2 propagate via the value-function derivative).
+}
+\details{
 For a transition-probability input (\code{i} in
 \code{names(block$Pi_inputs)}), the s=1 term perturbs Pi in BOTH places it
 enters the shock date (see the file header): the backward step's

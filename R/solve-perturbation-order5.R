@@ -39,7 +39,7 @@
   ns <- nrow(hx)
   m  <- ns^5
 
-  if (verbose) cat("  Compact Sylvester solve (order 5): n =", n, ", ns^5 =", m, "\n")
+  if (verbose) .dynhr_cat("  Compact Sylvester solve (order 5): n =", n, ", ns^5 =", m, "\n")
 
   # QZ decomposition
   qz_result <- QZ::qz(A_L, fp)
@@ -346,10 +346,9 @@ solve_perturbation_order5 <- function(model, compiled, ss, params, dr4,
   hxx  <- ghxx [state_idx, , drop = FALSE]   # n_s x n_s^2
   hxxx <- ghxxx[state_idx, , drop = FALSE]   # n_s x n_s^3
 
-  if (n_s == 0L) {
-    if (verbose) message("No state variables; 5th-order x-terms are zero.")
-    return(.trivial_dr5(dr4))
-  }
+  ## No `n_s == 0` short-circuit: a stateless model's ghuuuuu is the fifth
+  ## Taylor coefficient of its static map (y = exp(e) -> 1), not zero. The
+  ## general path below runs with empty state blocks.
 
   # System matrices
   sys <- extract_system_matrices(compiled, ss, params)
@@ -361,8 +360,8 @@ solve_perturbation_order5 <- function(model, compiled, ss, params, dr4,
   A_L <- f0 + fp %*% ghx %*% t(S_mat)
 
   if (verbose) {
-    cat("Fifth-order perturbation (deterministic):\n")
-    cat(sprintf("  n_endo=%d  n_state=%d  n_exo=%d  ns^5=%d\n",
+    .dynhr_cat("Fifth-order perturbation (deterministic):\n")
+    .dynhr_cat(sprintf("  n_endo=%d  n_state=%d  n_exo=%d  ns^5=%d\n",
                 n, n_s, n_u, n_s^5))
   }
 
@@ -378,19 +377,23 @@ solve_perturbation_order5 <- function(model, compiled, ss, params, dr4,
   # to the FD truncation floor).  Replaces the old FD-forcing path which was
   # ~1000x slower at order 5.
   # ================================================================
-  if (verbose) cat("  Computing 5th-order forcing via analytic assembler...\n")
+  if (verbose) .dynhr_cat("  Computing 5th-order forcing via analytic assembler...\n")
   # Reuse extract_system_matrices()'s mapping so forcing rows align with A_L.
   # See [[eq-to-decl-consistency-invariant]].
   eq_to_decl <- sys$eq_to_decl %||% .build_eq_to_decl(model)
   res_perm   <- order(eq_to_decl)
-  phi <- .build_phi_analytic(dyn, dr4, ss, params, state_idx,
-                             endo_names, exo_names, n_s, n_u, n,
-                             order = 5L, res_perm = res_perm)
+  phi <- if (n_s == 0L)
+    .build_phi_analytic_nostate(dyn, dr4, ss, params, endo_names, exo_names,
+                                n_u, n, order = 5L, res_perm = res_perm)
+  else
+    .build_phi_analytic(dyn, dr4, ss, params, state_idx,
+                        endo_names, exo_names, n_s, n_u, n,
+                        order = 5L, res_perm = res_perm)
 
   # ================================================================
   # Solve for ghxxxxx:  A_L·X + fp·X·hx^{⊗5} = -Φ_xxxxx
   # ================================================================
-  if (verbose) cat("  Solving for ghxxxxx (Sylvester, n*ns^5 =", n * n_s^5, ")...\n")
+  if (verbose) .dynhr_cat("  Solving for ghxxxxx (Sylvester, n*ns^5 =", n * n_s^5, ")...\n")
   # Compact eigen/QZ Sylvester (with iterative refinement + dense fallback);
   # avoids forming/Schur-factorising the ns^5 x ns^5 Kronecker matrix.
   ghxxxxx <- .solve_kron_compact(A_L, fp, hx, 5L, -phi$xxxxx, verbose = verbose)
@@ -407,7 +410,7 @@ solve_perturbation_order5 <- function(model, compiled, ss, params, dr4,
   # exactly as order-4's mixed solve uses ghxxxx.
   # ================================================================
   if (n_u > 0L) {
-    if (verbose) cat("  Solving for ghxxxxu, ghxxxuu, ghxxuuu, ghxuuuu, ghuuuuu...\n")
+    if (verbose) .dynhr_cat("  Solving for ghxxxxu, ghxxxuu, ghxxuuu, ghxuuuu, ghuuuuu...\n")
     fut <- function(...) {
       mats <- list(...); Kf <- mats[[1L]]
       for (i in 2:length(mats)) Kf <- Kf %x% mats[[i]]
@@ -455,8 +458,8 @@ solve_perturbation_order5 <- function(model, compiled, ss, params, dr4,
                    "DecisionRules2", "DecisionRules")
 
   if (verbose) {
-    cat("Fifth-order solution complete.\n")
-    cat(sprintf("  ghxxxxx: %d x %d  max|.| = %.3g\n",
+    .dynhr_cat("Fifth-order solution complete.\n")
+    .dynhr_cat(sprintf("  ghxxxxx: %d x %d  max|.| = %.3g\n",
                 nrow(ghxxxxx), ncol(ghxxxxx), max(abs(ghxxxxx))))
   }
 
@@ -557,26 +560,6 @@ tensor_contract_5d <- function(T, M, mode) {
     out[i] <- paste(parts, collapse = "__x__")
   }
   out
-}
-
-
-#' Trivial 5th-order for no-state-variables case.
-#' @noRd
-.trivial_dr5 <- function(dr4) {
-  n   <- length(dr4$endo_names)
-  n_u <- length(dr4$exo_names)
-  dr5 <- unclass(dr4)
-  dr5$ghxxxxx <- matrix(0, n, 0)
-  dr5$ghxxxxu <- matrix(0, n, 0)
-  dr5$ghxxxuu <- matrix(0, n, 0)
-  dr5$ghxxuuu <- matrix(0, n, 0)
-  dr5$ghxuuuu <- matrix(0, n, 0)
-  dr5$ghuuuuu <- matrix(0, n, n_u^5)
-  dr5$order <- 5L
-  dr5$fifth_order_method <- "trivial_no_states"
-  class(dr5) <- c("DecisionRules5", "DecisionRules4", "DecisionRules3",
-                   "DecisionRules2", "DecisionRules")
-  dr5
 }
 
 

@@ -19,17 +19,24 @@ diag_sloppiness(
   sloppy_threshold = 1e-06,
   n_top_loadings = 5L,
   h = 1e-04,
+  scale = c("log", "raw"),
+  meta = NULL,
   ...
 )
 }
 \arguments{
-\item{theta}{Numeric parameter vector at which to assess sloppiness.}
+\item{theta}{Named numeric parameter vector at which to assess
+sloppiness (raw scale).}
 
-\item{log_post_fn}{Optional log-posterior function of \code{theta}; if
-supplied (or built from \code{model}), the Hessian is formed numerically.}
+\item{log_post_fn}{Optional log-posterior function of raw \code{theta}; if
+supplied (or built from \code{model}), the Hessian is formed numerically
+in the coordinates given by \code{scale}, at steps \code{h} and
+\code{2h} (their difference sets the noise floor).}
 
-\item{hessian}{Optional pre-computed Hessian of the negative
-log-posterior at \code{theta}; supplied instead of \code{log_post_fn}.}
+\item{hessian}{Optional pre-computed RAW-scale Hessian of the negative
+log-posterior at \code{theta}; supplied instead of \code{log_post_fn}.
+With \code{scale = "log"} it is transformed to
+\code{diag(theta) \%*\% hessian \%*\% diag(theta)} (exact at a mode).}
 
 \item{model}{Optional parsed dynhr model (used to build
 \code{log_post_fn} when neither \code{hessian} nor \code{log_post_fn}
@@ -52,30 +59,45 @@ required when \code{model} is supplied.}
 \item{param_names}{Optional character vector of parameter names (for
 labelling the eigenvector loadings).}
 
-\item{n_flat}{Integer number of flattest (sloppiest) eigendirections
-to report (default 3).}
+\item{n_flat}{Integer number of flattest (smallest |eigenvalue|) and
+stiffest eigendirections to tabulate (default 3).}
 
-\item{sloppy_threshold}{Eigenvalue below which a direction is deemed
-"sloppy" (default 1e-6).}
+\item{sloppy_threshold}{Relative threshold in (0, 1): eigenvalues below
+\code{lambda_max * sloppy_threshold} are "sloppy" (default 1e-6).}
 
-\item{n_top_loadings}{Integer number of top parameter loadings to report
-per sloppy direction (default 5).}
+\item{n_top_loadings}{Integer number of top parameter loadings kept per
+tabulated direction (default 5).}
 
-\item{h}{Finite-difference step for the numerical Hessian
-(default 1e-4).}
+\item{h}{Finite-difference step (default 1e-4; log units when
+\code{scale = "log"}).}
+
+\item{scale}{\code{"log"} (default; unit-free) or \code{"raw"}.}
+
+\item{meta}{Optional \code{diag_meta()} list for plot captions.}
 
 \item{\dots}{Passed to \code{make_log_posterior} when constructing
 the log-posterior internally.}
 }
 \value{
-A \code{dynhr_diagnostic} (see \code{d38_sloppiness} for
-  the full \code{$result} structure). Pass is always \code{NA}
-  (informational).
+A \code{dynhr_diagnostic} with \code{pass = NA} (informational).
+  \code{$result} holds \code{eigenvalues}, \code{eigenvectors} (rows named
+  by parameter), \code{class}, \code{condition_number},
+  \code{spread_decades}, \code{participation_ratio}, \code{spectral_gap},
+  \code{n_sloppy}, \code{n_unresolved}, \code{n_negative},
+  \code{sloppy_cutoff}, \code{noise_floor}, \code{fd_noise}, \code{scale},
+  \code{raw_scale_params}, \code{flat_directions},
+  \code{stiff_directions}, \code{hessian} and \code{hessian_raw}.
+  Plots: \code{spectrum} (eigenvalue ladder with the cutoff and noise
+  floor drawn) and \code{flat_directions} (loadings).
 }
 \description{
 Compute the eigen-spectrum of the negative log-posterior Hessian at
 \code{theta} to diagnose parameter-space ridge / flat-direction difficulty
-("sloppy" directions following Gutenkunst et al. 2007).
+("sloppy" directions following Gutenkunst et al. 2007). By default the
+Hessian is taken with respect to log-parameters, so the eigenvalues are
+unit-free; zero-valued parameters stay on their raw scale (with a warning).
+Eigenvalues are classed stiff / sloppy / unresolved (below the
+finite-difference noise floor) / negative (theta is not a mode).
 }
 \seealso{
 \code{d1_local_identification},

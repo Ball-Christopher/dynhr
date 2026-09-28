@@ -40,7 +40,10 @@ print.dynhr_estimation_result <- function(x, ...) {
   if (isTRUE(x$meta$use_obc))
     cat(sprintf("  OBC       : %d constraints (PKF)\n",
                 length(x$obc_specs %||% list())))
-  cat(sprintf("  Mode      : logpost = %.3f\n", x$mode$logpost))
+  if (is.null(x$mode))
+    cat("  Mode      : not run (prior-initialised sampler)\n")
+  else
+    cat(sprintf("  Mode      : logpost = %.3f\n", x$mode$logpost))
   if (!is.null(x$chains)) {
     n_draws <- nrow(x$chains$chain)
     sampler <- toupper(x$chains$sampler %||% "?")
@@ -57,20 +60,23 @@ print.dynhr_estimation_result <- function(x, ...) {
     }
     if (!is.null(x$chains$log_marginal_lik))
       cat(sprintf("  log p(Y|M): %.3f\n", x$chains$log_marginal_lik))
-    ## THAMES cross-check (guarded: cannot break print)
+    ## THAMES cross-check (guarded: a numerical failure cannot break print;
+    ## a programming error is re-raised)
     thames_line <- tryCatch({
       tr <- thames_mdd_from_chains(x$chains)
       if (is.finite(tr$log_mdd))
         sprintf("  log p(Y|M) [THAMES]: %.3f +/- %.3f\n", tr$log_mdd, tr$se)
       else
         NULL
-    }, error = function(e) NULL)
+    }, error = function(e) .dynhr_reraise_bug(e, NULL))
     if (!is.null(thames_line)) cat(thames_line)
   } else {
     cat("  MCMC      : skipped (n_draws = 0)\n")
   }
   if (!is.null(x$diagnostics))
     cat(sprintf("  Diagnostics: %d run\n", length(x$diagnostics)))
+  il <- .est_integrity_lines(x$provenance$integrity)
+  if (length(il)) cat(il, sep = "\n")
   invisible(x)
 }
 
@@ -160,6 +166,20 @@ print.dynhr_estimation_result <- function(x, ...) {
 #' optionally runs the diagnostic battery.  Results are saved to
 #' \code{output_dir} and returned as a structured list.
 #'
+#' @section One code path:
+#' The arguments become a \code{\link{dynhr_estimation_spec}}
+#' (\code{\link{as_estimation_spec}}), run by \code{\link{run_estimation}}:
+#' the mode stage is exactly \code{\link{run_mode_finding}}'s and the sampler
+#' stage exactly \code{\link{run_posterior_estimation}}'s, so
+#' \code{run_full_estimation(...)} returns the mode and the draws of
+#' \code{run_mode_finding()} followed by \code{run_posterior_estimation(seed =
+#' seed)} with the same settings. In particular it honours the
+#' result-changing options (\code{transform_params}, \code{rwmh_adapt_cov},
+#' \code{rwmh_n_blocks}, \code{proposal_cov_method},
+#' \code{use_exact_hessian}, ...; see \code{\link{dynhr_set_options}}), which
+#' its own mode and sampler code ignored before dynhr 0.9.3.105. The
+#' particle-likelihood variance preflight is evaluated at the mode.
+#'
 #' @section Arguments by stage:
 #' The argument list is long because one call spans the whole pipeline.  Every
 #' argument has a default; a minimal call needs only \code{mod_file},
@@ -178,7 +198,8 @@ print.dynhr_estimation_result <- function(x, ...) {
 #'     \code{mode_n_starts}}
 #'   \item{\strong{Sampler}}{\code{sampler}, \code{n_draws}, \code{n_warmup},
 #'     \code{n_chains}, \code{n_particles}, \code{n_walkers},
-#'     \code{analytic_grad}, \code{seed}, \code{...}}
+#'     \code{analytic_grad}, \code{seed}, \code{checkpoint_dir},
+#'     \code{resume}, \code{on_mismatch}, \code{...}}
 #'   \item{\strong{Parallelism}}{\code{parallel}, \code{parallel_backend},
 #'     \code{n_cores}}
 #'   \item{\strong{Occasionally-binding constraints}}{\code{obc},
@@ -203,7 +224,11 @@ print.dynhr_estimation_result <- function(x, ...) {
 #' @param output_prefix Prefix prepended to saved file names (default
 #'   \code{"dynhr_est"}).
 #' @param sampler    Which sampler to use: \code{"rwmh"} (default),
-#'   \code{"smc"}, \code{"nuts"}, or \code{"dime"}.
+#'   \code{"smc"}, \code{"nuts"}, \code{"dime"}, \code{"pmmh"} (random-walk
+#'   MH over an unbiased particle likelihood), \code{"hmc"}, \code{"mala"},
+#'   \code{"chees"}, \code{"dsmh"} or \code{"smc2"} -- every sampler of
+#'   \code{\link{sampler_spec}}. Arguments a sampler does not take (e.g.
+#'   \code{n_chains} for \code{"hmc"}) are left out, with a message.
 #' @param n_draws    Post-warmup draws to retain (default \code{10000L}).
 #'   Set to \code{0} to run mode-finding only.
 #' @param n_warmup   Warmup / burn-in draws, discarded (default \code{5000L}).
@@ -224,12 +249,29 @@ print.dynhr_estimation_result <- function(x, ...) {
 #'   (default).  Reserved for future backends.
 #' @param n_cores Worker (daemon) count when \code{parallel = TRUE}
 #'   (\code{NULL} = auto-detect, capped at \code{n_chains}).
-#' @param analytic_grad For \code{sampler = "nuts"} on a standard Gaussian
-#'   model, use the exact analytic gradient (\code{\link{make_posterior_grad}}:
-#'   a compiled Kalman score for the shock-std parameters plus a numerical
-#'   gradient for the rest) instead of a fully numerical gradient. Default
-#'   \code{FALSE}. Applies to the serial (single-chain) NUTS path; the parallel
-#'   multi-chain path uses the numerical gradient.
+#' @param analytic_grad For the gradient samplers (NUTS, HMC, MALA, ChEES), use
+#'   the analytic gradient from \code{\link{make_posterior_grad}} instead of a
+#'   finite-difference one. Its method is the \code{grad_method} option,
+#'   default \code{"auto"}: the exact \code{"adjoint_solution"} for the
+#'   Gaussian likelihood. Default \code{TRUE}: the exact gradient wherever the
+#'   likelihood has one; a likelihood without one (the OBC filters,
+#'   \code{"tpf"}, \code{"pskf"}, ...) keeps the numerical gradient without a
+#'   warning. \code{FALSE} always finite-differences the log-posterior.
+#'   Applies to the serial path and to the parallel multi-chain NUTS path
+#'   (standard Gaussian models).
+#' @param metric For \code{sampler = "nuts"}: the warmup mass-matrix
+#'   adaptation. \code{"diagonal"} (default) starts from the inverse-Hessian
+#'   diagonal at the mode and adapts a diagonal inverse mass equal to the
+#'   warmup posterior variance (Stan's convention); \code{"warmup_dense"}
+#'   ends warmup with a Ledoit-Wolf dense inverse mass; \code{"fisher_diag"}
+#'   (opt-in) sets the diagonal inverse mass to
+#'   \eqn{\sqrt{\mathrm{var}(x)/\mathrm{var}(\nabla \log p)}} from each
+#'   window's draws and gradients (Seyboldt, Carlson & Carpenter 2026,
+#'   arXiv:2603.18845); \code{"lowrank"} (opt-in) adapts a
+#'   low-rank-plus-diagonal inverse mass from draws and gradients (same
+#'   paper's Algorithm 1, Lao 2026 schedule). Applies to the serial NUTS path;
+#'   the parallel multi-chain path always uses \code{"diagonal"} and warns
+#'   otherwise. Ignored by the other samplers.
 #' @param n_mode_iter Maximum optimizer iterations for mode-finding (default
 #'   \code{10000L}).
 #' @param mode_method Optimizer sequence for mode-finding (default
@@ -240,9 +282,14 @@ print.dynhr_estimation_result <- function(x, ...) {
 #'   multi-start mode-finding (Step 6) when \code{parallel = TRUE}
 #'   (\code{NULL} = one per daemon). Ignored when \code{parallel = FALSE}.
 #' @param me_variance Measurement-error variance added to the observation
-#'   noise diagonal (default \code{0}).  Use a small positive value for
+#'   noise diagonal. \code{NULL} (default) reads the \code{me_variance}
+#'   option (0 unless set), as the estimation spec's
+#'   \code{likelihood$me_variance} does.  Use a small positive value for
 #'   stochastically singular models.
-#' @param seed       Random seed for reproducibility (default \code{42L}).
+#' @param seed       Random seed for reproducibility (default \code{42L}): it
+#'   seeds the mode stage (the caller's RNG stream is restored on exit) and
+#'   re-seeds the sampler stage; the parallel samplers use it as their base
+#'   seed.
 #' @param run_diag   Run the diagnostic battery after sampling?  (default
 #'   \code{FALSE}; set \code{TRUE} for a full run).
 #' @param verbose    Print progress messages (default \code{TRUE}).
@@ -271,9 +318,18 @@ print.dynhr_estimation_result <- function(x, ...) {
 #' @param ramsey_order Perturbation order used by Ramsey workflow (1 or 2).
 #' @param ramsey_n_periods Simulation length for welfare evaluation.
 #' @param ramsey_burn_in Burn-in for Ramsey welfare simulation.
+#' @param ramsey_discount Planner discount factor for the Ramsey step.  When
+#'   \code{NULL} (default) it is taken from the parameter \code{beta} or
+#'   \code{betta}; if the model has neither, the Ramsey step is SKIPPED with a
+#'   \code{dynhr_warn_ramsey_skipped} warning (\code{$ramsey} stays
+#'   \code{NULL}) instead of aborting the whole estimation.
 #' @param likelihood  Likelihood type: \code{"gaussian"} (Kalman filter, default),
-#'   \code{"cumulant"}, \code{"whittle"}, or \code{"tpf"} (Tempered Particle
-#'   Filter).
+#'   \code{"cumulant"}, \code{"whittle"}, \code{"tpf"} (Tempered Particle
+#'   Filter), \code{"sv_rbpf"}, \code{"pskf"}, \code{"student_t"} (pass
+#'   \code{student_df} in \code{...}), \code{"pruned"}, \code{"global_pf"}, or
+#'   the OBC filters \code{"pkf"}, \code{"ppf"} and \code{"copf"} (which pick
+#'   the filter of an OBC model) -- every likelihood of
+#'   \code{\link{likelihood_spec}}.
 #' @param lik_init    Kalman filter \code{P0} initialisation
 #'   (default \code{"auto"}).  Ignored for non-Gaussian likelihoods.
 #' @param freq_band   Numeric(2) \code{c(lo, hi)} in radians; Whittle band
@@ -301,7 +357,17 @@ print.dynhr_estimation_result <- function(x, ...) {
 #'   a \code{filter_tunes_spec} object (built with
 #'   \code{\link{filter_tunes}()}) to override the mod-file block entirely.
 #'   Pass \code{FALSE} to ignore the mod-file block.
-#' @param ...        Additional arguments forwarded to the chosen sampler.
+#' @param checkpoint_dir Optional directory for streamed, restartable
+#'   sampling (the samplers that support it are listed at
+#'   \code{\link{run_posterior_estimation}}).
+#' @param resume When \code{TRUE}, continue the chains saved in
+#'   \code{checkpoint_dir}, adding \code{n_draws} draws.
+#' @param on_mismatch What a \code{resume} does when the checkpoint's target
+#'   differs from this call's, or a registered result change touches this
+#'   run: \code{"refuse"} (default) or \code{"warn"} (resume; the result is
+#'   marked). See \code{\link{run_estimation}}, section Checkpoints.
+#' @param ...        Additional arguments forwarded to the chosen sampler
+#'   (\code{student_df} and \code{obc_filter} go to the likelihood).
 #'
 #' @return A \code{dynhr_estimation_result} list with elements:
 #'   \describe{
@@ -319,12 +385,21 @@ print.dynhr_estimation_result <- function(x, ...) {
 #'       \code{NULL} unless \code{compute_smoother = TRUE} and OBC is active.}
 #'     \item{\code{ramsey}}{A \code{dynhr_ramsey_result}, or \code{NULL} if
 #'       \code{run_ramsey = FALSE}.}
+#'     \item{\code{resolved}}{What the sampler stage resolved at run time:
+#'       \code{grad_method}, the analytic-gradient method it used (named by
+#'       sampler, e.g. \code{"adjoint_solution"} for a requested
+#'       \code{"auto"}), and \code{grad_method_requested}; \code{NULL} when
+#'       no sampler ran. The run record copies it.}
 #'     \item{\code{meta}}{Run metadata: mod_file, sampler, seed, timestamps, use_obc}
+#'     \item{\code{run_record}}{A \code{dynhr_run_record}: resolved arguments,
+#'       option snapshot, RNG state and provenance; replay it with
+#'       \code{\link{dynhr_rerun}}.}
 #'   }
 #'
-#' @seealso \code{\link{parse_mod}}, \code{\link{find_mode}}, \code{\link{mcmc}},
+#' @seealso \code{\link{parse_mod}}, \code{\link{find_mode}}, \code{\link{dynhr_mcmc}},
 #'   \code{\link{smc}}, \code{\link{nuts}}, \code{run_all_diagnostics},
-#'   \code{write_llm_report}
+#'   \code{write_llm_report}, \code{\link{run_estimation}} (the spec runner
+#'   behind this wrapper), \code{\link{dynhr_rerun}}, \code{\link{dynhr_verify}}
 #'
 #' @examples
 #' \donttest{
@@ -357,7 +432,8 @@ run_full_estimation <- function(
     obs_vars      = NULL,
     output_dir    = ".",
     output_prefix = "dynhr_est",
-    sampler       = c("rwmh", "smc", "nuts", "dime"),
+    sampler       = c("rwmh", "smc", "nuts", "dime", "pmmh", "hmc", "mala",
+                      "chees", "dsmh", "smc2"),
     n_draws       = 10000L,
     n_warmup      = 5000L,
     n_chains      = 4L,
@@ -366,12 +442,15 @@ run_full_estimation <- function(
     parallel      = FALSE,
     parallel_backend = "mirai",
     n_cores       = NULL,
-    analytic_grad = FALSE,
+    analytic_grad = TRUE,
+    metric        = c("diagonal", "warmup_dense", "fisher_diag", "lowrank"),
     n_mode_iter   = 10000L,
     mode_method   = "newrat",
     mode_n_starts = NULL,
-    me_variance   = 0,
-    likelihood    = c("gaussian", "cumulant", "whittle", "tpf", "sv_rbpf"),
+    me_variance   = NULL,
+    likelihood    = c("gaussian", "cumulant", "whittle", "tpf", "sv_rbpf",
+                      "pskf", "student_t", "pruned", "global_pf", "pkf",
+                      "ppf", "copf"),
     lik_init      = "auto",
     freq_band     = c(0, pi),
     system_priors = NULL,
@@ -390,62 +469,208 @@ run_full_estimation <- function(
     ramsey_order  = 1L,
     ramsey_n_periods = 400L,
     ramsey_burn_in = 100L,
+    ramsey_discount = NULL,
     filter_tunes  = NULL,
     heteroskedastic_shocks = NULL,
     stochastic_volatility = NULL,
     tpf_options   = list(),
     plan          = NULL,
+    checkpoint_dir = NULL,
+    resume        = FALSE,
+    on_mismatch   = "refuse",
     ...) {
-  likelihood <- match.arg(likelihood)
+  ## Retired spellings (0.9.3 renames): classed error naming the new one.
+  .dynhr_reject_retired_args("run_full_estimation", ...names(),
+                             names(sys.call()),
+                             c(.dynhr_retired_count_args,
+                               .dynhr_retired_data_args))
+  ## Own the message epoch for this run: repeat-suppressed warnings
+  ## (`.dynhr_warn(once = TRUE)`) are keyed within it and re-arm for the
+  ## next run, and the close reports what it suppressed. A nested call
+  ## inherits this epoch rather than opening a second one.
+  .dynhr_run_epoch <- .dynhr_epoch("run_full_estimation")
+  on.exit(.dynhr_close_epoch(.dynhr_run_epoch), add = TRUE)
+  ## Run record (R/run-record.R): resolved args, option snapshot and RNG
+  ## state at ENTRY -- before the body touches any argument or the RNG.
+  .rr <- .dynhr_rr_begin("run_full_estimation", environment(), list(...))
+  ## E5 C2: a thin wrapper. The arguments become an estimation spec
+  ## (validate_spec() holds the cross-field checks) and the one spec runner
+  ## runs its mode stage, sampler stage and outputs -- the same code as
+  ## run_mode_finding() + run_posterior_estimation().
+  spec <- as_estimation_spec(.rr$args, entry = "run_full_estimation")
+  .run_estimation_impl(spec, rr = .rr)
+}
 
-  sampler <- match.arg(sampler)
-  t_start <- Sys.time()
 
-  .vcat <- function(...) if (verbose) cat(...)
+# ============================================================================
+# The spec runner
+# ============================================================================
 
-  .vcat("\n================================================================\n")
-  .vcat("  run_full_estimation\n")
-  .vcat("================================================================\n\n")
+#' Run an estimation from its spec
+#'
+#' The single estimation runner: given a \code{\link{dynhr_estimation_spec}}
+#' it runs the mode stage, then the sampler stage(s), then the outputs, and
+#' returns the result classes of the familiar entry points.
+#' \code{\link{run_mode_finding}}, \code{\link{run_posterior_estimation}} and
+#' \code{\link{run_full_estimation}} are thin wrappers that build a spec from
+#' their arguments (\code{\link{as_estimation_spec}}) and call the same code.
+#'
+#' @section Result form:
+#' \code{spec$outputs$form} selects the result class: \code{"mode"} a
+#' \code{dynhr_mode_result} (no sampler); \code{"posterior"} a
+#' \code{dynhr_posterior_result} (the sampler(s) run from \code{mode$result}
+#' when it is set, else from a fresh mode stage); \code{"full"} a
+#' \code{dynhr_estimation_result} (mode, one sampler or none, then the
+#' outputs: saved files, diagnostics, Ramsey, the OBC smoother). The default
+#' \code{"auto"} picks \code{"mode"} without a sampler, \code{"posterior"}
+#' with a precomputed mode result or a sampler sequence, else \code{"full"}.
+#'
+#' The prior-initialised samplers (\code{"smc"}, \code{"dsmh"},
+#' \code{"dime"}, \code{"smc2"}) start from prior draws and use neither the
+#' mode nor its proposal covariance, so when every sampler of the spec is one
+#' of them the mode stage is not run -- unless an output is evaluated at the
+#' mode (\code{outputs$diagnostics}, \code{outputs$ramsey}, the OBC
+#' \code{outputs$smoother}). The result then has no mode: \code{$mode} of a
+#' full result is \code{NULL}, and a posterior result's \code{mode_result}
+#' carries the log-posterior but \code{theta_mode = NULL} and
+#' \code{meta$mode_skipped = TRUE}. The draws are those of a run with a mode
+#' stage (the sampler stage re-seeds). \code{mode$run} overrides this rule:
+#' \code{"auto"} (the default) applies it, \code{"always"} runs the mode stage
+#' anyway (for example to report the mode next to the draws), and
+#' \code{"never"} does not run it -- an error (class
+#' \code{dynhr_error_spec_mode_needed}) when a sampler or output uses the
+#' mode.
+#'
+#' @section Options:
+#' For the duration of the run the package option store holds the spec's
+#' values: its option snapshot (\code{spec$options}) plus every result-changing
+#' option taken from the typed field that owns it (for example
+#' \code{power_posterior} from \code{likelihood$power_posterior},
+#' \code{transform_params} from \code{mode$transform_params} during the mode
+#' stage and from the sampler's field during sampling, \code{seed_base} from
+#' \code{compute$seed}). Parallel daemons receive that store. The caller's
+#' options are restored on exit, also on error.
+#'
+#' @section Seeds:
+#' With \code{compute$seed} set, a run that includes the mode stage seeds it
+#' and restores the caller's RNG stream on exit; the sampler stage re-seeds
+#' with the same seed, and the parallel (mirai) samplers use it as their base
+#' seed. Sampling a precomputed mode result (\code{mode$result}) seeds only
+#' the sampler stage and leaves the RNG where it ends, as
+#' \code{run_posterior_estimation()} does. \code{NULL} leaves the ambient RNG
+#' stream untouched.
+#'
+#' @section Checkpoints:
+#' With \code{compute$checkpoint_dir} a fresh run writes
+#' \code{spec_integrity.rds} next to the chain files: the content hash of each
+#' target/algorithm part (model, data, likelihood, mode, sampler without
+#' \code{n_draws}) and the build and numerical environment. A resume
+#' (\code{compute$resume = TRUE}) compares them: a different target part is
+#' refused (error \code{dynhr_error_checkpoint_spec_mismatch}, naming the
+#' differing parts and fields) unless \code{compute$on_mismatch = "warn"}. A
+#' different dynhr version is looked up in the result-change registry (a
+#' table of every change that alters results, with the components it
+#' touches): when a registered change between the two versions touches a
+#' component the continued chain uses (its likelihood, priors, sampler kernel,
+#' analytic gradient, ...), the resume is refused as well (error
+#' \code{dynhr_error_checkpoint_code_changed}, naming the changes and the
+#' version to install) unless \code{compute$on_mismatch = "warn"}. Any other
+#' code difference, or a different environment (R, platform, BLAS/LAPACK,
+#' daemon count), warns: the continued chain is still a valid MCMC chain, but
+#' not bit-identical to an uninterrupted run (equivalent in distribution). Any
+#' such event is kept in \code{result$provenance$integrity} and the run
+#' record, and \code{print()} shows it; an overridden refusal marks the result
+#' as not clean. See \code{\link{dynhr_verify}} for checking a finished result
+#' under the current build and environment.
+#'
+#' @param spec A \code{dynhr_estimation_spec} (from
+#'   \code{\link{dynhr_estimation_spec}}, \code{\link{as_estimation_spec}},
+#'   \code{update()} or \code{\link{read_spec}}).
+#' @return A \code{dynhr_mode_result}, \code{dynhr_posterior_result} or
+#'   \code{dynhr_estimation_result} (see Result form), with
+#'   \code{$run_record} (schema 2: it carries the spec).
+#' @seealso \code{\link{dynhr_estimation_spec}}, \code{\link{dynhr_rerun}},
+#'   \code{\link{dynhr_verify}}, \code{\link{write_spec}};
+#'   \code{vignette("estimation")}, section "Specs, records and reruns"
+#' @examples
+#' \donttest{
+#' mod <- system.file("extdata/models/nk_demo.mod", package = "dynhr")
+#' Y <- as.matrix(read.csv(system.file("extdata/models/nk_demo_data.csv",
+#'                                     package = "dynhr")))
+#' spec <- dynhr_estimation_spec(mod, data = Y,
+#'   mode = mode_spec(n_iter = 200L), sampler = NULL,
+#'   compute = compute_spec(verbose = FALSE))
+#' fit <- run_estimation(spec)
+#' fit$theta_mode
+#' }
+#' @export
+run_estimation <- function(spec) {
+  .dynhr_run_epoch <- .dynhr_epoch("run_estimation")
+  on.exit(.dynhr_close_epoch(.dynhr_run_epoch), add = TRUE)
+  if (!inherits(spec, "dynhr_estimation_spec"))
+    .dynhr_abort("run_estimation: `spec` must be a dynhr_estimation_spec ",
+                 "(see dynhr_estimation_spec(), as_estimation_spec(), read_spec()).",
+                 class = "dynhr_error_bad_argument")
+  if (!identical(spec$spec_version, .spec_version))
+    .dynhr_abort("run_estimation: spec_version ", format(spec$spec_version),
+                 " is not supported (this dynhr reads version ", .spec_version,
+                 ").", class = "dynhr_error_spec_version")
+  .rr <- .dynhr_rr_begin("run_estimation", environment())
+  .run_estimation_impl(spec, rr = .rr)
+}
 
-  # -------------------------------------------------------------------
-  # Step 1: Parse
-  # -------------------------------------------------------------------
-  .vcat("-- Step 1: Parse model --\n")
-  if (is.null(model)) {
-    if (is.null(mod_file))
-      stop("Provide either 'mod_file' or 'model'.")
-    model <- parse_mod(mod_file, verbose = verbose)
-  } else {
-    mod_file <- model$mod_file %||% "(pre-parsed)"
+## The result form a spec asks for (outputs$form, "auto" resolved).
+.est_form <- function(spec) {
+  form <- spec$outputs$form
+  if (!identical(form, "auto")) return(form)
+  if (is.null(spec$sampler)) return("mode")
+  if (!is.null(spec$mode$result) ||
+      inherits(spec$sampler, "dynhr_sampler_sequence")) return("posterior")
+  "full"
+}
+
+## The option store for one stage: the spec's snapshot plus each
+## result-changing option from its typed home field (`samp`: the sampler
+## spec whose fields apply; NULL during the mode stage). An option whose home
+## this stage does not have stays at its registered default.
+.est_stage_options <- function(spec, samp = NULL) {
+  store <- spec$options
+  attr(store, "set") <- NULL
+  homes <- .spec_option_homes()
+  for (op in names(homes)) {
+    val <- NULL
+    for (h in homes[[op]]) {
+      cp  <- sub("\\$.*$", "", h)
+      fld <- sub("^.*\\$", "", h)
+      src <- if (identical(cp, "sampler")) samp else spec[[cp]]
+      ## transform_params lives in mode and sampler: the stage's own wins
+      if (identical(cp, "mode") && !is.null(samp) &&
+          any(grepl("^sampler\\$", homes[[op]])) && fld %in% names(samp))
+        next
+      if (!is.null(src) && fld %in% names(src) && !is.null(src[[fld]]))
+        val <- src[[fld]]
+    }
+    store[op] <- list(val)
   }
-  .vcat(sprintf("  %d endo, %d exo, %d params, %d eqs\n",
-                length(model$var_names),
-                length(model$varexo_names),
-                length(model$param_values),
-                length(model$equations)))
+  store[!vapply(store, is.null, logical(1))]
+}
 
-  # -------------------------------------------------------------------
-  # Step 2: Extract priors
-  # -------------------------------------------------------------------
-  .vcat("-- Step 2: Extract prior specification --\n")
-  priors <- extract_prior_spec(model, verbose = verbose)
-  .vcat(sprintf("  %d parameters to estimate\n", nrow(priors)))
+## Replace the option store by `store` (restored by the caller).
+.est_set_store <- function(store) {
+  rm(list = ls(.dynhr_opts, all.names = TRUE), envir = .dynhr_opts)
+  if (length(store)) list2env(store, envir = .dynhr_opts)
+  invisible(NULL)
+}
 
-  # -------------------------------------------------------------------
-  # Step 3: Compile
-  # -------------------------------------------------------------------
-  .vcat("-- Step 3: Compile model --\n")
-  if (is.null(compiled))
-    compiled <- compile_model(model, verbose = FALSE)
-
-  # -------------------------------------------------------------------
-  # Step 4: Validate data
-  # -------------------------------------------------------------------
-  .vcat("-- Step 4: Load and validate data --\n")
-  if (is.null(data))
-    stop("Provide a data matrix or CSV path via 'data'.")
-  if (is.character(data)) {
-    data_raw <- read.csv(data)
+## The data matrix a spec's likelihood uses: the value, or the CSV (columns
+## renamed by data_col_map, restricted to obs_vars); then the first_obs / nobs
+## window.
+.est_load_data <- function(spec) {
+  obs_vars <- spec$obs_vars
+  data <- spec$data$value
+  if (is.null(data)) {
+    data_raw <- utils::read.csv(spec$data$path)
+    data_col_map <- spec$likelihood$data_col_map
     if (!is.null(data_col_map)) {
       for (mod_nm in names(data_col_map)) {
         dat_nm <- data_col_map[[mod_nm]]
@@ -454,536 +679,241 @@ run_full_estimation <- function(
       }
     }
     if (!all(obs_vars %in% names(data_raw)))
-      stop(sprintf("obs_vars not found in data: %s",
-                   paste(setdiff(obs_vars, names(data_raw)), collapse = ", ")))
+      .dynhr_abort(sprintf("obs_vars not found in data: %s",
+                           paste(setdiff(obs_vars, names(data_raw)), collapse = ", ")),
+                   class = "dynhr_error_spec_invalid")
     data <- as.matrix(data_raw[, obs_vars])
   }
   if (is.null(colnames(data))) colnames(data) <- obs_vars
-  # Validate that obs_vars are present in data columns
-  if (!is.null(obs_vars) && !all(obs_vars %in% colnames(data)))
-    stop(sprintf("obs_vars not found in data columns: %s",
-                 paste(setdiff(obs_vars, colnames(data)), collapse = ", ")))
-  .vcat(sprintf("  Data: %d x %d  (obs: %s)\n",
-                nrow(data), ncol(data),
-                paste(colnames(data), collapse = ", ")))
+  lik <- spec$likelihood
+  if (lik$first_obs > 1L || !is.null(lik$nobs)) {
+    last <- if (is.null(lik$nobs)) nrow(data) else lik$first_obs + lik$nobs - 1L
+    if (lik$first_obs > nrow(data) || last > nrow(data))
+      .dynhr_abort("run_estimation: the likelihood sample (first_obs = ",
+                   lik$first_obs, ", nobs = ", format(lik$nobs %||% "all"),
+                   ") runs past the ", nrow(data), " data rows.",
+                   class = "dynhr_error_spec_invalid")
+    data <- data[seq.int(lik$first_obs, last), , drop = FALSE]
+  }
+  data
+}
 
-  ## Apply unified plan= if supplied.  Error if both plan and the individual
-  ## args are non-NULL (ambiguous).
-  ## Tier 8 item 10: plan adaptation now routes through estimation_context()
-  ## so that the compiled specs live in ctx$plan for provenance.
-  if (!is.null(plan)) {
-    if (!inherits(plan, "dynhr_plan"))
-      stop("run_full_estimation: 'plan' must be a dynhr_plan object.", call. = FALSE)
-    if (!is.null(filter_tunes))
-      stop("run_full_estimation: supply either 'plan' or 'filter_tunes', not both.",
-           call. = FALSE)
-    if (!is.null(heteroskedastic_shocks))
-      stop("run_full_estimation: supply either 'plan' or 'heteroskedastic_shocks', not both.",
-           call. = FALSE)
-    ## Compile plan inside estimation_context (TPF check + spec resolution).
-    .plan_ctx <- estimation_context(plan = plan,
-                                    sample_start = model$sample_start,
-                                    likelihood   = likelihood)
-    filter_tunes           <- attr(.plan_ctx$plan, ".filter_tunes_spec")
-    heteroskedastic_shocks <- attr(.plan_ctx$plan, ".shock_scale_spec")
-    rm(.plan_ctx)
+## Model, compiled model, data and the `solved` object the mode result keeps.
+.est_inputs <- function(spec) {
+  mp <- spec$model
+  model <- mp$mod
+  compiled <- mp$compiled %||% mp$solved$compiled %||%
+    compile_model(model, verbose = FALSE, max_order = mp$max_order)
+  solved <- mp$solved
+  if (is.null(solved)) {
+    solved <- structure(list(model = model, compiled = compiled),
+                        class = c("dynhr_solved", "list"))
+  } else if (is.null(solved$compiled)) {
+    solved$compiled <- compiled
+  }
+  list(model = model, compiled = compiled, solved = solved,
+       data = .est_load_data(spec))
+}
+
+## The log-posterior a spec defines, built by the runner's own builder: the
+## mode stage run with optimise = FALSE (.est_mode_stage() then applies the
+## plan / filter_tunes / heteroskedastic_shocks / stochastic_volatility
+## overrides and .mod blocks, routes an OBC model to its filter, and builds
+## the closure, but finds no mode and no proposal), under the spec's option
+## store and OBC switch as .run_estimation_impl() sets them. Returns the
+## stage's list (log_post_fn, result = the mode result without a mode,
+## model, priors, data, obs_vars, ...). `spec` must be valid. dm_posterior()
+## builds through this, so its closure is the runner's objective.
+.est_build_posterior <- function(spec) {
+  saved_opts <- as.list(.dynhr_opts)
+  on.exit(.est_set_store(saved_opts), add = TRUE)
+  if (isFALSE(spec$likelihood$obc)) {
+    old_obc_off <- .mod_blocks_state$obc_off
+    .mod_blocks_state$obc_off <- TRUE
+    on.exit(.mod_blocks_state$obc_off <- old_obc_off, add = TRUE)
+  }
+  .est_set_store(.est_stage_options(spec, NULL))
+  .est_mode_stage(spec, .est_inputs(spec), proposal = FALSE, optimise = FALSE)
+}
+
+## A spec's mode$result may be a dynhr_mode_ref (a run record's stand-in):
+## only dynhr_rerun() can rebuild it.
+.est_check_mode_result <- function(spec) {
+  mr <- spec$mode$result
+  if (inherits(mr, "dynhr_mode_ref"))
+    .dynhr_abort("run_estimation: this spec's mode$result is a reference to a ",
+                 "recorded mode run, not a mode result. Replay the record with ",
+                 "dynhr_rerun(), or set mode$result to a dynhr_mode_result.",
+                 class = "dynhr_error_rerun_needs_mode_result")
+  if (!is.null(mr) && !inherits(mr, "dynhr_mode_result") &&
+      !(is.list(mr) && !is.null(mr$theta_mode) && is.function(mr$log_post_fn)))
+    .dynhr_abort("run_estimation: mode$result must be a dynhr_mode_result.",
+                 class = "dynhr_error_spec_invalid")
+  invisible(NULL)
+}
+
+## The runner. `rr`: the run record begun by the calling entry point.
+.run_estimation_impl <- function(spec, rr = NULL) {
+  .est_check_mode_result(spec)
+  form <- .est_form(spec)
+  cmp  <- spec$compute
+  seed <- cmp$seed
+
+  ## Scoped option store: the spec's values, restored on exit (also on error).
+  saved_opts <- as.list(.dynhr_opts)
+  on.exit(.est_set_store(saved_opts), add = TRUE)
+  samplers <- .spec_sampler_list(spec$sampler)
+  ## likelihood$obc = FALSE estimates an mcp model as linear on purpose: the
+  ## posterior constructors need not warn that they leave the mcp tags out.
+  if (isFALSE(spec$likelihood$obc)) {
+    old_obc_off <- .mod_blocks_state$obc_off
+    .mod_blocks_state$obc_off <- TRUE
+    on.exit(.mod_blocks_state$obc_off <- old_obc_off, add = TRUE)
   }
 
-  ## Apply call-level filter_tunes override (NULL = use mod-file block as-is;
-  ## FALSE = disable; filter_tunes_spec = override).
-  model <- .resolve_filter_tunes(model, filter_tunes)
+  ## Checkpoint integrity (plan section 7): before any stage runs.
+  integrity <- .est_checkpoint_integrity(spec)
 
-  ## Apply call-level heteroskedastic_shocks override.
-  model <- .resolve_heteroskedastic_shocks(model, heteroskedastic_shocks)
+  mode_result <- spec$mode$result
+  mode_out <- NULL
+  inp <- NULL
+  if (is.null(mode_result)) {
+    ## A run that finds the mode owns the seed: seeded here, and the caller's
+    ## RNG stream is restored on exit.
+    .local_seed(seed)
+    .est_set_store(.est_stage_options(spec, NULL))
+    inp <- .est_inputs(spec)
+    ## a full run that samples nothing needs no proposal covariance; the
+    ## prior-initialised samplers (SMC, DSMH, DIME, SMC2) need no mode at all
+    ## unless an output asks for it, or mode$run says otherwise
+    ## (.spec_mode_stage_needed())
+    mode_out <- .est_mode_stage(spec, inp,
+                                proposal = !(identical(form, "full") &&
+                                               !length(samplers)),
+                                optimise = .spec_mode_stage_needed(spec))
+    mode_result <- mode_out$result
+  }
 
-  ## Apply call-level stochastic_volatility override (latent SV on shocks).
-  model <- .resolve_stochastic_volatility(model, stochastic_volatility)
-
-  ## Expand observables for filter_tunes (no-op when no tunes are present).
-  tunes_exp <- .expand_observables_for_tunes(model, obs_vars, data)
-  obs_vars  <- tunes_exp$obs_vars
-  data      <- tunes_exp$Y
-  me_extra  <- tunes_exp$me_extra
-
-  ## Build shock_scale matrix from heteroskedastic_shocks block (NULL when unused).
-  ## Row order aligns to dr$exo_names (Landmine 9); we use model$varexo_names
-  ## here as a proxy and validate at KF call via the exo arg.
-  shock_scale_mat <- .build_shock_scale_matrix(
-    model, model$varexo_names, nrow(data))
-
-  # -------------------------------------------------------------------
-  # Step 5: Posterior
-  # -------------------------------------------------------------------
-  .vcat("-- Step 5: Build log-posterior --\n")
-
-  # Auto-detect OBC: any equation carries an MCP tag of the form  mcp = '...' ?
-  use_obc <- if (isTRUE(obc)) {
-    TRUE
-  } else if (isFALSE(obc)) {
-    FALSE
+  if (identical(form, "mode")) {
+    result <- mode_result
+  } else if (identical(form, "posterior")) {
+    .est_set_store(.est_stage_options(spec, samplers[[1L]]))
+    result <- .est_sampler_stage(.est_sampler_spec(spec, mode_result), mode_result)
   } else {
-    any(vapply(model$equations,
-               function(e) {
-                 tg <- e$tag
-                 !is.null(tg) && !is.na(tg) &&
-                   grepl("^\\s*mcp\\s*=", tg, perl = TRUE)
-               },
-               logical(1L)))
+    result <- .est_full_result(spec, mode_out, samplers, rr)
   }
 
-  obc_specs <- NULL
-  if (use_obc) {
-    .vcat("  OBC model detected -- using Pfeiffer-Ratto PKF log-posterior\n")
-    obc_specs   <- obc_parse_tags(model)
-    log_post_fn <- make_log_posterior_obc_pkf(
-      model, data, priors, obs_vars, compiled,
-      specs       = obc_specs,
-      me_variance = me_variance,
-      max_inner   = obc_max_inner
-    )
-  } else {
-    ## sv_rbpf: forward the RB-PF particle count (a run_full_estimation formal,
-    ## otherwise consumed here and never seen by the factory) into make_log_posterior.
-    sv_lp_args <- if (identical(likelihood, "sv_rbpf"))
-      list(n_particles = n_particles) else list()
-    log_post_fn <- do.call(make_log_posterior,
-      c(list(model, data, priors, obs_vars, compiled,
-             me_variance   = me_variance,
-             likelihood    = likelihood,
-             lik_init      = lik_init,
-             me_extra      = me_extra,
-             shock_scale   = shock_scale_mat,
-             freq_band     = freq_band,
-             system_priors = system_priors),
-        sv_lp_args, list(...)))
+  if (!is.null(integrity)) result$provenance <- list(integrity = integrity)
+  result$run_record <- if (!is.null(rr))
+    .dynhr_rr_finish(rr, model = inp$model %||% mode_result$solved$model,
+                     data = inp$data, spec = spec, integrity = integrity,
+                     result = result)
+  invisible(result)
+}
+
+## Output file prefix of a full run.
+.est_prefix <- function(out) file.path(out$dir, out$prefix)
+
+## The spec the sampler stage runs: when the mode stage was skipped (prior-
+## initialised samplers) there is no mode to check, so its quality check is
+## off.
+.est_sampler_spec <- function(spec, mode_result) {
+  if (isTRUE(mode_result$meta$mode_skipped))
+    spec$mode <- .spec_build("mode", list(skip_check = TRUE), base = spec$mode)
+  spec
+}
+
+## The dynhr_chains object and convergence of one sampler-stage method result.
+.est_chains_object <- function(chain_res, sampler) {
+  cl <- chain_res$chains
+  if (length(cl) == 1L) {
+    ## one chain: the sampler's own result (keeps post_logpost etc.)
+    ch <- new_dynhr_chains(cl[[1L]], sampler)
+    return(list(chains = ch,
+                convergence = list(rhat = NULL, ess = NULL, combined = ch$chain)))
+  }
+  if (!is.null(chain_res$combined)) {
+    ## .run_rwmh_batch(): combined chains + convergence already built
+    return(list(chains = chain_res$combined, convergence = chain_res$convergence))
+  }
+  if (!length(cl)) return(list(chains = NULL, convergence = NULL))
+  conv <- .compute_convergence(cl)
+  st <- chain_res$chain_stats
+  ch <- new_dynhr_chains(list(
+    chain           = conv$combined,
+    acceptance_rate = mean(st$accept_rate, na.rm = TRUE),
+    sampler         = sampler, n_chains = length(cl),
+    n_divergent     = if (!is.null(st$n_divergent)) sum(st$n_divergent, na.rm = TRUE),
+    mean_treedepth  = if (!is.null(st$mean_treedepth))
+                        mean(st$mean_treedepth, na.rm = TRUE),
+    chain_list      = cl,
+    chain_stats     = st), sampler)
+  list(chains = ch, convergence = conv)
+}
+
+## The full-run form (formerly the tail of run_full_estimation()): the mode
+## result is `mode_out` (.est_mode_stage()); runs the one sampler (if any),
+## saves the outputs and runs the post-estimation extras.
+.est_full_result <- function(spec, mode_out, samplers, rr) {
+  if (is.null(mode_out))
+    .dynhr_abort("run_estimation: outputs$form = \"full\" runs the mode stage; ",
+                 "a precomputed mode$result needs form \"posterior\".",
+                 class = "dynhr_error_spec_invalid")
+  cmp <- spec$compute
+  out <- spec$outputs
+  lik <- spec$likelihood
+  verbose <- cmp$verbose
+  seed <- cmp$seed
+  t_start <- Sys.time()
+  .vcat <- function(...) if (verbose) .dynhr_cat(...)
+
+  mode_result <- mode_out$result
+  model      <- mode_out$model
+  compiled   <- mode_out$compiled
+  priors     <- mode_out$priors
+  data       <- mode_out$data
+  obs_vars   <- mode_out$obs_vars
+  use_obc    <- mode_out$use_obc
+  obc_specs  <- mode_out$obc_specs
+  me_variance <- lik$me_variance
+  theta_mode <- mode_result$theta_mode
+  mode_res   <- mode_result$mode
+  s1 <- if (length(samplers)) samplers[[1L]]
+
+  ## Labels as run_full_estimation() reported them.
+  rfe <- is.list(rr) && identical(rr$fn, "run_full_estimation")
+  mod_file <- if (rfe && !is.null(rr$args$mod_file)) rr$args$mod_file else
+    spec$model$path %||% model$mod_file %||% "(pre-parsed)"
+  sampler_lbl <- if (!is.null(s1)) s1$method else if (rfe) rr$args$sampler[[1L]]
+  n_draws  <- if (rfe) rr$args$n_draws  else s1$n_draws %||% 0L
+  n_warmup <- if (rfe) rr$args$n_warmup else s1$n_warmup %||% 0L
+  n_chains <- if (rfe) rr$args$n_chains else s1$n_chains %||% 1L
+
+  prefix <- .est_prefix(out)
+  if (isTRUE(out$save) && !is.null(mode_res)) {
+    dir.create(out$dir, recursive = TRUE, showWarnings = FALSE)
+    mode_path <- paste0(prefix, "_mode.rds")
+    saveRDS(mode_res, mode_path)
+    .vcat(sprintf("  Mode saved -> %s\n", mode_path))
   }
 
-  ## Estimation context: single carrier for the per-estimation options.
-  ## Also gates the mirai pool path: daemons recompile the STANDARD GAUSSIAN
-  ## full-band posterior, so any other likelihood (whittle/cumulant/tpf) or a
-  ## restricted freq_band must ship the already-built log_post_fn closure.
-  ## tpf_options: thread the caller-supplied list into est_ctx so it reaches
-  ## the mirai pool init path (previously omitted -- gap fixed here).
-  ## When use_obc = TRUE, stamp the OBC filter type that was actually used so
-  ## that conditional_forecast() dispatches to the correct terminal-state path
-  ## (Tier 10 item 5; Tier 15 §C: ppf/copf stamping).
-  ## run_full_estimation always calls make_log_posterior_obc_pkf; ctx$likelihood
-  ## is "pkf".  If the caller pre-built a PPF/COPF posterior and passes
-  ## obc_filter = "ppf"/"copf" via ..., that overrides the "pkf" default.
-  .obc_filter_type <- if (use_obc) {
-    ft <- list(...)$obc_filter %||% "pkf"
-    match.arg(as.character(ft), c("pkf", "ppf", "copf"))
-  } else likelihood
-  est_ctx <- estimation_context(
-    me_variance   = me_variance,
-    likelihood    = .obc_filter_type,
-    lik_init      = lik_init,
-    me_extra      = me_extra,
-    shock_scale   = shock_scale_mat,
-    freq_band     = freq_band,
-    system_priors = system_priors,
-    tpf_options   = tpf_options,
-    obc_specs     = obc_specs
-    ## plan provenance: plan= not passed here because me_extra/shock_scale are
-    ## already resolved matrices at this point; $plan is set directly below.
-  )
-  ## Store plan provenance in est_ctx (Tier 8 item 10).
-  if (!is.null(plan)) est_ctx$plan <- plan
-  pool_gaussian <- !use_obc && identical(likelihood, "gaussian") &&
-                   isTRUE(all.equal(freq_band, c(0, pi)))
-
   # -------------------------------------------------------------------
-  # Step 5.5: TPF PMCMC preflight (when likelihood = "tpf")
-  # Run BEFORE mode-finding so the user sees the variance estimate early.
-  # The preflight function must use seed = NULL to vary RNG each call.
-  # (Landmine 1: a non-NULL seed would make the PF deterministic, giving SD=0.)
+  # Sampling: the sampler stage (run_posterior_estimation()'s code)
   # -------------------------------------------------------------------
-  tpf_preflight_result <- NULL
-  if (!use_obc && identical(likelihood, "tpf")) {
-    pf_K      <- tpf_options$pmcmc_preflight_K    %||% 30L
-    pf_skip   <- isTRUE(tpf_options$pmcmc_preflight_skip)
-    pf_n_part <- tpf_options$n_particles %||% 1000L
-
-    if (!pf_skip && pf_K > 0L) {
-      .vcat(sprintf("-- Step 5.5: TPF PMCMC preflight (K = %d) --\n", pf_K))
-      ## Build a seed=NULL version of the TPF closure for variance measurement.
-      ## CRITICAL (Landmine 1): seed MUST be NULL so each evaluation draws
-      ## different RNG streams; non-NULL seed makes the PF deterministic (SD=0).
-      ## tpf_options is a user-facing bag that also carries non-factory keys
-      ## consumed elsewhere (pmcmc_preflight_K/pmcmc_preflight_skip read just
-      ## above; cpm_rho_u read downstream by run_posterior_estimation's CPM
-      ## routing -- see R/posterior.R's own strip-before-dispatch comment).
-      ## make_log_posterior_tpf() has no `...` to swallow those, so filter to
-      ## its own formals first (mirrors R/smc2.R's .smc2_tpf_allow pattern)
-      ## before merging in the forced seed = NULL.
-      .rfe_tpf_factory_allow <- setdiff(
-        names(formals(make_log_posterior_tpf)),
-        c("model", "data", "prior_spec", "obs_vars", "compiled",
-          "me_variance", "system_priors"))
-      pf_tpf_args <- modifyList(
-        tpf_options[intersect(names(tpf_options), .rfe_tpf_factory_allow)],
-        list(seed = NULL))
-      pf_log_post_fn <- do.call(
-        make_log_posterior_tpf,
-        c(list(model       = model,
-               data        = if (ncol(data) == length(obs_vars)) t(data) else data,
-               prior_spec  = priors,
-               obs_vars    = obs_vars,
-               compiled    = compiled,
-               me_variance = me_variance),
-          pf_tpf_args)
-      )
-      theta_pf <- setNames(priors$mean, priors$name)
-      tpf_preflight_result <- .tpf_pmcmc_preflight(
-        pf_log_post_fn, theta_pf, K = pf_K, verbose = verbose)
-
-      if (!is.na(tpf_preflight_result$sd) && tpf_preflight_result$sd > 1) {
-        n_needed <- ceiling(pf_n_part * tpf_preflight_result$n_needed_factor)
-        warning(sprintf(
-          "TPF loglik SD at prior mean = %.2f > 1 (Dynare threshold).\n",
-          tpf_preflight_result$sd),
-          "PMCMC acceptance will be dominated by loglik noise.\n",
-          sprintf("Current n_particles = %d; to achieve SD < 1, raise to ~%d.\n",
-                  pf_n_part, n_needed),
-          call. = FALSE)
-        tpf_preflight_result$n_needed <- n_needed
-      } else if (!is.na(tpf_preflight_result$sd)) {
-        .vcat(sprintf("  TPF loglik SD = %.3f (< 1 threshold, OK)\n",
-                      tpf_preflight_result$sd))
-      }
+  chains   <- NULL
+  conv_res <- NULL
+  post     <- NULL
+  if (!is.null(s1)) {
+    .est_set_store(.est_stage_options(spec, s1))
+    post <- .est_sampler_stage(.est_sampler_spec(spec, mode_result), mode_result)
+    co <- .est_chains_object(post$chains[[1L]], s1$method)
+    chains   <- co$chains
+    conv_res <- co$convergence
+    if (isTRUE(out$save) && !is.null(chains)) {
+      chains_path <- paste0(prefix, "_chains.rds")
+      saveRDS(chains, chains_path)
+      .vcat(sprintf("  Chains saved -> %s\n", chains_path))
     }
-  }
-
-  # -------------------------------------------------------------------
-  # Step 6: Mode-finding
-  # -------------------------------------------------------------------
-  .vcat(sprintf("-- Step 6: Mode-finding (method = '%s') --\n", mode_method))
-  theta_init <- setNames(priors$mean, priors$name)
-  set.seed(seed)
-
-  ## Use .ctx_is_standard_gaussian for the mode-finding parallel-path guard.
-  ## me_extra/shock_scale are already built above; freq_band from the new arg.
-  .rfe_mode_ctx <- estimation_context(
-    me_variance = me_variance,
-    likelihood  = likelihood,
-    me_extra    = me_extra,
-    shock_scale = shock_scale_mat,
-    freq_band   = freq_band
-  )
-  par_standard_mode <- .ctx_is_standard_gaussian(.rfe_mode_ctx, use_obc = use_obc)
-  rm(.rfe_mode_ctx)
-  use_par_mode <- isTRUE(parallel) && requireNamespace("mirai", quietly = TRUE)
-
-  if (use_par_mode) {
-    .vcat(sprintf("  Parallel multi-start mode-finding (mirai)%s\n",
-                  if (!par_standard_mode) " [closure-shipped]" else ""))
-    par_mode <- run_mode_mirai(
-      parsed_model = if (par_standard_mode) model else NULL,
-      Y            = if (par_standard_mode) data  else NULL,
-      prior_spec   = priors,
-      obs_names    = if (par_standard_mode) obs_vars else NULL,
-      theta_init   = theta_init,
-      n_chains     = mode_n_starts,
-      nm_maxit     = n_mode_iter,
-      method       = mode_method,
-      n_cores      = n_cores,
-      me_variance  = me_variance,
-      me_extra     = me_extra,
-      shock_scale  = shock_scale_mat,
-      log_post_fn  = if (par_standard_mode) NULL else log_post_fn,
-      progress     = verbose
-    )
-    mode_res <- par_mode$best
-    mode_res$multistart <- par_mode
-  } else {
-    mode_res <- .run_mode_finding(log_post_fn, theta_init, priors,
-                                  nm_maxit = n_mode_iter,
-                                  method   = mode_method,
-                                  verbose  = verbose)
-  }
-  if (is.null(mode_res) || !is.finite(mode_res$logpost))
-    stop("Mode-finding failed or returned non-finite log-posterior.")
-  theta_mode <- mode_res$theta_mode
-  .vcat(sprintf("  logpost at mode: %.4f\n", mode_res$logpost))
-
-  # Save mode
-  dir.create(output_dir, recursive = TRUE, showWarnings = FALSE)
-  prefix <- file.path(output_dir, output_prefix)
-  mode_path <- paste0(prefix, "_mode.rds")
-  saveRDS(mode_res, mode_path)
-  .vcat(sprintf("  Mode saved -> %s\n", mode_path))
-
-  # -------------------------------------------------------------------
-  # Step 7: Sampling
-  # -------------------------------------------------------------------
-  chains    <- NULL
-  conv_res  <- NULL
-
-  if (n_draws > 0L) {
-    .vcat(sprintf("-- Step 7: Sampling [%s] --\n", toupper(sampler)))
-    set.seed(seed + 1L)
-
-    chains <- switch(sampler,
-
-      rwmh = {
-        n_par      <- length(theta_mode)
-        ## Posterior curvature, not prior variances. `mode_res$V_mode` is set
-        ## only by the exported run_mode_finding(); .run_mode_finding() (the
-        ## optimiser core this path uses) never sets it, so the old
-        ## `if (!is.null(mode_res$V_mode))` test was a DEAD branch and every
-        ## proposal came from the prior. See .sampler_proposal_cov().
-        Sigma_prop <- if (!is.null(mode_res$V_mode)) {
-                        S <- mode_res$V_mode * (2.38^2 / n_par)
-                        dimnames(S) <- list(names(theta_mode), names(theta_mode))
-                        S
-                      } else {
-                        .sampler_proposal_cov(log_post_fn, theta_mode, priors,
-                                              verbose = verbose)
-                      }
-
-        if (n_chains == 1L) {
-          res <- rwmh(log_post_fn, theta_mode, Sigma_prop,
-                      n_draws     = n_draws + n_warmup,
-                      n_burn      = n_warmup, ...)
-          new_dynhr_chains(res, "rwmh")
-        } else {
-          # Parallel multi-chain RWMH via the mirai daemon pool. Standard
-          # Gaussian models recompile the posterior per daemon; OBC/PKF
-          # models ship the already-built log_post_fn closure once instead.
-          use_par <- isTRUE(parallel) &&
-                     identical(parallel_backend, "mirai") &&
-                     requireNamespace("mirai", quietly = TRUE)
-          if (use_par) {
-            .vcat(sprintf("  Parallel RWMH (mirai): %d chains\n", n_chains))
-            par_res <- run_mcmc_mirai(
-              parsed_model = if (pool_gaussian) model else NULL,
-              Y            = if (pool_gaussian) data else NULL,
-              prior_spec   = priors, obs_names = obs_vars,
-              theta_mode   = theta_mode, Sigma_prop = Sigma_prop,
-              n_chains     = n_chains,
-              n_draws      = n_draws, n_burn = n_warmup,
-              seed_base    = seed, n_cores = n_cores,
-              me_variance  = me_variance,
-              me_extra     = me_extra,
-              shock_scale  = shock_scale_mat,
-              ctx          = est_ctx,
-              log_post_fn  = if (pool_gaussian) NULL else log_post_fn,
-              progress     = verbose)
-            chain_list  <- par_res$chains
-            chain_stats <- par_res$chain_stats
-          } else {
-            chain_list  <- vector("list", n_chains)
-            chain_stats <- data.frame(
-              chain = integer(), accept_rate = numeric(),
-              final_logpost = numeric(), stringsAsFactors = FALSE
-            )
-            L <- .robust_chol(Sigma_prop, n_par)
-            for (ch in seq_len(n_chains)) {
-              set.seed(seed + ch)
-              if (ch == 1L) {
-                th0 <- theta_mode
-              } else {
-                z   <- rnorm(n_par)
-                th0 <- theta_mode + 0.4 * as.numeric(L %*% z)
-                names(th0) <- names(theta_mode)
-                for (i in seq_along(th0)) {
-                  th0[i] <- max(th0[i], priors$lower[i] + 1e-8)
-                  th0[i] <- min(th0[i], priors$upper[i] - 1e-8)
-                }
-                if (!is.finite(log_post_fn(th0)$logpost)) th0 <- theta_mode
-              }
-              .vcat(sprintf("  Chain %d/%d...\n", ch, n_chains))
-              chain_list[[ch]] <- rwmh(log_post_fn, th0, Sigma_prop,
-                                       n_draws = n_draws + n_warmup,
-                                       n_burn  = n_warmup, ...)
-              if (!is.null(chain_list[[ch]]))
-                chain_stats <- rbind(chain_stats, data.frame(
-                  chain         = ch,
-                  accept_rate   = chain_list[[ch]]$acceptance_rate,
-                  final_logpost = tail(chain_list[[ch]]$post_logpost, 1),
-                  stringsAsFactors = FALSE
-                ))
-            }
-          }
-          # Compute convergence
-          conv_res <- .compute_convergence(chain_list)
-          # Package the combined chain as a dynhr_chains object
-          combined_res <- list(
-            chain           = conv_res$combined,
-            acceptance_rate = mean(chain_stats$accept_rate, na.rm = TRUE),
-            sampler         = "rwmh",
-            n_chains        = n_chains,
-            chain_list      = chain_list,
-            chain_stats     = chain_stats
-          )
-          new_dynhr_chains(combined_res, "rwmh")
-        }
-      },
-
-      smc = {
-        use_par <- isTRUE(parallel) &&
-                   identical(parallel_backend, "mirai") &&
-                   requireNamespace("mirai", quietly = TRUE)
-        res <- if (use_par)
-          run_smc_mirai(parsed_model = if (pool_gaussian) model else NULL,
-                        Y = if (pool_gaussian) data else NULL,
-                        prior_spec = priors, obs_names = obs_vars,
-                        n_particles = n_particles, seed_base = seed,
-                        n_cores = n_cores, me_variance = me_variance,
-                        me_extra = me_extra,
-                        shock_scale = shock_scale_mat,
-                        ctx = est_ctx,
-                        log_post_fn = if (pool_gaussian) NULL else log_post_fn,
-                        verbose = verbose, ...)
-        else
-          dynhr_smc(log_post_fn, prior_spec = priors,
-                    n_particles = n_particles, verbose = verbose, ...)
-        ## Resample the weighted particle cloud to an equally-weighted draw
-        ## matrix so all downstream consumers (diagnostics, Bayesian IRF,
-        ## smoother) receive a standard draw matrix.  The original particles
-        ## and weights remain in $particles and $smc_weights.
-        if (.is_smc_weighted(res)) {
-          res$chain <- as_posterior_draws(res, seed = seed)
-          res$n_draws <- nrow(res$chain)
-          if (verbose)
-            .vcat(sprintf("  SMC: resampled %d particles to %d equally-weighted draws\n",
-                          res$n_particles, res$n_draws))
-        }
-        new_dynhr_chains(res, "smc")
-      },
-
-      nuts = {
-        # Diagonal mass preconditioning from the inverse-Hessian (V_mode) is
-        # essential here: without it NUTS runs on an identity metric and a DSGE
-        # posterior whose marginal variances span orders of magnitude forces a
-        # tiny step size. (The single-chain path previously omitted this.)
-        n_par <- length(theta_mode)
-        V <- if (!is.null(mode_res$V_mode)) mode_res$V_mode
-             else diag(priors$std^2, nrow = n_par)
-        rownames(V) <- colnames(V) <- names(theta_mode)
-        nuts_mass <- 1 / pmax(diag(V), 1e-12)
-
-        # The analytic gradient path (tangent/adjoint KF) has no me_extra or
-        # shock_scale support: the gradients would be of a different likelihood.
-        # Fall back to the numerical gradient. Guard via .ctx_allows_analytic_gradient.
-        {
-          if (isTRUE(analytic_grad) && !.ctx_allows_analytic_gradient(est_ctx)) {
-            warning("analytic_grad ignored: the analytic gradient path does ",
-                    "not support per-period me_extra (filter_tunes) or ",
-                    "shock_scale (heteroskedastic_shocks). Using the numerical gradient.",
-                    call. = FALSE)
-            analytic_grad <- FALSE
-          }
-        }
-
-        use_par <- isTRUE(parallel) && n_chains > 1L &&
-                   identical(parallel_backend, "mirai") &&
-                   requireNamespace("mirai", quietly = TRUE)
-        if (use_par) {
-          # Analytic/implicit gradient on the parallel path requires a
-          # standard Gaussian model: each daemon needs .worker_model/
-          # .worker_cm/.worker_Y from .mirai_pool_init, which only runs when
-          # parsed_model/Y are supplied (!use_obc). OBC/PKF ships a pre-built
-          # log_post_fn closure instead (.mirai_pool_closure) and has no
-          # analytic gradient -- mirrors the serial branch's
-          # `analytic_grad && !use_obc` gate below.
-          par_analytic_grad <- isTRUE(analytic_grad) && !use_obc
-          par_grad_method <- .dynhr_opt("grad_method", default = "hybrid")
-          if (isTRUE(analytic_grad) && use_obc)
-            .vcat("  [NUTS] analytic_grad requires a standard Gaussian model (compiled per daemon); ",
-                  "this OBC/PKF run uses the numerical gradient.\n")
-          else if (par_analytic_grad)
-            .vcat(sprintf("  [NUTS] parallel chains will build analytic gradients (%s) per daemon...\n",
-                          par_grad_method))
-          par_res <- run_nuts_mirai(
-            parsed_model = if (pool_gaussian) model else NULL,
-            Y = if (pool_gaussian) data else NULL,
-            prior_spec = priors, obs_names = obs_vars,
-            theta_mode = theta_mode, Sigma_prop = V,
-            n_chains = n_chains, n_draws = n_draws, n_warmup = n_warmup,
-            seed_base = seed, n_cores = n_cores,
-            me_variance = me_variance,
-            me_extra = me_extra,
-            shock_scale = shock_scale_mat,
-            ctx = est_ctx,
-            log_post_fn = if (pool_gaussian) NULL else log_post_fn,
-            analytic_grad = par_analytic_grad,
-            grad_method = par_grad_method,
-            progress = verbose)
-          chain_list <- par_res$chains
-          conv_res <- .compute_convergence(chain_list)
-          new_dynhr_chains(list(
-            chain           = conv_res$combined,
-            acceptance_rate = mean(par_res$chain_stats$accept_rate, na.rm = TRUE),
-            sampler         = "nuts", n_chains = n_chains,
-            n_divergent     = sum(par_res$chain_stats$n_divergent, na.rm = TRUE),
-            mean_treedepth  = mean(par_res$chain_stats$mean_treedepth, na.rm = TRUE),
-            chain_list      = chain_list,
-            chain_stats     = par_res$chain_stats), "nuts")
-        } else {
-          # Exact analytic gradient (C++ Kalman score for shock-std params +
-          # numerical for the rest, or full implicit-differentiation gradient
-          # when grad_method = "implicit") when requested on a standard
-          # Gaussian model.
-          nuts_grad <- if (isTRUE(analytic_grad) && !use_obc) {
-            grad_method <- .dynhr_opt("grad_method", default = "hybrid")
-            .vcat(sprintf("  [NUTS] building analytic gradient (%s)...\n", grad_method))
-            make_posterior_grad(model, data, priors, obs_vars, compiled,
-                                me_variance = me_variance,
-                                me_extra    = me_extra,
-                                shock_scale = shock_scale_mat,
-                                grad_method = grad_method,
-                                likelihood  = likelihood,
-                                freq_band   = freq_band)
-          } else NULL
-          res <- dynhr_nuts(log_post_fn, theta_mode,
-                            n_draws  = n_draws,
-                            n_warmup = n_warmup,
-                            mass_diag = nuts_mass, grad_fn = nuts_grad, ...)
-          new_dynhr_chains(res, "nuts")
-        }
-      },
-
-      dime = {
-        use_par <- isTRUE(parallel) &&
-                   identical(parallel_backend, "mirai") &&
-                   requireNamespace("mirai", quietly = TRUE)
-        res <- if (use_par)
-          run_dime_mirai(
-            parsed_model = if (pool_gaussian) model else NULL,
-            Y            = if (pool_gaussian) data else NULL,
-            prior_spec   = priors, obs_names = obs_vars,
-            n_chain      = n_walkers,
-            n_iter       = n_draws, n_burn = n_warmup,
-            seed_base    = seed, n_cores = n_cores,
-            me_variance  = me_variance,
-            me_extra     = me_extra,
-            shock_scale  = shock_scale_mat,
-            ctx          = est_ctx,
-            log_post_fn  = if (pool_gaussian) NULL else log_post_fn,
-            verbose      = verbose)
-        else
-          run_dime(log_post_fn, prior_spec = priors,
-                   n_chain = n_walkers,
-                   n_iter  = n_draws, n_burn = n_warmup,
-                   verbose = verbose, ...)
-        new_dynhr_chains(res, "dime")
-      }
-    )
-
-    # Compute convergence for single-chain samplers if not done yet
-    if (is.null(conv_res) && sampler == "rwmh" && n_chains == 1L) {
-      conv_res <- list(rhat = NULL, ess = NULL, combined = chains$chain)
-    } else if (is.null(conv_res)) {
-      conv_res <- list(rhat = NULL, ess = NULL, combined = chains$chain)
-    }
-
-    # Save chains
-    chains_path <- paste0(prefix, "_chains.rds")
-    saveRDS(chains, chains_path)
-    .vcat(sprintf("  Chains saved -> %s\n", chains_path))
-
-    # Log convergence
     if (!is.null(conv_res$rhat)) {
       .vcat(sprintf("  R-hat: max=%.3f  (>1.05: %d/%d)\n",
                     max(conv_res$rhat),
@@ -992,68 +922,125 @@ run_full_estimation <- function(
                     median(conv_res$ess), min(conv_res$ess)))
     }
   } else {
-    .vcat("-- Step 7: Sampling skipped (n_draws = 0) --\n")
+    .vcat("-- Sampling skipped (no sampler) --\n")
+    ## A particle likelihood still gets its loglik-variance preflight (at
+    ## the mode), as run_full_estimation() always reported it.
+    post <- list(tpf_preflight = .est_pmcmc_preflight(
+      mode_result$log_post_fn, theta_mode, mode_result$ctx, 1000L, verbose))
   }
 
   # -------------------------------------------------------------------
-  # Step 8.25: Ramsey policy workflow (optional)
+  # Ramsey policy workflow (optional)
   # -------------------------------------------------------------------
   ramsey_res <- NULL
-  if (isTRUE(run_ramsey)) {
-    .vcat("-- Step 8.25: Ramsey policy workflow --\n")
+  if (isTRUE(out$ramsey)) {
+    .vcat("-- Ramsey policy workflow --\n")
     params_mode <- model$param_values
     for (nm in names(theta_mode)) {
       if (nm %in% names(params_mode)) params_mode[[nm]] <- theta_mode[[nm]]
     }
-    ramsey_res <- ramsey_policy(
-      model = model,
-      compiled = compiled,
-      params = params_mode,
-      order = ramsey_order,
-      n_periods = ramsey_n_periods,
-      burn_in = ramsey_burn_in,
-      verbose = FALSE
-    )
+    ## 0.9.4 (WS4): `ramsey_policy()` ABORTS when it can find no discount
+    ## factor. Ramsey is an OPTIONAL extra, so resolve the discount here and
+    ## skip the step with a classed warning naming the argument that fixes
+    ## it, rather than losing the estimate.
+    disc <- if (!is.null(out$ramsey_discount)) as.numeric(out$ramsey_discount)
+            else .get_discount(params_mode)
+
+    if (is.null(disc) || length(disc) != 1L || !is.finite(disc)) {
+      .dynhr_warn(
+        "run_full_estimation(run_ramsey = TRUE): skipping the Ramsey step. ",
+        "The planner objective is discounted, but the model has no `beta` or ",
+        "`betta` parameter and `ramsey_discount` was not supplied. ",
+        "Pass ramsey_discount = <value> to run it; $ramsey stays NULL.",
+        class = "dynhr_warn_ramsey_skipped")
+    } else {
+      ramsey_res <- ramsey_policy(
+        model = model,
+        compiled = compiled,
+        params = params_mode,
+        order = out$ramsey_order,
+        n_periods = out$ramsey_n_periods,
+        burn_in = out$ramsey_burn_in,
+        discount = disc,
+        verbose = FALSE
+      )
+    }
   }
 
   # -------------------------------------------------------------------
-  # Step 8: Diagnostics (optional)
+  # Diagnostics (optional)
   # -------------------------------------------------------------------
   diag_results <- NULL
-  if (run_diag && !is.null(chains)) {
-    .vcat("-- Step 8: Diagnostics --\n")
-    dr_mode <- {
-      orig_pv <- model$param_values
-      for (nm in names(theta_mode))
-        if (nm %in% names(model$param_values))
-          model$param_values[[nm]] <- theta_mode[nm]
-      dr <- solve_perturbation(compiled, solve_steady(compiled))
-      model$param_values <- orig_pv
-      dr
+  if (isTRUE(out$diagnostics) && !is.null(chains)) {
+    .vcat("-- Diagnostics --\n")
+    ## Solve at the posterior MODE through the same theta -> params -> steady
+    ## state -> decision-rule pipeline the likelihood uses.
+    params_diag <- apply_theta_to_params(model, theta_mode)
+    ss_diag     <- solve_steady_state(model, compiled, params_diag, verbose = FALSE)
+    dr_diag     <- NULL
+    irf_diag    <- NULL
+    if (!is.null(ss_diag) && isTRUE(ss_diag$converged)) {
+      params_diag <- ss_diag$params %||% params_diag
+      dr_diag <- solve_perturbation(model, compiled, ss_diag$ss, params_diag,
+                                    verbose = FALSE)
+      if (!is.null(dr_diag) && isTRUE(dr_diag$bk_satisfied))
+        irf_diag <- compute_irfs(dr_diag, model, n_periods = 40L,
+                                 params = params_diag)
+      else
+        .dynhr_warn("run_full_estimation(run_diag = TRUE): the posterior mode ",
+                    "does not satisfy Blanchard-Kahn; diagnostics that need a ",
+                    "decision rule will report ERROR.",
+                    class = "dynhr_warn_diag_mode_solve")
+    } else {
+      .dynhr_warn("run_full_estimation(run_diag = TRUE): the steady state did ",
+                  "not converge at the posterior mode; diagnostics that need ",
+                  "a solution will report ERROR.",
+                  class = "dynhr_warn_diag_mode_solve")
     }
+
+    ## Provenance for the report (0.9.4): the orchestrator reads these off
+    ## `draws` attributes.
+    draws_diag <- chains$chain
+    attr(draws_diag, "sampler")  <- sampler_lbl
+    attr(draws_diag, "n_warmup") <- n_warmup
+    attr(draws_diag, "seed")     <- seed
 
     diag_results <- run_all_diagnostics(
       model       = model,
       compiled    = compiled,
-      draws       = if (!is.null(chains)) chains$chain else NULL,
-      chains_list = if (!is.null(chains)) list(chains$chain) else NULL,
+      dr          = dr_diag,
+      ss          = if (!is.null(ss_diag)) ss_diag$ss else NULL,
+      params      = params_diag,
+      priors      = priors,
       data        = data,
-      dates       = dates,
-      ramsey_result = ramsey_res
+      dates       = lik$dates,
+      draws       = draws_diag,
+      ## One post-warmup draw MATRIX per chain (D5 split R-hat / ESS need the
+      ## chains separately; `chains$chain` is their row-bind).
+      chains_list = if (!is.null(chains$chain_list))
+                      lapply(chains$chain_list, function(ch) ch$chain %||% ch)
+                    else list(chains$chain),
+      irf         = irf_diag,
+      obs_names   = obs_vars,
+      theta_mode  = theta_mode,
+      model_name  = if (!identical(mod_file, "(pre-parsed)")) basename(mod_file)
+                    else out$prefix,
+      ramsey_result = ramsey_res,
+      verbose     = verbose
     )
     if (!is.null(diag_results))
       .vcat(sprintf("  %d diagnostics run\n", length(diag_results)))
   }
 
   # -------------------------------------------------------------------
-  # Step 8.5: OBC smoother + historical decomposition at mode (optional)
+  # OBC smoother + historical decomposition at mode (optional)
   # -------------------------------------------------------------------
   smoother_res <- NULL
-  if (compute_smoother && use_obc) {
-    .vcat("-- Step 8.5: PKF smoother + historical decomposition at mode --\n")
+  if (isTRUE(out$smoother) && use_obc) {
+    .vcat("-- PKF smoother + historical decomposition at mode --\n")
     smoother_res <- .compute_smoother_at_mode(
       theta_mode, model, compiled, data, obs_vars,
-      obc_specs, me_variance, obc_max_inner
+      obc_specs, me_variance, lik$obc_max_inner
     )
     if (!is.null(smoother_res))
       .vcat(sprintf("  Smoothed states: %d x %d, Smoothed shocks: %d x %d, HD: %d shocks+constraint\n",
@@ -1063,11 +1050,11 @@ run_full_estimation <- function(
   }
 
   # -------------------------------------------------------------------
-  # Step 8.6: PPF importance re-weighting (PKF adequacy check, opt-in)
+  # PPF importance re-weighting (PKF adequacy check, opt-in)
   # -------------------------------------------------------------------
   ppf_reweight_res <- NULL
-  if (use_obc && !is.null(chains) && isTRUE(obc_ppf_reweight)) {
-    .vcat("-- Step 8.6: PPF importance re-weighting (PKF adequacy check) --\n")
+  if (use_obc && !is.null(chains) && isTRUE(out$obc_ppf_reweight)) {
+    .vcat("-- PPF importance re-weighting (PKF adequacy check) --\n")
     ppf_reweight_res <- tryCatch(
       ppf_reweight_posterior(
         chains, model, compiled, data, priors, obs_vars,
@@ -1078,14 +1065,14 @@ run_full_estimation <- function(
         seed        = seed
       ),
       error = function(e2) {
-        warning("Step 8.6 ppf_reweight_posterior failed: ", conditionMessage(e2),
+        .dynhr_warn("ppf_reweight_posterior failed: ", conditionMessage(e2),
                 call. = FALSE)
         NULL
       }
     )
     if (!is.null(ppf_reweight_res)) {
       if (ppf_reweight_res$ess_fraction < 0.5)
-        warning(sprintf(
+        .dynhr_warn(sprintf(
           "PKF may be inadequate for this dataset (ESS/n = %.2f < 0.50). ",
           ppf_reweight_res$ess_fraction),
           "Consider re-estimating with make_log_posterior_obc_ppf ",
@@ -1095,15 +1082,9 @@ run_full_estimation <- function(
     }
   }
 
-  # -------------------------------------------------------------------
-  # Wrap up
-  # -------------------------------------------------------------------
   t_end   <- Sys.time()
   elapsed <- as.numeric(difftime(t_end, t_start, units = "mins"))
-
-  .vcat("\n================================================================\n")
-  .vcat(sprintf("  DONE in %.1f min\n", elapsed))
-  .vcat("================================================================\n\n")
+  .vcat(sprintf("  Outputs DONE in %.1f min\n", elapsed))
 
   result <- list(
     model           = model,
@@ -1118,23 +1099,210 @@ run_full_estimation <- function(
     smoother        = smoother_res,
     ppf_reweight    = ppf_reweight_res,
     ramsey          = ramsey_res,
-    tpf_preflight   = tpf_preflight_result,
-    ctx             = est_ctx,
+    tpf_preflight   = post$tpf_preflight,
+    ## the gradient method(s) the sampler stage resolved (the run record
+    ## copies them, .dynhr_rr_set_resolved())
+    resolved        = post$resolved,
+    ctx             = mode_result$ctx,
     meta            = list(
       mod_file    = mod_file,
       obs_vars    = obs_vars,
-      sampler     = sampler,
+      sampler     = sampler_lbl,
       n_draws     = n_draws,
       n_warmup    = n_warmup,
       n_chains    = n_chains,
       seed        = seed,
       use_obc     = use_obc,
-      run_ramsey  = isTRUE(run_ramsey),
+      run_ramsey  = isTRUE(out$ramsey),
       started_at  = format(t_start, "%Y-%m-%d %H:%M:%S"),
       elapsed_min = elapsed,
       dynhr_version = utils::packageVersion("dynhr")
     )
   )
   class(result) <- c("dynhr_estimation_result", "list")
-  invisible(result)
+  result
+}
+
+
+# ============================================================================
+# Checkpoint integrity (plan section 7)
+# ============================================================================
+
+## (The result-change registry, .dynhr_result_changes_between() and the
+## component tags a spec uses, .est_component_tags(), are in
+## R/result-changes.R.)
+
+.est_integrity_file <- function(dir) file.path(dir, "spec_integrity.rds")
+
+## Class A: content hashes of the target / algorithm parts of a spec. The
+## sampler hash leaves out n_draws (a resume adds draws on purpose).
+.est_target_hashes <- function(spec) {
+  sl <- lapply(.spec_sampler_list(spec$sampler), function(s) {
+    s <- unclass(s)
+    s$n_draws <- NULL
+    s
+  })
+  list(model      = spec$hashes$model,
+       data       = spec$hashes$data,
+       likelihood = spec$hashes$likelihood,
+       mode       = spec$hashes$mode,
+       sampler    = .spec_hash(sl))
+}
+
+## Classes B (code) and C (numerical environment).
+.est_integrity_provenance <- function(spec) {
+  pv <- .dynhr_rr_provenance()
+  cmp <- spec$compute
+  list(version = pv$version, git_commit = pv$git_commit,
+       r_version = pv$r_version, platform = pv$platform, os = pv$os,
+       blas = pv$blas, lapack = pv$lapack, lapack_version = pv$lapack_version,
+       n_cores = if (isTRUE(cmp$parallel)) .mirai_n_cores(cmp$n_cores) else 1L)
+}
+
+## Fresh checkpointed run: write the integrity file. Resume: compare it with
+## the current spec and build (and act on) the verdict. Returns NULL when
+## there is nothing to report, else a `dynhr_integrity` list.
+.est_checkpoint_integrity <- function(spec) {
+  cmp <- spec$compute
+  dir <- cmp$checkpoint_dir
+  if (is.null(dir)) return(NULL)
+  now <- list(integrity_version = 1L,
+              hashes     = .est_target_hashes(spec),
+              provenance = .est_integrity_provenance(spec),
+              spec       = .dynhr_rr_strip_spec(spec))
+  f <- .est_integrity_file(dir)
+  if (!isTRUE(cmp$resume)) {
+    dir.create(dir, recursive = TRUE, showWarnings = FALSE)
+    saveRDS(now, f)
+    return(NULL)
+  }
+  if (!file.exists(f)) {
+    .dynhr_warn("run_estimation: resuming from ", dir, ", which has no ",
+                "spec_integrity.rds (a checkpoint written before dynhr's spec ",
+                "runner): the target cannot be verified beyond the samplers' ",
+                "own parameter check.",
+                class = "dynhr_warning_checkpoint_unverified")
+    return(structure(list(events = list(unverified = TRUE), checkpoint_dir = dir,
+                          overridden = FALSE), class = "dynhr_integrity"))
+  }
+  was <- readRDS(f)
+  events <- list()
+  warn_mode <- identical(cmp$on_mismatch, "warn")
+
+  ## ---- A: target / algorithm --------------------------------------------
+  parts <- names(now$hashes)
+  diff_parts <- parts[!vapply(parts, function(p)
+    identical(now$hashes[[p]], was$hashes[[p]]), logical(1))]
+  if (length(diff_parts)) {
+    fl <- diff_specs(was$spec, now$spec)
+    rx <- paste0("^(", paste(diff_parts, collapse = "|"), ")(\\[\\[\\d+\\]\\])?(\\$|$)")
+    fl <- fl[grepl(rx, fl$path) & !grepl("\\$n_draws$", fl$path), , drop = FALSE]
+    fields <- if (nrow(fl)) sprintf("%s: %s -> %s", fl$path, fl$a, fl$b)
+              else character(0)
+    msg <- paste0("the spec's ", paste(diff_parts, collapse = ", "),
+                  " differ(s) from the checkpointed run",
+                  if (length(fields)) paste0(" (", paste(fields, collapse = "; "), ")"),
+                  ". The continued chain would target a different posterior or ",
+                  "kernel, so the pooled chain would be invalid")
+    if (!warn_mode)
+      .dynhr_abort("run_estimation: refusing to resume from ", dir, ": ", msg,
+                   ". Start a fresh checkpoint directory, or set ",
+                   "compute$on_mismatch = \"warn\" to resume anyway (the ",
+                   "result is then marked).",
+                   class = "dynhr_error_checkpoint_spec_mismatch")
+    .dynhr_warn("run_estimation: resuming from ", dir, " although ", msg,
+                " (compute$on_mismatch = \"warn\"); the result is marked.",
+                class = "dynhr_warning_checkpoint_spec_mismatch")
+    events$target <- list(parts = diff_parts, fields = fields)
+  }
+
+  ## ---- B: code ----------------------------------------------------------
+  pw <- was$provenance
+  pn <- now$provenance
+  if (!identical(pw$version, pn$version) ||
+      !identical(pw$git_commit, pn$git_commit)) {
+    ## The continued chain runs the sampler stage only: its target and its
+    ## kernel are what a code change must not touch (the mode stage's own
+    ## tags are the class-A mode hash's business).
+    reg <- .dynhr_result_changes_between(pw$version, pn$version,
+                                         .est_component_tags(spec, "sampler"))
+    what <- sprintf("dynhr %s%s -> %s%s", format(pw$version),
+                    if (!is.na(pw$git_commit %||% NA)) paste0(" (", substr(pw$git_commit, 1L, 12L), ")") else "",
+                    format(pn$version),
+                    if (!is.na(pn$git_commit %||% NA)) paste0(" (", substr(pn$git_commit, 1L, 12L), ")") else "")
+    if (length(reg)) {
+      msg <- paste0("the code changed (", what, ") through registered result ",
+                    "change(s) touching this run: ", paste(reg, collapse = "; "),
+                    ". The kernel or target changed mid-chain")
+      if (!warn_mode)
+        .dynhr_abort("run_estimation: refusing to resume from ", dir, ": ", msg,
+                     ". Install dynhr ", format(pw$version), " (the version ",
+                     "that wrote the checkpoint) to continue this chain, start ",
+                     "a fresh checkpoint directory, or set ",
+                     "compute$on_mismatch = \"warn\" to resume anyway (the ",
+                     "result is then marked).",
+                     class = "dynhr_error_checkpoint_code_changed")
+      .dynhr_warn("run_estimation: resuming from ", dir, " although ", msg,
+                  " (compute$on_mismatch = \"warn\"); the result is marked.",
+                  class = "dynhr_warning_checkpoint_code_changed")
+    } else {
+      .dynhr_warn("run_estimation: resuming from ", dir, " with a different ",
+                  "build (", what, "). No registered result change touches ",
+                  "this run, so the chain stays a valid MCMC chain, but it is ",
+                  "not bit-identical to an uninterrupted run (equivalent in ",
+                  "distribution: means within MCSE).",
+                  class = "dynhr_warning_checkpoint_code_changed")
+    }
+    events$code <- list(from = pw[c("version", "git_commit")],
+                        to = pn[c("version", "git_commit")], registered = reg)
+  }
+
+  ## ---- C: numerical environment ------------------------------------------
+  env_f <- c("r_version", "platform", "os", "blas", "lapack", "lapack_version",
+             "n_cores")
+  env_d <- env_f[!vapply(env_f, function(k) identical(pw[[k]], pn[[k]]), logical(1))]
+  if (length(env_d)) {
+    .dynhr_warn("run_estimation: resuming from ", dir, " in a different ",
+                "numerical environment (",
+                paste(sprintf("%s: %s -> %s", env_d,
+                              vapply(env_d, function(k) paste(format(pw[[k]]), collapse = " "), ""),
+                              vapply(env_d, function(k) paste(format(pn[[k]]), collapse = " "), "")),
+                      collapse = "; "),
+                "). Deterministic quantities agree to floating-point ",
+                "precision, but the continued chain is not bit-identical to an ",
+                "uninterrupted run (equivalent in distribution). The daemon ",
+                "count alone does not change seeded draws.",
+                class = "dynhr_warning_checkpoint_environment_changed")
+    events$environment <- list(fields = env_d, from = pw[env_d], to = pn[env_d])
+  }
+  if (!length(events)) return(NULL)
+  structure(list(events = events, checkpoint_dir = dir,
+                 overridden = !is.null(events$target) ||
+                   length(events$code$registered) > 0L),
+            class = "dynhr_integrity")
+}
+
+## One-line summary of an integrity record (print banners).
+.est_integrity_lines <- function(integ) {
+  if (is.null(integ)) return(character(0))
+  ev <- integ$events
+  what <- c(
+    if (!is.null(ev$target))
+      paste0("resumed across a TARGET change (", paste(ev$target$parts, collapse = ", "),
+             "; compute$on_mismatch = \"warn\")"),
+    if (!is.null(ev$code))
+      paste0("resumed across a code change (", format(ev$code$from$version), " -> ",
+             format(ev$code$to$version),
+             if (length(ev$code$registered))
+               paste0("; ", length(ev$code$registered), " REGISTERED result ",
+                      "change(s) touch this run; compute$on_mismatch = \"warn\""),
+             ")"),
+    if (!is.null(ev$environment))
+      paste0("resumed in a different environment (",
+             paste(ev$environment$fields, collapse = ", "), ")"),
+    if (isTRUE(ev$unverified)) "resumed from an unverifiable checkpoint")
+  c(sprintf("  !! INTEGRITY : %s", what[1L]),
+    if (length(what) > 1L) sprintf("               %s", what[-1L]),
+    if (isTRUE(integ$overridden))
+      "               NOT a clean run: see $provenance$integrity")
 }

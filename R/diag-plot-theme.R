@@ -306,10 +306,16 @@ theme_dynhr_diagnostic <- function(base_size = 14) theme_dynhr(base_size = base_
 #' Compact dynhr theme for many-facet plots
 #'
 #' Builds on \code{theme_dynhr(base_size)} but maximises panel area: tighter
-#' panel spacing, no y-axis title/text/ticks/line, and a smaller strip label.
-#' The x-axis line and ticks are retained so the time axis remains readable.
-#' Use together with \code{geom_dynhr_zero()} to add a visible zero baseline
-#' when the y-axis labels are suppressed.
+#' panel spacing, no y-axis TITLE, small y-axis tick labels, and a smaller
+#' strip label.
+#'
+#' Until 0.9.4 this also blanked \code{axis.text.y}, \code{axis.ticks.y} and
+#' \code{axis.line.y}. That made every plot built on it unreadable whenever
+#' the y value itself was the message -- a forest plot of parameter estimates,
+#' a shock-decomposition panel, a free-y facet of IRFs -- and several
+#' diagnostics had each re-enabled the y text locally. The axis is now kept
+#' (at \code{rel(0.75)}); \code{geom_dynhr_zero()} is still worth adding for a
+#' visible zero baseline, but it is no longer a substitute for the axis.
 #'
 #' @param base_size Numeric base font size (default 12).
 #' @return A ggplot2 theme object.
@@ -324,9 +330,7 @@ theme_dynhr_compact <- function(base_size = 12) {
       panel.spacing.x  = ggplot2::unit(0.3, "lines"),
       panel.spacing.y  = ggplot2::unit(0.3, "lines"),
       axis.title.y     = ggplot2::element_blank(),
-      axis.text.y      = ggplot2::element_blank(),
-      axis.ticks.y     = ggplot2::element_blank(),
-      axis.line.y      = ggplot2::element_blank(),
+      axis.text.y      = ggplot2::element_text(size = ggplot2::rel(0.75)),
       strip.text       = ggplot2::element_text(
         size   = ggplot2::rel(0.8),
         face   = "bold",
@@ -354,8 +358,23 @@ geom_dynhr_zero <- function() {
 }
 
 # Resolve a font family to "sans" silently if not installed.
+#
+# systemfonts::system_fonts() enumerates every installed font and takes tens of
+# milliseconds; theme_dynhr() calls this TWICE per theme and a diagnostic suite
+# builds dozens of themes, so the answer is cached per family for the session.
+# The installed font set does not change within a session in any way that
+# matters here; .dynhr_clear_font_cache() exists for tests.
+.dynhr_font_cache <- new.env(parent = emptyenv())
+
+.dynhr_clear_font_cache <- function() {
+  rm(list = ls(.dynhr_font_cache, all.names = TRUE), envir = .dynhr_font_cache)
+  invisible(NULL)
+}
+
 .dynhr_resolve_family <- function(family) {
   if (!is.character(family) || length(family) != 1L || !nzchar(family)) return("sans")
+  hit <- .dynhr_font_cache[[family]]
+  if (!is.null(hit)) return(hit)
   ok <- FALSE
   if (requireNamespace("systemfonts", quietly = TRUE)) {
     sf <- systemfonts::system_fonts()
@@ -366,7 +385,9 @@ geom_dynhr_zero <- function() {
     # Best-effort: trust caller; ggplot will fall back at render time.
     ok <- TRUE
   }
-  if (ok) family else "sans"
+  out <- if (ok) family else "sans"
+  assign(family, out, envir = .dynhr_font_cache)
+  out
 }
 
 
@@ -464,14 +485,42 @@ scale_colour_dynhr_light <- function(..., na.value = dynhr_na_colour) {
 #' @export
 scale_color_dynhr_light <- scale_colour_dynhr_light
 
+## Rescaler that maps `mid` to the CENTRE of a diverging ramp, symmetrically:
+## the half-width is max(|from - mid|) on both sides, so the neutral colour
+## sits exactly at `mid` whatever the data range. Same construction as
+## scales::rescale_mid(), inlined so the theme does not depend on `scales`.
+.dynhr_rescale_mid <- function(mid) {
+  force(mid)
+  function(x, to = c(0, 1), from = range(x, na.rm = TRUE)) {
+    if (!is.finite(mid)) return(scales_rescale_default(x, to, from))
+    extent <- 2 * max(abs(from - mid), na.rm = TRUE)
+    if (!is.finite(extent) || extent == 0) return(rep(mean(to), length(x)))
+    (x - mid) / extent * diff(to) + mean(to)
+  }
+}
+scales_rescale_default <- function(x, to, from) {
+  if (!is.finite(diff(from)) || diff(from) == 0) return(rep(mean(to), length(x)))
+  (x - from[1]) / diff(from) * diff(to) + to[1]
+}
+
 #' Diverging colour scale using Paul Tol sunset (continuous)
-#' @param midpoint Numeric midpoint (default 0).
+#'
+#' \code{midpoint} is the value that gets the ramp's NEUTRAL centre colour.
+#' Until 0.9.4 the argument was accepted and then ignored, so the centre of the
+#' ramp landed at the midpoint of the DATA range: a scale asked to centre on 0
+#' coloured an all-positive variable as if half of it were negative.
+#'
+#' @param midpoint Numeric midpoint (default 0). \code{NA}/\code{NULL}
+#'   restores the plain data-range rescaling.
 #' @param ... Passed to \code{ggplot2::scale_colour_gradientn}.
 #' @param na.value Colour for NA values.
 #' @export
 scale_colour_dynhr_sunset <- function(..., midpoint = 0, na.value = dynhr_na_colour) {
   if (!requireNamespace("ggplot2", quietly = TRUE)) stop("ggplot2 required.")
-  ggplot2::scale_colour_gradientn(colours = tol_sunset, na.value = na.value, ...)
+  ggplot2::scale_colour_gradientn(
+    colours = tol_sunset, na.value = na.value,
+    rescaler = .dynhr_rescale_mid(if (is.null(midpoint)) NA_real_ else midpoint),
+    ...)
 }
 
 #' @rdname scale_colour_dynhr_sunset
@@ -479,6 +528,10 @@ scale_colour_dynhr_sunset <- function(..., midpoint = 0, na.value = dynhr_na_col
 scale_color_dynhr_sunset <- scale_colour_dynhr_sunset
 
 #' Diverging fill scale using Paul Tol sunset (continuous)
+#'
+#' \code{midpoint} is the value that gets the ramp's neutral centre colour;
+#' see \code{\link{scale_colour_dynhr_sunset}} (it was ignored before 0.9.4).
+#'
 #' @param midpoint Numeric midpoint of the diverging scale (default 0).
 #' @param ... Additional arguments passed to
 #'   \code{ggplot2::scale_fill_gradientn}.
@@ -486,7 +539,10 @@ scale_color_dynhr_sunset <- scale_colour_dynhr_sunset
 #' @export
 scale_fill_dynhr_sunset <- function(..., midpoint = 0, na.value = dynhr_na_fill) {
   if (!requireNamespace("ggplot2", quietly = TRUE)) stop("ggplot2 required.")
-  ggplot2::scale_fill_gradientn(colours = tol_sunset, na.value = na.value, ...)
+  ggplot2::scale_fill_gradientn(
+    colours = tol_sunset, na.value = na.value,
+    rescaler = .dynhr_rescale_mid(if (is.null(midpoint)) NA_real_ else midpoint),
+    ...)
 }
 
 #' Sequential cividis colour scale (viridis option "E")

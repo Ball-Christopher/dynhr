@@ -44,7 +44,8 @@ An object of class \code{"MsDecisionRules"} with fields:
   \describe{
     \item{\code{dr}}{Length-h list of \code{DecisionRules} objects, one per
       regime. Each has \code{ghx}, \code{ghu}, \code{ys}, \code{state_idx},
-      \code{bk_satisfied}, plus \code{c_const} (constant drift term).}
+      \code{bk_satisfied}, plus \code{c_const}, the regime constant
+      \eqn{k_s} of the law below (named, length \code{n_endo}).}
     \item{\code{P}}{The transition matrix.}
     \item{\code{pi0}}{Ergodic distribution of P.}
     \item{\code{ss_list}}{List of per-regime steady states.}
@@ -64,6 +65,28 @@ using the Maih (2015) functional iteration.
 \strong{NON-CONVERGENCE:} If the iteration does not converge (max_iter
 hit, divergence, or non-finite iterates), the function \code{stop()}s with
 a diagnostic message. It never silently returns an unconverged solution.
+
+\strong{The law (regime-specific steady states):} regime \eqn{s}'s
+equations are linearised around its own steady state \eqn{ys_s}, and the
+solution is, with \eqn{s = s_t} the regime in force at \eqn{t},
+\deqn{x_t = ys_s + k_s + ghx_s (x_{t-1} - ys_s)[\mathrm{state}] +
+  ghu_s \varepsilon_t ,}
+the lagged state deviating from the CURRENT regime's steady state.  The
+constant \eqn{k_s} (\code{c_const}) solves the stacked linear system
+\deqn{(f_0^s + f_+^s \Phi_s) k_s + f_+^s \sum_{s'} P_{ss'} k_{s'} =
+  -f_+^s \sum_{s'} P_{ss'} (\Delta_{s'} - ghx_{s'}
+  \Delta_{s'}[\mathrm{state}]),}
+\eqn{\Delta_{s'} = ys_{s'} - ys_s}, \eqn{\Phi_s = \sum_{s'} P_{ss'}
+ghx_{s'}} (embedded on the state columns): the effect on today's
+forward-looking variables of EXPECTING a move to another regime's steady
+state (the first-order term of the Maih 2015 / Foerster et al. 2016
+perturbation).  It is zero when all steady states coincide and for
+purely backward-looking equations.  For a linear model the law is exact;
+for a nonlinear one its error is second order in the steady-state gap.
+\code{\link{ms_kim_filter_struct}} and \code{\link{ms_kim_smoother_struct}}
+use exactly this law.  (Releases before 2026-09-25 returned
+\code{ghx_s[state, ]} times \code{sum_q P[s, q] (ys_q - ys_s)[state]} here, which is
+not a term of the solution and was used by nothing.)
 
 \strong{Reduction oracle:} when all \code{params_by_regime} elements are
 identical, the converged \code{ghx_s} must equal the single-regime

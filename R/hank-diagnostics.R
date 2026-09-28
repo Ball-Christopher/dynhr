@@ -159,41 +159,307 @@ hank_distribution_stats <- function(block, top = c(0.1, 0.01),
 }
 
 
-#' Sequence-space determinacy / well-posedness of a HANK model
+#' Sequence-space determinacy of a HANK model (winding-number criterion)
 #'
-#' Reports the conditioning of the GE Jacobian \code{H_U}.  A well-posed
-#' (locally determinate) linear rational-expectations equilibrium requires
-#' \code{H_U} to be invertible; a near-singular \code{H_U} means
-#' \code{\link{hank_model_irf}} would return an unreliable solution.
+#' Decides local determinacy of the linearized general equilibrium by the
+#' winding-number criterion of Auclert, Rognlie and Straub ("Determinacy and
+#' Existence in the Sequence Space", Prop. 1; ARS below) as extended to
+#' the stacked (matrix-valued) GE Jacobian by Rion (Dynare WP 88, Prop. 7):
+#' the untruncated stacked Jacobian \eqn{\tilde J_X} is block quasi-Toeplitz,
+#' \eqn{\tilde J_X = T(j_X) + C}, and when \eqn{\det j_X(z) \neq 0} on the unit
+#' circle it is Fredholm with
+#' \deqn{\dim\ker \tilde J_X - \mathrm{codim\,ran}\, \tilde J_X =
+#'   -\,\mathrm{wind}(\det j_X).}
+#' The conditioning of the TRUNCATED \code{H_U} alone cannot decide this: a
+#' \code{T x T} corner may be perfectly well conditioned while the infinite
+#' system is indeterminate (e.g. a Taylor rule with \code{phi < 1}).
 #'
-#' @param model A \code{\link{hank_model}}.
-#' @param tol Reciprocal-condition threshold below which \code{H_U} is flagged
-#'   ill-conditioned (default 1e-10).
+#' \strong{Symbol.} Conventions follow both papers: \eqn{j_k = \lim_s
+#' J_{s+k,s}} (date-\eqn{t} response to a date-\eqn{s} movement,
+#' \eqn{k = t - s}) and \eqn{j(z) = \sum_k j_k z^k}, so the lag operator has
+#' symbol \eqn{z} (winding \eqn{+1}) and the lead operator \eqn{z^{-1}}
+#' (winding \eqn{-1}). For every (target, unknown) block of \code{H_U} the
+#' coefficients are read at an interior date \eqn{\tau} (0-based) as in ARS
+#' (2023 version, Sec. 5.1): \eqn{j_k = J_{\tau+k,\tau}} for \eqn{k \le 0} (column
+#' \eqn{\tau}, anticipation) and \eqn{j_k = J_{\tau,\tau-k}} for \eqn{k \ge 0}
+#' (row \eqn{\tau}, propagation). Every entry used lies in the leading
+#' \eqn{(\tau+1)\times(\tau+1)} corner, far from the truncation artefacts
+#' that composing truncated Jacobians leaves near date \code{T_h}. The default
+#' is \eqn{\tau = \lfloor (T_h-1)/2 \rfloor}; a second estimate from
+#' \eqn{\tau_2 = \lfloor 2\tau/3 \rfloor} is used as a convergence
+#' diagnostic (\code{symbol_discrepancy}).
 #'
-#' @return A list with \code{rcond} (reciprocal condition number), \code{cond},
-#'   \code{min_sv}/\code{max_sv} (extreme singular values), \code{determinate}
-#'   (logical: \code{rcond >= tol}), and a \code{message}.
+#' \strong{Winding.} \eqn{\det j_X} is evaluated (FFT) on \code{n_grid}
+#' counter-clockwise roots of unity; the winding number is the sum of the
+#' principal-value phase increments over \eqn{2\pi} (unwrapped arg). The grid
+#' is doubled (up to \eqn{2^{16}}) until no phase step exceeds \eqn{\pi/4}.
+#'
+#' \strong{Classification} (\code{status}):
+#' \describe{
+#'   \item{\code{"determinate"}}{\eqn{w = 0} and the truncated \code{H_U} is
+#'     numerically nonsingular: the index is zero and the kernel is trivial,
+#'     so a unique bounded response exists. \eqn{w = 0} is the generic
+#'     certificate (invertible on an open dense set; Rion Prop. 7 item 3).}
+#'   \item{\code{"indeterminate"}}{\eqn{w < 0}: at least \eqn{-w} independent
+#'     square-summable solutions of the homogeneous system -- the bounded
+#'     response is not unique.}
+#'   \item{\code{"nonexistence"}}{\eqn{w > 0}: the range has codimension at
+#'     least \eqn{w}; for some forcings no bounded response exists (whether
+#'     THIS model's shocks hit an unreachable direction is a separate check,
+#'     Rion Prop. 8).}
+#'   \item{\code{"singular_index_zero"}}{\eqn{w = 0} but \code{H_U} is
+#'     numerically singular (\code{rcond < tol}): the non-generic index-zero
+#'     case with a nontrivial kernel, which couples indeterminacy with
+#'     non-existence (Rion, discussion after Prop. 8).}
+#'   \item{\code{"boundary"}}{\eqn{\det j_X} vanishes on the unit circle
+#'     (\code{min_abs_det <= boundary_tol * max_abs_det}): the operator is not
+#'     Fredholm and \code{winding} is \code{NA}.}
+#' }
+#' \code{determinate} is \code{TRUE} only for \code{"determinate"}.
+#'
+#' \strong{Convergence.} Rion (Prop. 10) shows the verdict read off an
+#' approximate symbol is exact once the approximation error stays below the
+#' determinant floor \eqn{\min_{|z|=1} |\det j_X|} (the curves cannot be
+#' pulled across the origin). \code{converged} applies that argument between
+#' the two readings: it is \code{TRUE} when
+#' \eqn{|\det \hat j^{(\tau_2)}(z) - \det \hat j^{(\tau)}(z)| <
+#' |\det \hat j^{(\tau)}(z)|} at every grid point, which by Rouche's theorem
+#' forces both readings to wind identically. \code{FALSE} means the symbol has
+#' not visibly converged relative to the determinant floor: increase
+#' \code{T_h}. It does not change \code{determinate}.
+#'
+#' @param model A \code{\link{hank_model}} (anything with a square stacked
+#'   \code{H_U}; \code{T_h} and \code{unknowns} are read when present,
+#'   otherwise one unknown with \code{T_h = nrow(H_U)} is assumed).
+#' @param tol Reciprocal-condition threshold below which the truncated
+#'   \code{H_U} is flagged numerically singular (default 1e-10). It no longer
+#'   decides \code{determinate} on its own: it only separates
+#'   \code{"determinate"} from \code{"singular_index_zero"} when \eqn{w = 0}.
+#' @param tau Optional 0-based interior date at which the symbol is read
+#'   (default \code{floor((T_h - 1) / 2)}).
+#' @param n_grid Integer: initial number of unit-circle points (default
+#'   4096; raised to exceed \eqn{4\tau} and doubled adaptively).
+#' @param boundary_tol Relative floor for \eqn{\min |\det j_X|} below which the
+#'   symbol is treated as vanishing on the circle (default 1e-8).
+#'
+#' @return A list with the headline \code{determinate} (logical, from the
+#'   winding number -- see above), \code{status}, \code{winding} (integer, or
+#'   \code{NA} on the boundary), \code{index} (\eqn{= -w}),
+#'   \code{min_abs_det}/\code{max_abs_det} over the circle, \code{converged},
+#'   \code{symbol_discrepancy} (\eqn{\sup_z \|\hat j^{(\tau)} -
+#'   \hat j^{(\tau_2)}\|_F} relative to \eqn{\sup_z \|\hat j^{(\tau)}\|_F}), \code{symbol_tail} (largest
+#'   \eqn{|j_k|} in the outer tenth of the band, relative), \code{tau},
+#'   \code{n_grid} (final), \code{symbol} (\code{n x n x (2 tau + 1)} array of
+#'   the blocks \eqn{j_k}, \eqn{k = -\tau..\tau}); the numerical-conditioning
+#'   fields of the truncated \code{H_U}: \code{rcond}, \code{cond},
+#'   \code{min_sv}/\code{max_sv}, \code{well_conditioned}
+#'   (\code{rcond >= tol}); and a \code{message}.
+#' @references
+#' Auclert, A., Rognlie, M., Straub, L. (2023; cited by Rion as 2025).
+#' Determinacy and Existence in the Sequence Space. Working paper.
+#'
+#' Rion, N. (2026). Rich Heterogeneity in Dynare 7: A Practical Description.
+#' Dynare Working Paper 88.
 #' @examples
 #' inc <- hank_income_rouwenhorst(0.9, 0.7, 3)
 #' ag  <- hank_asset_grid(60, 40, 0)
 #' nk  <- hank_nk_hank(ag, inc$Pi, inc$e, beta = 0.96, eis = 1,
 #'                     r_ss = 0.005, phi = 1.5, kappa = 0.1, T_h = 80)
-#' hank_determinacy(nk$model)$determinate
+#' d <- hank_determinacy(nk$model)
+#' d$determinate
+#' d$winding
 #' @export
-hank_determinacy <- function(model, tol = 1e-10) {
+hank_determinacy <- function(model, tol = 1e-10, tau = NULL, n_grid = 4096L,
+                             boundary_tol = 1e-8) {
   H <- model$H_U
+  if (!is.matrix(H) || nrow(H) != ncol(H))
+    .dynhr_abort("hank_determinacy(): `model$H_U` must be a square matrix.",
+                 class = "dynhr_error_input")
+  n_u <- if (is.null(model$unknowns)) 1L else length(model$unknowns)
+  T_h <- if (is.null(model$T_h)) nrow(H) %/% n_u else as.integer(model$T_h)
+  if (n_u * T_h != nrow(H))
+    .dynhr_abort(sprintf(paste0("hank_determinacy(): H_U is %d x %d, not ",
+                                "(n_unknowns * T_h) = %d square."),
+                         nrow(H), ncol(H), n_u * T_h),
+                 class = "dynhr_error_input")
+  if (T_h < 7L)
+    .dynhr_abort("hank_determinacy(): T_h must be at least 7 to read an ",
+                 "interior symbol.", class = "dynhr_error_input")
+
+  ## ---- secondary: conditioning of the truncated corner --------------------
   sv <- svd(H, nu = 0, nv = 0)$d
   min_sv <- min(sv); max_sv <- max(sv)
   rc <- if (max_sv > 0) min_sv / max_sv else 0
-  determinate <- rc >= tol
-  msg <- if (determinate)
-    sprintf("H_U well-conditioned (rcond = %.2e): locally determinate.", rc)
-  else
-    sprintf(paste0("H_U ill-conditioned (rcond = %.2e < %.0e): the GE solution ",
-                   "is unreliable (near-singular / indeterminate)."), rc, tol)
-  list(rcond = rc, cond = if (min_sv > 0) max_sv / min_sv else Inf,
-       min_sv = min_sv, max_sv = max_sv,
-       determinate = determinate, message = msg)
+  well_conditioned <- is.finite(rc) && rc >= tol
+
+  ## ---- headline: winding number of det j_X --------------------------------
+  if (is.null(tau)) tau <- (T_h - 1L) %/% 2L
+  tau <- as.integer(tau)
+  if (tau < 3L || tau > T_h - 1L)
+    .dynhr_abort(sprintf("hank_determinacy(): `tau` must lie in [3, %d].",
+                         T_h - 1L), class = "dynhr_error_input")
+  tau2 <- max(2L, (tau * 2L) %/% 3L)
+  j1 <- .hank_symbol_blocks(H, n_u, T_h, tau)
+  j2 <- .hank_symbol_blocks(H, n_u, T_h, tau2)
+
+  N <- as.integer(max(n_grid, 2^ceiling(log2(4 * tau + 2))))
+  repeat {
+    Jz <- .hank_symbol_eval(j1, tau, N)
+    d  <- .hank_cdet_grid(Jz)
+    abs_d <- Mod(d)
+    min_abs <- min(abs_d); max_abs <- max(abs_d)
+    on_boundary <- !is.finite(min_abs) || max_abs <= 0 ||
+      min_abs <= boundary_tol * max_abs
+    if (on_boundary) break
+    ## phase increments between consecutive counter-clockwise nodes, closing
+    ## the loop; principal values are exact while |step| < pi
+    dphi <- Arg(d[c(seq_len(N)[-1L], 1L)] / d)
+    if (max(abs(dphi)) <= pi / 4 || N >= 65536L) break
+    N <- 2L * N
+  }
+  w <- if (on_boundary) NA_integer_ else as.integer(round(sum(dphi) / (2 * pi)))
+
+  ## ---- convergence diagnostic: a second reading date ----------------------
+  ## The verdict is trusted when the symbol read at tau2 winds identically,
+  ## certified pointwise by Rouche: |det j2 - det j1| < |det j1| on the whole
+  ## circle forces wind(det j2) = wind(det j1) (Rion Prop. 10's argument,
+  ## with the second reading standing in for the unknown exact symbol).
+  Jz2 <- .hank_symbol_eval(j2, tau2, N)
+  d2  <- .hank_cdet_grid(Jz2)
+  disc_abs <- max(sqrt(apply(Mod(Jz - Jz2)^2, 1L, sum)))
+  scale_j <- max(sqrt(apply(Mod(Jz)^2, 1L, sum)))
+  sym_disc <- if (scale_j > 0) disc_abs / scale_j else Inf
+  converged <- !on_boundary && all(Mod(d2 - d) < abs_d)
+  kk <- seq(-tau, tau)
+  outer_band <- abs(kk) >= ceiling(0.9 * tau)
+  jmax <- max(abs(j1))
+  sym_tail <- if (jmax > 0) max(abs(j1[, , outer_band])) / jmax else 0
+
+  status <- if (on_boundary) "boundary"
+    else if (w < 0L) "indeterminate"
+    else if (w > 0L) "nonexistence"
+    else if (!well_conditioned) "singular_index_zero"
+    else "determinate"
+  determinate <- identical(status, "determinate")
+
+  msg <- switch(status,
+    boundary = sprintf(paste0(
+      "det j_X(z) vanishes on the unit circle (min |det| = %.2e, relative ",
+      "%.2e): the stacked GE Jacobian is not Fredholm -- boundary between ",
+      "regimes; no determinacy verdict."), min_abs,
+      if (max_abs > 0) min_abs / max_abs else NA_real_),
+    indeterminate = sprintf(paste0(
+      "winding(det j_X) = %d < 0: at least %d independent bounded solution(s) ",
+      "of the homogeneous system -- INDETERMINATE (the truncated H_U has ",
+      "rcond = %.2e; the corner hides this)."), w, -w, rc),
+    nonexistence = sprintf(paste0(
+      "winding(det j_X) = %d > 0: the range has codimension >= %d, so for ",
+      "some forcings no bounded response exists (non-existence risk; whether ",
+      "this model's shocks hit an unreachable direction is not checked)."),
+      w, w),
+    singular_index_zero = sprintf(paste0(
+      "winding(det j_X) = 0 but the truncated H_U is numerically singular ",
+      "(rcond = %.2e < %.0e): the non-generic index-zero case with a ",
+      "nontrivial kernel (indeterminacy together with non-existence)."),
+      rc, tol),
+    determinate = sprintf(paste0(
+      "winding(det j_X) = 0 and H_U nonsingular (rcond = %.2e): locally ",
+      "determinate (index zero, trivial kernel)."), rc))
+  if (!converged && !on_boundary)
+    msg <- paste0(msg, sprintf(paste0(
+      " Not converged: the symbol read at date %d does not provably wind ",
+      "like the one read at date %d (|det j_X| floor %.2e vs discrepancy); ",
+      "increase T_h."), tau2, tau, min_abs))
+
+  list(determinate = determinate, status = status, winding = w,
+       index = if (is.na(w)) NA_integer_ else -w,
+       min_abs_det = min_abs, max_abs_det = max_abs,
+       converged = converged, symbol_discrepancy = sym_disc,
+       symbol_tail = sym_tail, tau = tau, n_grid = N, symbol = j1,
+       rcond = rc, cond = if (min_sv > 0) max_sv / min_sv else Inf,
+       min_sv = min_sv, max_sv = max_sv, well_conditioned = well_conditioned,
+       message = msg)
+}
+
+
+#' Asymptotic Toeplitz symbol blocks of a stacked sequence-space Jacobian
+#'
+#' Reads \eqn{j_k} for every (row-block, column-block) pair of the stacked
+#' \code{(n T) x (n T)} matrix \code{H} at the 0-based interior date
+#' \code{tau}: \eqn{j_k = H_{\tau+k,\tau}} for \eqn{k \le 0},
+#' \eqn{j_k = H_{\tau,\tau-k}} for \eqn{k \ge 0} (ARS 2023 version, Sec. 5.1).
+#'
+#' @param H Stacked square matrix.
+#' @param n Number of blocks per side.
+#' @param T_h Block size (horizon).
+#' @param tau 0-based interior date.
+#' @return Real array \code{n x n x (2 tau + 1)}; slice \code{k + tau + 1}
+#'   holds \eqn{j_k}.
+#' @keywords internal
+.hank_symbol_blocks <- function(H, n, T_h, tau) {
+  out <- array(0, c(n, n, 2L * tau + 1L))
+  k_neg <- seq(-tau, 0L)                  # anticipation: column tau
+  k_pos <- seq_len(tau)                   # propagation: row tau
+  for (a in seq_len(n)) for (b in seq_len(n)) {
+    r0 <- (a - 1L) * T_h; c0 <- (b - 1L) * T_h
+    out[a, b, k_neg + tau + 1L] <- H[r0 + tau + k_neg + 1L, c0 + tau + 1L]
+    out[a, b, k_pos + tau + 1L] <- H[r0 + tau + 1L, c0 + tau - k_pos + 1L]
+  }
+  out
+}
+
+
+#' Evaluate a matrix symbol on the unit circle by FFT
+#'
+#' @param jk Array \code{n x n x (2 tau + 1)} from
+#'   \code{\link{.hank_symbol_blocks}}.
+#' @param tau Band half-width.
+#' @param N Number of nodes \eqn{z_m = e^{2\pi i m/N}}, \eqn{m = 0..N-1}
+#'   (counter-clockwise); needs \code{N > 2 tau}.
+#' @return Complex array \code{N x n x n} with \code{[m + 1, , ] = j(z_m)}.
+#' @keywords internal
+.hank_symbol_eval <- function(jk, tau, N) {
+  n <- dim(jk)[1L]
+  idx <- (seq(-tau, tau) %% N) + 1L       # j_k at position k mod N
+  out <- array(0 + 0i, c(N, n, n))
+  for (a in seq_len(n)) for (b in seq_len(n)) {
+    x <- numeric(N)
+    x[idx] <- jk[a, b, ]
+    ## unnormalized inverse DFT: sum_k j_k exp(+2 pi i k m / N) = j(z_m)
+    out[, a, b] <- stats::fft(x, inverse = TRUE)
+  }
+  out
+}
+
+
+#' Determinant of a complex matrix at every grid point
+#'
+#' Closed form for \code{n <= 2}; Gaussian elimination with partial pivoting
+#' otherwise (base \code{det()} does not accept complex input).
+#'
+#' @param Jz Complex array \code{N x n x n}.
+#' @return Complex vector of length \code{N}.
+#' @keywords internal
+.hank_cdet_grid <- function(Jz) {
+  n <- dim(Jz)[2L]
+  if (n == 1L) return(Jz[, 1L, 1L])
+  if (n == 2L) return(Jz[, 1L, 1L] * Jz[, 2L, 2L] - Jz[, 1L, 2L] * Jz[, 2L, 1L])
+  vapply(seq_len(dim(Jz)[1L]), function(m) {
+    A <- Jz[m, , ]
+    d <- 1 + 0i
+    for (col in seq_len(n)) {
+      p <- which.max(Mod(A[col:n, col])) + col - 1L
+      if (Mod(A[p, col]) == 0) return(0 + 0i)
+      if (p != col) { A[c(col, p), ] <- A[c(p, col), ]; d <- -d }
+      d <- d * A[col, col]
+      if (col < n) {
+        rows <- (col + 1L):n
+        f <- A[rows, col] / A[col, col]
+        A[rows, ] <- A[rows, , drop = FALSE] - outer(f, A[col, ])
+      }
+    }
+    d
+  }, complex(1))
 }
 
 

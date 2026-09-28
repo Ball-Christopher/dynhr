@@ -51,5 +51,5 @@ Herbst, E. P., & Schorfheide, F. (2015). \emph{Bayesian Estimation of
     \emph{Biometrika}, 89(3), 539-552.
 }
 \seealso{
-\code{\link{mcmc}}, \code{\link{nuts}}, \code{\link{dm_sample}}
+\code{\link{dynhr_mcmc}}, \code{\link{nuts}}, \code{\link{dm_sample}}
 }

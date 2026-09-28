@@ -2,7 +2,7 @@
 % Please edit documentation in R/hank-mixture-emulator.R
 \name{print.hank_mixture_sbc}
 \alias{print.hank_mixture_sbc}
-\title{Print method for `hank_mixture_sbc`}
+\title{Print method for \code{hank_mixture_sbc}}
 \usage{
 \method{print}{hank_mixture_sbc}(x, ...)
 }

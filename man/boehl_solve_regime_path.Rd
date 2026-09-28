@@ -2,7 +2,7 @@
 % Please edit documentation in R/obc-boehl.R
 \name{boehl_solve_regime_path}
 \alias{boehl_solve_regime_path}
-\title{Boehl (2022) OBC simulation solver}
+\title{Boehl (2022) / OccBin OBC path solver}
 \usage{
 boehl_solve_regime_path(
   shock_seq,
@@ -27,55 +27,73 @@ boehl_solve_regime_path(
 
 \item{specs}{OBC spec list (from obc_parse_tags / obc_collect_specs)}
 
-\item{obs_idx}{Integer vector: observable positions in endo vector.
-NULL → all endo indices (safe for simulation-only use)}
+\item{obs_idx}{Unused (kept for interface compatibility).}
 
-\item{single_spell}{Logical: use the O(T + log T) spell-duration fast path
+\item{single_spell}{Logical: use the spell-duration fast path
 (default FALSE → iterative path)}
 
 \item{spell_regime}{Integer bitfield active during the binding spell;
 used only when single_spell = TRUE.
 NULL → 2^n_spec - 1 (all specs bind simultaneously)}
 
-\item{max_iter}{Maximum outer iterations for the iterative path (ignored
-when single_spell = TRUE; default 50L)}
+\item{max_iter}{Maximum guess-and-verify iterations per re-solve
+(ignored when single_spell = TRUE; default 50L)}
 
-\item{tol}{FB-norm tolerance; also used as the end-of-spell gap
-tolerance when single_spell = TRUE (default 1e-8)}
+\item{tol}{Relative complementarity tolerance (default 1e-8):
+a bound is violated when the slack
+\eqn{s (x - b)} is below \eqn{-tol (|x| + |b|)}, a
+multiplier (the residual of the tagged equation)
+has the wrong sign when below -tol times the sum of
+the absolute terms of that residual.  Scale-free:
+rescaling the model's units leaves the regimes
+unchanged (an absolute tolerance before W78,
+2026-09).}
 
-\item{regime_path_init}{Integer vector (length T) for warm-starting the
+\item{regime_path_init}{Integer vector (length T) warm start for the
 iterative path; ignored when single_spell = TRUE}
 
-\item{state_init}{Numeric vector (length n_state) initial model state;
-NULL → zero initial state (standard IRF convention)}
+\item{state_init}{Numeric vector (length n_state) initial model state
+(deviations); NULL → zero initial state}
 }
 \value{
 Named list with:
   $regime_path -- integer vector (length T): final bitfield regime per period
-  $paths       -- n_endo x T matrix of simulated endogenous variable paths
-  $fb_norm     -- scalar: FB residual norm (iterative) or end-of-spell gap
-                  magnitude (spell-duration)
+  $paths       -- n_endo x T matrix of simulated paths (deviations)
+  $fb_norm     -- scalar: Fischer-Burmeister residual norm of the returned
+                  path (zero to rounding at an equilibrium)
   $converged   -- logical
-  $n_iter      -- integer: iterations (iterative) or bisection steps (spell)
+  $n_iter      -- integer: guess-and-verify iterations (the largest
+                  over the re-solves) or bisection steps (spell)
 }
 \description{
-Finds the binding/slack regime path for a given deterministic shock sequence.
-Two dispatch paths:
+Finds the binding/slack regime path and the piecewise-linear path for a
+deterministic shock sequence.  A regime path is simulated with the
+time-varying rules of the OccBin backward recursion (the rule of a period
+depends on the regimes ahead of it) and accepted when it reproduces itself
+on the constrained path: every slack period satisfies every bound and
+every binding period has a multiplier of the right sign (the residual F =
+lhs - rhs of the constraint's tagged equation, F >= 0 at a lower bound, F
+<= 0 at an upper bound, as in Dynare's MCP convention and
+\code{\link{pf_newton_solve}}).
 }
 \details{
-\strong{single_spell = FALSE} (default): iterative complementarity path.
-  At each iteration the model is forward-simulated, the slack-policy
-  prediction at every period determines which constraints bind, and the
-  regime path is updated.  Repeats until the path stabilises.  Handles
-  multi-spell, staggered, and multi-constraint scenarios.
+Shocks are surprises: at period 1 and at every period with a non-zero
+shock the regime path expected from then on is re-solved from the current
+state (Dynare's \code{occbin_solver}).  With a single shock in period 1
+the result is the exact perfect-foresight piecewise-linear path (slack
+after the horizon \code{ncol(shock_seq)}).
+
+Two dispatch paths:
+
+\strong{single_spell = FALSE} (default): OccBin guess-and-verify.  Starting
+  from \code{regime_path_init} (all slack by default), every period is
+  re-checked on the constrained path and the regime path updated until it
+  reproduces itself.  Handles multi-spell, staggered and interacting
+  constraints (a bound violated only because another one binds).
 
 \strong{single_spell = TRUE}: spell-duration root-finder (Boehl 2022 §3).
   Parameterises the regime path as a single contiguous block [1, k_star]
-  followed by permanent slack.  Pre-computes the full binding-regime state
-  trajectory in one pass, then bisects for k_star in O(log T) steps.
-  Cost: O(T + log T) vs O(n_iter × T) for the iterative path.
-  Assumption: the shock hits at t=1 and the constraint relaxes
-  monotonically — the standard IRF convention.  Intended for single-spell
-  ZLB / ELB IRF analysis.  spell_regime controls which constraint bitfield
-  is active during the binding block (default: all specs simultaneously).
+  of \code{spell_regime} followed by permanent slack and bisects for
+  k_star.  Intended for single-spell ZLB / ELB IRFs; \code{converged} is
+  FALSE when the resulting path is not an equilibrium.
 }

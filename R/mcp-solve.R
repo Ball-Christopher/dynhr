@@ -21,8 +21,10 @@
 ##
 ##   The Jacobian has the standard block-tridiagonal structure, with MCP rows
 ##   modified by the FB chain rule:
-##     J_new[i, :] = ∂φ/∂b · J_orig[i, :] + δ_{i, var} · ∂φ/∂a
-##   where δ_{i, var} is 1 in the column of the constrained variable.
+##     J_new[i, :] = s · (∂φ/∂b · J_orig[i, :] + δ_{i, var} · ∂φ/∂a)
+##   where δ_{i, var} is 1 in the column of the constrained variable and
+##   s = +1 for a lower bound, −1 for an upper bound (a = b − x_t and
+##   −F_j both enter with a minus sign).
 ##
 ## REFERENCES
 ##   Fischer, A. (1992). "A special Newton-type optimization method."
@@ -64,7 +66,9 @@
 #' @return List with:
 #'   $J   — sparse dgCMatrix (T*n_endo × T*n_endo)
 #'   $R   — numeric vector (T*n_endo): stacked residual with FB modifications
-#'   $fb  — n_spec × T matrix of FB residuals (for convergence check)
+#'   $fb  — n_spec × T matrix of FB residuals (for convergence check); each
+#'          entry is the final residual of the spec's row, so both specs of a
+#'          two-sided bound report the nested (upper-around-lower) FB value
 #' @noRd
 .mcp_build_stacked_system <- function(Y, y0_num, y_ss_num, eps_mat,
                                        pf_meta, mcp_meta,
@@ -156,9 +160,8 @@
           b <- -Rt[sr]
         }
 
-        # Store FB residual
+        # FB residual (recorded in fb_mat once every spec on the row is done)
         fb <- mcp_fb(a, b)
-        fb_mat[j, t] <- fb
 
         # Replace original residual with FB residual
         Rt[sr] <- fb
@@ -174,17 +177,31 @@
         if (isTRUE(abs(dphi_da) < .Machine$double.eps &&
                    abs(dphi_db) < .Machine$double.eps)) next
 
-        # Modify Jacobian row sr:
-        #   J_new[sr, :] = dphi_db * J_orig[sr, :]
-        #   J_new[sr, vi_col] += dphi_da * 1
-        Jt[sr, ] <- dphi_db * Jt[sr, ]
+        # Modify Jacobian row sr by the chain rule d phi = phi_a da + phi_b db:
+        #   lower: a = x - l, b =  F  ->  da = +e_x, db = +J_F
+        #          J_new[sr, :] = +(dphi_db * J_orig[sr, :] + dphi_da * e_x)
+        #   upper: a = u - x, b = -F  ->  da = -e_x, db = -J_F
+        #          J_new[sr, :] = -(dphi_db * J_orig[sr, :] + dphi_da * e_x)
+        # The residual flips sign with the (a, b) mapping, so the row must
+        # too: without it the Newton direction is wrong in every upper row.
+        # For a two-sided spec the upper FB nests the lower one (J_orig and
+        # F above are the lower spec's FB row/value), and the same rule
+        # applies to it.
+        sgn <- if (sp$op == ">") 1 else -1
+        Jt[sr, ] <- sgn * dphi_db * Jt[sr, ]
 
-        # Add dphi_da to the current-period column of the constrained variable
+        # Add sgn * dphi_da to the current-period column of the constrained
+        # variable
         dc_vi <- mcp_meta$spec_cur_dc[j]
         if (dc_vi > 0L && dc_vi <= ncol(Jt)) {
-          Jt[sr, dc_vi] <- Jt[sr, dc_vi] + dphi_da
+          Jt[sr, dc_vi] <- Jt[sr, dc_vi] + sgn * dphi_da
         }
       }
+      # Record each spec's FB residual as the FINAL value of its row.  For a
+      # two-sided spec the lower FB is only an intermediate (it is nonzero
+      # whenever the upper bound binds, since then F < 0); the complementarity
+      # residual is the nested upper FB, which both specs on the row report.
+      fb_mat[, t] <- Rt[spec_to_selected_row]
     }
 
     # Store residual and route Jacobian columns into sparse triplets
@@ -359,7 +376,7 @@ mcp_solve_path <- function(compiled,
   # Validate: with MCP constraints, we need n_eq >= n_endo - n_distinct_specs
   # (some equations get replaced by FB constraints)
   if (n_spec > 0L && n_eq < n_endo) {
-    warning(sprintf(
+    .dynhr_warn(sprintf(
       "mcp_solve_path: n_eq (%d) < n_endo (%d). MCP constraints replace equations,",
       n_eq, n_endo),
       " but fewer equations than variables suggests an underdetermined system.")
@@ -477,6 +494,7 @@ mcp_solve_path <- function(compiled,
             stop("mcp_solve_path: RHS length ", length(sys$R), " != n_dim ", n_dim)
           mcp_sparse_solve_cpp(i, j, x, -sys$R, n_dim)
         }, error = function(e) {
+          if (.dynhr_is_programming_error(e)) stop(e)
           if (sparse_fallback)
             tryCatch(as.numeric(Matrix::solve(sys$J, -sys$R)),
                      error = function(e2) NULL)
@@ -499,7 +517,7 @@ mcp_solve_path <- function(compiled,
       }
 
       if (is.null(delta_vec) || anyNA(delta_vec) || any(!is.finite(delta_vec))) {
-        warning("mcp_solve_path: non-finite Newton step at iter ", iter,
+        .dynhr_warn("mcp_solve_path: non-finite Newton step at iter ", iter,
                 "; aborting.")
         break
       }
@@ -680,9 +698,12 @@ mcp_solve_steady <- function(compiled, params, mcp_specs = list(),
 
         # Replace equation residual with FB function
         R[ei] <- fb
-        # Modify Jacobian row
-        J[ei, ] <- deriv$db * J[ei, ]
-        J[ei, vi] <- J[ei, vi] + deriv$da
+        # Modify Jacobian row (chain rule; see .mcp_build_stacked_system):
+        # lower (a = x - l, b = F) gives +(db * J + da * e_x); upper
+        # (a = u - x, b = -F) gives -(db * J + da * e_x).
+        sgn <- if (sp$op == ">") 1 else -1
+        J[ei, ] <- sgn * deriv$db * J[ei, ]
+        J[ei, vi] <- J[ei, vi] + sgn * deriv$da
       }
     }
 

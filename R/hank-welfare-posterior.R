@@ -38,8 +38,7 @@
 #' \mathrm{concat}_k(\lambda_k)}, since CEV/welfare units do not depend on
 #' population mass.
 #'
-#' This is exactly the "missing piece" flagged in
-#' \code{references/HANK_WELFARE_SURVEY.md} section 5.2 for computing
+#' This is the missing piece for computing
 #' \eqn{\Delta W = \sum_i D_i \lambda_i} at the pooled (mixture) level rather
 #' than within a single type's block.
 #'

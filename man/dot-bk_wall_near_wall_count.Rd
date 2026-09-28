@@ -2,7 +2,7 @@
 % Please edit documentation in R/bk-wall-transform.R
 \name{.bk_wall_near_wall_count}
 \alias{.bk_wall_near_wall_count}
-\title{Count of finite generalized eigenvalues within `near_tol` of |lambda| = 1}
+\title{Count of finite generalized eigenvalues within \code{near_tol} of |lambda| = 1}
 \usage{
 .bk_wall_near_wall_count(D, E, near_tol = 1e-04, finite_tol = 1e-09)
 }

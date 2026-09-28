@@ -21,6 +21,9 @@
 ##   that drops omega=0 and full-weights pi leaves an O(1) endpoint error
 ##   (1/2)[g(0)-g(pi)] that does NOT vanish with T and blows up near a unit
 ##   root -- see whittle_fim() for the endpoint handling.
+##   These weights match the Whittle log-likelihood (.whittle_loglik: weight
+##   1 per positive ordinate, 1/2 at Nyquist), so G is the expected negative
+##   Hessian of that likelihood up to the O(1) omega = 0 endpoint term.
 ##
 ## Implementation:
 ##   Uses the STANDARD spectral density path (not the debiased EI path):
@@ -138,7 +141,13 @@ whittle_fim <- function(TT, RR, ZZ, DD, Sigma_e,
   dSe_arr <- lapply(dss_list, function(d) get_d(d, "dSigma_e", zero_Se))
 
   ## --- Accumulate FIM via spectral quadrature ---------------------------------
-  ## Quadrature weight per frequency = 1 (see derivation above).
+  ## Quadrature weight per interior frequency = 1 (see derivation above).
+  ## Consistency with the likelihood: .whittle_loglik() weights each positive
+  ## ordinate by 1 and the Nyquist by 1/2 (.whittle_freq_weights), so its
+  ## expected negative Hessian is sum_j w_j Re tr(f^-1 d_a f f^-1 d_b f) --
+  ## exactly this sum minus the (1/2) g(0) endpoint term, which the likelihood
+  ## lacks only because it drops the demeaned omega = 0 ordinate. The
+  ## 2*pi scale of the spectral kernel cancels in tr(S^-1 dS S^-1 dS).
   ## Inner loop: per-frequency, compute Si_j = f^{-1}(w_j), then per-param
   ## dS_k, and accumulate FIM_{jk} += Re tr(Si dS_j Si dS_k).
   ##
@@ -238,7 +247,7 @@ whittle_fim <- function(TT, RR, ZZ, DD, Sigma_e,
   ## --- Regularise via SoftAbs -------------------------------------------------
   m <- tryCatch(
     softabs_metric(FIM, alpha = softabs_alpha),
-    error = function(e) NULL
+    error = function(e) .dynhr_reraise_bug(e, NULL)
   )
 
   if (is.null(m)) {
@@ -274,9 +283,11 @@ whittle_fim <- function(TT, RR, ZZ, DD, Sigma_e,
 #' (\code{solution_derivatives()} failed or returned \code{ok = FALSE}) falls
 #' back to a central finite difference on the solved SSM matrices directly
 #' (central FD is acceptable here: this assembler runs once at the mode).
-#' \code{dSigma_e} is always obtained by central FD of \code{.get_shock_cov()}
-#' (cheap, and exact-zero for parameters absent from the shocks block),
-#' mirroring \code{.dSigma_e_fd()} in \code{make_posterior_grad()}.
+#' \code{dSigma_e} is the exact derivative of \code{.get_shock_cov()}
+#' (\code{.shock_cov_deriv_plan()}/\code{.shock_cov_deriv_eval()}, built once
+#' per call; exact zero for parameters absent from the shocks block), with a
+#' central FD of \code{.get_shock_cov()} only where no exact derivative exists,
+#' mirroring \code{.dSigma_e_d()} in \code{make_posterior_grad()}.
 #'
 #' @param model    dynhr_mod.
 #' @param compiled dynhr_compiled.
@@ -316,9 +327,35 @@ whittle_fim <- function(TT, RR, ZZ, DD, Sigma_e,
   DD      <- dr$ghu[oi, , drop = FALSE]
   Sigma_e <- .get_shock_cov(model, exo, params)
 
-  ## dSigma_e/dtheta_nm by central FD of .get_shock_cov (mirrors
-  ## .dSigma_e_fd() in make_posterior_grad(); exact-zero for parameters
-  ## absent from the shocks block).
+  ## dSigma_e/dtheta_nm. W93: EXACT, from the plan/eval pair
+  ## make_posterior_grad() uses (.shock_cov_deriv_plan/.shock_cov_deriv_eval,
+  ## R/posterior.R), the plan built and evaluated ONCE for this metric build.
+  ## theta_nm reaches Sigma_e through params[key], key = the name
+  ## .apply_theta_to_params() writes it under (itself, or the canonical
+  ## "corr a,b" key), with d params[key] / d theta_nm = 1. Parameters that
+  ## cannot reach .get_shock_cov() (.sigma_e_param_deps) get an exact zero
+  ## (their FD was exactly zero). The central FD of .get_shock_cov remains
+  ## only where no exact derivative exists -- plan NULL (an expression D()
+  ## cannot differentiate exactly, e.g. abs()), the eval not applying at this
+  ## point, or a non-finite entry -- the rule .dSigma_e_d applies in
+  ## make_posterior_grad().
+  theta_key <- vapply(par_names, function(nm) {
+    if (nm %in% names(params) || nm %in% exo) return(nm)
+    pr <- .corr_pair(nm)
+    if (!is.null(pr) && all(pr %in% exo)) .corr_key(pr[1], pr[2]) else nm
+  }, character(1))
+  sig_keys <- .sigma_e_param_deps(model, exo, unique(theta_key))
+  zero_dSe <- matrix(0, length(exo), length(exo), dimnames = list(exo, exo))
+  dSe_exact <- if (length(sig_keys)) {
+    plan <- .shock_cov_deriv_plan(model, exo, params, sig_keys)
+    .shock_cov_deriv_eval(plan, model, exo, params, Sigma_e)
+  } else NULL
+  .dSigma_e_d1 <- function(nm) {
+    key <- theta_key[[nm]]
+    if (!(key %in% sig_keys)) return(zero_dSe)
+    d <- dSe_exact[[key]]
+    if (is.null(d)) .dSigma_e_fd1(nm) else d
+  }
   .dSigma_e_fd1 <- function(nm) {
     h  <- 1e-6 * max(abs(theta[[nm]]), 1e-3)
     tp <- theta; tm <- theta
@@ -364,28 +401,28 @@ whittle_fim <- function(TT, RR, ZZ, DD, Sigma_e,
   names(dss_list) <- par_names
 
   for (nm in sig_names)
-    dss_list[[nm]] <- list(dSigma_e = .dSigma_e_fd1(nm))
+    dss_list[[nm]] <- list(dSigma_e = .dSigma_e_d1(nm))
 
   sd_res <- NULL
   if (length(num_names) > 0) {
     sd_res <- tryCatch(
       solution_derivatives(model, compiled, dr, params,
                             param_names = num_names, obs_vars = obs_vars),
-      error = function(e) NULL
+      error = function(e) .dynhr_reraise_bug(e, NULL)
     )
     for (nm in num_names) {
       d <- if (!is.null(sd_res)) sd_res$derivs[[nm]] else NULL
       if (!is.null(d) && isTRUE(d$ok)) {
         dss_list[[nm]] <- list(dTT = d$dTT, dRR = d$dRR, dZZ = d$dZZ,
                                 dDD = d$dDD,
-                                dSigma_e = .dSigma_e_fd1(nm))
+                                dSigma_e = .dSigma_e_d1(nm))
       } else {
         ## Fall back to direct central FD on the solved SSM matrices.
         fd <- .ssm_fd1(nm)
         dss_list[[nm]] <- if (!is.null(fd)) {
-          c(fd, list(dSigma_e = .dSigma_e_fd1(nm)))
+          c(fd, list(dSigma_e = .dSigma_e_d1(nm)))
         } else {
-          list(dSigma_e = .dSigma_e_fd1(nm))   ## last resort: zero solution-block
+          list(dSigma_e = .dSigma_e_d1(nm))   ## last resort: zero solution-block
         }
       }
     }
@@ -408,7 +445,7 @@ whittle_fim <- function(TT, RR, ZZ, DD, Sigma_e,
   if (!is.null(prior_hess)) {
     m <- tryCatch(
       softabs_metric(prior_hess + diag(1e-4, np), alpha = softabs_alpha),
-      error = function(e) NULL
+      error = function(e) .dynhr_reraise_bug(e, NULL)
     )
     if (!is.null(m)) {
       if (!is.null(nm)) {

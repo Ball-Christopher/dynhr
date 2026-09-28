@@ -1,6 +1,6 @@
 Package: dynhr
 Title: DSGE Modelling Toolkit (Parsing, Solving, Estimating, Diagnosing)
-Version: 0.9.3.7
+Version: 0.9.4
 Authors@R: c(
     person("Chris", "Ball", role = c("aut", "cre"),
            email = "chrispball1@gmail.com"))
@@ -67,7 +67,10 @@ Suggests:
     quarto,
     knitr,
     rmarkdown,
-    JuliaCall
+    yaml,
+    JuliaCall,
+    posterior,
+    coda
 SystemRequirements: C++20; Julia (>= 1.9, optional, for parity test fixture
     regeneration); Dynare (>= 5.0, optional, for parity test fixture
     regeneration)
@@ -156,6 +159,7 @@ Collate:
     'tpf-sbc.R'
     'sv-rbpf.R'
     'sv-rbpf-sbc.R'
+    'sv-grid-filter.R'
     'pskf-likelihood.R'
     'pskf-smoother.R'
     'analytic-gradient.R'
@@ -172,6 +176,7 @@ Collate:
     'smoother-diffuse.R'
     'smoother-monolith.R'
     'shock-decomposition.R'
+    'shock-decomposition-shapley.R'
     'conditional-forecast.R'
     'param-transform.R'
     'param-set.R'
@@ -182,6 +187,7 @@ Collate:
     'posterior-closure.R'
     'posterior.R'
     'mdd-thames.R'
+    'model-compare-predictive.R'
     'system-priors.R'
     'mode-cmaes.R'
     'mode-nmkb.R'
@@ -191,6 +197,7 @@ Collate:
     'mode-trust-region.R'
     'mode-orchestrate.R'
     'method-of-moments.R'
+    'mom-se-bounds.R'
     'profile-ci.R'
     'parallel-cluster.R'
     'parallel-mirai.R'
@@ -205,9 +212,11 @@ Collate:
     'metric-monge.R'
     'sampler-hmc.R'
     'sampler-nuts.R'
+    'sampler-nuts-pooled.R'
     'sampler-chees.R'
     'sampler-mala.R'
     'sampler-dime.R'
+    'sampler-dsmh.R'
     'sampler-diagnostics.R'
     'chain-diagnostics.R'
     'pruned-state-space.R'
@@ -220,6 +229,7 @@ Collate:
     'estimate-runner.R'
     'estimation-context.R'
     'diag-plot-theme.R'
+    'diag-explanations.R'
     'diag-result.R'
     'diag-summary.R'
     'diag-helpers.R'
@@ -237,6 +247,7 @@ Collate:
     'diag-pre-d2-spectral.R'
     'diag-pre-d23-spectral.R'
     'diag-pre-d26-calibration-sensitivity.R'
+    'diag-pre-d26-calibration-choice.R'
     'diag-pre-d37-komunjer-ng.R'
     'diag-pre-d38-sloppiness.R'
     'diag-pre-d39-stability-map.R'
@@ -248,6 +259,7 @@ Collate:
     'diag-mcmc-d6-prior-posterior.R'
     'diag-mcmc-d7-mode-robustness.R'
     'diag-post-d8-irf.R'
+    'diag-post-d41-innovation.R'
     'diag-post-d9-moments.R'
     'diag-post-d10-vardec.R'
     'diag-post-d11-historical.R'
@@ -270,7 +282,6 @@ Collate:
     'diag-model-structure.R'
     'diag-obc-d31-scenario.R'
     'diag-obc-d32-binding.R'
-    'diag-obc.R'
     'diag-data.R'
     'diag-bayesian-irf.R'
     'bayesian-cfcst.R'
@@ -375,15 +386,21 @@ Collate:
     'hank-mixture-estimation.R'
     'hank-mixture-emulator.R'
     'hank-partial-id.R'
+    'hank-limited-info.R'
     'hank-estimation.R'
     'hank-kalman.R'
+    'hank-shock-filter.R'
     'hank-kalman-ar.R'
     'hank-kalman-ar-grad.R'
     'hank-run-ar.R'
     'hank-panel.R'
     'hank-diagnostics.R'
+    'hank-nonlinearity.R'
     'csminwel.R'
     'var-irf.R'
+    'svar-ica.R'
+    'vardec-nonlinear.R'
+    'lp-estimand.R'
     'run-mode-finding.R'
     'run-posterior-estimation.R'
     'pmmh.R'
@@ -392,5 +409,14 @@ Collate:
     'mdd-calibration.R'
     'run-full-estimation.R'
     'options.R'
+    'conditions.R'
+    'run-record.R'
+    'estimation-spec.R'
+    'spec-serialize.R'
+    'result-changes.R'
+    'dynhr-verify.R'
+    'rng-helpers.R'
+    'format-report.R'
+    'interop.R'
     'zzz.R'
 Config/roxygen2/version: 8.0.0

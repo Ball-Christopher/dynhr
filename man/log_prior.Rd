@@ -10,11 +10,19 @@ log_prior(theta, prior_spec)
 \item{theta}{Named numeric vector (parameter values to evaluate)}
 
 \item{prior_spec}{Data.frame with columns: name, distribution, p1, p2,
-lower, upper}
+lower, upper (optionally p3, p4)}
 }
 \value{
 Scalar log-prior (finite, or -Inf if any parameter is out of bounds)
 }
 \description{
-Compute total log-prior density for a named parameter vector
+Hyperparameters follow Dynare: \code{p1}/\code{p2} are the prior MEAN and STANDARD
+DEVIATION for every shape, and the optional columns \code{p3}/\code{p4} are Dynare's
+PRIOR_3RD/4TH_PARAMETER (generalised-beta support, gamma / inverse-gamma
+shift). For a UNIFORM prior this means (Dynare \code{uniform_specification()}):
+the support is \code{[p3, p4]} when both are given, otherwise
+\code{[p1 - sqrt(3) * p2, p1 + sqrt(3) * p2]} -- \code{p1}/\code{p2} are NOT the bounds.
+A hand-built uniform on \code{[a, b]} is therefore written with \code{p3 = a,
+p4 = b} (and \code{p1 = (a + b)/2}, \code{p2 = (b - a)/sqrt(12)}, which is what
+[extract_prior_spec()] emits). \code{lower}/\code{upper} truncate every prior.
 }

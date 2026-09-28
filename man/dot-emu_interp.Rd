@@ -2,26 +2,26 @@
 % Please edit documentation in R/hank-mixture-emulator.R
 \name{.emu_interp}
 \alias{.emu_interp}
-\title{Interpolate a stored per-node field of a `hank_mixture_emulator` at a query theta}
+\title{Interpolate a stored per-node field of a \code{hank_mixture_emulator} at a query theta}
 \usage{
 .emu_interp(emu, theta_vec, field)
 }
 \arguments{
 \item{emu}{A \code{\link{hank_mixture_emulator}}.}
 
-\item{theta_vec}{Named numeric length-`d` query point (or a list with
-`names(emu$box)` entries), in `names(emu$box)` order.}
+\item{theta_vec}{Named numeric length-\code{d} query point (or a list with
+\code{names(emu$box)} entries), in \code{names(emu$box)} order.}
 
-\item{field}{One of `"Theta"`, `"gref"`, `"m1"`, `"M2D0"`, `"M2dD"`.}
+\item{field}{One of \code{"Theta"}, \code{"gref"}, \code{"m1"}, \code{"M2D0"}, \code{"M2dD"}.}
 }
 \value{
 The interpolated field value, same shape as one node's slice of
-  `emu[[field]]` (dropping the leading node dimension(s)).
+  \code{emu[[field]]} (dropping the leading node dimension(s)).
 }
 \description{
-Internal dispatcher between the two surrogate backends: `"multilinear"`
-(tensor-grid `d`-dimensional linear interpolation, generalizing the
-research scratch's `.bw`/`emu_slice`) and `"rbf"` (thin-plate-spline with a
+Internal dispatcher between the two surrogate backends: \code{"multilinear"}
+(tensor-grid \code{d}-dimensional linear interpolation, generalizing the
+research scratch's \code{.bw}/\code{emu_slice}) and \code{"rbf"} (thin-plate-spline with a
 linear tail, on box-normalized coordinates).
 }
 \keyword{internal}

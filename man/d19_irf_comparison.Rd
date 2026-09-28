@@ -11,6 +11,7 @@ d19_irf_comparison(
   vars = NULL,
   n_periods = 40L,
   params = NULL,
+  shock_size = 1,
   meta = NULL
 )
 }
@@ -25,15 +26,28 @@ d19_irf_comparison(
 
 \item{n_periods}{IRF horizon}
 
-\item{params}{Named parameter vector}
+\item{params}{Named parameter vector (default \code{model$param_values})}
+
+\item{shock_size}{Shock size in standard deviations (default 1)}
 
 \item{meta}{Optional metadata list attached to the diagnostic result}
 }
 \value{
-A dynhr_diagnostic object with plots
+A dynhr_diagnostic object with \code{plots$irf_comparison}
 }
 \description{
-Plots IRFs from first-order (ghx/ghu only) and second-order (pruned
-state space) side by side, highlighting the quadratic correction.
+Plots IRFs from the first-order rule (ghx/ghu only) and the pruned
+second-order system for the SAME one-standard-deviation shock vector, as
+deviations from the deterministic steady state net of the constant risk
+correction (so the two coincide when the model is linear).
+}
+\details{
+The shock vector is column \code{k} of the lower Cholesky factor of
+\code{dr2$Sigma_e} (the model's covariance at \code{params} when that is
+absent), times \code{shock_size} -- the \code{compute_irfs()} convention.
+A shock with zero variance gets a unit impulse of size \code{shock_size},
+as in \code{compute_irfs()}. The second-order response is the difference of
+two pruned simulations (\code{simulate_model_order2()}) with and without the
+impulse, which removes the \code{ghss} drift exactly.
 }
 \keyword{internal}

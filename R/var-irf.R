@@ -305,20 +305,18 @@ var_irf_bootstrap <- function(varfit, horizon = 20L, data = NULL,
       reg <- c(reg, det_row(t - p))
       Ys[t, ] <- as.numeric(reg %*% coef) + ub[t - p, ]
     }
-    fit_b <- tryCatch(estimate_var(Ys, p = p, type = type), error = function(e) NULL)
+    fit_b <- tryCatch(estimate_var(Ys, p = p, type = type),
+                      error = function(e) .dynhr_reraise_bug(e, NULL))
     if (is.null(fit_b)) return(NULL)
     fit_b$var_names <- varfit$var_names            # keep naming stable
     tryCatch(var_irf(fit_b, horizon = horizon, shock = shock),
-             error = function(e) NULL)
+             error = function(e) .dynhr_reraise_bug(e, NULL))
   }
 
-  ## Reproducible draws.
-  old_seed <- if (exists(".Random.seed", envir = .GlobalEnv))
-    get(".Random.seed", envir = .GlobalEnv) else NULL
-  set.seed(seed)
-  on.exit({
-    if (!is.null(old_seed)) assign(".Random.seed", old_seed, envir = .GlobalEnv)
-  }, add = TRUE)
+  ## Reproducible draws; the caller's RNG stream (or its absence -- the old
+  ## inline restore left a freshly created .Random.seed behind) is restored
+  ## on exit (C1).
+  .local_seed(seed)
 
   reps <- vector("list", n_boot)
   kept <- 0L

@@ -426,7 +426,7 @@ hank_mixture_panel_loglik_marginal <- function(panel, obs_spec, blocks_by_type,
   n_particles <- as.integer(n_particles)
   if (n_particles < 1L)
     stop("hank_mixture_panel_loglik_marginal: 'n_particles' must be >= 1.")
-  if (!is.null(seed)) set.seed(seed)
+  .local_seed(seed)  # caller's RNG stream restored on exit (C1)
 
   if (is.function(shock_specs)) {
     paths <- shock_specs(n_particles, T_h)

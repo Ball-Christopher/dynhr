@@ -86,8 +86,14 @@ solve_model <- function(mod_file,
                         mcp_options      = list(),
                         ss_mcp           = FALSE,
                         verbose          = TRUE) {
+  ## Own the message epoch for this run: repeat-suppressed warnings
+  ## (`.dynhr_warn(once = TRUE)`) are keyed within it and re-arm for the
+  ## next run, and the close reports what it suppressed. A nested call
+  ## inherits this epoch rather than opening a second one.
+  .dynhr_run_epoch <- .dynhr_epoch("solve_model")
+  on.exit(.dynhr_close_epoch(.dynhr_run_epoch), add = TRUE)
 
-  .vcat <- function(...) if (verbose) cat(...)
+  .vcat <- function(...) if (verbose) .dynhr_cat(...)
 
   t_start <- Sys.time()
 

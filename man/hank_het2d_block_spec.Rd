@@ -8,7 +8,8 @@ hank_het2d_block_spec(
   name,
   block,
   inputs = c("rb", "ra", "w"),
-  outputs = c("B", "A", "C")
+  outputs = c("B", "A", "C"),
+  expectations = NULL
 )
 }
 \arguments{
@@ -17,6 +18,9 @@ hank_het2d_block_spec(
 \item{block}{A \code{\link{hank_het2d_block}}.}
 
 \item{inputs, outputs}{Character vectors, validated at spec time.}
+
+\item{expectations}{\code{NULL} (FIRE, default) or a behavioural
+expectations spec; see \code{\link{hank_het2_block_spec}}.}
 }
 \value{
 An object of class \code{hank_block} (kind \code{"het2d"}).

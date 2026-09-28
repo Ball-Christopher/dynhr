@@ -3,7 +3,7 @@
 \docType{class}
 \title{S3 class for posterior sample chains}
 \description{
-An S3 class returned by \code{\link{mcmc}}, \code{\link{smc}}, and
+An S3 class returned by \code{\link{dynhr_mcmc}}, \code{\link{smc}}, and
 \code{\link{nuts}}.  Wraps the raw sampler output with consistent slots
 and \code{print} / \code{summary} methods.
 }
@@ -21,5 +21,5 @@ and \code{print} / \code{summary} methods.
 }
 }
 \seealso{
-\code{\link{mcmc}}, \code{\link{smc}}, \code{\link{nuts}}
+\code{\link{dynhr_mcmc}}, \code{\link{smc}}, \code{\link{nuts}}
 }

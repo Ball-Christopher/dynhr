@@ -299,7 +299,7 @@ dynamic_path_perturbation <- function(compiled, ss, params, dr,
         nleqslv::nleqslv(z_guess, obj_fn,
                           control = list(xtol = tol * 1e-2, ftol = tol * 1e-2,
                                          maxit = 10000L, allowSingular = TRUE)),
-        error = function(e) NULL
+        error = function(e) .dynhr_reraise_bug(e, NULL)
       )
 
       if (!is.null(sol) && max(abs(sol$fvec)) < tol && all(is.finite(sol$fvec))) {
@@ -344,11 +344,11 @@ dynamic_path_perturbation <- function(compiled, ss, params, dr,
           gg$x0 <- xt
           gg$f0 <- matrix(y_sol, nrow = ny)
         } else if (verbose) {
-          cat(sprintf("  IFT solve failed at tb=%d, t=%d\n", tb, t))
+          .dynhr_cat(sprintf("  IFT solve failed at tb=%d, t=%d\n", tb, t))
         }
 
       } else if (verbose) {
-        cat(sprintf("  nleqslv failed at tb=%d, t=%d (max|res|=%g)\n",
+        .dynhr_cat(sprintf("  nleqslv failed at tb=%d, t=%d (max|res|=%g)\n",
                     tb, t,
                     if (!is.null(sol)) max(abs(sol$fvec)) else Inf))
       }
@@ -362,7 +362,7 @@ dynamic_path_perturbation <- function(compiled, ss, params, dr,
     x_sim[, t] <- as.numeric(hh$f0) + ETA %*% shock_t
     y_sim[, t - 1L] <- as.numeric(gg$f0)
 
-    if (verbose) cat(sprintf("dynamic_path_perturbation: period %d done\n", t - 1L))
+    if (verbose) .dynhr_cat(sprintf("dynamic_path_perturbation: period %d done\n", t - 1L))
   }
 
   list(

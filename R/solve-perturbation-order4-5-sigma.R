@@ -131,8 +131,12 @@
     for (q in seq_along(gh$wts)) {
       eps <- if (n_u > 0L) sig * gh$nodes[q, ] else numeric(0)
       y_lead <- ss_endo + policy(x_now, eps, sig)
+      # eps is the t+1 shock: it enters only through y_lead.  The residual's
+      # own shock columns hold the CURRENT shock u_t, which is 0 here (same
+      # convention as .build_phi_sigma_full; passing eps as u_t was wrong for
+      # any model whose current shock enters nonlinearly).
       r <- as.numeric(dyn$residuals_fn(
-             build_dy(y_lag, y_now, y_lead, eps), params, ss_full))
+             build_dy(y_lag, y_now, y_lead, u0), params, ss_full))
       acc <- acc + gh$wts[q] * r
     }
     val <- acc[res_perm]
@@ -183,6 +187,21 @@
 #'   \code{ghss2}  (n × 1)     — pure sigma^4 steady-state correction
 #'
 #' For Gaussian shocks the sigma^3 and sigma^1 cross terms vanish.
+#'
+#' Convention: the policy is \eqn{y_t = g(x_t, u_t, \sigma)} with the
+#' \emph{future} shocks scaled as \eqn{u_{t+1} = \sigma \varepsilon_{t+1}},
+#' \eqn{\varepsilon \sim N(0, \Sigma_e)} (\eqn{\Sigma_e} is absorbed into the
+#' coefficients; evaluate at \eqn{\sigma = 1}).  \code{ghss2} is the plain
+#' fourth derivative \eqn{\partial^4 g / \partial\sigma^4}, entering the Taylor
+#' expansion as \code{ghss2 * sigma^4 / 24}, and \code{ghxxss} is
+#' \eqn{\partial^4 g / \partial x^2 \partial\sigma^2} (Taylor weight
+#' \eqn{1/4}).  Dynare's \code{k_order_solver} instead reports the collapsed
+#' coefficients at \eqn{\sigma = 1}, e.g. \code{g_0 = ghss/2 + ghss2/24}.  The
+#' current shock \eqn{u_t} is a policy argument held at 0 in every sigma
+#' derivative; only \eqn{u_{t+1}} is random.  Hence a model with no
+#' forward-looking variable has every pure-sigma term (\code{ghss},
+#' \code{ghxss}, \code{ghuss}, \code{ghxxss}, \code{ghss2}, \code{ghxxxss},
+#' \code{ghxss2}) exactly 0.
 #'
 #' @param dr4       DecisionRules4 from \code{solve_perturbation_order4()}
 #' @param compiled  dynhr_compiled
@@ -246,7 +265,7 @@ solve_sigma_order4 <- function(dr4, compiled, ss, params,
                                     4L, res_perm)
 
   # ---- ghxxss : g_{x² σ²}  (A_L·X + fp·X·hx^{⊗2} = -Φ) ----
-  if (verbose) cat("  Computing ghxxss (4th-order x^2-sigma^2, analytic forcing)...\n")
+  if (verbose) .dynhr_cat("  Computing ghxxss (4th-order x^2-sigma^2, analytic forcing)...\n")
   phi_xxss <- .extract_sigma_block2(Phi_full, 4L, n_s, n_u, 2L, 2L, n, M2, M4)
   ghxxss <- .solve_kron_compact(A_L, fp, hx, 2L, -phi_xxss, verbose = verbose)
   rownames(ghxxss) <- endo_names
@@ -258,7 +277,7 @@ solve_sigma_order4 <- function(dr4, compiled, ss, params,
   }
 
   # ---- ghss2 : g_{σ⁴}  ((A_L + fp)·X = -Φ) ----
-  if (verbose) cat("  Computing ghss2 (4th-order sigma^4 SS, analytic forcing)...\n")
+  if (verbose) .dynhr_cat("  Computing ghss2 (4th-order sigma^4 SS, analytic forcing)...\n")
   phi_ssss <- .extract_sigma_block2(Phi_full, 4L, n_s, n_u, 0L, 4L, n, M2, M4)
   ghss2 <- as.numeric(.solve_equilibrated(A_L + fp, -as.numeric(phi_ssss)))
   names(ghss2) <- endo_names
@@ -284,6 +303,13 @@ solve_sigma_order4 <- function(dr4, compiled, ss, params,
 #'
 #' Requires order-4 sigma terms (\code{ghxxss}, \code{ghss2}) from
 #' \code{solve_sigma_order4()}.
+#'
+#' Same convention as \code{\link{solve_sigma_order4}}: plain derivatives
+#' (\code{ghxxxss} = \eqn{\partial^5 g/\partial x^3\partial\sigma^2}, Taylor
+#' weight \eqn{1/12}; \code{ghxss2} = \eqn{\partial^5 g/\partial x\,
+#' \partial\sigma^4}, Taylor weight \eqn{1/24}), \eqn{\Sigma_e} absorbed, only
+#' the future shock scaled by \eqn{\sigma}.  Stateless models (no
+#' predetermined variable) are supported; both blocks then have 0 columns.
 #'
 #' @param dr5       DecisionRules5 from \code{solve_perturbation_order5()}
 #' @param compiled  dynhr_compiled
@@ -347,14 +373,14 @@ solve_sigma_order5 <- function(dr5, compiled, ss, params,
                                     5L, res_perm)
 
   # ---- ghxxxss : g_{x³ σ²}  (A_L·X + fp·X·hx^{⊗3} = -Φ) ----
-  if (verbose) cat("  Computing ghxxxss (5th-order x^3-sigma^2, analytic forcing)...\n")
+  if (verbose) .dynhr_cat("  Computing ghxxxss (5th-order x^3-sigma^2, analytic forcing)...\n")
   phi_xxxss <- .extract_sigma_block2(Phi_full, 5L, n_s, n_u, 3L, 2L, n, M2, M4)
   ghxxxss <- .solve_kron_compact(A_L, fp, hx, 3L, -phi_xxxss, verbose = verbose)
   rownames(ghxxxss) <- endo_names
   colnames(ghxxxss) <- .triple_names_internal(endo_names[state_idx])
 
   # ---- ghxss2 : g_{x σ⁴}  (A_L·X + fp·X·hx = -Φ) ----
-  if (verbose) cat("  Computing ghxss2 (5th-order x-sigma^4, analytic forcing)...\n")
+  if (verbose) .dynhr_cat("  Computing ghxss2 (5th-order x-sigma^4, analytic forcing)...\n")
   phi_xss2 <- .extract_sigma_block2(Phi_full, 5L, n_s, n_u, 1L, 4L, n, M2, M4)
   ghxss2 <- .solve_kron_compact(A_L, fp, hx, 1L, -phi_xss2, verbose = verbose)
   rownames(ghxss2) <- endo_names

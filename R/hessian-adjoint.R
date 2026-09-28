@@ -293,8 +293,30 @@ kf_loglik_hessian <- function(Y, ss, dX_list, d2X_list, me_variance = 0,
 #' @param require_mode logical (default \code{FALSE}). When \code{TRUE} and
 #'   the \code{check_mode} guard fires, \code{stop()} instead of
 #'   \code{warning()}.
-#' @return n_par x n_par symmetric matrix; the loglik Hessian
-#'   (plus prior Hessian if \code{include_prior = TRUE}).
+#' @param power Power-posterior exponent zeta in (0, 1]. \code{NULL} (default)
+#'   resolves the \code{power_posterior} option, exactly as the
+#'   \code{make_log_posterior*} factories do. The loglik Hessian is multiplied
+#'   by zeta (the prior and system-prior Hessians are not), so the result is
+#'   the curvature of the SAME tempered target the posterior closure
+#'   evaluates. The \code{check_mode} gradient uses the same zeta.
+#' @param system_priors Optional \code{system_prior_spec}. Its log-density is a
+#'   prior-side term of the target, so it requires \code{include_prior = TRUE};
+#'   its Hessian is added by a second-order central-difference stencil of the
+#'   system-prior density alone (first-order re-solves, no filter pass).
+#' @param lik_init Kalman filter \code{P0} initialisation of the likelihood
+#'   whose curvature is requested (\code{"auto"}, the default,
+#'   \code{"stationary"}, \code{"diffuse"} or \code{"kappa"}; as in
+#'   \code{\link{make_log_posterior}}). The curvature kernel starts from the
+#'   stationary (Lyapunov) \code{P0}, so it is the Hessian of that likelihood
+#'   only where \code{lik_init} puts the stationary init in force at
+#'   \code{dr}; otherwise (a unit root under \code{"auto"}, a root within
+#'   \code{1e-6} of the unit circle under \code{"diffuse"}, any
+#'   \code{"kappa"} init, or \code{"stationary"} on a unit root) the call is
+#'   refused with class \code{dynhr_error_grad_lik_init} rather than
+#'   returning the curvature of another likelihood. The \code{check_mode}
+#'   gradient is built with the same \code{lik_init}.
+#' @return n_par x n_par symmetric matrix; zeta times the loglik Hessian
+#'   (plus the prior and system-prior Hessians if \code{include_prior = TRUE}).
 #'   Carries attribute \code{t1_asymmetry} (scalar) from \code{kf_loglik_hessian},
 #'   and attribute \code{second_primitives} ("analytic" when the compiled model
 #'   carries the \code{param_deriv = "second"} codegen, "fd" for the stencil
@@ -323,12 +345,47 @@ posterior_hessian <- function(model, compiled, dr, params, param_names,
                                             "hvp_solution", "adjoint_solution"),
                               check_mode = NULL,
                               mode_grad_tol = NULL,
-                              require_mode = FALSE) {
+                              require_mode = FALSE,
+                              power = NULL,
+                              system_priors = NULL,
+                              lik_init = c("auto", "stationary", "diffuse",
+                                           "kappa")) {
 
   t1_method <- match.arg(t1_method)
   t2_method <- match.arg(t2_method)
+  lik_init  <- match.arg(lik_init)
   np  <- length(param_names)
   exo <- model$varexo_names
+  ## The curvature kernels (kf_loglik_hessian / .kf_loglik_adjoint) start
+  ## from the stationary Lyapunov P0. Refuse an init under which the
+  ## likelihood at `dr` is another one (exact diffuse, big-kappa, or the
+  ## -Inf of "stationary" on a unit root) rather than return its curvature
+  ## under the wrong init; same rule as the gradient kernels
+  ## (.grad_init_in_force).
+  init_in_force <- .grad_init_in_force(
+    dr$ghx[dr$state_idx, , drop = FALSE],
+    dr$ghu[dr$state_idx, , drop = FALSE],
+    .get_shock_cov(model, exo, params), lik_init)
+  if (!identical(init_in_force, "stationary"))
+    .dynhr_abort("posterior_hessian: ",
+                 if (identical(init_in_force, "reject"))
+                   "lik_init = \"stationary\" at a unit root (the likelihood is -Inf there)"
+                 else paste0("lik_init = \"", lik_init, "\" puts the \"",
+                             init_in_force, "\" P0 in force at this decision rule"),
+                 "; the exact Hessian is available for the stationary ",
+                 "(Lyapunov) P0 only. Use posterior_hessian_fd_grad(lik_init = ",
+                 "\"", lik_init, "\") (central differences of the gradient of ",
+                 "that likelihood) or a numerical Hessian.",
+                 class = "dynhr_error_grad_lik_init")
+  ## Brief 23 A6: curvature of the tempered target
+  ## logprior + zeta * loglik + log p_sys, the one the posterior closures use.
+  power <- .resolve_power_posterior(power, "posterior_hessian")
+  if (!is.null(system_priors) && length(system_priors) == 0L)
+    system_priors <- NULL
+  if (!is.null(system_priors) && !isTRUE(include_prior))
+    .dynhr_abort("posterior_hessian: `system_priors` is a prior-side term of ",
+                 "the target and requires include_prior = TRUE (and prior_spec).",
+                 class = "dynhr_error_argument")
 
   ## ------------------------------------------------------------------
   ## Resolve a parameter's scalar value at `params`, with a fail-loud
@@ -388,7 +445,10 @@ posterior_hessian <- function(model, compiled, dr, params, param_names,
       names(theta_full) <- full_names
 
       grad_fn <- make_posterior_grad(model, data, prior_spec, obs_vars, compiled,
-                                     me_variance = me_variance)
+                                     me_variance = me_variance,
+                                     power = power, lik_init = lik_init,
+                                     system_priors = if (isTRUE(include_prior))
+                                       system_priors else NULL)
       g_full  <- grad_fn(theta_full)
 
       g_sub <- g_full[param_names]
@@ -396,7 +456,7 @@ posterior_hessian <- function(model, compiled, dr, params, param_names,
         stop("gradient has NA/unresolved entries for param_names not in prior_spec")
       TRUE
     }, error = function(e) {
-      warning("posterior_hessian: check_mode gradient evaluation failed (",
+      .dynhr_warn("posterior_hessian: check_mode gradient evaluation failed (",
               conditionMessage(e), "); skipping the mode-criticality guard.",
               call. = FALSE)
       FALSE
@@ -431,7 +491,7 @@ posterior_hessian <- function(model, compiled, dr, params, param_names,
         nm <- intersect(names(se_hess), names(se_guard))
         nm[is.finite(se_hess[nm]) & is.finite(se_guard[nm]) &
            abs(se_hess[nm] - se_guard[nm]) > 1e-10 * pmax(1, abs(se_hess[nm]))]
-      }, error = function(e) character(0))
+      }, error = function(e) .dynhr_reraise_bug(e, character(0)))
       if (length(mism)) {
         sigma_e_note <- sprintf(
           paste0(" NOTE: the Hessian's Sigma_e (from `params`) differs from the ",
@@ -456,7 +516,7 @@ posterior_hessian <- function(model, compiled, dr, params, param_names,
         if (isTRUE(require_mode)) {
           stop(msg, call. = FALSE)
         } else {
-          warning(msg, call. = FALSE)
+          .dynhr_warn(msg, call. = FALSE)
         }
       }
     }
@@ -504,7 +564,7 @@ posterior_hessian <- function(model, compiled, dr, params, param_names,
   sd1 <- if (length(struct_names) > 0) tryCatch(
     solution_derivatives(model, compiled, dr, params,
                          param_names = struct_names, obs_vars = obs_vars),
-    error = function(e) NULL
+    error = function(e) .dynhr_reraise_bug(e, NULL)
   ) else NULL
 
   ## ------------------------------------------------------------------
@@ -518,7 +578,7 @@ posterior_hessian <- function(model, compiled, dr, params, param_names,
   sd2 <- if (!(t2_method %in% d2x_free_methods) && length(struct_names) > 0) tryCatch(
     solution_derivatives_2(model, compiled, dr, params,
                            param_names = struct_names, obs_vars = obs_vars),
-    error = function(e) NULL
+    error = function(e) .dynhr_reraise_bug(e, NULL)
   ) else NULL
 
   ## ------------------------------------------------------------------
@@ -602,13 +662,23 @@ posterior_hessian <- function(model, compiled, dr, params, param_names,
   ## Build d2X_list: second-order blocks per (i,j) pair.
   ## Skipped entirely for the d2X-free "hvp_solution" path (which forms T2
   ## without any materialised second-order solution block).
+  ##
+  ## sd2 was built over `struct_names` only, so its "a|b" keys index
+  ## STRUCT_NAMES, not param_names: translate (i, j) through `s_idx`. A
+  ## stderr entry (s_idx NA) has no solution-curvature block (certainty
+  ## equivalence) -- only its d2Sigma_e channel. Looking sd2 up with the
+  ## param_names key instead mis-assigned every struct pair's d2X whenever a
+  ## stderr name preceded a structural one (SW2007 lists its 7 stderrs
+  ## first: 13% Frobenius error, worst on the stderr x stderr block).
   ## ------------------------------------------------------------------
+  s_idx <- match(param_names, struct_names)
   d2X_list <- list()
   if (!(t2_method %in% d2x_free_methods)) {
     for (i in seq_len(np)) {
       for (j in seq_len(np)) {
         key  <- paste(i, j, sep = "|")
-        sd2_blk <- if (!is.null(sd2)) sd2$d2[[key]] else NULL
+        sd2_blk <- if (!is.null(sd2) && !is.na(s_idx[i]) && !is.na(s_idx[j]))
+          sd2$d2[[paste(s_idx[i], s_idx[j], sep = "|")]] else NULL
         blk <- list(
           d2TT      = sd2_blk$d2TT,
           d2RR      = sd2_blk$d2RR,
@@ -651,6 +721,10 @@ posterior_hessian <- function(model, compiled, dr, params, param_names,
                            t1_method = t1_method, t2_method = t2_method)
   }
 
+  ## Tempering: zeta scales the LIKELIHOOD curvature only (scalar * matrix
+  ## keeps H's attributes). zeta = 1 leaves H untouched.
+  if (power != 1) H <- power * H
+
   ## ------------------------------------------------------------------
   ## Optionally add the analytic prior Hessian (diagonal for independent
   ## priors; d2/dx2 log p(x) = d/dx [dlog_prior_density1]).
@@ -668,15 +742,21 @@ posterior_hessian <- function(model, compiled, dr, params, param_names,
       dist <- prior_spec$distribution[row_i]
       p1   <- prior_spec$p1[row_i]
       p2   <- prior_spec$p2[row_i]
+      p3   <- if ("p3" %in% names(prior_spec)) prior_spec$p3[row_i] else NA_real_
+      p4   <- if ("p4" %in% names(prior_spec)) prior_spec$p4[row_i] else NA_real_
       ## Check that this prior name maps to a param in param_names
       idx  <- match(nm, param_names)
       if (is.na(idx)) next
       ## d2 log p / dx2 by central FD of .dlog_prior_density1
       h_pr <- 1e-5 * max(abs(x0), 1e-4)
-      d2pr <- (.dlog_prior_density1(x0 + h_pr, dist, p1, p2) -
-               .dlog_prior_density1(x0 - h_pr, dist, p1, p2)) / (2 * h_pr)
+      d2pr <- (.dlog_prior_density1(x0 + h_pr, dist, p1, p2, p3, p4) -
+               .dlog_prior_density1(x0 - h_pr, dist, p1, p2, p3, p4)) / (2 * h_pr)
       H[idx, idx] <- H[idx, idx] + d2pr
     }
+    if (!is.null(system_priors))
+      H <- H + .ph_system_prior_hessian(model, compiled, params, param_names,
+                                        prior_spec, system_priors,
+                                        .resolve_param_value)
   }
 
   if (isTRUE(check_mode) && !is.na(grad_norm_val)) {
@@ -748,17 +828,17 @@ posterior_hessian <- function(model, compiled, dr, params, param_names,
   sol_grad_at <- function(params_pt) {
     ss_pt <- tryCatch(
       solve_steady_state(model, compiled, params_pt, verbose = FALSE),
-      error = function(e) NULL)
+      error = function(e) .dynhr_reraise_bug(e, NULL))
     if (is.null(ss_pt) || !isTRUE(ss_pt$converged)) return(NULL)
     dr_pt <- tryCatch(
       solve_perturbation(model, compiled, ss_pt$ss, params_pt, order = 1L,
                          verbose = FALSE),
-      error = function(e) NULL)
+      error = function(e) .dynhr_reraise_bug(e, NULL))
     if (is.null(dr_pt) || !isTRUE(dr_pt$bk_satisfied)) return(NULL)
     res <- tryCatch(
       .solution_adjoint(model, compiled, dr_pt, params_pt, struct_names,
                         obs_vars = obs_vars, bars = bars_solution),
-      error = function(e) NULL)
+      error = function(e) .dynhr_reraise_bug(e, NULL))
     if (is.null(res)) return(NULL)
     g <- res$grad
     g[!res$ok] <- NA_real_
@@ -777,7 +857,7 @@ posterior_hessian <- function(model, compiled, dr, params, param_names,
       gp <- sol_grad_at(pp)
       gm <- sol_grad_at(pm)
       if (is.null(gp) || is.null(gm)) {
-        warning(sprintf(
+        .dynhr_warn(sprintf(
           "posterior_hessian(hvp_solution): re-solve failed at %s +/- h; ",
           nm_i), "row set to 0 (T2 solution part).", call. = FALSE)
         next
@@ -860,7 +940,7 @@ posterior_hessian <- function(model, compiled, dr, params, param_names,
                                 obs_vars = obs_vars, bars = bars_solution,
                                 h_rel2 = h_rel2),
       error = function(e) {
-        warning("posterior_hessian(adjoint_solution): solution-Hessian ",
+        .dynhr_warn("posterior_hessian(adjoint_solution): solution-Hessian ",
                 "failed (", conditionMessage(e), "); T2 solution part set ",
                 "to 0.", call. = FALSE)
         NULL
@@ -869,7 +949,7 @@ posterior_hessian <- function(model, compiled, dr, params, param_names,
       T2_sol <- res$T2
       T2_sol[!is.finite(T2_sol)] <- 0
       if (any(!res$ok))
-        warning(sprintf(
+        .dynhr_warn(sprintf(
           "posterior_hessian(adjoint_solution): primitives failed for %s; ",
           paste(struct_names[!res$ok], collapse = ", ")),
           "corresponding rows/cols set to 0 (T2 solution part).",
@@ -896,6 +976,72 @@ posterior_hessian <- function(model, compiled, dr, params, param_names,
   dimnames(H) <- list(param_names, param_names)
   attr(H, "t1_asymmetry") <- t1_asym
   H
+}
+
+
+## --------------------------------------------------------------------------
+## .ph_system_prior_hessian(): Hessian of the system-prior log-density
+## (brief 23 A6). System priors have no analytic derivative (their features
+## are arbitrary functions of the solved model), so this is a second-order
+## central-difference stencil of the density ALONE -- 3-point on the diagonal,
+## 4-corner off it -- each point one steady-state + first-order solve and one
+## .eval_system_priors() call, evaluated on the same state list
+## (theta, model, dr, Sigma_e, params) the Gaussian posterior closure builds.
+## A point outside a hard restriction (-Inf) contributes nothing: the
+## restriction is flat inside its region, so its curvature there is 0.
+## --------------------------------------------------------------------------
+#' @noRd
+.ph_system_prior_hessian <- function(model, compiled, params, param_names,
+                                     prior_spec, system_priors,
+                                     resolve_value, h_rel = 1e-4) {
+  exo  <- model$varexo_names
+  np   <- length(param_names)
+  sp_cache <- cache_system_structure(compiled)
+  th0  <- vapply(prior_spec$name, resolve_value, 0.0)
+  names(th0) <- prior_spec$name
+  base <- vapply(param_names, resolve_value, 0.0)
+  names(base) <- param_names
+  h    <- h_rel * pmax(abs(base), 1e-3)
+
+  sp_at <- function(shift) {
+    th <- th0
+    for (nm in names(shift)) th[nm] <- base[[nm]] + shift[[nm]]
+    p  <- apply_theta_to_params(model, th, params = params)
+    ssr <- solve_steady_state(model, compiled, p, verbose = FALSE)
+    if (is.null(ssr) || !isTRUE(ssr$converged)) return(-Inf)
+    p   <- ssr$params %||% p
+    sys <- extract_system_matrices_fast(sp_cache, ssr$ss, p)
+    drp <- .solve_from_system(sys, model, compiled, ssr$ss, p, FALSE)
+    if (is.null(drp) || !isTRUE(drp$bk_satisfied)) return(-Inf)
+    .eval_system_priors(system_priors,
+                        list(theta = th, model = model, dr = drp,
+                             Sigma_e = .get_shock_cov(model, exo, p),
+                             params = p))
+  }
+  one <- function(nm, v) setNames(v, nm)
+
+  f0 <- sp_at(numeric(0))
+  Hs <- matrix(0, np, np, dimnames = list(param_names, param_names))
+  if (!is.finite(f0)) return(Hs)
+  fp <- fm <- setNames(numeric(np), param_names)
+  for (i in seq_len(np)) {
+    nm <- param_names[i]
+    fp[i] <- sp_at(one(nm, h[[nm]]))
+    fm[i] <- sp_at(one(nm, -h[[nm]]))
+    if (is.finite(fp[i]) && is.finite(fm[i]))
+      Hs[i, i] <- (fp[i] - 2 * f0 + fm[i]) / h[[nm]]^2
+  }
+  if (np > 1L) for (i in seq_len(np - 1L)) for (j in (i + 1L):np) {
+    ni <- param_names[i]; nj <- param_names[j]
+    hi <- h[[ni]]; hj <- h[[nj]]
+    fpp <- sp_at(c(one(ni,  hi), one(nj,  hj)))
+    fpm <- sp_at(c(one(ni,  hi), one(nj, -hj)))
+    fmp <- sp_at(c(one(ni, -hi), one(nj,  hj)))
+    fmm <- sp_at(c(one(ni, -hi), one(nj, -hj)))
+    if (all(is.finite(c(fpp, fpm, fmp, fmm))))
+      Hs[i, j] <- Hs[j, i] <- (fpp - fpm - fmp + fmm) / (4 * hi * hj)
+  }
+  Hs
 }
 
 
@@ -969,6 +1115,11 @@ posterior_hessian <- function(model, compiled, dr, params, param_names,
 #'                  \code{k} is \code{h_rel * max(abs(theta[k]), 1e-3)}.
 #' @param me_variance scalar measurement-error variance (default 0); passed
 #'                  through to \code{make_posterior_grad}.
+#' @param lik_init  Kalman filter \code{P0} initialisation of the likelihood
+#'                  (default \code{"auto"}; \code{"stationary"},
+#'                  \code{"diffuse"} or \code{"kappa"}), passed to
+#'                  \code{make_posterior_grad}, so the Hessian is that of the
+#'                  posterior \code{make_log_posterior(lik_init = )} evaluates.
 #' @param ...       additional arguments forwarded to \code{make_posterior_grad}
 #'                  (e.g. \code{grad_method}, \code{likelihood}).
 #' @return \code{length(param_names) x length(param_names)} symmetric matrix:
@@ -983,6 +1134,7 @@ posterior_hessian_fd_grad <- function(model, data, prior_spec, obs_vars,
                                       param_names = names(theta),
                                       h_rel = 1e-5,
                                       me_variance = 0,
+                                      lik_init = "auto",
                                       ...) {
   full_names <- prior_spec$name
   ## Build the FULL theta vector the gradient closure expects: start from
@@ -997,7 +1149,8 @@ posterior_hessian_fd_grad <- function(model, data, prior_spec, obs_vars,
          paste(setdiff(param_names, full_names), collapse = ", "))
 
   grad_fn <- make_posterior_grad(model, data, prior_spec, obs_vars, compiled,
-                                 me_variance = me_variance, ...)
+                                 me_variance = me_variance,
+                                 lik_init = lik_init, ...)
 
   np <- length(param_names)
   h_vec <- h_rel * pmax(abs(theta_full[param_names]), 1e-3)
@@ -1046,13 +1199,13 @@ posterior_hessian_fd_grad <- function(model, data, prior_spec, obs_vars,
 laplace_log_marglik <- function(mode_result) {
   H <- mode_result$hessian_exact
   if (is.null(H)) {
-    warning("laplace_log_marglik: mode_result has no exact Hessian; re-run ",
+    .dynhr_warn("laplace_log_marglik: mode_result has no exact Hessian; re-run ",
             "run_mode_finding(use_exact_hessian = TRUE).", call. = FALSE)
     return(NA_real_)
   }
   ev <- eigen(-H, symmetric = TRUE)$values
   if (any(ev <= 0)) {
-    warning("laplace_log_marglik: -H is not positive-definite at the mode; ",
+    .dynhr_warn("laplace_log_marglik: -H is not positive-definite at the mode; ",
             "the Laplace marginal likelihood is undefined.", call. = FALSE)
     return(NA_real_)
   }

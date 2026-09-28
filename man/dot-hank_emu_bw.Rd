@@ -7,7 +7,7 @@
 .hank_emu_bw(grid, x)
 }
 \description{
-Direct generalization of the research scratch's `.bw`: clamps queries
+Direct generalization of the research scratch's \code{.bw}: clamps queries
 outside the grid to the boundary node (weight 1 on that node), otherwise
 returns the bracketing pair of grid indices and the linear weight on the
 LOWER index.

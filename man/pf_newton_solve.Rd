@@ -38,7 +38,20 @@ have $eq_idx, $var_idx, $var_name, $op, $bound.}
 
 \item{max_iter}{Maximum Newton iterations per regime (default 50).}
 
-\item{tol}{Newton convergence tolerance on max|R| (default 1e-10).}
+\item{tol}{Tolerance (default 1e-10).  Newton stops when every
+stacked equation's residual is within \code{tol}
+times the magnitude of its terms (sum over the terms
+of \eqn{|dF/dy| |y|}, shocks included; plus a
+round-off floor) AND \eqn{\max|R| < } \code{tol}.
+The regime decisions use \code{tol} as a RELATIVE
+round-off band: a slack
+period binds when the bound is violated by more than
+\code{tol} \eqn{(|y| + |bound|)}, and a binding
+period is released when the relaxed equation's
+residual \eqn{F} has the wrong sign by more than
+\code{tol} times the sum of the absolute values of
+its terms, so the regimes do not depend on the units
+of the model (an absolute band before 0.9.3.127).}
 
 \item{max_regime_iter}{Maximum active-set regime switches (default 30).}
 
@@ -59,7 +72,8 @@ List with:
     \item \code{Y} — T x n_endo solution matrix (rows = periods, cols = variables)
     \item \code{regime} — n_spec x T logical matrix (TRUE = binding)
     \item \code{irf} — T x n_endo deviation from steady state
-    \item \code{converged} — Logical: TRUE if Newton converged on the final regime
+    \item \code{converged} — Logical: TRUE if Newton converged on the final
+      regime AND that regime satisfies complementarity in every period
     \item \code{n_iter} — Integer: Newton iterations on the final regime
     \item \code{endo_names} — Character: variable ordering of Y columns
   }
@@ -71,7 +85,14 @@ Solves the T-period deterministic path
 }
 with \eqn{y_0} = y0 (given) and \eqn{y_{T+1}} = y_ss (terminal transversality),
 subject to optional occasionally-binding constraints handled via active-set
-(complementarity-flip) iteration over the regime path.
+(complementarity-flip) iteration over the regime path.  A slack period
+becomes binding when the constrained variable violates its bound; a binding
+period is released when the residual \eqn{F} (lhs minus rhs) of the
+constraint's own equation, evaluated on the current path, has the wrong
+sign for a binding constraint (Dynare's MCP convention: \eqn{F \ge 0} at a
+lower bound, \eqn{F \le 0} at an upper bound).  For an equation of the form
+\code{x = <notional>} this releases the period once the notional (shadow)
+value is back inside the bound, as in OccBin.
 }
 \details{
 Unlike the perturbation + LCP solvers (pf-lcp.R, obc-lcp.R), this operates

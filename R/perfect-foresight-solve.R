@@ -224,6 +224,11 @@ pf_boundary_exo <- function(model, which = c("init", "terminal")) {
 #' @param T, n_endo  Integer: horizon and number of endogenous variables
 #' @param exo_init   Optional length-n_exo numeric: period-0 values for
 #'   exogenous variables (from initval). Used for correct lagged exo values.
+#' @param ctrl       Optional controlled-paths swap from
+#'   \code{.pf_controlled_setup()}: for every (period p, exogenized endogenous
+#'   i, endogenized exogenous j) the stacked column (p-1)*n_endo + i holds
+#'   dF_p / d eps_{p,j} instead of dF / d y_{p,i} (Dynare 7's
+#'   controlled_paths_substitute_stacked_jacobian.m).  NULL = no swap.
 #' @return List with:
 #'   $J  — sparse dgCMatrix (T*n_endo × T*n_endo)
 #'   $R  — numeric vector (T*n_endo): stacked residuals
@@ -231,7 +236,7 @@ pf_boundary_exo <- function(model, which = c("init", "terminal")) {
 .pf_build_stacked_system <- function(Y, y0_num, y_term_num, eps_mat,
                                       meta, compiled, params, T, n_endo,
                                       exo_init = NULL, exo_terminal = NULL,
-                                      y_ss_num = NULL) {
+                                      y_ss_num = NULL, ctrl = NULL) {
   dyn     <- compiled$dynamic
   n_total <- T * n_endo
   n_exo   <- length(dyn$exo_names)
@@ -305,6 +310,7 @@ pf_boundary_exo <- function(model, which = c("init", "terminal")) {
         lead = if (t < T)  t * n_endo + vi         else NA_integer_
       )
       if (is.na(gcol)) next
+      if (!is.null(ctrl) && ctrl$swapped[gcol]) next
 
       col_vals <- Jt[, dc]
 
@@ -325,6 +331,30 @@ pf_boundary_exo <- function(model, which = c("init", "terminal")) {
             i_triplet <- c(i_triplet, row_off + eq)
             j_triplet <- c(j_triplet, gcol)
             v_triplet <- c(v_triplet, val)
+          }
+        }
+      }
+    }
+
+    # Controlled paths: the swapped column of an exogenized y_{t,i} carries
+    # the derivative of period t's equations w.r.t. the endogenized eps_{t,j}
+    # (only period t: exogenous leads/lags are auxiliary endogenous here).
+    if (!is.null(ctrl)) {
+      for (k in which(ctrl$p == t)) {
+        col_vals <- Jt[, ctrl$j_dc[k]]
+        for (eq in seq_len(n_endo)) {
+          val <- col_vals[eq]
+          if (isTRUE(val != 0) && is.finite(val)) {
+            if (pre_alloc) {
+              ptr <- ptr + 1L
+              i_triplet[ptr] <- row_off + eq
+              j_triplet[ptr] <- ctrl$col[k]
+              v_triplet[ptr] <- val
+            } else {
+              i_triplet <- c(i_triplet, row_off + eq)
+              j_triplet <- c(j_triplet, ctrl$col[k])
+              v_triplet <- c(v_triplet, val)
+            }
           }
         }
       }
@@ -440,6 +470,93 @@ pf_boundary_exo <- function(model, which = c("init", "terminal")) {
   }
 
   list(delta = NULL, method = "failed", lambda = lambda)
+}
+
+
+# =============================================================================
+# Controlled paths (Dynare 7 perfect_foresight_controlled_paths)
+# =============================================================================
+
+#' Validate a controlled-paths table and build the stacked-system swap
+#'
+#' Dynare 7.1 `controlled_paths_by_period.m` semantics: in period p the
+#' endogenous `exogenize` is fixed to `value` and the exogenous `endogenize`
+#' becomes the unknown in its place.  A variable exogenized twice, or a shock
+#' endogenized twice, in the same period is an error, as in Dynare.
+#'
+#' @param cp   NULL, or a data.frame with columns exogenize (endogenous name),
+#'   endogenize (exogenous name), period (integer in 1..T) and value.
+#' @param dyn  compiled$dynamic.
+#' @param meta Output of .pf_col_meta().
+#' @param T    Horizon.
+#' @return NULL when there is nothing to control, else a list with p, i, j,
+#'   value, col (stacked column (p-1)*n_endo + i), j_dc (dynamic-Jacobian
+#'   column of the shock), swapped (logical over the T*n_endo columns) and
+#'   table (the validated data.frame).
+#' @noRd
+.pf_controlled_setup <- function(cp, dyn, meta, T) {
+  if (is.null(cp)) return(NULL)
+  bad <- function(...) .dynhr_abort("perfect_foresight_solve: controlled_paths: ",
+                                    ..., class = "dynhr_error_input")
+  if (!is.data.frame(cp) ||
+      !all(c("exogenize", "endogenize", "period", "value") %in% names(cp)))
+    bad("must be a data.frame with columns exogenize, endogenize, period ",
+        "and value (see parse_mod()'s $controlled_paths).")
+  if (nrow(cp) == 0L) return(NULL)
+  n_endo <- length(dyn$endo_names)
+  exo_nm <- as.character(cp$exogenize)
+  end_nm <- as.character(cp$endogenize)
+  per    <- cp$period
+  val    <- as.numeric(cp$value)
+  unk <- setdiff(exo_nm, dyn$endo_names)
+  if (length(unk) > 0L)
+    bad("`exogenize` names non-endogenous variable(s): ",
+        paste(unique(unk), collapse = ", "), ".")
+  unk <- setdiff(end_nm, dyn$exo_names)
+  if (length(unk) > 0L)
+    bad("`endogenize` names non-exogenous variable(s): ",
+        paste(unique(unk), collapse = ", "), ".")
+  if (!is.numeric(per) || anyNA(per) || any(per != round(per)) ||
+      any(per < 1) || any(per > T))
+    bad("every period must be an integer in 1..", T, " (n_periods).")
+  if (anyNA(val) || any(!is.finite(val)))
+    bad("every value must be finite.")
+  per <- as.integer(per)
+  dup <- duplicated(cbind(per, exo_nm))
+  if (any(dup))
+    bad("variable ", exo_nm[dup][1L], " is exogenized two times in period ",
+        per[dup][1L], ".")
+  dup <- duplicated(cbind(per, end_nm))
+  if (any(dup))
+    bad("shock ", end_nm[dup][1L], " is endogenized two times in period ",
+        per[dup][1L], ".")
+  i <- match(exo_nm, dyn$endo_names)
+  j <- match(end_nm, dyn$exo_names)
+  exo_rows <- which(meta$kind == "exo")
+  j_dc <- meta$dyn_col[exo_rows][match(j, meta$var_idx[exo_rows])]
+  if (anyNA(j_dc))
+    bad("shock(s) ", paste(unique(end_nm[is.na(j_dc)]), collapse = ", "),
+        " do not appear in the model equations and cannot be endogenized.")
+  col <- (per - 1L) * n_endo + i
+  swapped <- logical(T * n_endo)
+  swapped[col] <- TRUE
+  list(p = per, i = i, j = j, value = val, col = col, j_dc = j_dc,
+       swapped = swapped,
+       table = data.frame(exogenize = exo_nm, endogenize = end_nm,
+                          period = per, value = val,
+                          stringsAsFactors = FALSE))
+}
+
+#' Split the controlled-paths Newton unknown into (Y, eps)
+#'
+#' The unknown Z is a T x n_endo matrix whose controlled cells (p, i) hold the
+#' endogenized shock eps_{p,j}; Y takes the target values there instead.
+#' @noRd
+.pf_controlled_unpack <- function(Z, eps, ctrl, values) {
+  cells <- cbind(ctrl$p, ctrl$i)
+  eps[cbind(ctrl$p, ctrl$j)] <- Z[cells]
+  Z[cells] <- values
+  list(Y = Z, eps = eps)
 }
 
 
@@ -561,6 +678,23 @@ pf_boundary_exo <- function(model, which = c("init", "terminal")) {
 #'   (e.g. a growing deterministic trend A=(1+g)^t, where A(T+1) differs from
 #'   A(T)); if NULL, falls back to the last row of \code{exo_path} (= A(T)),
 #'   which mis-states the terminal-period growth rates in such models.
+#' @param controlled_paths Controlled paths (Dynare 7's
+#'   \code{perfect_foresight_controlled_paths} block, or the
+#'   \code{exogenize}/\code{endogenize} stanzas of a \code{shock_paths}
+#'   block): a data.frame with one row per controlled period and columns
+#'   \code{exogenize} (endogenous variable whose value is imposed),
+#'   \code{endogenize} (exogenous variable solved for instead),
+#'   \code{period} (1..\code{n_periods}) and \code{value} (the imposed level).
+#'   In each listed period the endogenous variable is fixed at \code{value}
+#'   and the shock becomes an unknown of the stacked Newton system, whose
+#'   Jacobian column for that endogenous variable is replaced by the
+#'   derivative with respect to the shock -- the same column swap as Dynare's
+#'   \code{controlled_paths_substitute_stacked_jacobian.m}.  Defaults to the
+#'   parsed model's \code{$controlled_paths} (empty unless the .mod declares
+#'   one); pass \code{NULL} to ignore it.  An entry of \code{exo_path} at an
+#'   endogenized (period, shock) cell is only the Newton starting guess; the
+#'   solved value is returned in \code{$exo_path}.  Not available for OccBin
+#'   (bind/relax) models.
 #' @param verbose     Logical: print convergence progress (default FALSE).
 #' @return List with:
 #'   \item{Y}{T × n_endo solution matrix (rows = periods, cols = variables).}
@@ -569,6 +703,11 @@ pf_boundary_exo <- function(model, which = c("init", "terminal")) {
 #'   \item{max_res}{Numeric: final max|R_stack|.}
 #'   \item{endo_names}{Character: variable ordering of Y columns.}
 #'   \item{merit_history}{Numeric vector: merit function value per iteration.}
+#'   \item{exo_path}{T × n_exo exogenous path the solution was computed with:
+#'     the input \code{exo_path}, with the solved shocks in the endogenized
+#'     (period, shock) cells when \code{controlled_paths} is used.}
+#'   \item{controlled_paths}{The validated controlled-paths table (NULL when
+#'     none was used).}
 #' @export
 #'
 #' @examples
@@ -601,6 +740,7 @@ perfect_foresight_solve <- function(compiled,
                                      Y_init          = NULL,
                                      exo_init        = NULL,
                                      exo_terminal    = NULL,
+                                     controlled_paths = compiled$model$controlled_paths,
                                      verbose         = FALSE) {
 
   dyn    <- compiled$dynamic
@@ -623,11 +763,16 @@ perfect_foresight_solve <- function(compiled,
   }
 
   if (n_eq != n_endo) {
+    if (is.data.frame(controlled_paths) && nrow(controlled_paths) > 0L)
+      .dynhr_abort(
+        "perfect_foresight_solve: controlled paths are not available for ",
+        "bind/relax (OccBin) models, as in Dynare (not available for ",
+        "mixed-complementarity problems).", class = "dynhr_error_input")
     # When compiled$occbin is present (native OccBin model with bind/relax
     # equation pairs), delegate to occbin_solve_path() which implements the
     # GI candidate-regime-sequence algorithm.
     if (!is.null(compiled$occbin) && compiled$occbin$n_constraints > 0L) {
-      message(sprintf(
+      .dynhr_inform(sprintf(
         "perfect_foresight_solve: n_eq (%d) > n_endo (%d); ",
         n_eq, n_endo),
         "delegating to occbin_solve_path() for regime-switching simulation.")
@@ -741,6 +886,9 @@ perfect_foresight_solve <- function(compiled,
   # ---- Precompute column metadata ----
   meta <- .pf_col_meta(dyn)
 
+  # ---- Controlled paths (exogenize / endogenize swap) ----
+  ctrl <- .pf_controlled_setup(controlled_paths, dyn, meta, T)
+
   # ---- Initialize path ----
   if (!is.null(Y_init)) {
     if (nrow(Y_init) != T || ncol(Y_init) != n_endo) {
@@ -768,16 +916,32 @@ perfect_foresight_solve <- function(compiled,
   # and a Levenberg-Marquardt step when the stacked Jacobian singularises
   # (issue M15 cold-start robustness).
   # ==========================================================================
-  .pf_run_newton <- function(Y_start, eps_use) {
+  ##
+  ## With controlled paths (`ctrl_use` non-NULL) the iterate Y_loc is the
+  ## unknown Z of the swapped system: its controlled cells (p, i) carry the
+  ## endogenized shocks, while the model is evaluated at Y with those cells
+  ## set to `ctrl_values` (.pf_controlled_unpack).
+  .pf_run_newton <- function(Y_start, eps_use, ctrl_use = NULL,
+                             ctrl_values = NULL) {
     Y_loc <- Y_start
     colnames(Y_loc) <- dyn$endo_names
 
-    merit_fn <- function(Y_try) {
-      ss <- .pf_build_stacked_system(
-        Y_try, y0_num, y_term_num, eps_use,
+    build_sys <- function(Z) {
+      if (is.null(ctrl_use)) {
+        Yz <- Z; ez <- eps_use
+      } else {
+        up <- .pf_controlled_unpack(Z, eps_use, ctrl_use, ctrl_values)
+        Yz <- up$Y; ez <- up$eps
+      }
+      .pf_build_stacked_system(
+        Yz, y0_num, y_term_num, ez,
         meta, compiled, params, T, n_endo,
-        exo_init = exo_init, exo_terminal = exo_terminal
+        exo_init = exo_init, exo_terminal = exo_terminal, ctrl = ctrl_use
       )
+    }
+
+    merit_fn <- function(Y_try) {
+      ss <- build_sys(Y_try)
       if (anyNA(ss$R) || any(!is.finite(ss$R))) return(1e30)  # invalid step
       0.5 * sum(ss$R * ss$R)
     }
@@ -790,11 +954,7 @@ perfect_foresight_solve <- function(compiled,
     for (iter in seq_len(max_iter)) {
       n_iter_loc <- iter
 
-      sys <- .pf_build_stacked_system(
-        Y_loc, y0_num, y_term_num, eps_use,
-        meta, compiled, params, T, n_endo,
-        exo_init = exo_init, exo_terminal = exo_terminal
-      )
+      sys <- build_sys(Y_loc)
 
       # Non-finite residuals (e.g. log of a negative after an over-large
       # cold-start step): abort cleanly so the homotopy driver can retry with
@@ -810,13 +970,13 @@ perfect_foresight_solve <- function(compiled,
       merit_loc   <- c(merit_loc, theta_cur)
 
       if (verbose) {
-        cat(sprintf("  PF Newton iter %3d: max|R| = %.2e, theta = %.2e\n",
+        .dynhr_cat(sprintf("  PF Newton iter %3d: max|R| = %.2e, theta = %.2e\n",
                     iter, max_res, theta_cur))
       }
 
       if (max_res < tol) {
         conv_loc <- TRUE
-        if (verbose) cat("  PF Newton converged.\n")
+        if (verbose) .dynhr_cat("  PF Newton converged.\n")
         break
       }
 
@@ -824,7 +984,7 @@ perfect_foresight_solve <- function(compiled,
       sol <- .pf_robust_solve(sys$J, sys$R, sparse_fallback = sparse_fallback)
       delta_vec <- sol$delta
       if (verbose && sol$method == "lm") {
-        cat(sprintf("  Singular Jacobian: Levenberg-Marquardt step (lambda=%.1e)\n",
+        .dynhr_cat(sprintf("  Singular Jacobian: Levenberg-Marquardt step (lambda=%.1e)\n",
                     sol$lambda))
       }
 
@@ -832,7 +992,7 @@ perfect_foresight_solve <- function(compiled,
         if (!sparse_fallback) {
           stop("perfect_foresight_solve: singular Jacobian at iter ", iter)
         }
-        warning("perfect_foresight_solve: could not compute a finite Newton ",
+        .dynhr_warn("perfect_foresight_solve: could not compute a finite Newton ",
                 "step at iter ", iter, " (Jacobian rank-deficient); aborting.")
         break
       }
@@ -849,7 +1009,7 @@ perfect_foresight_solve <- function(compiled,
           # (the old behaviour blew the path up and singularised the next
           # Jacobian — M15). Stop this Newton run cleanly; the homotopy
           # driver can retry with continuation.
-          if (verbose) cat("  Line search found no descent; stopping run.\n")
+          if (verbose) .dynhr_cat("  Line search found no descent; stopping run.\n")
           break
         }
         Y_loc <- ls$Y_new
@@ -882,18 +1042,49 @@ perfect_foresight_solve <- function(compiled,
   eps_base <- matrix(rep(base_row, each = T), nrow = T, ncol = n_exo)
   colnames(eps_base) <- dyn$exo_names
 
-  run_homotopy <- function(n_stage) {
+  # Controlled paths: the Newton unknown Z starts from Y with the endogenized
+  # shocks' starting guesses (their exo_path entries) in the controlled cells.
+  # For continuation the imposed values are ramped too, from the uncontrolled
+  # solution under the baseline forcing (where the controlled problem is
+  # solved by the baseline shocks themselves) to the targets -- Dynare's
+  # create_scenario() blends the controlled values the same way.
+  ctrl_cells <- if (!is.null(ctrl)) cbind(ctrl$p, ctrl$i) else NULL
+  ctrl_start <- function(Y_from, eps_from) {
+    Z <- Y_from
+    Z[ctrl_cells] <- eps_from[cbind(ctrl$p, ctrl$j)]
+    Z
+  }
+  ctrl_baseline <- function() {
+    base_res <- .pf_run_newton(Y, eps_base)
+    Y_b <- if (base_res$converged) base_res$Y else Y
+    list(Y = Y_b, values = Y_b[ctrl_cells])
+  }
+
+  run_homotopy <- function(n_stage, ctrl_base = NULL) {
     n_stage <- max(1L, as.integer(n_stage))
     Y_cur   <- Y
     res     <- NULL
+    if (!is.null(ctrl)) {
+      if (n_stage > 1L && is.null(ctrl_base)) ctrl_base <- ctrl_baseline()
+      Y_cur <- if (n_stage > 1L) ctrl_start(ctrl_base$Y, eps_base)
+               else ctrl_start(Y, eps_mat)
+    }
     for (st in seq_len(n_stage)) {
       frac <- if (n_stage == 1L) 1 else st / n_stage
       eps_st <- (1 - frac) * eps_base + frac * eps_mat
       if (verbose && n_stage > 1L) {
-        cat(sprintf("== Homotopy stage %d/%d (forcing fraction %.3f) ==\n",
+        .dynhr_cat(sprintf("== Homotopy stage %d/%d (forcing fraction %.3f) ==\n",
                     st, n_stage, frac))
       }
-      res   <- .pf_run_newton(Y_cur, eps_st)
+      if (is.null(ctrl)) {
+        res <- .pf_run_newton(Y_cur, eps_st)
+      } else {
+        vals <- if (n_stage == 1L) ctrl$value
+                else (1 - frac) * ctrl_base$values + frac * ctrl$value
+        res <- .pf_run_newton(Y_cur, eps_st, ctrl_use = ctrl,
+                              ctrl_values = vals)
+        res$eps <- eps_st
+      }
       Y_cur <- res$Y
       # If an intermediate stage stalls badly, abort the ladder early.
       if (!res$converged && st < n_stage && !all(is.finite(res$Y))) break
@@ -913,19 +1104,31 @@ perfect_foresight_solve <- function(compiled,
 
   # Auto fallback: if a direct cold solve failed, escalate to continuation.
   if (auto_mode && !result$converged) {
-    if (verbose) cat("== Direct solve failed; retrying with continuation ==\n")
+    if (verbose) .dynhr_cat("== Direct solve failed; retrying with continuation ==\n")
+    base_once <- if (!is.null(ctrl)) ctrl_baseline() else NULL
     for (ns in c(4L, 16L, 64L)) {
-      result <- run_homotopy(ns)
+      result <- run_homotopy(ns, ctrl_base = base_once)
       if (result$converged) break
     }
   }
 
   Y <- result$Y
+  eps_out <- eps_mat
+  if (!is.null(ctrl)) {
+    ## result$Y is the swapped unknown Z: split it into the imposed endogenous
+    ## path and the solved shocks (the last stage has the full forcing, so
+    ## ctrl$value are the targets and result$eps == eps_mat).
+    up <- .pf_controlled_unpack(Y, result$eps, ctrl, ctrl$value)
+    Y <- up$Y
+    eps_out <- up$eps
+  }
   colnames(Y) <- dyn$endo_names
   rownames(Y) <- paste0("t", seq_len(T))
+  colnames(eps_out) <- dyn$exo_names
+  rownames(eps_out) <- paste0("t", seq_len(T))
 
   if (!result$converged && verbose) {
-    cat(sprintf("  PF Newton did NOT converge. max|R| = %.2e\n", result$max_res))
+    .dynhr_cat(sprintf("  PF Newton did NOT converge. max|R| = %.2e\n", result$max_res))
   }
 
   list(
@@ -934,7 +1137,9 @@ perfect_foresight_solve <- function(compiled,
     n_iter        = result$n_iter,
     max_res       = result$max_res,
     endo_names    = dyn$endo_names,
-    merit_history = result$merit_history
+    merit_history = result$merit_history,
+    exo_path      = eps_out,
+    controlled_paths = if (!is.null(ctrl)) ctrl$table else NULL
   )
 }
 

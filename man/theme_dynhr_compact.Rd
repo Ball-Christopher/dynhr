@@ -14,8 +14,15 @@ A ggplot2 theme object.
 }
 \description{
 Builds on \code{theme_dynhr(base_size)} but maximises panel area: tighter
-panel spacing, no y-axis title/text/ticks/line, and a smaller strip label.
-The x-axis line and ticks are retained so the time axis remains readable.
-Use together with \code{geom_dynhr_zero()} to add a visible zero baseline
-when the y-axis labels are suppressed.
+panel spacing, no y-axis TITLE, small y-axis tick labels, and a smaller
+strip label.
+}
+\details{
+Until 0.9.4 this also blanked \code{axis.text.y}, \code{axis.ticks.y} and
+\code{axis.line.y}. That made every plot built on it unreadable whenever
+the y value itself was the message -- a forest plot of parameter estimates,
+a shock-decomposition panel, a free-y facet of IRFs -- and several
+diagnostics had each re-enabled the y text locally. The axis is now kept
+(at \code{rel(0.75)}); \code{geom_dynhr_zero()} is still worth adding for a
+visible zero baseline, but it is no longer a substitute for the axis.
 }

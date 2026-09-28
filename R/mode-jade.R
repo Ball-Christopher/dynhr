@@ -56,7 +56,7 @@ jade_optimize <- function(fn, par, lower = -Inf, upper = Inf,
   best_idx <- which.min(f_pop)
   best_val <- f_pop[best_idx]
   best_par <- pop[, best_idx]
-  if (verbose) cat(sprintf("  JADE init: f=%.4f (logpost=%.4f) NP=%d\n",
+  if (verbose) .dynhr_cat(sprintf("  JADE init: f=%.4f (logpost=%.4f) NP=%d\n",
                            best_val, -best_val, NP))
 
   pb <- NULL
@@ -148,7 +148,7 @@ jade_optimize <- function(fn, par, lower = -Inf, upper = Inf,
       .val <- sprintf("%.4f", -best_val)
       cli::cli_progress_update(id = pb, .envir = environment())
     } else if (verbose && gen %% report_every == 0) {
-      cat(sprintf("  gen %5d/%d  logpost=%.4f  mu_F=%.3f  mu_CR=%.3f\n",
+      .dynhr_cat(sprintf("  gen %5d/%d  logpost=%.4f  mu_F=%.3f  mu_CR=%.3f\n",
                   gen, max_iter, -best_val, mu_F, mu_CR))
     }
 

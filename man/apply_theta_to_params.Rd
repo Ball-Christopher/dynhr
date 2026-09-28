@@ -37,13 +37,33 @@ routinely also carries SHOCK STANDARD DEVIATIONS under Dynare's
 a parameter, and are injected under the shock's own name so the downstream
 shock-covariance builder picks them up as that shock's standard deviation.
 }
+\section{Estimated correlations and skewness}{
+
+A \code{corr <a>,<b>} entry (Dynare's
+\code{estimated_params; corr e_a, e_b, ...;}) IS carried through, under the
+canonical key \code{"corr e_a,e_b"}. Every spelling the prior parser can
+produce is accepted (\code{"corr e_a, e_b"}, \code{"corr_e_a,e_b"},
+\code{"e_a,e_b"}, either ordering) and normalised to that one key, which
+\code{.get_shock_cov()} reads as Priority 0 -- overriding the calibrated
+\code{corr} row of the \code{shocks} block, including an expression-valued
+one. Before 0.9.4 such entries were dropped here, so the likelihood, the
+posterior-path IRFs/moments and the post-estimation diagnostics all used
+the CALIBRATED correlation whatever the draw was.
+
+A \code{skew <shock>} entry is carried through the same way, under the key
+\code{"skew e_a"} (spellings \code{"skew_e_a"} / \code{"skew.e_a"} are
+accepted), which \code{.get_shock_skewness()} reads as Priority 0, overriding
+a \code{skew_expr} row. Before 0.9.4 it was injected under the SHOCK's own
+name and consumed as that shock's standard deviation, while the skewness
+itself stayed frozen at its calibrated value.
+}
+
 \section{Names that are deliberately passed over}{
 
-Entries of \code{theta} that are neither a model parameter nor a declared
-shock -- in practice \code{corr <a>,<b>} entries -- are left OUT of the
-returned vector by design: a correlation is not a parameter value and is
-consumed separately when the shock covariance is assembled. An entry that is
-none of the three is also passed over here rather than raised, because the
+An entry that is neither a model parameter, nor a declared
+shock, nor a correlation over two declared shocks, nor a skewness over one
+declared shock, is
+passed over here rather than raised, because the
 builder-time guard in \code{\link{make_log_posterior}} is the layer that
 rejects an unusable prior target, and duplicating that check here would make
 the same mistake fail in two places with different messages. **If you are

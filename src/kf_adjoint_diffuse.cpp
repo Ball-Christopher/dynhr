@@ -272,11 +272,10 @@ List kf_adjoint_diffuse_cpp(const arma::mat& Y,
     if (in_diffuse) {
       arma::mat F_inf  = sym(ZZ * P_inf  * tZZ);
       arma::mat F_star = sym(ZZ * P_star * tZZ + HHme);
-      double scale_star = std::max(1.0, arma::abs(F_star).max());
-
+      // F_inf / P_inf are unit-free: the forward filter's rule (W77).
       double max_Finf = arma::abs(F_inf).max();
 
-      if (max_Finf < diffuse_tol * scale_star) {
+      if (max_Finf < diffuse_tol) {
         // ---- Case A: standard KF step on (s, P_star); propagate P_inf -------
         arma::mat PZ = P_star * tZZ;
         arma::mat Ft = sym(ZZ * PZ + HHme);
@@ -364,8 +363,7 @@ List kf_adjoint_diffuse_cpp(const arma::mat& Y,
 
       // Check for diffuse phase convergence
       double max_Pinf  = arma::abs(P_inf).max();
-      double max_Pstar = std::max(1.0, arma::abs(P_star).max());
-      if (max_Pinf < conv_tol * max_Pstar) {
+      if (max_Pinf < conv_tol) {
         d_diffuse  = static_cast<int>(t + 1);   // 1-indexed like R
         in_diffuse = false;
       } else if (t + 1 >= cap) {

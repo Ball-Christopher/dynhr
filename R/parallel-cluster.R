@@ -35,7 +35,13 @@
 .dynhr_cluster_ship_options <- function(cl) {
   state    <- .dynhr_daemon_state()
   apply_fn <- .dynhr_daemon_apply
-  parallel::clusterCall(cl, function(state, apply_fn) {
+  ## Worker-version check FIRST (see `.dynhr_daemon_skew`, R/options.R): the
+  ## worker RETURNS the skew message rather than aborting, because
+  ## clusterCall() re-raises a worker error as a plain simpleError and the
+  ## `dynhr_error_worker_version_skew` class would be lost.
+  skew <- parallel::clusterCall(cl, function(state, apply_fn) {
+    msg <- state$build$check(state$build)
+    if (!is.null(msg)) return(msg)
     apply_fn(state)
     ## A sourced dev copy of options.R installs its OWN `.dynhr_opts` store in
     ## globalenv, which shadows the namespace one for globalenv-resolved
@@ -44,6 +50,9 @@
       get(".dynhr_daemon_apply", envir = globalenv())(state)
     NULL
   }, state = state, apply_fn = apply_fn)
+  skew <- Filter(Negate(is.null), skew)
+  if (length(skew))
+    .dynhr_abort(skew[[1L]], class = "dynhr_error_worker_version_skew")
   invisible(state)
 }
 
@@ -96,15 +105,17 @@ run_mcmc_parallel <- function(
   }
   n_cores <- min(n_cores, n_chains)
 
-  cat(sprintf("  Parallel MCMC: %d chains on %d workers (of %d logical processors detected)\n",
+  .dynhr_cat(sprintf("  Parallel MCMC: %d chains on %d workers (of %d logical processors detected)\n",
               n_chains, n_cores, max_cores))
-  cat(sprintf("  Per chain: %dk draws + %dk burn-in\n",
+  .dynhr_cat(sprintf("  Per chain: %dk draws + %dk burn-in\n",
               n_draws / 1000, n_burn / 1000))
 
   n_par <- length(theta_mode)
   L <- t(chol(Sigma_prop))
 
   starts <- vector("list", n_chains)
+  ## Host-side start dispersion; restore the caller's RNG stream on exit (C1).
+  .local_seed(seed_base)
   for (ch in seq_len(n_chains)) {
     set.seed(seed_base + ch)
     if (ch == 1) {
@@ -166,8 +177,8 @@ run_mcmc_parallel <- function(
   })
 
   dt_init <- (proc.time() - t_init)[["elapsed"]]
-  cat(sprintf("  Cluster init: %.1f sec (source + compile + lp_fn)\n", dt_init))
-  cat("  Chains running...\n")
+  .dynhr_cat(sprintf("  Cluster init: %.1f sec (source + compile + lp_fn)\n", dt_init))
+  .dynhr_cat("  Chains running...\n")
   t_global <- Sys.time()
 
   raw <- parallel::parLapply(cl, configs, function(cfg) {
@@ -196,7 +207,7 @@ run_mcmc_parallel <- function(
   })
 
   wall_min <- as.numeric(difftime(Sys.time(), t_global, units = "mins"))
-  cat(sprintf("  All chains complete. Wall time: %.1f min\n", wall_min))
+  .dynhr_cat(sprintf("  All chains complete. Wall time: %.1f min\n", wall_min))
 
   chains <- vector("list", n_chains)
   chain_stats <- data.frame(
@@ -208,7 +219,7 @@ run_mcmc_parallel <- function(
   for (r in raw) {
     ch <- r$chain_id
     if (!is.null(r$result$error)) {
-      cat(sprintf("  Chain %d FAILED: %s\n", ch, r$result$error))
+      .dynhr_cat(sprintf("  Chain %d FAILED: %s\n", ch, r$result$error))
       chain_stats <- rbind(chain_stats, data.frame(
         chain = ch, accept_rate = NA, final_logpost = NA,
         final_scale = NA, elapsed_min = r$elapsed_min,
@@ -230,13 +241,13 @@ run_mcmc_parallel <- function(
   for (i in seq_len(nrow(chain_stats))) {
     s <- chain_stats[i, ]
     if (is.na(s$accept_rate)) next
-    cat(sprintf("  Chain %d: accept=%.1f%%, scale=%.3f, logpost=%.2f, %.1f min\n",
+    .dynhr_cat(sprintf("  Chain %d: accept=%.1f%%, scale=%.3f, logpost=%.2f, %.1f min\n",
                 s$chain, s$accept_rate * 100, s$final_scale,
                 s$final_logpost, s$elapsed_min))
   }
 
   seq_min <- sum(chain_stats$elapsed_min, na.rm = TRUE)
-  cat(sprintf("\n  Speedup: %.1fx (%.1f min wall vs %.1f min sequential)\n",
+  .dynhr_cat(sprintf("\n  Speedup: %.1fx (%.1f min wall vs %.1f min sequential)\n",
               seq_min / max(wall_min, 0.01), wall_min, seq_min))
 
   list(chains = chains, chain_stats = chain_stats,
@@ -309,6 +320,8 @@ run_mode_parallel <- function(
   starts <- vector("list", n_chains)
   starts[[1L]] <- theta_init
 
+  ## Host-side start dispersion; restore the caller's RNG stream on exit (C1).
+  .local_seed(seed_base)
   for (ch in seq(2L, n_chains)) {
     set.seed(seed_base + ch)
     th <- theta_init
@@ -335,9 +348,9 @@ run_mode_parallel <- function(
   future::plan(future::multisession, workers = n_cores)
   on.exit(future::plan(future::sequential), add = TRUE)
 
-  cat(sprintf("  Parallel mode: %d chains on %d cores | %s | maxit=%d/chain\n",
+  .dynhr_cat(sprintf("  Parallel mode: %d chains on %d cores | %s | maxit=%d/chain\n",
               n_chains, n_cores, method, nm_maxit))
-  cat(sprintf("  Perturbation scale: %.2f x prior std  (chain 1 = exact calibration)\n",
+  .dynhr_cat(sprintf("  Perturbation scale: %.2f x prior std  (chain 1 = exact calibration)\n",
               perturb_scale))
 
   t_global <- Sys.time()
@@ -346,7 +359,9 @@ run_mode_parallel <- function(
   ## .dynhr_cluster_ship_options): a multisession worker starts with an empty
   ## `.dynhr_opts` and none of the host's `dynhr.*` base options. Ship the
   ## snapshot AND the apply function object as future globals; the function's
-  ## namespace environment re-resolves in the worker's own dynhr.
+  ## namespace environment re-resolves in the worker's own dynhr. The apply
+  ## also checks the worker's build against the host's and aborts with class
+  ## `dynhr_error_worker_version_skew` (future re-signals it on the host).
   .dynhr_worker_opt_state <- .dynhr_daemon_state()
   .dynhr_worker_opt_apply <- .dynhr_daemon_apply
 
@@ -379,7 +394,7 @@ run_mode_parallel <- function(
   }, future.seed = TRUE)
 
   wall_min <- as.numeric(difftime(Sys.time(), t_global, units = "mins"))
-  cat(sprintf("  All chains complete. Wall time: %.1f min\n", wall_min))
+  .dynhr_cat(sprintf("  All chains complete. Wall time: %.1f min\n", wall_min))
 
   logposts <- vapply(raw, function(r) {
     lp <- r$result$logpost
@@ -388,7 +403,7 @@ run_mode_parallel <- function(
 
   best_idx <- which.max(logposts)
 
-  cat(sprintf("\n  %-7s  %12s  %8s  %s\n", "chain", "logpost", "min", "start_delta"))
+  .dynhr_cat(sprintf("\n  %-7s  %12s  %8s  %s\n", "chain", "logpost", "min", "start_delta"))
   for (r in raw) {
     lp_str  <- if (is.finite(logposts[r$chain_id])) sprintf("%12.4f", logposts[r$chain_id])
                else sprintf("%12s", "-Inf")
@@ -398,11 +413,11 @@ run_mode_parallel <- function(
                else sprintf("max|delta|=%.3f (%s)", max(abs(delta)),
                             names(which.max(abs(delta))))
     best_mk <- if (r$chain_id == best_idx) " <- best" else ""
-    cat(sprintf("  ch %-4d  %s  %8.1f  %s%s%s\n",
+    .dynhr_cat(sprintf("  ch %-4d  %s  %8.1f  %s%s%s\n",
                 r$chain_id, lp_str, r$elapsed_min, d_str, best_mk, err_str))
   }
 
-  cat(sprintf("\n  Best: chain %d  logpost=%.4f\n",
+  .dynhr_cat(sprintf("\n  Best: chain %d  logpost=%.4f\n",
               best_idx, logposts[best_idx]))
 
   list(

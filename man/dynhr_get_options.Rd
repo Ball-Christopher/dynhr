@@ -2,13 +2,29 @@
 % Please edit documentation in R/options.R
 \name{dynhr_get_options}
 \alias{dynhr_get_options}
-\title{Get all current dynhr package-level options}
+\title{Get dynhr package-level options}
 \usage{
-dynhr_get_options()
+dynhr_get_options(effective = FALSE)
+}
+\arguments{
+\item{effective}{\code{FALSE} (default) returns only the options set with
+\code{\link{dynhr_set_options}} -- the form to save and later restore with
+\code{do.call(dynhr_set_options, old)}. \code{TRUE} returns EVERY
+registered option (see \code{\link{dynhr_set_options}} for the list) with
+its effective value: the value set, or else its registered default. Any
+set option that is not registered is appended after the registered ones.
+This is the snapshot stored in an estimation result's run record.}
 }
 \value{
-Named list of all currently set options.
+Named list. With \code{effective = TRUE} it carries an attribute
+  \code{"set"}: the names of the options whose value came from
+  \code{dynhr_set_options()} rather than from the registered default.
 }
 \description{
-Get all current dynhr package-level options
+Get dynhr package-level options
+}
+\examples{
+eff <- dynhr_get_options(effective = TRUE)
+eff$power_posterior
+attr(eff, "set")
 }

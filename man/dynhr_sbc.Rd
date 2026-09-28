@@ -125,8 +125,13 @@ An object of class \code{"dynhr_sbc"}: a list with elements
   \describe{
     \item{ranks}{\code{n_ok x d} integer matrix of SBC ranks (one row per
       successful replication).}
-    \item{n_failed}{Number of replications skipped because the model did
-      not solve at the prior draw.}
+    \item{n_failed}{Number of failed (skipped) replications -- e.g. the
+      model did not solve at the prior draw, or the log-posterior was
+      non-finite there.}
+    \item{failures}{data.frame with one row per failed replication:
+      \code{rep} (replication index) and \code{reason} (character, with
+      the error message when the failure was an R error). Zero rows when
+      every replication succeeded.}
     \item{n_replications}{The requested number of replications.}
     \item{L_effective}{Number of thinned posterior draws per
       replication.}
@@ -164,6 +169,17 @@ Blanchard-Kahn-satisfying perturbation solution are skipped (counted in
 conditional on the region of the prior where the model solves -- this is
 the practical scope of SBC for nonlinear DSGE models, and is reported
 explicitly via \code{n_failed} / \code{n_replications}.
+
+\strong{Failure reporting.} Every failed replication's reason is kept in
+\code{$failures} (including the error message when the failure was an R
+error: a solver error, or -- on the parallel path -- any error raised
+inside the replication, e.g. by the sampler or the gradient). When some
+replications fail, \code{dynhr_sbc()} warns (class
+\code{dynhr_warning_sbc_failures}) with the distinct reasons and their
+counts; when ALL replications fail it stops (class
+\code{dynhr_error_sbc_all_failed}), since there are no ranks to test. On
+the serial path (\code{n_cores = NULL}) an R error raised by the sampler
+or likelihood step is not caught: it stops \code{dynhr_sbc()} directly.
 
 \strong{Unit-root models.} If the model's state-transition matrix has an
 eigenvalue with modulus \code{>= 1 - 1e-6} (i.e.

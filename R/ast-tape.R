@@ -55,8 +55,13 @@
     "binop" = {
       .tape_compile_node(node$left,  emit, dy_idx, par_idx, ss_idx)
       .tape_compile_node(node$right, emit, dy_idx, par_idx, ss_idx)
+      ## `[[` on a named ATOMIC vector throws "subscript out of bounds" for a
+      ## missing name (it never returns NULL), so test membership explicitly:
+      ## an unsupported op must reach the "tape: unsupported" signal, not a
+      ## programming-error class that .compile_ast_tape() re-raises.
+      if (!(node$op %in% names(.TAPE_BINOP)))
+        stop("tape: unsupported binop ", node$op)
       o <- .TAPE_BINOP[[node$op]]
-      if (is.null(o)) stop("tape: unsupported binop ", node$op)
       emit(o)
     },
     "unaryop" = {
@@ -72,7 +77,7 @@
         }
         return(.tape_compile_node(arg, emit, dy_idx, par_idx, ss_idx))
       }
-      o <- .TAPE_FUNC_OP[[node$name]]
+      o <- if (node$name %in% names(.TAPE_FUNC_OP)) .TAPE_FUNC_OP[[node$name]]
       if (length(node$args) != 1L || is.null(o))
         stop("tape: unsupported funcall ", node$name, "/", length(node$args))
       .tape_compile_node(node$args[[1]], emit, dy_idx, par_idx, ss_idx)
@@ -139,7 +144,7 @@
     }
     list(op = op[seq_len(n)], ia = ia[seq_len(n)],
          da = da[seq_len(n)], expr_len = expr_len)
-  }, error = function(e) NULL)
+  }, error = function(e) .dynhr_reraise_bug(e, NULL))
 }
 
 #' Compile a list of Jacobian triplets (each with $ast, $row, $col) into a tape.

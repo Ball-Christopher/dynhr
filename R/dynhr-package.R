@@ -5,7 +5,7 @@
 
 #' dynhr: DSGE Modelling Toolkit
 #'
-#' Parses Dynare `.mod` files, solves the resulting models by perturbation
+#' Parses Dynare \code{.mod} files, solves the resulting models by perturbation
 #' at orders 1 to 5, evaluates the likelihood with Kalman, particle
 #' (bootstrap / tempered / Rao-Blackwellised) and skewed (pruned skewed
 #' Kalman) filters, and runs Bayesian estimation with random-walk
@@ -18,7 +18,7 @@
 #' discretionary), occasionally-binding constraints (OccBin), the
 #' heterogeneous-agent (HANK) line -- endogenous grid method, sequence-space
 #' Jacobians, reweighting and welfare -- and reporting. Functions still
-#' marked internal (no `@export`) remain accessible via `dynhr:::fn`.
+#' marked internal (no \code{@export}) remain accessible via \code{dynhr:::fn}.
 #'
 #' @keywords internal
 #' @useDynLib dynhr, .registration = TRUE
@@ -117,5 +117,22 @@ utils::globalVariables(c(
   "ngdpp_z_smooth", "param_group", "param_label", "param_type", "perturbation",
   "pmstar_constructed", "precision", "pxstar_constructed", "rh_constructed",
   "rstar_anchor", "setnames", "singular_value", "value_lo_out", "value_sd",
-  "xmax", "xmin"
+  "xmax", "xmin",
+  ## more ggplot2 aes() column names (diag plot helpers d1-d41, bayesian
+  ## IRF). Kept bare rather than `.data$col`: the report pagination reads
+  ## the discrete-axis column name off the mapping (.aes_var_name()), which
+  ## only recognises a bare symbol.
+  "Regressor", "Status", "Theoretical", "against", "block_lab", "bound",
+  "check", "circle", "d_rhomax_dparam", "dark", "direction", "distinct",
+  "elasticity", "gap", "grp", "hi_in", "hi_out", "im", "is_best", "key",
+  "lo_in", "lo_out", "log10S", "log_ml_rel", "ratio_plot", "re", "reference",
+  "regime", "rel", "softness_plot", "stat", "state", "thr", "txt", "txt_col",
+  "what", "x0", "x1", "xmid", "y0", "y1", "z_crit", "z_plot", "zero",
+  ## SMC mutation task: bound in the task's data environment (.mut_env)
+  ## alongside ll_vec / lp_vec, not in run_smc_mirai()'s own frame.
+  "phi_vec",
+  ## mirai daemon globals: .dynhr_state / .dynhr_apply are passed to each
+  ## daemon via everywhere(.args = ...) and so exist only in the DAEMON's
+  ## global environment, where the pool-setup closures reference them.
+  ".dynhr_apply", ".dynhr_state"
 ))

@@ -176,7 +176,13 @@
                                     system_prior_fn   = NULL,
                                     system_prior_mode = c("lp", "extra"),
                                     reject_fields     = NULL,
-                                    pass_dots         = FALSE) {
+                                    pass_dots         = FALSE,
+                                    ## TRUE only for the Gaussian Kalman
+                                    ## adapter, whose kalman_filter() call
+                                    ## subtracts observation_trends.
+                                    obs_trends_ok     = FALSE) {
+  if (!isTRUE(obs_trends_ok))
+    .refuse_obs_trends(model, "this likelihood")
 
   ## Force everything the closure reads: without this they stay unevaluated
   ## promises pointing at the adapter's frame, and a mirai daemon shipped the
@@ -222,20 +228,41 @@
   ## order. Extras are assigned one at a time through `[<-` with a length-1
   ## list so that a NULL extra ($regime_path on a rejected PKF draw) is STORED
   ## as NULL rather than dropping the element -- `out[[nm]] <- NULL` removes.
-  .emit <- function(logpost, loglik, logprior, extra) {
+  ##
+  ## Every returned list also carries the attribute "posterior_parts" (read it
+  ## with .posterior_parts()): the target's COMPONENTS, which the returned
+  ## fields alone cannot always recover -- in "lp" mode $logprior already
+  ## contains the system prior, and $logpost has `power` and (on an
+  ## infeasible_penalty reject) a finite optimiser penalty folded in. SMC reads
+  ## the parts so it can draw stage 0 from the PARAMETER prior and temper
+  ##   phi(theta) = log_sysprior + power * loglik
+  ## (brief 23 A4). An attribute rather than a field because the field set is
+  ## a pinned contract (test-posterior-closure-parity.R).
+  .emit <- function(logpost, loglik, logprior, extra,
+                    lp_param = logprior, sp = 0) {
     out <- list(logpost = logpost, loglik = loglik, logprior = logprior)
     for (nm in names(extra)) out[nm] <- list(extra[[nm]])
+    attr(out, "posterior_parts") <- c(logprior_param = unname(lp_param),
+                                      log_sysprior   = unname(sp),
+                                      loglik         = unname(loglik),
+                                      power          = unname(power))
     out
   }
 
-  .reject <- function(lp, r = NULL) {
+  .reject <- function(lp, r = NULL, sp = 0) {
     .emit(if (is.null(r)) -Inf else r$logpost,
           if (is.null(r)) -Inf else r$loglik,
           lp,
-          c(reject_fields, if (is.null(r)) NULL else r$extra))
+          c(reject_fields, if (is.null(r)) NULL else r$extra),
+          sp = sp)
   }
 
+  ## Theta is read BY NAME against the prior spec (.theta_by_name(),
+  ## R/posterior.R): an unnamed theta is taken in prior_spec$name order, a
+  ## mis-named one is a classed error (brief 31 A2).
+  spec_names <- prior_spec$name
   inner <- function(theta, ...) {
+    theta <- .theta_by_name(theta, spec_names)
     lp <- log_prior(theta, prior_spec)
     if (!is.finite(lp)) return(.reject(lp))
 
@@ -281,13 +308,17 @@
     loglik <- res$loglik
 
     ## ---- System prior -----------------------------------------------------
-    sp_lp <- NULL
+    sp_lp    <- NULL
+    sp_part  <- 0
+    lp_param <- lp
     if (!is.null(system_prior)) {
-      sp_lp <- system_prior_fn(system_prior, theta, sol, params, res)
+      sp_lp   <- system_prior_fn(system_prior, theta, sol, params, res)
+      sp_part <- sp_lp
       if (identical(system_prior_mode, "lp")) {
         if (!is.finite(sp_lp))
           return(.reject(lp, .posterior_reject(logpost = -Inf,
-                                               loglik  = loglik)))
+                                               loglik  = loglik),
+                         sp = sp_lp))
         lp    <- lp + sp_lp
         sp_lp <- NULL
       }
@@ -303,8 +334,36 @@
     logpost <- if (is.null(sp_lp)) power * loglik + lp
                else                lp + power * loglik + sp_lp
 
-    .emit(logpost, loglik, lp, res$extra)
+    .emit(logpost, loglik, lp, res$extra, lp_param = lp_param, sp = sp_part)
   }
 
   if (pass_dots) inner else function(theta) inner(theta)
+}
+
+
+#' Target components of one log-posterior evaluation
+#'
+#' Reads the \code{"posterior_parts"} attribute that
+#' \code{.make_posterior_closure()} attaches to every returned list:
+#' \code{logprior_param} (the PARAMETER prior only), \code{log_sysprior} (the
+#' system-prior log density, 0 when there is none), \code{loglik} (the RAW
+#' likelihood) and \code{power} (the tempering exponent zeta), so that
+#' \code{logpost = logprior_param + log_sysprior + power * loglik} on every
+#' feasible draw whatever the factory's \code{system_prior_mode}.
+#'
+#' A closure that does not attach the attribute (a user-written
+#' \code{function(theta) list(logpost, loglik, logprior)}) is read with the
+#' historical contract: \code{$logprior} is the parameter prior, the tempered
+#' score is \code{$loglik}, no system prior, \code{power = 1}.
+#'
+#' @param r A list returned by a log-posterior closure.
+#' @return Named numeric \code{c(logprior_param, log_sysprior, loglik, power)}.
+#' @noRd
+.posterior_parts <- function(r) {
+  p <- attr(r, "posterior_parts", exact = TRUE)
+  if (!is.null(p)) return(p)
+  c(logprior_param = if (is.null(r$logprior)) 0 else unname(r$logprior),
+    log_sysprior   = 0,
+    loglik         = if (is.null(r$loglik)) -Inf else unname(r$loglik),
+    power          = 1)
 }

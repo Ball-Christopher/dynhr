@@ -7,38 +7,38 @@
 .hank_sbc_direct_truth(theta_star, emu, inc, ag, rw_scale, need_D1 = TRUE)
 }
 \arguments{
-\item{theta_star}{Named list with `centre`, `spread` (and `omega1` if it is
-a `box` coordinate).}
+\item{theta_star}{Named list with \code{centre}, \code{spread} (and \code{omega1} if it is
+a \code{box} coordinate).}
 
-\item{emu}{A \code{\link{hank_mixture_emulator}} (used only for its `box`
-coordinate names, `config`, and shared household primitives via
-`emu$a_cell`/`emu$config`).}
+\item{emu}{A \code{\link{hank_mixture_emulator}} (used only for its \code{box}
+coordinate names, \code{config}, and shared household primitives via
+\code{emu$a_cell}/\code{emu$config}).}
 
 \item{inc, ag}{Shared income process / asset grid (as built inside
 \code{\link{hank_mixture_emulator}}; passed in so the SBC harness builds
 them once, not once per replication).}
 
 \item{rw_scale}{Reweighting shock-size multiplier: the direct-truth price
-path is `r_path = r + rw_scale * config$rw_shock$r` (passed explicitly
-rather than read off `emu$config`, so a caller's `rw_scale` argument to
+path is \code{r_path = r + rw_scale * config$rw_shock$r} (passed explicitly
+rather than read off \code{emu$config}, so a caller's \code{rw_scale} argument to
 \code{\link{hank_mixture_sbc}} cannot silently diverge from the DGP's own
 shock size).}
 
 \item{need_D1}{Logical: whether to compute the nonlinear post-shock snapshot
-`D1` (needed only when the `"response"` channel is active). When `FALSE`
+\code{D1} (needed only when the \code{"response"} channel is active). When \code{FALSE}
 (e.g. a macro + level-only SBC) the extra \code{\link{hank_mixture_td_nonlinear}}
-solve is skipped and `D1` is `NULL`.}
+solve is skipped and \code{D1} is \code{NULL}.}
 }
 \value{
-A list with `ss_dir` (`dsge_ss`), `D0`, `D1` (length-`n_cell` or
-  `NULL` when `need_D1 = FALSE`), `r`, `w`.
+A list with \code{ss_dir} (\code{dsge_ss}), \code{D0}, \code{D1} (length-\code{n_cell} or
+  \code{NULL} when \code{need_D1 = FALSE}), \code{r}, \code{w}.
 }
 \description{
-Mirrors the research scratch's `snap_sbc.R` `direct_truth()`: a fresh
-mixture GE steady-state solve at `theta*` (NOT read off the emulator, so
+Mirrors the research scratch's \code{snap_sbc.R} \code{direct_truth()}: a fresh
+mixture GE steady-state solve at \code{theta*} (NOT read off the emulator, so
 the emulator does not mark its own homework), the truth stationary
-distribution `D0`, and the GENUINE NONLINEAR post-shock snapshot
-cross-section `D1` at `t_star` (\code{\link{hank_mixture_td_nonlinear}}, no
+distribution \code{D0}, and the GENUINE NONLINEAR post-shock snapshot
+cross-section \code{D1} at \code{t_star} (\code{\link{hank_mixture_td_nonlinear}}, no
 linear-response clipping).
 }
 \keyword{internal}

@@ -46,6 +46,12 @@ List with T_mat, R_mat, Z_mat, D_mat, Sigma_e, ghx, ghu,
   dr$ys[obs_vars]} (with the full steady state in \code{ys}). The
   intercept is what makes a state space self-contained: everything that
   consumes one takes observables in LEVELS and subtracts \code{d}.
+  When the model has an \code{observation_trends} block, \code{obs_trend}
+  holds the per-observable trend slopes evaluated at \code{params} and
+  \code{obs_trend_first_obs} the trend index of the first data row, so the
+  intercept of data row \eqn{t} is
+  \code{d + obs_trend * (obs_trend_first_obs + t - 1)} (\code{obs_trend}
+  is \code{NULL} otherwise).
 }
 \description{
 Extracts T, R, Z, D matrices from ghx/ghu using lead_lag_incidence

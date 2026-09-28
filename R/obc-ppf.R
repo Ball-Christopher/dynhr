@@ -1,19 +1,324 @@
 ## R/obc-ppf.R
 ## --------------------------------------------------------------------------
-## OBC Bootstrap Piecewise Particle Filter (PPF).
+## OBC Piecewise Particle Filter (PPF): bootstrap and conditionally-optimal
+## (COPF) proposals for OccBin piecewise-linear models.
 ##
-## Implements the bootstrap variant of the PPF for OCC-bin piecewise-linear
-## models. Each particle independently resolves its own OBC regime at each
-## period using the shared per-draw regime_cache.
+## TRANSITION (W50, 2026-09-25).  A particle carries s_{t-1}.  In period t it
+## draws eps_t and follows the OccBin rule of the regime SEQUENCE expected
+## from ITS OWN (s_{t-1}, eps_t): the guess-and-verify solve of Dynare's
+## OccBin (shock eps_t in period t, no shock after, check-ahead horizon 200,
+## slack after it) gives the expected sequence, and the period-t rule of that
+## sequence is the time-varying rule of .obc_pwl_rules() (R/obc-binding.R):
+##   y_t = ghx_t s_{t-1} + ghu_t eps_t + c_t,   s_t = y_t[state],
+##   obs_t = y_t[obs] + d + me.
+## This is the per-period step of the piecewise-linear Kalman filter
+## (kalman_filter_obc_pkf(), R/obc-filter.R) applied to a POINT state and a
+## drawn shock instead of the filtered mean: the solve starts all-slack and,
+## when that does not converge, from the sequence the particle expected in
+## t-1 for t onwards (the PKF's two starting guesses).  A particle whose
+## solve does not converge has no model solution and gets weight zero.
+##
+## Vectorisation: particles are grouped by their current regime-sequence
+## guess; each group's rules are built once and the guess is verified for
+## the whole group with matrix products (the slack continuation after the
+## last guessed binding period is one product with the precomputed slack
+## tail of .obc_pkf_prep()).  An all-slack solution -- the common case -- is
+## one product for the whole cloud.
+##
+## Before W50 each particle checked period t only, against the SLACK rule
+## (pkf_check_binding()), and a binding period used the one-period policy of
+## obc_ensure_policy() (next period slack): exact for one-period spells only.
 ##
 ## References:
 ##   Aruoba, Cuba-Borda, Higa-Flores, Schorfheide & Villalvazo (2021, RED)
-##   Dynare 7.0 PPF documentation
+##   Guerrieri & Iacoviello (2015, JME); Dynare 7.1 +occbin
 ##
 ## Provides:
-##   ppf_likelihood()              -- per-evaluation bootstrap PF loglik
+##   ppf_likelihood()              -- per-evaluation PF loglik
 ##   make_log_posterior_obc_ppf()  -- closure factory (mirrors PKF version)
 ## --------------------------------------------------------------------------
+
+
+## ============================================================================
+## Regime-sequence engine for particle clouds
+## ============================================================================
+
+#' Key of a trimmed regime sequence ("" = all slack)
+#' @noRd
+.ppf_seq_key <- function(seq) {
+  if (length(seq) == 0L) "" else paste(seq, collapse = ",")
+}
+
+#' Regime sequence of a key (integer(0) = all slack)
+#' @noRd
+.ppf_key_seq <- function(key) {
+  if (is.na(key) || !nzchar(key)) integer(0)
+  else as.integer(strsplit(key, ",", fixed = TRUE)[[1L]])
+}
+
+#' Particle-filter engine: PKF context, eq-row matrices, rule caches
+#'
+#' @param sys, dr_slack, specs, obs_idx  model pieces
+#' @param Sigma_e     shock covariance
+#' @param me_variance measurement-error variance
+#' @param horizon     check-ahead horizon of the regime solves (Dynare: 200)
+#' @noRd
+.ppf_engine <- function(sys, dr_slack, specs, obs_idx, Sigma_e, me_variance,
+                        horizon = 200L) {
+  ctx <- .obc_pwl_context(sys, dr_slack, specs)
+  pk  <- .obc_pkf_prep(ctx, dr_slack, obs_idx, Sigma_e, me_variance, horizon)
+  eq  <- ctx$eq
+  list(pk = pk, ctx = ctx,
+       Fm_e = ctx$Fm[eq, , drop = FALSE], F0_e = ctx$F0[eq, , drop = FALSE],
+       Fp_e = ctx$Fp[eq, , drop = FALSE], Fe_e = ctx$Fe[eq, , drop = FALSE],
+       w = 2L^(seq_len(ctx$n_spec) - 1L),
+       rules = new.env(parent = emptyenv(), hash = TRUE),
+       mats  = new.env(parent = emptyenv(), hash = TRUE))
+}
+
+#' Time-varying rules of a regime sequence (cached; NULL = singular system)
+#' @noRd
+.ppf_rules <- function(eng, key) {
+  ek <- paste0("s", key)                 # environment names must be non-empty
+  if (exists(ek, envir = eng$rules, inherits = FALSE))
+    return(get(ek, envir = eng$rules, inherits = FALSE))
+  r <- if (!nzchar(key)) list()
+       else .obc_pwl_rules(eng$ctx, .ppf_key_seq(key), strict = FALSE)
+  assign(ek, r, envir = eng$rules)
+  r
+}
+
+#' State-space matrices of the period rule of an expected sequence (cached)
+#'
+#' A singular sequence falls back to the slack matrices (only used as a
+#' COPF proposal guess; a solved sequence is never singular).
+#' @noRd
+.ppf_mats <- function(eng, key) {
+  ek <- paste0("s", key)
+  if (exists(ek, envir = eng$mats, inherits = FALSE))
+    return(get(ek, envir = eng$mats, inherits = FALSE))
+  r <- .ppf_rules(eng, key)
+  m <- if (length(r) == 0L) eng$pk$slack else .obc_pkf_mats(eng$pk, r[[1L]])
+  assign(ek, m, envir = eng$mats)
+  m
+}
+
+#' Expected sequences one period later: drop the first period, trim
+#' @noRd
+.ppf_shift_keys <- function(keys) {
+  keys[is.na(keys)] <- ""
+  u <- unique(keys)
+  su <- vapply(u, function(k) {
+    s <- .ppf_key_seq(k)
+    if (length(s) <= 1L) "" else .ppf_seq_key(.obc_pkf_trim(s[-1L]))
+  }, character(1), USE.NAMES = FALSE)
+  su[match(keys, u)]
+}
+
+#' Verify one regime-sequence guess for a group of particles
+#'
+#' One pass of the OccBin guess-and-verify (.obc_pwl_solve() iteration) over
+#' the check-ahead horizon pk$H for every column of (S, E): the guess's rules
+#' in periods 1..L (L = last guessed binding period), the slack continuation
+#' L+1..H through the precomputed slack tail, the complementarity check of
+#' .obc_pwl_check() (a slack period binds when the constrained variable
+#' violates its bound; a binding period is released when the multiplier of
+#' its relaxed equation has the wrong sign).
+#' @return list(ok = FALSE) for a singular guess, else list(ok, conv, edge,
+#'   newkey, Y1): conv = the check reproduces the guess; edge = converged
+#'   but binding in period H (the PKF solve then doubles the horizon);
+#'   newkey = the checked sequence of the non-converged columns; Y1 =
+#'   n_endo x n period-1 values under the guess's rule
+#' @noRd
+.ppf_eval_guess <- function(eng, key, S, E, tol) {
+  pk  <- eng$pk
+  ctx <- eng$ctx
+  rules <- .ppf_rules(eng, key)
+  if (is.null(rules)) return(list(ok = FALSE))
+  sq <- .ppf_key_seq(key)
+  L  <- length(sq)
+  H  <- pk$H
+  n  <- ncol(S)
+  ns <- ctx$n_spec
+  Lx <- max(L, 1L)
+  bits <- matrix(0L, H, n)
+  Sp <- S
+  Y1 <- NULL
+  for (t in seq_len(Lx)) {
+    ru <- if (t <= L) rules[[t]] else NULL
+    if (is.null(ru)) {
+      Yt <- ctx$ghx %*% Sp
+      if (t == 1L) Yt <- Yt + ctx$ghu %*% E
+    } else {
+      Yt <- ru$ghx %*% Sp + ru$c
+      if (t == 1L) Yt <- Yt + ru$ghu %*% E
+    }
+    St  <- Yt[ctx$si, , drop = FALSE]
+    Xt  <- Yt[ctx$var, , drop = FALSE]
+    gap <- ctx$sgn * (Xt - ctx$bnd)
+    Bn  <- .obc_gap_binds(gap, Xt, ctx$bnd, tol)
+    rb  <- if (t <= L) obc_regime_flags(sq[t], ns) else logical(ns)
+    if (any(rb)) {
+      ru1 <- if (t < L) rules[[t + 1L]] else NULL
+      Ey1 <- if (is.null(ru1)) ctx$ghx %*% St else ru1$ghx %*% St + ru1$c
+      Fr  <- eng$Fm_e %*% Sp + eng$F0_e %*% Yt + eng$Fp_e %*% Ey1
+      Mg  <- abs(eng$Fm_e) %*% abs(Sp) + abs(eng$F0_e) %*% abs(Yt) +
+             abs(eng$Fp_e) %*% abs(Ey1)
+      if (t == 1L) {
+        Fr <- Fr + eng$Fe_e %*% E
+        Mg <- Mg + abs(eng$Fe_e) %*% abs(E)
+      }
+      Bn[rb, ] <- .obc_mult_keeps((ctx$sgn * Fr)[rb, , drop = FALSE],
+                                  Mg[rb, , drop = FALSE], tol)
+    }
+    bits[t, ] <- as.integer(colSums(Bn * eng$w))
+    if (t == 1L) Y1 <- Yt
+    Sp <- St
+  }
+  if (H > Lx && !is.null(pk$tail)) {
+    ## slack continuation: period Lx + k is tail block k applied to s_{Lx}
+    np <- H - Lx
+    X  <- pk$tail[seq_len(np * ns), , drop = FALSE] %*% Sp
+    Bt <- .obc_gap_binds(rep(ctx$sgn, np) * (X - rep(ctx$bnd, np)), X,
+                         rep(ctx$bnd, np), tol)
+    tb <- if (ns == 1L) Bt
+          else rowsum(Bt * rep(eng$w, np), rep(seq_len(np), each = ns),
+                      reorder = FALSE)
+    bits[Lx + seq_len(np), ] <- as.integer(tb)
+  }
+  gb <- c(sq, integer(H - L))
+  conv <- colSums(bits != gb) == 0L
+  edge <- conv & bits[H, ] != 0L
+  newkey <- rep(NA_character_, n)
+  for (j in which(!conv)) {
+    nz <- which(bits[, j] != 0L)
+    newkey[j] <- if (length(nz) == 0L) ""
+                 else paste(bits[seq_len(max(nz)), j], collapse = ",")
+  }
+  list(ok = TRUE, conv = conv, edge = edge, newkey = newkey, Y1 = Y1)
+}
+
+#' OccBin guess-and-verify for a particle cloud (vectorised .obc_pkf_solve)
+#'
+#' Same iterates as .obc_pkf_solve(pk, E[, i], S[, i], init) for every
+#' particle i: at most maxit guesses, a repeated guess (cycle) or a singular
+#' guess is a failure.  Particles whose solution binds in the last period of
+#' the horizon (or whose initial guess is longer than it) are handed to
+#' .obc_pkf_solve() itself, which doubles the horizon.
+#' @param init_keys character, per particle: the starting guess ("" slack)
+#' @param tol relative round-off band of the regime decisions
+#'   (.obc_gap_binds(), R/obc-binding.R)
+#' @return list(key = solved sequence per particle (NA: no solution),
+#'   Y1 = n_endo x N period-t values under the solved rule)
+#' @noRd
+.ppf_solve_batch <- function(eng, S, E, init_keys, maxit = 30L, tol = 1e-8) {
+  pk  <- eng$pk
+  N   <- ncol(S)
+  key <- rep(NA_character_, N)
+  Y1  <- matrix(NA_real_, pk$n_endo, N)
+  if (eng$ctx$n_spec == 0L) {
+    return(list(key = rep("", N),
+                Y1 = eng$ctx$ghx %*% S + eng$ctx$ghu %*% E))
+  }
+  init_len <- ifelse(nzchar(init_keys),
+                     nchar(init_keys) - nchar(gsub(",", "", init_keys,
+                                                   fixed = TRUE)) + 1L, 0L)
+  undecided <- init_len >= pk$H
+  cur    <- init_keys
+  seen   <- vector("list", N)
+  active <- which(!undecided)
+  for (iter in seq_len(maxit)) {
+    if (length(active) == 0L) break
+    nxt <- integer(0)
+    grp <- split(active, cur[active])
+    for (g in seq_along(grp)) {
+      k   <- names(grp)[g]
+      idx <- grp[[g]]
+      ev  <- .ppf_eval_guess(eng, k, S[, idx, drop = FALSE],
+                             E[, idx, drop = FALSE], tol)
+      if (!ev$ok) next                       # singular guess: no solution
+      fin <- ev$conv & !ev$edge
+      if (any(fin)) {
+        key[idx[fin]]   <- k
+        Y1[, idx[fin]]  <- ev$Y1[, fin, drop = FALSE]
+      }
+      undecided[idx[ev$edge]] <- TRUE
+      for (j in which(!ev$conv)) {
+        i <- idx[j]
+        seen[[i]] <- c(seen[[i]], k)
+        if (ev$newkey[j] %in% seen[[i]]) next          # cycle: no solution
+        cur[i] <- ev$newkey[j]
+        nxt <- c(nxt, i)
+      }
+    }
+    active <- nxt
+  }
+  for (i in which(undecided)) {
+    sol <- .obc_pkf_solve(pk, E[, i], S[, i], .ppf_key_seq(init_keys[i]),
+                          maxit = maxit, tol = tol)
+    if (!isTRUE(sol$converged)) next
+    k <- .ppf_seq_key(sol$seq)
+    r <- .ppf_rules(eng, k)
+    if (is.null(r)) next
+    ru <- if (length(r)) r[[1L]] else NULL
+    key[i]  <- k
+    Y1[, i] <- if (is.null(ru)) drop(pk$ghx %*% S[, i]) + drop(pk$ghu %*% E[, i])
+               else drop(ru$ghx %*% S[, i]) + drop(ru$ghu %*% E[, i]) + ru$c
+  }
+  list(key = key, Y1 = Y1)
+}
+
+#' Particle transition: expected regime sequence and period-t values
+#'
+#' The solve starts all-slack; a particle whose solve does not converge is
+#' re-solved from the sequence it expected in t-1 for t onwards (prev_keys),
+#' as the PKF's second starting guess.  NA key: no solution.
+#' @param S n_state x N states s_{t-1}; E n_exo x N shocks eps_t
+#' @param prev_keys character N: expected sequences carried from t-1
+#'   (already shifted to start at t)
+#' @return list(key, Y1 = n_endo x N)
+#' @noRd
+.ppf_transition <- function(eng, S, E, prev_keys = NULL) {
+  N  <- ncol(S)
+  tr <- .ppf_solve_batch(eng, S, E, rep("", N))
+  if (!is.null(prev_keys)) {
+    retry <- which(is.na(tr$key) & !is.na(prev_keys) & nzchar(prev_keys))
+    if (length(retry) > 0L) {
+      r2 <- .ppf_solve_batch(eng, S[, retry, drop = FALSE],
+                             E[, retry, drop = FALSE], prev_keys[retry])
+      tr$key[retry]  <- r2$key
+      tr$Y1[, retry] <- r2$Y1
+    }
+  }
+  tr
+}
+
+#' Gaussian measurement log-density of every particle (NA observations
+#' dropped; the missing pattern is common to all particles)
+#' @param pred n_obs x N predicted observables (levels)
+#' @noRd
+.ppf_log_meas <- function(y_t, pred, me_variance) {
+  ok <- which(!is.na(y_t))
+  n_ok <- length(ok)
+  if (n_ok == 0L) return(numeric(ncol(pred)))
+  innov <- y_t[ok] - pred[ok, , drop = FALSE]
+  -0.5 * n_ok * log(2 * pi) - 0.5 * n_ok * log(me_variance) -
+    0.5 * colSums(innov^2) / me_variance
+}
+
+#' Resample and propagate a weighted cloud
+#' @return list(particles, log_lik_contrib, keys) or NULL (all weights zero)
+#' @noRd
+.ppf_resample <- function(log_w, Y1, keys, si) {
+  N <- length(log_w)
+  log_lik_contrib <- .smc_log_sum_exp(log_w) - log(N)
+  if (!is.finite(log_lik_contrib)) return(NULL)
+  w_norm <- exp(log_w - max(log_w))
+  w_norm <- w_norm / sum(w_norm)
+  idx <- .smc_systematic_resample(w_norm, N)
+  list(particles = Y1[si, idx, drop = FALSE],
+       log_lik_contrib = log_lik_contrib, keys = keys[idx])
+}
 
 
 ## ============================================================================
@@ -22,114 +327,40 @@
 
 #' Bootstrap PPF: process one time period
 #'
-#' Each particle draws eps_t^i ~ N(0, Sigma_e) and resolves its OBC regime.
-#' Particle weight = Gaussian p(y_t | s_{t-1}^i, eps_t^i, regime^i).
-#' Accumulates log_lik_contrib BEFORE resampling; resamples at end of period.
+#' Each particle draws eps_t^i ~ N(0, Sigma_e), solves the regime sequence
+#' expected from (s_{t-1}^i, eps_t^i) and follows its period-t rule.
+#' Particle weight = Gaussian p(y_t | s_{t-1}^i, eps_t^i).  Accumulates
+#' log_lik_contrib BEFORE resampling; resamples at the end of the period.
 #'
 #' @param particles n_state x N matrix of particles (s_{t-1}^i)
 #' @param y_t       length-n_obs observation vector (may contain NAs)
 #' @param L_e       n_exo x n_exo lower-triangular Cholesky of Sigma_e
-#' @param Sigma_e   n_exo x n_exo shock covariance
-#' @param dr_slack  Slack-regime DecisionRules
-#' @param regime_cache R environment of per-regime policies
-#' @param sys       System matrices (for lazy regime building)
-#' @param specs     OBC spec list
-#' @param obs_idx   Integer vector of observable indices
-#' @param d_obs     length-n_obs observable steady-state mean
+#' @param eng       .ppf_engine()
+#' @param d_obs     length-n_obs observable steady-state level
 #' @param me_variance Scalar measurement error variance (must be > 0)
-#' @return list(particles = n_state x N updated, log_lik_contrib = scalar)
+#' @param prev_keys character N: each particle's expected sequence from t-1,
+#'   shifted to start at t (NULL: all slack)
+#' @return list(particles = n_state x N updated, log_lik_contrib = scalar,
+#'   keys = the resampled particles' expected sequences at t,
+#'   n_failed = particles without a regime solution)
 #' @noRd
-.ppf_run_period <- function(particles, y_t, L_e, Sigma_e,
-                             dr_slack, regime_cache, sys, specs,
-                             obs_idx, d_obs, me_variance) {
-
-  N       <- ncol(particles)
-  n_state <- nrow(particles)
-  n_exo   <- ncol(L_e)
-
-  ## -- Step 1: draw shocks for all particles --------------------------------
+.ppf_run_period <- function(particles, y_t, L_e, eng, d_obs, me_variance,
+                            prev_keys = NULL) {
+  N     <- ncol(particles)
+  n_exo <- ncol(L_e)
   shocks <- L_e %*% matrix(rnorm(n_exo * N), nrow = n_exo)   # n_exo x N
 
-  ## -- Step 2: resolve regime and compute observation likelihoods -----------
-  ## For each particle: check OBC regime from (s_{t-1}^i, eps^i)
-  log_w <- numeric(N)
+  tr    <- .ppf_transition(eng, particles, shocks, prev_keys)
+  fail  <- is.na(tr$key)
+  log_w <- .ppf_log_meas(y_t, tr$Y1[eng$pk$obs_idx, , drop = FALSE] + d_obs,
+                         me_variance)
+  log_w[fail] <- -Inf
 
-  for (i in seq_len(N)) {
-    s_i   <- particles[, i]
-    eps_i <- shocks[, i]
-
-    ## Regime check: use pkf_check_binding with backward state = particle state
-    ## (no backward smoothing in PPF; we use the particle's own s_{t-1})
-    bind_flags <- pkf_check_binding(s_i, eps_i, specs, dr_slack)
-    regime_idx <- obc_regime_idx(bind_flags)
-
-    ## Ensure this regime is in the cache
-    if (!exists(as.character(regime_idx), envir = regime_cache, inherits = FALSE))
-      obc_ensure_policy(regime_idx, regime_cache, sys, dr_slack, specs, obs_idx)
-
-    pol <- get(as.character(regime_idx), envir = regime_cache, inherits = FALSE)
-
-    ## Observation prediction: y_pred = ZZ * s_{t-1} + DD * eps + d + c_obs
-    y_pred <- drop(pol$ZZ %*% s_i) + drop(pol$DD %*% eps_i) + d_obs + pol$c_obs
-
-    ## Bootstrap PPF weight: p(y_t | s_{t-1}^i, eps^i, regime^i)
-    ## In the bootstrap PF, eps^i is drawn from the prior N(0, Sigma_e).
-    ## Given eps^i and s_{t-1}^i, y_t is predicted exactly up to measurement
-    ## error:  y_t = y_pred + noise_t,  noise_t ~ N(0, me_variance * I)
-    ## So the weight is purely:
-    ##   p(y_t | s_{t-1}^i, eps^i, regime^i) = N(y_t; y_pred, me_variance * I)
-    F_i   <- me_variance * diag(length(y_pred))
-    innov <- y_t - y_pred
-
-    ## Handle missing observations
-    obs_ok <- which(!is.na(innov))
-    if (length(obs_ok) == 0L) {
-      log_w[i] <- 0   # no information; weight = 1
-    } else {
-      innov_ok  <- innov[obs_ok]
-      n_ok      <- length(obs_ok)
-      ## F is diagonal: me_variance * I, so log_det = n_ok * log(me_variance)
-      ## and quad form = sum(innov^2) / me_variance
-      log_w[i]  <- -0.5 * n_ok * log(2 * pi) -
-                   0.5 * n_ok * log(me_variance) -
-                   0.5 * sum(innov_ok^2) / me_variance
-    }
-
-    ## Propagate state (TPF lesson: propagate AFTER weighting)
-    ## s_t^i = TT * s_{t-1}^i + RR * eps^i + c_state
-    shocks[, i] <- eps_i
-  }
-
-  ## -- Step 3: accumulate log_lik_contrib BEFORE resampling -----------------
-  ## log p(y_t | Y_{1:t-1}) = log(mean exp(log_w))
-  log_lik_contrib <- .smc_log_sum_exp(log_w) - log(N)
-
-  ## -- Step 4: normalize and systematic resample ----------------------------
-  log_w_c <- log_w - max(log_w)
-  w_norm  <- exp(log_w_c)
-  w_norm  <- w_norm / sum(w_norm)
-
-  idx       <- .smc_systematic_resample(w_norm, N)
-  shocks    <- shocks[, idx, drop = FALSE]
-
-  ## -- Step 5: propagate resampled particles --------------------------------
-  new_particles <- matrix(0, n_state, N)
-  for (i in seq_len(N)) {
-    orig_i <- idx[i]
-    s_i    <- particles[, orig_i]
-    eps_i  <- shocks[, i]
-
-    ## Re-resolve regime after resampling (uses same eps, same s)
-    bind_flags <- pkf_check_binding(s_i, eps_i, specs, dr_slack)
-    regime_idx <- obc_regime_idx(bind_flags)
-    if (!exists(as.character(regime_idx), envir = regime_cache, inherits = FALSE))
-      obc_ensure_policy(regime_idx, regime_cache, sys, dr_slack, specs, obs_idx)
-    pol <- get(as.character(regime_idx), envir = regime_cache, inherits = FALSE)
-
-    new_particles[, i] <- drop(pol$TT %*% s_i) + drop(pol$RR %*% eps_i) + pol$c_state
-  }
-
-  list(particles = new_particles, log_lik_contrib = log_lik_contrib)
+  rs <- .ppf_resample(log_w, tr$Y1, tr$key, eng$pk$si)
+  if (is.null(rs)) return(list(particles = particles, log_lik_contrib = -Inf,
+                               keys = tr$key, n_failed = sum(fail)))
+  rs$n_failed <- sum(fail)
+  rs
 }
 
 
@@ -137,11 +368,59 @@
 ## Per-period COPF step (conditionally-optimal proposal)
 ## ============================================================================
 
+#' Cholesky factor of a symmetric matrix, NULL unless clearly positive
+#' definite (explicit eigenvalue test instead of catching a chol() error)
+#' @noRd
+.ppf_chol <- function(A) {
+  if (any(!is.finite(A))) return(NULL)
+  ev <- eigen(A, symmetric = TRUE, only.values = TRUE)$values
+  if (min(ev) <= max(abs(ev)) * nrow(A) * .Machine$double.eps) return(NULL)
+  chol(A)
+}
+
+#' COPF quantities of one guessed rule for the observed subset
+#' @return list(Omega, L_Omega, F_inv, log_det_F) with NULL entries when the
+#'   corresponding matrix is not numerically positive definite
+#' @noRd
+.copf_quantities <- function(DD_ok, Sigma_e, Sigma_e_inv, me_variance) {
+  n_ok <- nrow(DD_ok)
+  out  <- list(Omega = NULL, L_Omega = NULL, F_inv = NULL, log_det_F = NULL)
+  ch_Oi <- .ppf_chol(crossprod(DD_ok) / me_variance + Sigma_e_inv)
+  if (!is.null(ch_Oi)) {
+    Om   <- chol2inv(ch_Oi)
+    ch_O <- .ppf_chol(Om)
+    if (!is.null(ch_O)) {
+      out$Omega   <- Om
+      out$L_Omega <- t(ch_O)
+    }
+  }
+  ch_F <- .ppf_chol(DD_ok %*% Sigma_e %*% t(DD_ok) + me_variance * diag(n_ok))
+  if (!is.null(ch_F)) {
+    out$F_inv     <- chol2inv(ch_F)
+    out$log_det_F <- 2 * sum(log(diag(ch_F)))
+  }
+  out
+}
+
 #' COPF: process one time period using the conditionally-optimal Gaussian proposal
 #'
-#' For each particle, draws eps_t^i from the posterior N(mu_r^i, Omega_r) given
-#' (y_t, s_{t-1}^i, regime r).  Weight = marginal N(v_r^i ; 0, F_r).
-#' Fallback to bootstrap draw + bootstrap weight when verified regime != guessed.
+#' Proposal.  For a guessed expected regime sequence g with period-t rule
+#' (ZZ_g, DD_g, c_g), the posterior of eps_t given (s_{t-1}^i, y_t) in the
+#' linear-Gaussian model of that rule is N(mu_g^i, Omega_g).  Each particle's
+#' guess starts from guess_keys (the ancestor's expectation shifted to t, or
+#' all slack) and is iterated to a fixed point ON THE POSTERIOR MEAN, as the
+#' PKF does for the filtered mean: g <- the sequence solved from
+#' (s_{t-1}^i, mu_g^i), at most copf_iter times.  The guess is a deterministic
+#' function of (s_{t-1}^i, its carried expectation, y_t), so
+#' q = N(mu_g, Omega_g) is a valid proposal; without the iteration every
+#' particle entering a spell proposed from the slack rule and mismatched.
+#'
+#' Weight.  eps_t^i ~ q; the particle's transition is solved from
+#' (s_{t-1}^i, eps_t^i) exactly as in the bootstrap filter
+#' (.ppf_transition()).  When the solved sequence is the guess the weight is
+#' the marginal N(v_g^i; 0, F_g) (the Gaussian identity); otherwise the
+#' generally-valid p(y_t | s, eps, solved rule) p(eps) / q(eps).  A guess whose
+#' Omega_g is degenerate draws from the prior with the bootstrap weight.
 #'
 #' Accumulates log_lik_contrib BEFORE resampling (same as bootstrap PPF).
 #'
@@ -150,265 +429,173 @@
 #' @param L_e           n_exo x n_exo lower-triangular Cholesky of Sigma_e
 #' @param Sigma_e       n_exo x n_exo shock covariance
 #' @param Sigma_e_inv   n_exo x n_exo inverse of Sigma_e (pre-computed once)
-#' @param dr_slack      Slack-regime DecisionRules
-#' @param regime_cache  R environment of per-regime policies (with COPF fields)
-#' @param sys           System matrices (for lazy regime building)
-#' @param specs         OBC spec list
-#' @param obs_idx       Integer vector of observable indices
-#' @param d_obs         length-n_obs observable steady-state mean
+#' @param eng           .ppf_engine()
+#' @param d_obs         length-n_obs observable steady-state level
 #' @param me_variance   Scalar measurement error variance (must be > 0)
-#' @param copf_args     list(Sigma_e, Sigma_e_inv, me_variance) for cache builds
-#' @param prev_regimes  Integer vector length N: verified regime of each
-#'   particle's resampled ancestor from the previous period.  NULL or a
-#'   zero-vector triggers all-slack guesses (t=1 behaviour).
-#' @return list(particles = n_state x N updated, log_lik_contrib = scalar,
-#'             n_fallback = integer count of bootstrap fallbacks,
-#'             verified_regimes = integer vector length N of verified regimes
-#'               after propagation, in resampled order — pass as prev_regimes
-#'               to the next period call)
+#' @param prev_keys     character N: expected sequences carried from t-1,
+#'   shifted to t (NULL: all slack).  Always used by the transition.
+#' @param guess_keys    character N: starting proposal guesses (NULL: all
+#'   slack)
+#' @param U_copf        CPM: list(z_copf = n_exo x N, z_fallback = n_exo x N);
+#'   NULL draws fresh from the RNG
+#' @param copf_iter     maximum guess updates on the posterior mean
+#' @return list(particles, log_lik_contrib, n_fallback = proposal
+#'   mismatches + degenerate-Omega prior draws, keys = resampled expected
+#'   sequences at t, n_failed, z_copf_used, z_fallback_used)
 #' @noRd
 .copf_run_period <- function(particles, y_t, L_e, Sigma_e, Sigma_e_inv,
-                              dr_slack, regime_cache, sys, specs,
-                              obs_idx, d_obs, me_variance, copf_args,
-                              prev_regimes = NULL,
-                              U_copf = NULL) { # CPM: list(z_copf = n_exo x N, z_fallback = n_exo x N)
-                                               #      NULL -> draw fresh from RNG
+                             eng, d_obs, me_variance,
+                             prev_keys = NULL, guess_keys = NULL,
+                             U_copf = NULL, copf_iter = 10L) {
+  N     <- ncol(particles)
+  n_exo <- ncol(L_e)
+  pk    <- eng$pk
 
-  N       <- ncol(particles)
-  n_state <- nrow(particles)
-  n_exo   <- ncol(L_e)
-
-  ## Pre-draw standard normals for COPF (consumed in mu + L_Omega * u)
-  ## and fallback draws (used only on fallback particles).
-  ## CPM: when U_copf is supplied, use its pre-drawn matrices (deterministic U structure).
-  ## Both z_copf and z_fallback are always drawn/supplied; only the per-particle
-  ## SELECTION (copf vs fallback) is data-dependent. The U structure itself is fixed.
+  ## Both z_copf and z_fallback are always drawn/supplied (CPM: fixed U
+  ## structure); only the per-particle SELECTION is data-dependent.
   z_copf     <- if (!is.null(U_copf)) U_copf$z_copf     else matrix(rnorm(n_exo * N), nrow = n_exo)
-  z_fallback <- if (!is.null(U_copf)) U_copf$z_fallback  else matrix(rnorm(n_exo * N), nrow = n_exo)
+  z_fallback <- if (!is.null(U_copf)) U_copf$z_fallback else matrix(rnorm(n_exo * N), nrow = n_exo)
 
-  ## Ancestor guesses: use prev_regimes if supplied and non-trivial,
-  ## otherwise fall back to all-slack (regime 0) for all particles.
-  ## This implements variance reduction: a particle whose ancestor was in the
-  ## binding regime proposes from that regime's COPF distribution, not the
-  ## slack regime's, slashing the mismatch rate during binding stretches.
-  use_ancestor <- !is.null(prev_regimes) && length(prev_regimes) == N &&
-                    any(prev_regimes != 0L)
-  ## Pre-compute unique guessed regimes so we can batch-ensure their cache
-  ## entries before the per-particle loop (avoids repeated env lookups in the
-  ## common case where only 1-2 distinct regimes are present in the cloud).
-  r_guesses <- if (use_ancestor) as.integer(prev_regimes) else rep(0L, N)
-  for (rg in unique(r_guesses)) {
-    if (!exists(as.character(rg), envir = regime_cache, inherits = FALSE))
-      obc_ensure_policy(rg, regime_cache, sys, dr_slack, specs, obs_idx, copf_args)
+  if (is.null(prev_keys)) prev_keys <- rep("", N)
+  g <- if (is.null(guess_keys)) rep("", N) else guess_keys
+  g[is.na(g)] <- ""
+  ok   <- which(!is.na(y_t))
+  n_ok <- length(ok)
+
+  ## Proposal of a guess (per period: the missing pattern is common)
+  qenv <- new.env(parent = emptyenv(), hash = TRUE)
+  getq <- function(k) {
+    ek <- paste0("s", k)
+    if (exists(ek, envir = qenv, inherits = FALSE))
+      return(get(ek, envir = qenv, inherits = FALSE))
+    m <- .ppf_mats(eng, k)
+    q <- .copf_quantities(m$DD[ok, , drop = FALSE], Sigma_e, Sigma_e_inv,
+                          me_variance)
+    q$DD_ok  <- m$DD[ok, , drop = FALSE]
+    q$ZZ_ok  <- m$ZZ[ok, , drop = FALSE]
+    q$off_ok <- d_obs[ok] + m$co[ok]
+    assign(ek, q, envir = qenv)
+    q
+  }
+  post <- function(q, idx) {
+    V <- y_t[ok] - q$ZZ_ok %*% particles[, idx, drop = FALSE] - q$off_ok
+    list(V = V, mu = q$Omega %*% (t(q$DD_ok) %*% V / me_variance))
   }
 
-  log_w    <- numeric(N)
-  shocks   <- matrix(0, n_exo, N)
-  n_fallback <- 0L
-
-  for (i in seq_len(N)) {
-    s_i <- particles[, i]
-
-    ## -- COPF path: guess regime from ancestor's verified regime
-    ## (or all-slack at t=1 / when prev_regimes is NULL)
-    r_guess <- r_guesses[i]
-
-    ## Cache entry guaranteed to exist from the batch-ensure above
-    pol_g <- get(as.character(r_guess), envir = regime_cache, inherits = FALSE)
-
-    ## Innovation for guessed regime
-    obs_offset_g <- d_obs + pol_g$c_obs
-    v_g  <- y_t - drop(pol_g$ZZ %*% s_i) - obs_offset_g
-
-    ## Handle NAs: use only observed components for COPF draw
-    obs_ok <- which(!is.na(v_g))
-    n_ok   <- length(obs_ok)
-
-    if (n_ok == 0L) {
-      ## All missing: draw from prior, weight 1
-      eps_i    <- drop(L_e %*% z_copf[, i])
-      shocks[, i] <- eps_i
-      ## Propagate with guessed regime (regime 0)
-      log_w[i] <- 0
-    } else {
-      ## Build COPF quantities restricted to observed components
-      DD_ok   <- pol_g$DD[obs_ok, , drop = FALSE]
-      v_ok    <- v_g[obs_ok]
-
-      ## Omega_r_inv and Omega_r for partial obs case
-      ## Use stored Omega if all obs present; recompute if partial obs
-      if (n_ok == length(v_g) && !is.null(pol_g$Omega) && !is.null(pol_g$L_Omega)) {
-        Omega_g   <- pol_g$Omega
-        L_Omega_g <- pol_g$L_Omega
-      } else {
-        ## Partial obs: recompute Omega for the observed subset
-        Omega_inv_g <- crossprod(DD_ok) / me_variance + Sigma_e_inv
-        ch_Oi_g     <- tryCatch(chol(Omega_inv_g), error = function(e2) NULL)
-        if (!is.null(ch_Oi_g)) {
-          Omega_g <- chol2inv(ch_Oi_g)
-          ch_O_g  <- tryCatch(chol(Omega_g), error = function(e2) NULL)
-        } else {
-          ch_O_g  <- NULL
-        }
-        if (is.null(ch_O_g)) {
-          ## Degenerate Omega: fall back to a prior draw. The choice to fall
-          ## back is deterministic given (s_i, y_t), so the bootstrap weight
-          ## is a valid importance weight -- but the measurement density must
-          ## use the regime actually implied by (s_i, eps_i), not the guess.
-          eps_i <- drop(L_e %*% z_fallback[, i])
-          shocks[, i] <- eps_i
-          r_fb_flags <- pkf_check_binding(s_i, eps_i, specs, dr_slack)
-          r_fb       <- obc_regime_idx(r_fb_flags)
-          if (!exists(as.character(r_fb), envir = regime_cache, inherits = FALSE))
-            obc_ensure_policy(r_fb, regime_cache, sys, dr_slack, specs, obs_idx, copf_args)
-          pol_fb  <- get(as.character(r_fb), envir = regime_cache, inherits = FALSE)
-          y_pred  <- drop(pol_fb$ZZ %*% s_i) + drop(pol_fb$DD %*% eps_i) +
-                       d_obs + pol_fb$c_obs
-          innov   <- y_t - y_pred
-          innov_ok2 <- innov[which(!is.na(innov))]
-          n_ok2 <- length(innov_ok2)
-          log_w[i] <- if (n_ok2 == 0L) 0 else
-            -0.5 * n_ok2 * log(2 * pi) - 0.5 * n_ok2 * log(me_variance) -
-            0.5 * sum(innov_ok2^2) / me_variance
-          n_fallback <- n_fallback + 1L
-          next
-        }
-        L_Omega_g <- t(ch_O_g)
+  ## Guess iteration on the posterior mean
+  if (n_ok > 0L) {
+    todo <- seq_len(N)
+    for (it in seq_len(copf_iter)) {
+      mu  <- matrix(0, n_exo, length(todo))
+      use <- logical(length(todo))
+      grp <- split(seq_along(todo), g[todo])
+      for (j in seq_along(grp)) {
+        q <- getq(names(grp)[j])
+        if (is.null(q$L_Omega)) next
+        pos <- grp[[j]]
+        mu[, pos] <- post(q, todo[pos])$mu
+        use[pos]  <- TRUE
       }
-
-      ## COPF draw: eps_i = mu_r^i + L_Omega_r * z
-      mu_g  <- drop(Omega_g %*% (t(DD_ok) %*% v_ok / me_variance))
-      eps_i <- mu_g + drop(L_Omega_g %*% z_copf[, i])
-
-      ## -- Verify regime --
-      r_verify_flags <- pkf_check_binding(s_i, eps_i, specs, dr_slack)
-      r_verify       <- obc_regime_idx(r_verify_flags)
-
-      if (r_verify == r_guess) {
-        ## -- COPF accepted: weight = N(v_g ; 0, F_r) -----------------------
-        ## Use stored F_inv and log_det_F if all obs present; otherwise recompute
-        if (n_ok == length(v_g) && !is.null(pol_g$F_inv)) {
-          F_inv_g     <- pol_g$F_inv
-          log_det_F_g <- pol_g$log_det_F
-        } else {
-          F_g         <- DD_ok %*% Sigma_e %*% t(DD_ok) + me_variance * diag(n_ok)
-          ch_Fg       <- tryCatch(chol(F_g), error = function(e2) NULL)
-          if (is.null(ch_Fg)) {
-            ## F Cholesky failed: weight -Inf
-            shocks[, i] <- eps_i
-            log_w[i]    <- -Inf
-            next
-          }
-          F_inv_g     <- chol2inv(ch_Fg)
-          log_det_F_g <- 2 * sum(log(diag(ch_Fg)))
-        }
-
-        log_w[i] <- -0.5 * n_ok * log(2 * pi) -
-                    0.5 * log_det_F_g -
-                    0.5 * drop(v_ok %*% (F_inv_g %*% v_ok))
-        shocks[, i] <- eps_i
-
-      } else {
-        ## -- Regime mismatch: KEEP the COPF draw and use the generally-valid
-        ## importance weight  p(y_t | s_i, eps_i, r_verify) p(eps_i) / q(eps_i).
-        ## Redrawing from the prior here would make the effective proposal a
-        ## draw-dependent mixture whose density the weights ignore, biasing
-        ## the likelihood estimator by O(mismatch rate) per period.
-        n_fallback <- n_fallback + 1L
-
-        if (!exists(as.character(r_verify), envir = regime_cache, inherits = FALSE))
-          obc_ensure_policy(r_verify, regime_cache, sys, dr_slack, specs, obs_idx, copf_args)
-        pol_v <- get(as.character(r_verify), envir = regime_cache, inherits = FALSE)
-
-        shocks[, i] <- eps_i
-
-        ## log p(y_t | s_i, eps_i, r_verify): measurement density under the
-        ## verified regime's policy
-        obs_offset_v <- d_obs + pol_v$c_obs
-        y_pred_v <- drop(pol_v$ZZ %*% s_i) + drop(pol_v$DD %*% eps_i) + obs_offset_v
-        innov_v  <- y_t - y_pred_v
-        obs_ok_v <- which(!is.na(innov_v))
-        n_ok_v   <- length(obs_ok_v)
-        log_p_y  <- if (n_ok_v == 0L) 0 else {
-          innov_ok_v <- innov_v[obs_ok_v]
-          -0.5 * n_ok_v * log(2 * pi) - 0.5 * n_ok_v * log(me_variance) -
-            0.5 * sum(innov_ok_v^2) / me_variance
-        }
-
-        ## log p(eps_i) under the prior N(0, Sigma_e)
-        u_p <- forwardsolve(L_e, eps_i)
-        log_p_eps <- -sum(log(diag(L_e))) - 0.5 * sum(u_p^2)
-
-        ## log q(eps_i) under the proposal N(mu_g, Omega_g) actually drawn from
-        u_q <- forwardsolve(L_Omega_g, eps_i - mu_g)
-        log_q_eps <- -sum(log(diag(L_Omega_g))) - 0.5 * sum(u_q^2)
-
-        ## (the -0.5 * n_exo * log(2*pi) normalisers cancel in p/q)
-        log_w[i] <- log_p_y + log_p_eps - log_q_eps
-      }
+      if (!any(use)) break
+      sub <- todo[use]
+      tr0 <- .ppf_transition(eng, particles[, sub, drop = FALSE],
+                             mu[, use, drop = FALSE], prev_keys[sub])
+      new <- tr0$key
+      new[is.na(new)] <- g[sub][is.na(new)]
+      ch  <- new != g[sub]
+      g[sub] <- new
+      todo <- sub[ch]
+      if (length(todo) == 0L) break
     }
   }
 
-  ## -- Accumulate log_lik_contrib BEFORE resampling -------------------------
-  log_lik_contrib <- .smc_log_sum_exp(log_w) - log(N)
-
-  ## -- Normalize and systematic resample ------------------------------------
-  log_w_c <- log_w - max(log_w)
-  w_norm  <- exp(log_w_c)
-  w_norm  <- w_norm / sum(w_norm)
-
-  idx    <- .smc_systematic_resample(w_norm, N)
-  shocks <- shocks[, idx, drop = FALSE]
-
-  ## -- Propagate resampled particles ----------------------------------------
-  ## Also track each particle's verified regime so the next period can use it
-  ## as its proposal guess (ancestor-regime variance reduction).
-  new_particles    <- matrix(0, n_state, N)
-  verified_regimes <- integer(N)
-  for (i in seq_len(N)) {
-    orig_i <- idx[i]
-    s_i    <- particles[, orig_i]
-    eps_i  <- shocks[, i]
-
-    ## Re-resolve regime after resampling
-    bind_flags <- pkf_check_binding(s_i, eps_i, specs, dr_slack)
-    regime_idx <- obc_regime_idx(bind_flags)
-    if (!exists(as.character(regime_idx), envir = regime_cache, inherits = FALSE))
-      obc_ensure_policy(regime_idx, regime_cache, sys, dr_slack, specs, obs_idx, copf_args)
-    pol <- get(as.character(regime_idx), envir = regime_cache, inherits = FALSE)
-
-    new_particles[, i]    <- drop(pol$TT %*% s_i) + drop(pol$RR %*% eps_i) + pol$c_state
-    verified_regimes[i]   <- regime_idx
+  shocks <- matrix(0, n_exo, N)
+  ## per particle: 1 = COPF draw, 2 = prior draw (all missing / degenerate)
+  mode   <- integer(N)
+  lw_acc <- rep(NA_real_, N)          # N(v_g; 0, F_g) when the guess verifies
+  lq     <- rep(NA_real_, N)          # log q(eps) up to the 2*pi constant
+  grp    <- split(seq_len(N), g)
+  for (j in seq_along(grp)) {
+    idx <- grp[[j]]
+    if (n_ok == 0L) {
+      shocks[, idx] <- L_e %*% z_copf[, idx, drop = FALSE]
+      mode[idx] <- 2L
+      next
+    }
+    q <- getq(names(grp)[j])
+    if (is.null(q$L_Omega)) {
+      shocks[, idx] <- L_e %*% z_fallback[, idx, drop = FALSE]
+      mode[idx] <- 2L
+      next
+    }
+    pm <- post(q, idx)
+    ep <- pm$mu + q$L_Omega %*% z_copf[, idx, drop = FALSE]
+    shocks[, idx] <- ep
+    mode[idx] <- 1L
+    u_q <- forwardsolve(q$L_Omega, ep - pm$mu)
+    lq[idx] <- -sum(log(diag(q$L_Omega))) - 0.5 * colSums(u_q^2)
+    lw_acc[idx] <- if (is.null(q$F_inv)) -Inf else
+      -0.5 * n_ok * log(2 * pi) - 0.5 * q$log_det_F -
+        0.5 * colSums(pm$V * (q$F_inv %*% pm$V))
   }
 
-  list(particles = new_particles, log_lik_contrib = log_lik_contrib,
-       n_fallback = n_fallback, verified_regimes = verified_regimes,
-       z_copf_used = z_copf, z_fallback_used = z_fallback)  # CPM: record used draws
-}
+  tr   <- .ppf_transition(eng, particles, shocks, prev_keys)
+  fail <- is.na(tr$key)
+  lp_y <- .ppf_log_meas(y_t, tr$Y1[pk$obs_idx, , drop = FALSE] + d_obs,
+                        me_variance)
+  log_w <- lp_y                                     # prior draws: bootstrap
+  acc  <- mode == 1L & !fail & tr$key == g
+  mis  <- mode == 1L & !fail & !acc
+  log_w[acc] <- lw_acc[acc]
+  if (any(mis)) {
+    ## p(y | s, eps, solved rule) p(eps) / q(eps); the 2*pi normalisers of
+    ## p(eps) and q(eps) cancel
+    u_p <- forwardsolve(L_e, shocks[, mis, drop = FALSE])
+    log_p_eps <- -sum(log(diag(L_e))) - 0.5 * colSums(u_p^2)
+    log_w[mis] <- lp_y[mis] + log_p_eps - lq[mis]
+  }
+  log_w[fail] <- -Inf
+  n_fallback <- sum(mis) + sum(mode == 2L & n_ok > 0L)
 
+  rs <- .ppf_resample(log_w, tr$Y1, tr$key, pk$si)
+  if (is.null(rs))
+    rs <- list(particles = particles, log_lik_contrib = -Inf, keys = tr$key)
+  rs$n_fallback      <- n_fallback
+  rs$n_failed        <- sum(fail)
+  rs$z_copf_used     <- z_copf
+  rs$z_fallback_used <- z_fallback
+  rs
+}
 
 ## ============================================================================
 ## Main PPF likelihood function
 ## ============================================================================
 
-#' Bootstrap Piecewise Particle Filter log-likelihood for OBC models
+#' Piecewise Particle Filter log-likelihood for OBC models
 #'
-#' Evaluates the marginal log-likelihood log p(Y | theta) using a bootstrap
-#' particle filter that treats the OBC regime sequence r_{1:T} as a latent
-#' variable.
+#' Evaluates the marginal log-likelihood log p(Y | theta) with a particle
+#' filter over the state of the OccBin piecewise-linear model.
 #'
 #' At each period t, N particles carry s_{t-1}^i; each particle:
-#'   1. Draws eps_t^i ~ N(0, Sigma_e) (prior proposal)
-#'   2. Resolves its OBC regime from (s_{t-1}^i, eps_t^i) via the SHARED
-#'      regime_cache (one cache per likelihood evaluation)
-#'   3. Computes weight w_t^i = p(y_t | s_{t-1}^i, eps_t^i, regime_t^i)
+#'   1. Draws eps_t^i from the prior N(0, Sigma_e) (bootstrap) or from the
+#'      conditionally-optimal Gaussian proposal of a guessed rule (COPF)
+#'   2. Solves the regime SEQUENCE expected from (s_{t-1}^i, eps_t^i)
+#'      (OccBin guess-and-verify, check-ahead \code{horizon}) and follows the
+#'      period-t time-varying rule of that sequence
+#'   3. Computes weight w_t^i = p(y_t | s_{t-1}^i, eps_t^i) (times
+#'      p(eps)/q(eps) for the COPF)
 #'   4. Accumulates log_lik += log(mean w_t^i) BEFORE resampling
 #'   5. Systematically resamples and propagates the state
+#' A period with no observation propagates the cloud (weights equal).
+#'
+#' Changed in W50 (2026-09-25): step 2 used to check period t only against
+#' the slack rule and apply the one-period binding policy (next period
+#' slack), which is wrong for spells of two or more periods.
 #'
 #' @param Y             n_obs x T observation matrix
 #' @param dr_slack      Slack-regime DecisionRules
-#' @param regime_cache  FRESH R environment for this call (modified in-place)
-#' @param sys           System matrices (for lazy regime building)
+#' @param regime_cache  Regime cache seeded by obc_ensure_policy(0, ...)
+#' @param sys           System matrices
 #' @param model         dynhr_mod
 #' @param params        Named numeric parameter vector
 #' @param obs_vars      Character vector of observed variable names
@@ -416,6 +603,11 @@
 #' @param obs_idx       Integer vector of observable indices
 #' @param N             Number of particles (default 1000)
 #' @param me_variance   Measurement error variance (must be > 0; default 1e-4)
+#' @param proposal      "bootstrap" or "copf"
+#' @param regime_guess  COPF proposal guess: "ancestor" (the resampled
+#'   ancestor's expected sequence, shifted to t) or "slack"
+#' @param horizon       Check-ahead horizon of the regime solves (default 200,
+#'   Dynare's; doubled while a solution binds in its last period)
 #' @param return_particles Logical (default FALSE).  When TRUE, append the
 #'   terminal \code{n_state x N} particle cloud as \code{$particles} in the
 #'   return list.  Has no effect on the loglik path (byte-identical when FALSE).
@@ -424,6 +616,7 @@
 #'   $loglik       scalar log-likelihood
 #'   $n_obs        integer
 #'   $n_T          integer
+#'   $n_failed     particle-periods without a regime solution (weight zero)
 #'   $particles    n_state x N terminal particle cloud (only when return_particles = TRUE)
 #' @noRd
 ppf_likelihood <- function(Y, dr_slack, regime_cache, sys,
@@ -434,6 +627,7 @@ ppf_likelihood <- function(Y, dr_slack, regime_cache, sys,
                             proposal         = c("bootstrap", "copf"),
                             regime_guess     = c("ancestor", "slack"),
                             U_copf_list      = NULL,  # CPM: list of per-period U_copf structures
+                            horizon          = 200L,
                             return_particles  = FALSE,
                             seed             = NULL) {
 
@@ -461,6 +655,10 @@ ppf_likelihood <- function(Y, dr_slack, regime_cache, sys,
   n_obs   <- length(obs_vars)
 
   if (is.null(obs_idx)) obs_idx <- match(obs_vars, endo)
+  ## The measurement density below is N(y; ., me_variance I): a vector would
+  ## be silently recycled into it, so refuse it (classed) instead.
+  me_variance <- .kf_me_variance(me_variance, obs_vars, "ppf_likelihood",
+                                 allow_vector = FALSE)
 
   ## Data orientation: n_obs x T
   if (is.null(dim(Y))) Y <- matrix(Y, nrow = n_obs)
@@ -471,105 +669,98 @@ ppf_likelihood <- function(Y, dr_slack, regime_cache, sys,
   Sigma_e <- .get_shock_cov(model, exo, params)
   L_e     <- t(chol(Sigma_e))   # lower-triangular L s.t. L %*% t(L) = Sigma_e
 
-  ## COPF pre-computation: Sigma_e_inv + copf_args for cache population
-  copf_args   <- NULL
+  ## chol(Sigma_e) succeeded just above (L_e), so no failure branch here.
   Sigma_e_inv <- NULL
-  if (proposal == "copf") {
-    ch_Se       <- tryCatch(chol(Sigma_e), error = function(e2) NULL)
-    if (is.null(ch_Se))
-      return(list(loglik = -Inf, n_obs = n_obs, n_T = n_T))
-    Sigma_e_inv <- chol2inv(ch_Se)
-    copf_args   <- list(Sigma_e = Sigma_e, Sigma_e_inv = Sigma_e_inv,
-                        me_variance = me_variance)
-    ## Ensure the already-built regime-0 entry gets COPF fields added
-    ## (it was inserted before proposal was known; update it now)
-    if (exists("0", envir = regime_cache, inherits = FALSE)) {
-      pol0 <- get("0", envir = regime_cache, inherits = FALSE)
-      if (is.null(pol0$Omega)) {
-        ## Remove and re-build with COPF args
-        rm(list = "0", envir = regime_cache)
-        obc_ensure_policy(0L, regime_cache, sys, dr_slack, specs, obs_idx, copf_args)
-      }
-    }
-  }
+  if (proposal == "copf") Sigma_e_inv <- chol2inv(t(L_e))
 
-  ## Observable steady-state means
-  d_obs <- dr_slack$ys[obs_vars]
+  ## Regime-sequence engine (theta-dependent: built per call)
+  if (!exists(".pwl_src", envir = regime_cache, inherits = FALSE))
+    obc_ensure_policy(0L, regime_cache, sys, dr_slack, specs, obs_idx)
+  eng   <- .ppf_engine(sys, dr_slack, specs, obs_idx, Sigma_e, me_variance,
+                       horizon)
+  d_obs <- .obc_pkf_obs_ss(dr_slack, obs_vars)
 
   ## ---- Initialise particles from slack-policy stationary distribution -----
-  pol_s <- get("0", envir = regime_cache, inherits = FALSE)
+  pol_s <- eng$pk$slack
+  ## Both fallbacks are in the model's units (W79): P_0 scales as Sigma_e.
+  ## They used to be diag(1e-6) (no stationary P_0) and a factor diag(1e-3)
+  ## (chol failure) -- absolute, behind tryCatch: with every shock std and
+  ## the data x 1e-4 a PSD-singular P_0 (an exact linear dependence among
+  ## the states) started the cloud thousands of state stds wide, 71 nats
+  ## off the rescale identity loglik(c) + N log(c) = const.
+  ##  * solve_lyapunov() signals a non-stationary slack policy with NaN (it
+  ##    does not throw): start from the one-period covariance QQ_s instead.
+  ##  * chol() only where P_0 is positive definite by its eigenvalues
+  ##    (lambda_min > 20 n^2.5 eps lambda_max is sufficient for chol to run
+  ##    to completion: Higham 2002 Thm 10.7 with van der Sluis'
+  ##    kappa(D P_0 D) <= n kappa(P_0)); a PSD-singular (or round-off
+  ##    negative) P_0 gets its symmetric square root, negative part clipped.
   QQ_s  <- tcrossprod(pol_s$RR %*% Sigma_e, pol_s$RR)
-  P_0   <- tryCatch(
-    solve_lyapunov(pol_s$TT, QQ_s),
-    error = function(e2) diag(1e-6, n_state)
-  )
-  if (any(!is.finite(P_0))) P_0 <- diag(1e-6, n_state)
-
-  L_P <- tryCatch(t(chol(P_0)), error = function(e2) diag(1e-3, n_state))
+  P_0   <- solve_lyapunov(pol_s$TT, QQ_s)
+  if (!all(is.finite(P_0))) P_0 <- QQ_s
+  ev_P  <- eigen(P_0, symmetric = TRUE)
+  L_P   <- if (min(ev_P$values) >
+               20 * n_state^2.5 * .Machine$double.eps * max(abs(ev_P$values)))
+             t(chol(P_0))
+           else
+             ev_P$vectors %*% (sqrt(pmax(ev_P$values, 0)) * t(ev_P$vectors))
   particles <- L_P %*% matrix(rnorm(n_state * N), nrow = n_state)
 
   ## ---- Main filter loop ---------------------------------------------------
   loglik           <- 0
   total_fallback   <- 0L
-  prev_regimes     <- NULL   # NULL => all-slack guess at t=1 (COPF only)
+  total_failed     <- 0L
+  keys             <- rep("", N)   # expected sequences (all slack before t=1)
   U_copf_realized  <- vector("list", n_T)  # CPM: collect used z_copf/z_fallback per period
 
   for (t in seq_len(n_T)) {
-    y_t <- Y[, t]
-
-    if (all(is.na(y_t))) next
+    y_t  <- Y[, t]
+    prev <- .ppf_shift_keys(keys)
 
     if (proposal == "bootstrap") {
       res <- .ppf_run_period(
-        particles    = particles,
-        y_t          = y_t,
-        L_e          = L_e,
-        Sigma_e      = Sigma_e,
-        dr_slack     = dr_slack,
-        regime_cache = regime_cache,
-        sys          = sys,
-        specs        = specs,
-        obs_idx      = obs_idx,
-        d_obs        = d_obs,
-        me_variance  = me_variance
+        particles   = particles,
+        y_t         = y_t,
+        L_e         = L_e,
+        eng         = eng,
+        d_obs       = d_obs,
+        me_variance = me_variance,
+        prev_keys   = prev
       )
     } else {
-      ## Pass prev_regimes only when using ancestor guessing.
-      ## regime_guess="slack" always passes NULL so r_guess=0 for all particles.
+      ## The proposal guess only: the transition always carries `prev`.
       ## CPM: thread per-period U_copf if supplied.
       U_copf_t <- if (!is.null(U_copf_list)) U_copf_list[[t]] else NULL
       res <- .copf_run_period(
-        particles    = particles,
-        y_t          = y_t,
-        L_e          = L_e,
-        Sigma_e      = Sigma_e,
-        Sigma_e_inv  = Sigma_e_inv,
-        dr_slack     = dr_slack,
-        regime_cache = regime_cache,
-        sys          = sys,
-        specs        = specs,
-        obs_idx      = obs_idx,
-        d_obs        = d_obs,
-        me_variance  = me_variance,
-        copf_args    = copf_args,
-        prev_regimes = if (regime_guess == "ancestor") prev_regimes else NULL,
-        U_copf       = U_copf_t
+        particles   = particles,
+        y_t         = y_t,
+        L_e         = L_e,
+        Sigma_e     = Sigma_e,
+        Sigma_e_inv = Sigma_e_inv,
+        eng         = eng,
+        d_obs       = d_obs,
+        me_variance = me_variance,
+        prev_keys   = prev,
+        guess_keys  = if (regime_guess == "ancestor") prev else NULL,
+        U_copf      = U_copf_t
       )
       total_fallback <- total_fallback + res$n_fallback
-      ## Store verified regimes for the next period's guess
-      prev_regimes <- res$verified_regimes
       ## Record used z_copf/z_fallback matrices (CPM: deterministic U structure)
       U_copf_realized[[t]] <- list(z_copf = res$z_copf_used, z_fallback = res$z_fallback_used)
     }
 
-    loglik    <- loglik + res$log_lik_contrib
-    particles <- res$particles
+    loglik       <- loglik + res$log_lik_contrib
+    total_failed <- total_failed + res$n_failed
+    particles    <- res$particles
+    keys         <- res$keys
 
     if (!is.finite(loglik))
-      return(list(loglik = -Inf, n_obs = n_obs, n_T = n_T))
+      return(list(loglik = -Inf, n_obs = n_obs, n_T = n_T,
+                  n_failed = total_failed))
   }
 
-  out <- list(loglik = loglik, n_obs = n_obs, n_T = n_T)
+  out <- list(loglik = loglik, n_obs = n_obs, n_T = n_T,
+              n_failed = total_failed)
   if (proposal == "copf") {
     out$n_fallback        <- total_fallback
     out$U_copf_realized   <- U_copf_realized  # CPM: used z_copf/z_fallback per period
@@ -587,9 +778,19 @@ ppf_likelihood <- function(Y, dr_slack, regime_cache, sys,
 
 #' Create a PPF-based log-posterior evaluator for OBC models
 #'
-#' Bootstrap particle filter variant of \code{make_log_posterior_obc_pkf}.
+#' Particle filter variant of \code{make_log_posterior_obc_pkf}.
 #' Each evaluation builds a FRESH regime_cache (theta-dependent) and runs
-#' the bootstrap PPF with N particles.
+#' the piecewise particle filter with N particles.  Each particle follows the
+#' OccBin piecewise-linear solution from its own state: in every period the
+#' regime sequence expected from the particle's state and drawn shock is
+#' solved by guess-and-verify (as \code{kalman_filter_obc_pkf} does for the
+#' filtered state) and the period's time-varying rule is applied.
+#'
+#' Changed in W50 (2026-09-25): the particles used to check the current
+#' period only, against the slack rule, and to apply the one-period binding
+#' policy (next period slack), which is wrong for spells of two or more
+#' periods; and a period with no observation was skipped instead of
+#' propagated.
 #'
 #' me_variance > 0 is required (hard stop): the bootstrap weights degenerate
 #' when me_variance = 0 with n_obs < n_exo.
@@ -604,10 +805,11 @@ ppf_likelihood <- function(Y, dr_slack, regime_cache, sys,
 #' @param N           Number of particles per evaluation (default 1000)
 #' @param proposal    "bootstrap" (prior proposal) or "copf" (conditionally
 #'   optimal proposal with regime verification and general-ratio fallback)
-#' @param regime_guess For proposal = "copf": "ancestor" (default) guesses
-#'   each particle's regime from its resampled ancestor's verified regime
-#'   (all-slack at t = 1); "slack" always guesses all-slack. Pure variance
-#'   reduction — weights are valid for any guess.
+#' @param regime_guess For proposal = "copf": the starting guess of each
+#'   particle's expected regime sequence, which is then iterated on the mean
+#'   of the proposal: "ancestor" (default) starts from the sequence the
+#'   resampled ancestor expected (all slack at t = 1); "slack" starts all
+#'   slack. Pure variance reduction -- weights are valid for any guess.
 #' @param seed        Integer RNG seed (NULL = not fixed; each call differs)
 #' @param power       Power-posterior (generalised-Bayes) tempering exponent
 #'   \eqn{\zeta}: \code{$logpost} becomes
@@ -634,6 +836,12 @@ make_log_posterior_obc_ppf <- function(model, data, prior_spec, obs_vars,
   proposal     <- match.arg(proposal)
   regime_guess <- match.arg(regime_guess)
 
+  ## A per-observable vector: refused with a classed error (the PPF/COPF
+  ## weights implement H = me I only); an all-equal vector is the scalar.
+  if (length(me_variance) > 1L)
+    me_variance <- .kf_me_variance(me_variance, obs_vars,
+                                   "make_log_posterior_obc_ppf",
+                                   allow_vector = FALSE)
   ## Hard stop: me_variance = 0 degenerates weights for both bootstrap and COPF
   if (!is.numeric(me_variance) || length(me_variance) != 1L ||
       !is.finite(me_variance) || me_variance <= 0) {

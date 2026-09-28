@@ -7,12 +7,12 @@
 \method{print}{DecisionRules}(x, ...)
 }
 \arguments{
-\item{x}{A `DecisionRules` object from [solve_perturbation()].}
+\item{x}{A \code{DecisionRules} object from [solve_perturbation()].}
 
 \item{...}{Ignored.}
 }
 \value{
-`x`, invisibly.
+\code{x}, invisibly.
 }
 \description{
 Print first-order decision rules

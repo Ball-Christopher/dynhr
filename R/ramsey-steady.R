@@ -86,7 +86,7 @@ ramsey_steady <- function(model,
   }
 
   if (verbose) {
-    cat(sprintf("[ramsey_steady] Solving for %d multipliers from FOC linear system\n",
+    .dynhr_cat(sprintf("[ramsey_steady] Solving for %d multipliers from FOC linear system\n",
                 n_eq))
   }
 
@@ -156,7 +156,7 @@ ramsey_steady <- function(model,
   rank_A <- qr(A)$rank
   if (rank_A < min(dim(A)) || n_endo > n_eq) {
     if (verbose) {
-      cat(sprintf("  Solving %d x %d system via ginv (rank %d)\n",
+      .dynhr_cat(sprintf("  Solving %d x %d system via ginv (rank %d)\n",
                   n_endo, n_eq, rank_A))
     }
     lambda_ss <- MASS::ginv(A) %*% b
@@ -168,9 +168,9 @@ ramsey_steady <- function(model,
   names(lambda_ss) <- multiplier_names
 
   if (verbose) {
-    cat(sprintf("  Multiplier SS values:\n"))
+    .dynhr_cat(sprintf("  Multiplier SS values:\n"))
     for (k in seq_along(lambda_ss)) {
-      cat(sprintf("    %s = %.6f\n", multiplier_names[k], lambda_ss[k]))
+      .dynhr_cat(sprintf("    %s = %.6f\n", multiplier_names[k], lambda_ss[k]))
     }
   }
 
@@ -190,13 +190,13 @@ ramsey_steady <- function(model,
     max_resid <- max(abs(r), na.rm = TRUE)
     converged <- max_resid < 1e-6
     if (verbose) {
-      cat(sprintf("  Augmented SS max residual: %.3e\n", max_resid))
+      .dynhr_cat(sprintf("  Augmented SS max residual: %.3e\n", max_resid))
     }
   }
 
   # ---- 6. Optional Newton refinement ----
   if (refine && !is.null(aug_compiled) && !converged) {
-    if (verbose) cat("  Running Newton refinement on augmented system...\n")
+    if (verbose) .dynhr_cat("  Running Newton refinement on augmented system...\n")
     # Use the linear-subsystem solution as initial guess for Newton
     refined <- .refine_augmented_ss(aug_compiled, aug_values, params,
                                      aug_model$var_names, aug_model$varexo_names,
@@ -265,7 +265,7 @@ ramsey_steady <- function(model,
 
     max_r <- max(abs(r))
     if (verbose && (k <= 3 || k %% 10 == 0 || max_r < tol)) {
-      cat(sprintf("    Newton iter %3d: max|r| = %.3e\n", k, max_r))
+      .dynhr_cat(sprintf("    Newton iter %3d: max|r| = %.3e\n", k, max_r))
     }
     if (max_r < tol) {
       converged <- TRUE

@@ -33,17 +33,18 @@
 #'        beta                          -> (0, 1)
 #'        gamma/inv_gamma/inv_gamma1/
 #'          inv_gamma2                  -> (0, Inf)
-#'        uniform                       -> (p1, p2)
+#'        uniform                       -> (p3, p4) if both given, else
+#'                                         p1 -+ sqrt(3) p2 (Dynare mean/sd)
 #'        normal (or unknown)           -> (-Inf, Inf)
 #'
 #' In practice extract_prior_spec() always populates lower/upper (via
-#' .default_lower / .default_upper, or directly from p1/p2 for "uniform"),
+#' .default_lower / .default_upper, or the p3/p4 support for "uniform"),
 #' so step 1 fires for every distribution produced by the parser.  Step 2
 #' is retained as a fallback for hand-built prior_spec data.frames (e.g.
 #' test fixtures) that omit lower/upper or leave them NA.
 #'
-#' @param row Single-row data.frame / list with at least `distribution`,
-#'   and optionally `p1`, `p2`, `lower`, `upper`.
+#' @param row Single-row data.frame / list with at least \code{distribution},
+#'   and optionally \code{p1}, \code{p2}, \code{lower}, \code{upper}.
 #' @return list(a = lower bound, b = upper bound)
 #' @noRd
 .resolve_param_support <- function(row) {
@@ -59,9 +60,10 @@
     "beta" = c(0, 1),
     "gamma" =, "inv_gamma" =, "inv_gamma1" =, "inv_gamma2" = c(0, Inf),
     "uniform" = {
-      lo_u <- if (!is.na(p1)) p1 else -Inf
-      hi_u <- if (!is.na(p2)) p2 else Inf
-      c(lo_u, hi_u)
+      p3 <- if (!is.null(row$p3)) row$p3 else NA_real_
+      p4 <- if (!is.null(row$p4)) row$p4 else NA_real_
+      ab <- .uniform_ab(p1, p2, p3, p4)
+      c(if (is.na(ab[1])) -Inf else ab[1], if (is.na(ab[2])) Inf else ab[2])
     },
     c(-Inf, Inf)  # "normal" or unknown: real line
   )
@@ -95,20 +97,20 @@
 #' Build an unconstrained-parameter transform layer
 #'
 #' @param prior_spec data.frame (from extract_prior_spec()) with columns
-#'   `name`, `distribution`, `p1`, `p2`, `lower`, `upper` (the latter four
+#'   \code{name}, \code{distribution}, \code{p1}, \code{p2}, \code{lower}, \code{upper} (the latter four
 #'   may be NA / absent for a given row).
 #' @param par_names  Character vector of parameter names, in the order they
 #'   appear in the parameter vector theta the samplers operate on.
 #' @return An S3 list of class "dynhr_param_transform" with elements:
 #'   \itemize{
-#'     \item `types`: named character vector, one of "identity", "log",
+#'     \item \code{types}: named character vector, one of "identity", "log",
 #'       "reflected_log", "logit" per parameter
-#'     \item `a`, `b`: named numeric vectors of resolved support bounds
-#'     \item `to_unconstrained(theta)`: theta -> eta (named, vectorized)
-#'     \item `to_constrained(eta)`: eta -> theta (named, vectorized)
-#'     \item `log_jacobian(eta)`: scalar sum of log|d theta/d eta|
-#'     \item `dlog_jacobian(eta)`: named vector d/deta_j log|J|
-#'     \item `dtheta_deta(eta)`: named vector d theta_j / d eta_j
+#'     \item \code{a}, \code{b}: named numeric vectors of resolved support bounds
+#'     \item \code{to_unconstrained(theta)}: theta -> eta (named, vectorized)
+#'     \item \code{to_constrained(eta)}: eta -> theta (named, vectorized)
+#'     \item \code{log_jacobian(eta)}: scalar sum of log|d theta/d eta|
+#'     \item \code{dlog_jacobian(eta)}: named vector d/deta_j log|J|
+#'     \item \code{dtheta_deta(eta)}: named vector d theta_j / d eta_j
 #'   }
 #' @export
 build_param_transform <- function(prior_spec, par_names) {
@@ -122,7 +124,7 @@ build_param_transform <- function(prior_spec, par_names) {
     idx <- match(nm, prior_spec$name)
 
     if (is.na(idx)) {
-      warning(sprintf(
+      .dynhr_warn(sprintf(
         "build_param_transform: parameter '%s' not found in prior_spec; using identity transform.",
         nm))
       types[nm] <- "identity"
@@ -291,17 +293,22 @@ build_param_transform <- function(prior_spec, par_names) {
 #' @param log_post_fn Function(theta) -> scalar logpost, or
 #'   list(logpost = ..., loglik = ..., logprior = ..., ...)
 #' @param tr          A "dynhr_param_transform" (from build_param_transform())
-#' @param include_jacobian Logical; if TRUE (default) add `tr$log_jacobian(eta)`
+#' @param include_jacobian Logical; if TRUE (default) add \code{tr$log_jacobian(eta)}
 #'   to the returned logpost (the change-of-variables correction needed when
 #'   sampling eta with a target proportional to p(theta) * |d theta/d eta|).
 #' @return function(eta) -> same shape as log_post_fn's return value (scalar
-#'   or list), with `logpost` (and the bare scalar) adjusted by the Jacobian.
+#'   or list), with \code{logpost} (and the bare scalar) adjusted by the Jacobian.
 #'   If the underlying logpost is -Inf, -Inf is returned unchanged (no
-#'   Jacobian added).
+#'   Jacobian added). \code{eta} is read by name in any order; an unnamed
+#'   \code{eta} is taken in \code{tr$par_names} order, and a wrong-length or
+#'   mis-named one is an error of class \code{dynhr_error_theta_names}.
 #' @export
 make_transformed_logpost <- function(log_post_fn, tr, include_jacobian = TRUE) {
+  ## eta is read BY NAME into tr$par_names order, an unnamed eta taken in that
+  ## order and a mis-named one refused (.theta_by_name(), R/posterior.R).
   function(eta) {
-    if (is.null(names(eta))) names(eta) <- tr$par_names
+    eta   <- .theta_by_name(eta, tr$par_names, "make_transformed_logpost",
+                            "eta")
     theta <- tr$to_constrained(eta)
     res   <- log_post_fn(theta)
 
@@ -328,13 +335,19 @@ make_transformed_logpost <- function(log_post_fn, tr, include_jacobian = TRUE) {
 #'   gradient of the (unadjusted) log-posterior.
 #' @param tr      A "dynhr_param_transform" (from build_param_transform())
 #' @return function(eta) -> named numeric vector, eta-space gradient of the
-#'   Jacobian-adjusted log-posterior.
+#'   Jacobian-adjusted log-posterior. \code{eta} is read as in
+#'   \code{\link{make_transformed_logpost}}; the theta-space gradient is
+#'   aligned with \code{tr$par_names} by name.
 #' @export
 make_transformed_grad <- function(grad_fn, tr) {
   function(eta) {
-    if (is.null(names(eta))) names(eta) <- tr$par_names
+    eta   <- .theta_by_name(eta, tr$par_names, "make_transformed_grad", "eta")
     theta <- tr$to_constrained(eta)
-    tr$dtheta_deta(eta) * grad_fn(theta) + tr$dlog_jacobian(eta)
+    ## The theta-space gradient comes back in ITS closure's (prior) order;
+    ## align it by name with tr$par_names before the elementwise chain rule.
+    g <- .theta_by_name(grad_fn(theta), tr$par_names, "make_transformed_grad",
+                        "the theta-space gradient")
+    tr$dtheta_deta(eta) * g + tr$dlog_jacobian(eta)
   }
 }
 

@@ -36,11 +36,20 @@
 #' @param compiled          Optional pre-compiled model.
 #' @param params            Named parameter vector. Defaults to
 #'   \code{model$param_values}.
-#' @param policy_instrument Character: name of the policy instrument
-#'   variable (e.g., \code{"i"}).
+#' @param policy_instrument Character vector: name(s) of the policy
+#'   instrument variable(s) (e.g., \code{"i"}, or \code{c("i", "tau")} for a
+#'   planner with two instruments -- Dynare's
+#'   \code{discretionary_policy(instruments = (i, tau))}). Each instrument is
+#'   either free (the model has one equation fewer per instrument) or pinned by
+#'   its own policy equation, which is dropped before solving. \code{NULL}
+#'   (default) takes the \code{instruments} option of the \code{.mod}'s
+#'   \code{discretionary_policy} command.
 #' @param loss_vars         Character vector of variable names whose
 #'   variances enter the loss function (typically a subset of endogenous
-#'   variables, possibly including the instrument).
+#'   variables, possibly including the instrument). Used only when the model
+#'   has no \code{planner_objective} (which, when present, defines the loss).
+#'   \code{NULL} (default) is allowed only when a \code{planner_objective}
+#'   exists.
 #' @param loss_weights      Named numeric vector of weights for each loss
 #'   variable. Names must match \code{loss_vars}. If \code{NULL}, equal
 #'   weights are used.
@@ -50,8 +59,12 @@
 #'   regularises the instrument block through the value function, and adding
 #'   a penalty biases the rule away from the true optimum. Set a small
 #'   positive value only to regularise a genuinely singular instrument block.
-#' @param discount          Discount factor. Defaults to \code{beta}
-#'   parameter in the model, or 0.99.
+#' @param discount          Discount factor. Defaults to the
+#'   \code{planner_discount} option of the \code{.mod}'s
+#'   \code{discretionary_policy} command (a number or a parameter expression),
+#'   else to the \code{beta} parameter in the model; when neither exists it
+#'   must be supplied (an error of class \code{dynhr_error_discount_missing}
+#'   is raised otherwise).
 #' @param max_iter          Maximum fixed-point iterations.
 #' @param tol               Convergence tolerance on ||P_new - P||.
 #' @param ramsey_result     Optional \code{dynhr_ramsey_result2} for
@@ -60,11 +73,13 @@
 #'
 #' @return An object of class \code{dynhr_discretionary_result} with:
 #'   \describe{
-#'     \item{F}{Policy rule matrix: u_t = -F s_t.}
+#'     \item{F}{Policy rule \eqn{u_t = -F s_{t-1}}: a named vector over the state
+#'       variables for one instrument, an (instruments x states) matrix for
+#'       several.}
 #'     \item{P}{Value function matrix: V(s) = s' P s.}
 #'     \item{A, B}{State-space matrices of the uncontrolled system.}
-#'     \item{Q, R}{Loss matrices.}
-#'     \item{policy_instrument}{Name of the policy instrument.}
+#'     \item{Q, R}{Loss matrices (\code{R} is the instrument block).}
+#'     \item{policy_instrument}{Name(s) of the policy instrument(s).}
 #'     \item{state_vars}{Character vector of state variable names.}
 #'     \item{discount}{Discount factor used.}
 #'     \item{converged}{Logical: did the fixed-point iteration converge?}
@@ -85,8 +100,8 @@
 discretionary_policy <- function(model,
                                   compiled = NULL,
                                   params = NULL,
-                                  policy_instrument,
-                                  loss_vars,
+                                  policy_instrument = NULL,
+                                  loss_vars = NULL,
                                   loss_weights = NULL,
                                   control_penalty = NULL,
                                   discount = NULL,
@@ -99,10 +114,35 @@ discretionary_policy <- function(model,
   if (!inherits(model, "dynhr_mod")) {
     stop("'model' must be a dynhr_mod object.")
   }
-  if (!policy_instrument %in% model$var_names) {
-    stop("'policy_instrument' must be an endogenous variable name.")
-  }
   if (is.null(params)) params <- model$param_values
+  # Defaults from the .mod's `discretionary_policy(instruments = (...),
+  # planner_discount = ...)` command.
+  mod_opts <- .mod_command_options(model, "discretionary_policy")
+  if (is.null(policy_instrument)) {
+    policy_instrument <- as.character(mod_opts$instruments %||% character(0))
+    if (length(policy_instrument) == 0L)
+      .dynhr_abort("discretionary_policy: no 'policy_instrument' supplied and ",
+                   "the model has no discretionary_policy(instruments = ...) ",
+                   "command.", class = "dynhr_error_policy_spec")
+  }
+  has_objective <- nzchar(model$planner_objective$text %||% "")
+  if (is.null(loss_vars)) {
+    if (!has_objective)
+      .dynhr_abort("discretionary_policy: no 'loss_vars' supplied and the ",
+                   "model has no planner_objective.",
+                   class = "dynhr_error_policy_spec")
+    loss_vars <- character(0)
+  }
+  if (is.null(discount) && !is.null(mod_opts$planner_discount))
+    discount <- .eval_mod_scalar_option(mod_opts$planner_discount, params,
+                                        "discretionary_policy(planner_discount)")
+  if (!is.character(policy_instrument) || length(policy_instrument) < 1L ||
+      !all(policy_instrument %in% model$var_names)) {
+    stop("'policy_instrument' must be an endogenous variable name ",
+         "(or a vector of them).")
+  }
+  if (anyDuplicated(policy_instrument) > 0L)
+    stop("'policy_instrument' lists an instrument more than once.")
 
   missing_vars <- setdiff(loss_vars, model$var_names)
   if (length(missing_vars) > 0) {
@@ -110,14 +150,27 @@ discretionary_policy <- function(model,
          paste(missing_vars, collapse = ", "))
   }
 
-  # Default discount factor
+  # Default discount factor: the model's `beta` parameter, and nothing else.
+  # There used to be a silent 0.99 fallback when no `beta` existed, which
+  # solved a DIFFERENT policy problem (the Riccati recursion and the loss both
+  # depend on the discount) for any model whose discount is named e.g.
+  # `betta` / `disc`, or computed. Require it explicitly instead.
   if (is.null(discount)) {
-    discount <- if ("beta" %in% names(params) && is.finite(params[["beta"]])) {
-      as.numeric(params[["beta"]])
+    if ("beta" %in% names(params) && length(params[["beta"]]) == 1L &&
+        is.finite(params[["beta"]])) {
+      discount <- as.numeric(params[["beta"]])
     } else {
-      0.99
+      .dynhr_abort(
+        "discretionary_policy: the model has no finite parameter named ",
+        "'beta', so the discount factor cannot be inferred. Pass it ",
+        "explicitly, e.g. discount = 0.99 (or discount = params[[\"betta\"]]).",
+        class = "dynhr_error_discount_missing")
     }
   }
+  if (!is.numeric(discount) || length(discount) != 1L || !is.finite(discount) ||
+      discount <= 0)
+    .dynhr_abort("discretionary_policy: 'discount' must be a single finite ",
+                 "positive number.", class = "dynhr_error_discount_invalid")
 
   # Default loss weights
   if (is.null(loss_weights)) {
@@ -157,7 +210,7 @@ discretionary_policy <- function(model,
     # system and would error. For linear discretionary-policy models the SS is
     # zero everywhere; use initval or zeros.
     if (verbose) {
-      cat(sprintf(
+      .dynhr_cat(sprintf(
         "  Non-square model (%d eqs, %d vars): using initval as SS.\n",
         n_eq_check, n_endo_check))
     }
@@ -193,10 +246,11 @@ discretionary_policy <- function(model,
   )
 
   if (verbose) {
-    cat(sprintf("[discretionary_policy] endo=%d eqs=%d instrument=%s\n",
-                inp$n_endo, inp$n_eq, policy_instrument))
+    .dynhr_cat(sprintf("[discretionary_policy] endo=%d eqs=%d instrument(s)=%s\n",
+                inp$n_endo, inp$n_eq,
+                paste(policy_instrument, collapse = ", ")))
     wnz <- which(abs(diag(inp$bigw)) > 0)
-    cat(sprintf("  Loss weights (W diag): %s\n",
+    .dynhr_cat(sprintf("  Loss weights (W diag): %s\n",
                 paste(sprintf("%s=%.4g", inp$endo[wnz], diag(inp$bigw)[wnz]),
                       collapse = ", ")))
   }
@@ -221,9 +275,9 @@ discretionary_policy <- function(model,
   endo <- inp$endo
   exo  <- inp$exo
 
-  # Feedback rule on the instrument: i_t = (H[i,] over lagged endo) y_{t-1}
-  #                                       + G[i,] e_t
-  inst_row <- which(endo == policy_instrument)
+  # Feedback rule on the instrument(s): i_t = (H[i,] over lagged endo) y_{t-1}
+  #                                          + G[i,] e_t
+  inst_row <- match(policy_instrument, endo)
   # State variables = endogenous columns of H with any nonzero feedback.
   state_idx  <- which(apply(abs(H), 2, max) > 1e-12)
   if (length(state_idx) == 0L) state_idx <- integer(0)
@@ -231,13 +285,17 @@ discretionary_policy <- function(model,
   # F_policy follows the documented API convention u_t = -F s_{t-1}, so the
   # closed-loop instrument feedback i_t = H[i, state] s_{t-1} corresponds to
   # F = -H[i, state] (a positive F_j is a stabilising response to state j).
-  F_policy <- if (length(state_idx) > 0L) -H[inst_row, state_idx] else numeric(0)
-  names(F_policy) <- state_vars
+  # One instrument: a named vector over the states; several: a matrix with
+  # one row per instrument.
+  F_policy <- -H[inst_row, state_idx, drop = FALSE]
+  dimnames(F_policy) <- list(policy_instrument, state_vars)
+  if (length(inst_row) == 1L)
+    F_policy <- stats::setNames(as.vector(F_policy), state_vars)
 
   if (verbose) {
-    cat(sprintf("  Converged in %d iterations (|Delta|=%.3e)\n",
+    .dynhr_cat(sprintf("  Converged in %d iterations (|Delta|=%.3e)\n",
                 eng$iterations, eng$diff))
-    cat(sprintf("  %d state variable(s) feed the instrument rule.\n",
+    .dynhr_cat(sprintf("  %d state variable(s) feed the instrument rule.\n",
                 length(state_idx)))
   }
 
@@ -247,13 +305,13 @@ discretionary_policy <- function(model,
   # Compute unconditional moments
   moments_disc <- tryCatch(
     compute_moments(dr_disc, model, params = params),
-    error = function(e) NULL
+    error = function(e) .dynhr_reraise_bug(e, NULL)
   )
 
   # Compute IRFs (20 periods, matching Dynare's default for these models)
   irfs_disc <- tryCatch(
     compute_irfs(dr_disc, model, n_periods = 20L, params = params),
-    error = function(e) NULL
+    error = function(e) .dynhr_reraise_bug(e, NULL)
   )
 
   # ---- 6. Ramsey comparison (optional) ----
@@ -298,14 +356,19 @@ discretionary_policy <- function(model,
   class(result) <- c("dynhr_discretionary_result", "list")
 
   if (verbose) {
-    cat(sprintf("\n[discretionary_policy] Done.\n"))
-    cat(sprintf("  Converged: %s (%d iters, |Delta| = %.3e)\n",
+    .dynhr_cat(sprintf("\n[discretionary_policy] Done.\n"))
+    .dynhr_cat(sprintf("  Converged: %s (%d iters, |Delta| = %.3e)\n",
                 eng$converged, eng$iterations, eng$diff))
     if (length(state_idx) > 0L) {
-      cat(sprintf("  Policy rule: %s_t = ", policy_instrument))
-      # F follows u = -F s, so the actual loading is -F.
-      cat(paste(sprintf("%.4f*%s(-1)", -F_policy, state_vars), collapse = " + "))
-      cat("\n")
+      ## Assembled and emitted as ONE call: each .dynhr_cat() is a separate
+      ## message, so the old three-call progressive build would now print the
+      ## rule across three lines instead of one.
+      ## F follows u = -F s, so the actual loading is -F.
+      Fm <- matrix(F_policy, nrow = length(policy_instrument))
+      for (k in seq_along(policy_instrument))
+        .dynhr_cat(sprintf("  Policy rule: %s_t = %s\n", policy_instrument[k],
+                           paste(sprintf("%.4f*%s(-1)", -Fm[k, ], state_vars),
+                                 collapse = " + ")))
     }
   }
 
@@ -316,6 +379,37 @@ discretionary_policy <- function(model,
 # ==========================================================================
 # Internal helpers
 # ==========================================================================
+
+#' Options of the first `.mod` command with the given name
+#'
+#' @param model dynhr_mod (from parse_mod()).
+#' @param cmd   Command name(s), e.g. "discretionary_policy"; the first one
+#'   present wins.
+#' @return The parsed option list (parse_command_options()), or list().
+#' @noRd
+.mod_command_options <- function(model, cmd) {
+  for (nm in cmd)
+    for (cm in model$commands %||% list())
+      if (identical(cm$name, nm)) return(cm$options %||% list())
+  list()
+}
+
+#' Evaluate a scalar `.mod` command option (a number or a parameter
+#' expression such as `planner_discount = beta`) at `params`
+#' @noRd
+.eval_mod_scalar_option <- function(val, params, what) {
+  if (is.numeric(val) && length(val) == 1L && is.finite(val))
+    return(as.numeric(val))
+  v <- if (is.character(val) && length(val) == 1L)
+    .dynhr_sandbox_eval(val, .dynhr_param_eval_env(params),
+                        context = paste0("the ", what, " option"))
+  else NULL
+  if (!is.numeric(v) || length(v) != 1L || !is.finite(v))
+    .dynhr_abort("the .mod option ", what, " = ", paste(val, collapse = " "),
+                 " does not evaluate to a finite number at the parameters.",
+                 class = "dynhr_error_policy_spec")
+  as.numeric(v)
+}
 
 # --------------------------------------------------------------------------
 # Söderlind (1999) / Dennis (2007) discretion solver
@@ -343,8 +437,8 @@ discretionary_policy <- function(model,
 #'      available -- the Dynare-faithful path; or
 #'   2. the supplied loss_vars / loss_weights: a diagonal with 2*weight on
 #'      each loss variable (matching the Hessian of sum-of-squares).
-#' A control penalty (2*control_penalty) is added on the instrument diagonal
-#' when the instrument carries no own loss weight, to keep Q (= bigw on the
+#' A control penalty (2*control_penalty) is added on the diagonal of each
+#' instrument that carries no own loss weight, to keep Q (= bigw on the
 #' instrument block) invertible.
 #'
 #' @noRd
@@ -397,8 +491,9 @@ discretionary_policy <- function(model,
 
   # ---- Instrument index ----
   instr_id <- match(policy_instrument, endo)
-  if (is.na(instr_id)) {
-    stop("policy_instrument '", policy_instrument,
+  if (anyNA(instr_id)) {
+    stop("policy_instrument '", paste(policy_instrument[is.na(instr_id)],
+                                      collapse = "', '"),
          "' not found in endogenous variables.")
   }
 
@@ -413,37 +508,47 @@ discretionary_policy <- function(model,
   if (n_eq == n_endo - n_instr) {
     # Already non-square: nothing to drop.
   } else if (n_eq == n_endo) {
-    # Square model: find and remove the equation that pins the instrument.
-    # The policy equation is the one whose contemporaneous coefficient on the
-    # instrument is largest relative to its coefficients on the other vars
-    # (typically the row where solving the .mod isolates i on the LHS).
-    inst_coef  <- abs(AA0[, instr_id])
-    other_load <- rowSums(abs(AA0[, -instr_id, drop = FALSE])) +
-                  rowSums(abs(AAlag)) + rowSums(abs(AAlead)) +
-                  rowSums(abs(BB))
-    # Prefer an equation of the form i = f(other vars): instrument coefficient
-    # nonzero, and the instrument does NOT appear at lead/lag in that row.
-    cand <- which(inst_coef > 1e-10 &
-                  abs(AAlag[, instr_id]) < 1e-10 &
-                  abs(AAlead[, instr_id]) < 1e-10)
-    if (length(cand) == 0L) {
-      stop(
-        "Cannot identify the policy equation to drop for instrument '",
-        policy_instrument, "' in this square model. For optimal discretionary ",
-        "policy the instrument must be free; either write the model with the ",
-        "instrument equation omitted (n_eq = n_endo - 1), or ensure exactly ",
-        "one equation pins the instrument contemporaneously."
-      )
+    # Square model: find and remove, for EACH instrument, the equation that
+    # pins it. The policy equation of instrument j is the row whose
+    # contemporaneous coefficient on j is largest relative to its coefficients
+    # on every other variable (typically the row where solving the .mod
+    # isolates j on the LHS); rows already assigned to an earlier instrument
+    # are not reused.
+    drop_eqs <- integer(0)
+    for (j in seq_len(n_instr)) {
+      ij <- instr_id[j]
+      inst_coef  <- abs(AA0[, ij])
+      other_load <- rowSums(abs(AA0[, -ij, drop = FALSE])) +
+                    rowSums(abs(AAlag)) + rowSums(abs(AAlead)) +
+                    rowSums(abs(BB))
+      # Prefer an equation of the form i = f(other vars): instrument
+      # coefficient nonzero, and the instrument does NOT appear at lead/lag in
+      # that row.
+      cand <- which(inst_coef > 1e-10 &
+                    abs(AAlag[, ij]) < 1e-10 &
+                    abs(AAlead[, ij]) < 1e-10)
+      cand <- setdiff(cand, drop_eqs)
+      if (length(cand) == 0L) {
+        stop(
+          "Cannot identify the policy equation to drop for instrument '",
+          policy_instrument[j], "' in this square model. For optimal ",
+          "discretionary policy the instrument must be free; either write the ",
+          "model with the instrument equation omitted (n_eq = n_endo - ",
+          "n_instruments), or ensure exactly one equation pins each ",
+          "instrument contemporaneously."
+        )
+      }
+      # Among candidates, drop the one most dominated by the instrument
+      # (largest instrument coefficient relative to the rest of the row).
+      score    <- inst_coef[cand] / (other_load[cand] + 1e-12)
+      drop_eq  <- cand[which.max(score)]
+      if (verbose) {
+        .dynhr_cat(sprintf("  Square model: dropping policy equation row %d (pins %s).\n",
+                    drop_eq, policy_instrument[j]))
+      }
+      drop_eqs <- c(drop_eqs, drop_eq)
     }
-    # Among candidates, drop the one most dominated by the instrument
-    # (largest instrument coefficient relative to the rest of the row).
-    score    <- inst_coef[cand] / (other_load[cand] + 1e-12)
-    drop_eq  <- cand[which.max(score)]
-    if (verbose) {
-      cat(sprintf("  Square model: dropping policy equation row %d (pins %s).\n",
-                  drop_eq, policy_instrument))
-    }
-    keep <- setdiff(seq_len(n_eq), drop_eq)
+    keep <- setdiff(seq_len(n_eq), drop_eqs)
     AAlag  <- AAlag[keep, , drop = FALSE]
     AA0    <- AA0[keep, , drop = FALSE]
     AAlead <- AAlead[keep, , drop = FALSE]
@@ -506,8 +611,9 @@ discretionary_policy <- function(model,
     Wobj <- tryCatch(
       .planner_objective_hessian(obj_text, model, params, ss, endo, exo),
       error = function(e) {
+        if (.dynhr_is_programming_error(e)) stop(e)
         if (verbose) {
-          cat("  planner_objective Hessian failed (", conditionMessage(e),
+          .dynhr_cat("  planner_objective Hessian failed (", conditionMessage(e),
               "); falling back to loss_vars.\n", sep = "")
         }
         NULL
@@ -516,7 +622,7 @@ discretionary_policy <- function(model,
     if (!is.null(Wobj) && any(abs(Wobj) > 0)) {
       bigw <- Wobj
       used_objective <- TRUE
-      if (verbose) cat("  Loss matrix W built from planner_objective.\n")
+      if (verbose) .dynhr_cat("  Loss matrix W built from planner_objective.\n")
     }
   }
 
@@ -528,31 +634,30 @@ discretionary_policy <- function(model,
       idx <- which(endo == v)
       if (length(idx) == 1L) bigw[idx, idx] <- bigw[idx, idx] + 2 * w
     }
-    if (verbose) cat("  Loss matrix W built from loss_vars/loss_weights.\n")
+    if (verbose) .dynhr_cat("  Loss matrix W built from loss_vars/loss_weights.\n")
   }
 
-  # Control penalty on the instrument (only if it carries no own loss weight).
-  if (!is.null(control_penalty) && control_penalty > 0 &&
-      abs(bigw[instr_id, instr_id]) < 1e-300) {
-    bigw[instr_id, instr_id] <- 2 * control_penalty
+  # Control penalty on each instrument that carries no own loss weight.
+  if (!is.null(control_penalty) && control_penalty > 0) {
+    for (ij in instr_id)
+      if (abs(bigw[ij, ij]) < 1e-300) bigw[ij, ij] <- 2 * control_penalty
   }
 
   bigw
 }
 
 
-#' Hessian of the planner objective over current-period endogenous variables
+#' The planner objective as a function of the endogenous vector
 #'
-#' @return n_endo x n_endo symmetric matrix.
+#' Exogenous variables are held at zero (Dynare evaluates the objective at
+#' `(ys, zeros(1, exo_nbr))`).
+#' @return function(v) of a numeric vector along `endo`.
 #' @noRd
-.planner_objective_hessian <- function(obj_text, model, params, ss, endo, exo) {
+.planner_objective_fn <- function(obj_text, model, params, ss, endo, exo) {
   all_vn  <- c(endo, exo)
   obj_ast <- parse_expression(obj_text, var_names = all_vn,
                               param_names = model$param_names)
-  n_endo  <- length(endo)
-
-  # Evaluate the objective at a vector of current-period endo deviations.
-  obj_fn <- function(v) {
+  function(v) {
     var_values <- numeric(0)
     for (i in seq_along(endo)) {
       nm <- endo[i]
@@ -564,6 +669,18 @@ discretionary_policy <- function(model,
     ast_eval(obj_ast, var_values = var_values, param_values = params,
              ss_values = ss)
   }
+}
+
+#' Hessian of the planner objective over current-period endogenous variables
+#'
+#' @param at Point (along `endo`) at which the Hessian is taken; `NULL`
+#'   (default) is the zero vector, the steady state of a linear model.
+#' @return n_endo x n_endo symmetric matrix.
+#' @noRd
+.planner_objective_hessian <- function(obj_text, model, params, ss, endo, exo,
+                                       at = NULL) {
+  n_endo  <- length(endo)
+  obj_fn  <- .planner_objective_fn(obj_text, model, params, ss, endo, exo)
 
   # Central second differences.  Loss functions in LQ optimal-policy models
   # are quadratic, for which central 2nd differences are analytically exact;
@@ -571,7 +688,7 @@ discretionary_policy <- function(model,
   # grows, so a relatively large step (1e-3) gives the cleanest result.
   h  <- 1e-3
   W  <- matrix(0, n_endo, n_endo)
-  x0 <- rep(0, n_endo)
+  x0 <- if (is.null(at)) rep(0, n_endo) else as.numeric(at)
   for (i in seq_len(n_endo)) {
     for (j in i:n_endo) {
       xpp <- x0; xpp[i] <- xpp[i] + h; xpp[j] <- xpp[j] + h
@@ -801,7 +918,7 @@ discretionary_policy <- function(model,
     if (diff < tol) {
       converged <- TRUE
       if (verbose && iter > 1) {
-        cat(sprintf("    DARE converged in %d iterations, |DeltaP| = %.3e\n",
+        .dynhr_cat(sprintf("    DARE converged in %d iterations, |DeltaP| = %.3e\n",
                     iter, diff))
       }
       P <- P_new
@@ -812,7 +929,7 @@ discretionary_policy <- function(model,
   }
 
   if (!converged && verbose) {
-    cat(sprintf("    DARE did NOT converge in %d iterations, |DeltaP| = %.3e\n",
+    .dynhr_cat(sprintf("    DARE did NOT converge in %d iterations, |DeltaP| = %.3e\n",
                 max_iter, diff))
   }
 
@@ -875,21 +992,24 @@ discretionary_policy <- function(model,
 #' @export
 print.dynhr_discretionary_result <- function(x, ...) {
   cat(sprintf("\n<dynhr_discretionary_result>\n"))
-  cat(sprintf("  Policy instrument: %s\n", x$policy_instrument))
+  cat(sprintf("  Policy instrument: %s\n", paste(x$policy_instrument, collapse = ", ")))
   cat(sprintf("  State variables:   %d\n", length(x$state_vars)))
   cat(sprintf("  Discount factor:   %.4f\n", x$discount))
   cat(sprintf("  Converged:         %s (%d iters, |DeltaP| = %.3e)\n",
               x$converged, x$iterations, x$diff))
 
   cat("  Optimal policy rule:\n")
-  cat(sprintf("    %s = ", x$policy_instrument))
-  terms <- sapply(seq_along(x$state_vars), function(j) {
-    coef <- -x$F[j]
-    if (abs(coef) < 1e-14) return(NULL)
-    sprintf("%.4f * %s", coef, x$state_vars[j])
-  })
-  terms <- terms[!sapply(terms, is.null)]
-  cat(paste(terms, collapse = " + "), "\n")
+  Fm <- matrix(x$F, nrow = length(x$policy_instrument))
+  for (k in seq_along(x$policy_instrument)) {
+    cat(sprintf("    %s = ", x$policy_instrument[k]))
+    terms <- sapply(seq_along(x$state_vars), function(j) {
+      coef <- -Fm[k, j]
+      if (abs(coef) < 1e-14) return(NULL)
+      sprintf("%.4f * %s", coef, x$state_vars[j])
+    })
+    terms <- terms[!sapply(terms, is.null)]
+    cat(paste(terms, collapse = " + "), "\n")
+  }
 
   if (!is.null(x$moments)) {
     cat("\n  Unconditional std devs:\n")

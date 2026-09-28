@@ -33,7 +33,8 @@
 #'       \code{NA} if not recorded.}
 #'     \item{n_draws}{Integer; post-warmup draw count.}
 #'     \item{n_burn}{Integer; warmup / burn-in draw count.}
-#'     \item{acceptance_rate}{Numeric; overall MH acceptance rate
+#'     \item{acceptance_rate}{Numeric; overall MH acceptance rate -- for
+#'       NUTS the mean post-warmup NUTS acceptance statistic
 #'       (\code{NA} when not applicable, e.g. SMC).}
 #'     \item{ess_bulk}{Named numeric vector; bulk ESS per parameter.
 #'       \code{NA} when chains are not available.}
@@ -116,44 +117,28 @@ sampler_diagnostics <- function(fit, chains_list = NULL) {
     if (is.null(p_names)) p_names <- paste0("theta_", seq_len(n_par))
     colnames(draws_m) <- p_names
 
-    # Bulk ESS (rank-normalised)
-    ess_bulk_vec <- vapply(seq_len(n_par), function(j) {
-      z <- .rank_normalise(list(draws_m[, j]))[[1]]
-      .effective_sample_size(z)
-    }, numeric(1L))
-    names(ess_bulk_vec) <- p_names
-
-    # Tail ESS (min of 5th / 95th quantile indicators)
-    ess_tail_vec <- vapply(seq_len(n_par), function(j) {
-      x   <- draws_m[, j]
-      q05 <- quantile(x, 0.05); q95 <- quantile(x, 0.95)
-      min(.effective_sample_size(as.numeric(x <= q05)),
-          .effective_sample_size(as.numeric(x <= q95)))
-    }, numeric(1L))
-    names(ess_tail_vec) <- p_names
-
-    # Multi-chain R-hat (requires chains_list)
-    if (!is.null(chains_list) && length(chains_list) >= 2L) {
-      chains_list_m <- lapply(chains_list, function(m) {
-        m2 <- as.matrix(m)
-        colnames(m2) <- p_names
-        m2
+    ## 0.9.4 (ledger A5): one implementation. This block used to call the
+    ## shared `.effective_sample_size()` / `.convergence_summary()` helpers,
+    ## which double-counted lag 0 (every ESS ~3x too low), concatenated chains
+    ## instead of using the between-chain variance, and omitted the folded
+    ## R-hat. `.d5_convergence()` (diag-helpers.R) is the Vehtari et al. (2021)
+    ## estimator, and it handles the single-chain case by splitting.
+    cl <- if (!is.null(chains_list) && length(chains_list) >= 2L)
+      lapply(chains_list, function(m) {
+        m2 <- as.matrix(m); colnames(m2) <- p_names; m2
       })
-      cs      <- .convergence_summary(chains_list_m)
+    else list(draws_m)
+
+    cs <- .d5_convergence(cl, p_names)
+    ess_bulk_vec <- cs$ess_bulk
+    ess_tail_vec <- cs$ess_tail
+    names(ess_bulk_vec) <- names(ess_tail_vec) <- cs$param
+    ## R-hat needs >= 2 chains to mean anything; with one chain the split
+    ## R-hat is still computed but is reported only for genuine multi-chain
+    ## runs, as before.
+    if (length(cl) >= 2L) {
       rhat_vec <- cs$rhat
       names(rhat_vec) <- cs$param
-      # Also pool all chains for better ESS
-      pooled   <- do.call(rbind, chains_list_m)
-      colnames(pooled) <- p_names
-      ess_bulk_vec <- vapply(seq_len(n_par), function(j) {
-        z <- .rank_normalise(lapply(chains_list_m, function(m) m[, j]))[[1]]
-        .effective_sample_size(z)
-      }, numeric(1L))
-      # The pooled-chain ESS from convergence_summary is more standard
-      ess_bulk_vec <- cs$ess_bulk
-      ess_tail_vec <- cs$ess_tail
-      names(ess_bulk_vec) <- cs$param
-      names(ess_tail_vec) <- cs$param
     }
   }
 

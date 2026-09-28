@@ -20,32 +20,25 @@ A list with \code{fitted} (\code{n_obs x T}), \code{residual}
 \description{
 Rebuilds the observables from a \code{\link{ms_kim_smoother_struct}} result
 through the regime-weighted observation equation
-\deqn{\hat y_t = \sum_i \Pr[s_{t-1} = i \mid y_{1:T}]
-  (Z_i s_{t-1|T}^{(i)} + d_i)
-  + \sum_j \Pr[s_t = j \mid y_{1:T}] D_j \varepsilon_{t|T}^{(j)},}
+\deqn{\hat y_t = \sum_j \Pr[s_t = j \mid y_{1:T}]
+  \left(d_j + Z_j E[s_{t-1} \mid s_t = j, y_{1:T}]
+  + D_j \varepsilon_{t|T}^{(j)}\right),}
 i.e. the check that the smoothed states and shocks actually reproduce the
 data they were smoothed from.
 }
 \details{
-The regime index follows the structural filter's own timing: under dynhr's
-lag-1 convention \eqn{y_t} loads \eqn{s_{t-1}} through the FROM-regime
-matrices \eqn{(Z_i, d_i)}, while the contemporaneous shock loads the
-TO-regime \eqn{D_j}; each expectation is therefore taken under the regime
-distribution that actually governs that term (\eqn{\Pr[s_0 = i]} is
-\code{pi0} at \eqn{t = 1}).  With \eqn{P = I} the two distributions
-coincide and the identity is exact to round-off; with genuine switching a
-residual remains, because the Kim filter/smoother is itself an
-approximation (the \eqn{h^2 \to h} collapse keeps only \eqn{h} conditional
-moments per period, so the state and the shock terms are averaged under
-regime marginals that no longer share a single exact joint).
-
-A \code{collapse = "gpb3"} smoother uses the same formula (its pair index
-at \eqn{t-1} is \eqn{(s_{t-2}, s_{t-1})}, so it is NOT the conditioning
-pair of this equation, and summing the pair joint over the coordinate each
-term does not condition on returns exactly this regime-marginal form), with
-one refinement: at \eqn{t = 1} the FROM distribution is the smoothed
-\eqn{\Pr[s_0 \mid y_{1:T}]} the GPB(3) pass supplies rather than the
-prior \code{pi0}.
+Every block of the structural law belongs to the regime in force at
+\eqn{t}, \eqn{y_t = d_j + Z_j s_{t-1} + D_j \varepsilon_t + u_t}, so the
+lagged state enters through its expectation conditional on the CURRENT
+regime, \code{smoothed_lag_states_by_regime[, j, t]}, which the smoother
+collapses with the same weights as the smoothed shocks.  Under
+\code{collapse = "gpb2"} or \code{"gpb3"} each forward cell satisfies the
+observation identity for any backward adjoint, so with
+\code{me_variance = 0} the fit reproduces the data to round-off; with
+\code{me_variance > 0} the residual is the smoothed measurement error.
+Under \code{"imm"} the forward cells are built from the MIXED prior, not the
+per-regime component the lagged state is read from, so a residual of the
+order of the mixing error remains.
 }
 \seealso{
 \code{\link{ms_kim_smoother_struct}}

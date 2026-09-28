@@ -81,14 +81,21 @@ parse_filter_tunes_block <- function(body, sample_start = NULL) {
     cur_stderr  <<- NULL
   }
 
+  sandbox <- .dynhr_sandbox_env()
   safe_eval_list <- function(spec) {
     spec <- trimws(spec)
     spec <- sub(",\\s*$", "", spec)        # trailing comma tolerance (#2030)
     toks <- strsplit(spec, "[,\\s]+", perl = TRUE)[[1]]
     toks <- toks[nchar(toks) > 0]
+    ## A-SEC (0.9.4): each token is evaluated in the .mod allowlist sandbox
+    ## (numeric literals + elementary arithmetic only), never in the caller
+    ## frame.  A disallowed call aborts with dynhr_error_unsafe_mod_expression;
+    ## text that is not R, or names an unbound symbol, stays NA as before.
     vapply(toks, function(tok) {
-      val <- tryCatch(eval(parse(text = tok)), error = function(e) NA_real_)
-      as.numeric(val)
+      val <- .dynhr_sandbox_eval(tok, sandbox, .dynhr_safe_fn_names,
+                                 context = "the filter_tunes value")
+      if (is.null(val) || !is.numeric(val) || length(val) != 1L) NA_real_
+      else as.numeric(val)
     }, numeric(1), USE.NAMES = FALSE)
   }
 

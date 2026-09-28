@@ -43,7 +43,7 @@ check_model <- function(model) {
     if (n_eq != n_endo) {
         n_occbin <- length(model$occbin_constraints)
         if (n_occbin > 0L && n_eq == n_endo + n_occbin) {
-            message(sprintf(
+            .dynhr_inform(sprintf(
                 "OccBin model: %d equations, %d endogenous variables (%d constraint pair(s)); relax-regime row selection will be applied.",
                 n_eq, n_endo, n_occbin))
         } else {
@@ -55,7 +55,7 @@ check_model <- function(model) {
 
     # Blanchard-Kahn count
     nfwd <- model$n_forward + model$n_mixed
-    cat("Blanchard-Kahn: ", nfwd,
+    .dynhr_cat("Blanchard-Kahn: ", nfwd,
         " forward-looking variable(s) (need ", nfwd,
         " explosive eigenvalue(s))\n", sep = "")
 
@@ -76,10 +76,10 @@ check_model <- function(model) {
 
     # Report
     if (length(issues) > 0) {
-        cat("ISSUES:\n")
-        for (iss in issues) cat("  [!] ", iss, "\n")
+        .dynhr_cat("ISSUES:\n")
+        for (iss in issues) .dynhr_cat("  [!] ", iss, "\n")
     } else {
-        cat("Model checks passed.\n")
+        .dynhr_cat("Model checks passed.\n")
     }
 
     invisible(length(issues) == 0)
@@ -173,19 +173,19 @@ compile_model <- function(model, verbose = FALSE, max_order = 1L,
             version          = ver))
         cache_file <- file.path(cache_dir, paste0("dynhr-cm-", key, ".rds"))
         if (file.exists(cache_file)) {
-            if (verbose) cat("compile_model: loaded from cache (", cache_file, ")\n")
+            if (verbose) .dynhr_cat("compile_model: loaded from cache (", cache_file, ")\n")
             cached <- tryCatch(readRDS(cache_file), error = function(e) NULL)
             if (inherits(cached, "dynhr_compiled")) return(cached)
         }
     }
 
-    if (verbose) cat("Compiling model...\n")
+    if (verbose) .dynhr_cat("Compiling model...\n")
 
-    if (verbose) cat("  Building static model...\n")
+    if (verbose) .dynhr_cat("  Building static model...\n")
     static <- build_static_model(model, want_param_deriv = want_param_deriv,
                                  want_param_deriv2 = want_param_deriv2)
 
-    if (verbose) cat("  Building dynamic model...\n")
+    if (verbose) .dynhr_cat("  Building dynamic model...\n")
     dynamic <- build_dynamic_model(model, max_order = max_order,
                                    want_param_deriv = want_param_deriv,
                                    want_param_deriv2 = want_param_deriv2)
@@ -215,26 +215,26 @@ compile_model <- function(model, verbose = FALSE, max_order = 1L,
         dir.create(dirname(cache_file), recursive = TRUE, showWarnings = FALSE)
         tryCatch({
             saveRDS(result, cache_file)
-            if (verbose) cat("compile_model: cached to", cache_file, "\n")
+            if (verbose) .dynhr_cat("compile_model: cached to", cache_file, "\n")
         }, error = function(e)
-            warning("compile_model: failed to write cache: ", conditionMessage(e)))
+            .dynhr_warn("compile_model: failed to write cache: ", conditionMessage(e)))
     }
 
-    if (verbose) cat("  Done.\n")
+    if (verbose) .dynhr_cat("  Done.\n")
     result
 }
 
 
 #' Print a compiled dynhr model
 #'
-#' Prints a one-screen summary of a `dynhr_compiled` object: variable and
+#' Prints a one-screen summary of a \code{dynhr_compiled} object: variable and
 #' parameter counts, and the shapes of the static and dynamic residual /
 #' Jacobian blocks.
 #'
-#' @param x A `dynhr_compiled` object, as returned by [compile_model()].
+#' @param x A \code{dynhr_compiled} object, as returned by [compile_model()].
 #' @param ... Ignored; present for S3 generic compatibility.
 #'
-#' @return `x`, invisibly. Called for the side effect of printing.
+#' @return \code{x}, invisibly. Called for the side effect of printing.
 #'
 #' @export
 print.dynhr_compiled <- function(x, ...) {

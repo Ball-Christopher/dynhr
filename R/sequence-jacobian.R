@@ -255,3 +255,214 @@ print.ra_ssj <- function(x, ...) {
   cat("  exo: ", paste(x$exo_names,  collapse = ", "), "\n")
   invisible(x)
 }
+
+
+# =============================================================================
+# Behavioural (non-FIRE) expectations: Lenney & Rosso (2026) forecast mapping
+# =============================================================================
+##
+## Source: Lenney, J. and Rosso, B. (2026), "A flexible deviation from FIRE in
+## the sequence space", Bank of England Staff Working Paper No. 1197.
+##
+## Expectations process (their eq. 1-6, the Kohlhas-Walther reduced form):
+## a fraction (1 - theta) of agents updates its information set each period
+## (theta = delta / (1 + delta) in their news-revision parameterisation), and
+## an updating agent extrapolates from the input it observes at the update,
+## with coefficient gamma (gamma < 0 = overreaction to current conditions).
+## The average time-h forecast of the input path, dX^{e,h} = A_h dX, is
+## (their eq. 8 / A.7; 0-based dates):
+##
+##   A_h[s, r] = 1                               s <= h, r = s  (observed)
+##             = 1 - theta^(h+1)                 s >  h, r = s  (news, B_h)
+##             = -gamma (1-theta) theta^(h-r)    s >  h, r <= h (extrapolation)
+##             = 0                               otherwise
+##
+## theta = gamma = 0 gives A_h = I for every h (FIRE); gamma = 0 alone is the
+## sticky-expectations mapping of Auclert, Rognlie & Straub (2020), with
+## agents observing the current input (the identity block of A_h).
+##
+## Behavioural block Jacobian (their eq. 7 / A.10): with F the FIRE fake-news
+## matrix (F[0,.] = J[0,.], F[.,0] = J[.,0], F[t,s] = J[t,s] - J[t-1,s-1]),
+##
+##   Jbar = sum_{h >= 0} P_h A_h,  P_h[t, s] = F[t-h, s-h] for t, s >= h, else 0,
+##
+## equivalently (their A.4, the Bardoczy-Guerreiro form)
+##   Jbar = J A_0 + sum_{h >= 1} R_h (A_h - A_{h-1}),  R_h = J shifted by h.
+## The transform is block-local and per input: each input column-block of a
+## block's Jacobian is transformed with that input's (theta, gamma), and GE
+## assembly is unchanged (their section 2.3). Constant (theta, gamma) only;
+## the paper's horizon-varying generalisation (their App. A.5) and the
+## extrapolation decay of their footnote 22 are not implemented.
+
+#' Behavioural forecast matrix A_h (0-based update date h)
+#' @noRd
+.ssj_forecast_matrix <- function(T_h, h, theta, gamma = 0) {
+  A <- diag(T_h)
+  if (h + 1L < T_h) {
+    fut <- (h + 2L):T_h                       # 1-based rows s = h+1 .. T-1
+    A[cbind(fut, fut)] <- 1 - theta^(h + 1)
+    ext <- -gamma * (1 - theta) * theta^(h - 0:h)
+    A[fut, seq_len(h + 1L)] <- matrix(ext, length(fut), h + 1L, byrow = TRUE)
+  }
+  A
+}
+
+#' Average behavioural k-step-ahead forecast path f_t x_{t+k}, t = 0..T-1-k
+#'
+#' The forecast held at date t (after that date's update) of the input k
+#' periods ahead, as a deviation from steady state: row t+k of A_t dx.
+#' @noRd
+.ssj_behavioural_forecast <- function(dx, k, theta, gamma = 0) {
+  .ssj_check_expectation_pars(theta, gamma, "forecast")
+  T_h <- length(dx)
+  k <- as.integer(k)
+  if (length(k) != 1L || is.na(k) || k < 0L || k >= T_h)
+    .dynhr_abort("behavioural forecast: `k` must be a single integer in ",
+                 "[0, length(dx) - 1].",
+                 class = "dynhr_error_behavioural_expectations")
+  vapply(0:(T_h - 1L - k), function(t) {
+    if (k == 0L) return(dx[t + 1L])
+    (1 - theta^(t + 1)) * dx[t + k + 1L] -
+      gamma * (1 - theta) * sum(theta^(t - 0:t) * dx[seq_len(t + 1L)])
+  }, numeric(1))
+}
+
+#' Validate one (theta, gamma) pair
+#' @noRd
+.ssj_check_expectation_pars <- function(theta, gamma, what) {
+  if (!is.numeric(theta) || length(theta) != 1L || !is.finite(theta) ||
+      theta < 0 || theta >= 1)
+    .dynhr_abort("behavioural expectations (", what, "): `theta` must be a ",
+                 "single number in [0, 1) (0 = every agent updates each ",
+                 "period).", class = "dynhr_error_behavioural_expectations")
+  if (!is.numeric(gamma) || length(gamma) != 1L || !is.finite(gamma))
+    .dynhr_abort("behavioural expectations (", what, "): `gamma` must be a ",
+                 "single finite number.",
+                 class = "dynhr_error_behavioural_expectations")
+  invisible(TRUE)
+}
+
+#' Behavioural Jacobian of one T x T FIRE Jacobian (Lenney-Rosso eq. 7)
+#'
+#' theta = gamma = 0 returns J itself (bit-identical).
+#' @noRd
+.ssj_behavioural_jacobian <- function(J, theta, gamma = 0) {
+  .ssj_check_expectation_pars(theta, gamma, "jacobian")
+  if (!is.matrix(J) || nrow(J) != ncol(J))
+    .dynhr_abort("behavioural expectations: the Jacobian must be a square ",
+                 "T x T matrix.", class = "dynhr_error_behavioural_expectations")
+  if (theta == 0 && gamma == 0) return(J)
+  T_h <- nrow(J)
+  ## FIRE fake-news matrix (ABRS 2021): F[t,s] = J[t,s] - J[t-1,s-1].
+  Fm <- J
+  if (T_h >= 2L) Fm[-1L, -1L] <- J[-1L, -1L] - J[-T_h, -T_h]
+  JB <- matrix(0, T_h, T_h)
+  for (h in 0:(T_h - 1L)) {
+    n    <- T_h - h
+    rows <- (h + 1L):T_h
+    Fs   <- Fm[seq_len(n), seq_len(n), drop = FALSE]
+    ## Row h of A_h is e_h: the input observed at the update date h.
+    JB[rows, h + 1L] <- JB[rows, h + 1L] + Fs[, 1L]
+    if (n >= 2L) {
+      fut  <- Fs[, -1L, drop = FALSE]
+      cols <- (h + 2L):T_h
+      ## News block B_h: diagonal 1 - theta^(h+1) on the future inputs.
+      JB[rows, cols] <- JB[rows, cols] + (1 - theta^(h + 1)) * fut
+      ## Extrapolation block: every future forecast shifts by
+      ## -gamma (1-theta) theta^(h-r) dx_r for each observed r <= h.
+      if (gamma != 0) {
+        ext  <- -gamma * (1 - theta) * theta^(h - 0:h)
+        past <- seq_len(h + 1L)
+        JB[rows, past] <- JB[rows, past] + outer(rowSums(fut), ext)
+      }
+    }
+  }
+  dimnames(JB) <- dimnames(J)
+  JB
+}
+
+#' Resolve an `expectations` specification to per-input (theta, gamma)
+#'
+#' Returns NULL for FIRE (NULL spec, type 'fire', or every input at
+#' theta = gamma = 0), otherwise list(theta =, gamma =), named numerics over
+#' `inputs`.
+#' @noRd
+.ssj_expectations_resolve <- function(expectations, inputs, where) {
+  if (is.null(expectations)) return(NULL)
+  fail <- function(...) .dynhr_abort(where, ": ", ...,
+                                     class = "dynhr_error_behavioural_expectations")
+  if (!is.list(expectations) || is.null(names(expectations)) ||
+      any(!nzchar(names(expectations))))
+    fail("`expectations` must be NULL (FIRE) or a named list with elements ",
+         "`theta` and optionally `gamma` / `type`.")
+  bad <- setdiff(names(expectations), c("type", "theta", "gamma"))
+  if (length(bad))
+    fail("unknown `expectations` element(s) ",
+         paste0("'", bad, "'", collapse = ", "),
+         "; allowed: 'type', 'theta', 'gamma'.")
+  type <- expectations$type
+  if (is.null(type)) type <- "behavioural"
+  if (!is.character(type) || length(type) != 1L ||
+      !type %in% c("behavioural", "sticky", "fire"))
+    fail("`expectations$type` must be one of 'behavioural', 'sticky', 'fire'.")
+  if (type == "fire") {
+    if (!is.null(expectations$theta) || !is.null(expectations$gamma))
+      fail("`expectations$type = 'fire'` takes no `theta` / `gamma`.")
+    return(NULL)
+  }
+  if (is.null(expectations$theta))
+    fail("`expectations` needs `theta` (the stickiness, in [0, 1)).")
+  if (type == "sticky" && !is.null(expectations$gamma) &&
+      any(expectations$gamma != 0))
+    fail("`expectations$type = 'sticky'` is the gamma = 0 case; use ",
+         "type = 'behavioural' for extrapolation.")
+  per_input <- function(v, nm) {
+    out <- setNames(rep(0, length(inputs)), inputs)
+    if (is.null(v)) return(out)
+    if (!is.numeric(v)) fail("`expectations$", nm, "` must be numeric.")
+    if (is.null(names(v))) {
+      if (length(v) != 1L)
+        fail("an unnamed `expectations$", nm, "` must be a scalar (applied ",
+             "to every input); name the entries by input to set them per ",
+             "input.")
+      out[] <- as.numeric(v)
+      return(out)
+    }
+    if (length(setdiff(names(v), inputs)) || anyDuplicated(names(v)))
+      fail("`expectations$", nm, "` names must be distinct inputs of this ",
+           "block (", paste0("'", inputs, "'", collapse = ", "), "); got ",
+           paste0("'", names(v), "'", collapse = ", "), ".")
+    out[names(v)] <- as.numeric(v)
+    out
+  }
+  theta <- per_input(expectations$theta, "theta")
+  gamma <- per_input(expectations$gamma, "gamma")
+  for (i in inputs)
+    .ssj_check_expectation_pars(theta[[i]], gamma[[i]],
+                                paste0(where, ", input '", i, "'"))
+  if (all(theta == 0 & gamma == 0)) return(NULL)
+  list(theta = theta, gamma = gamma)
+}
+
+#' Apply behavioural expectations to a nested Jacobian J[[output]][[input]]
+#'
+#' Inputs not named in a per-input spec keep their FIRE columns.
+#' @noRd
+.ssj_apply_expectations <- function(J, expectations, inputs, where) {
+  ex <- .ssj_expectations_resolve(expectations, inputs, where)
+  if (is.null(ex)) return(J)
+  for (o in names(J)) for (i in intersect(names(J[[o]]), inputs)) {
+    if (ex$theta[[i]] == 0 && ex$gamma[[i]] == 0) next
+    J[[o]][[i]] <- .ssj_behavioural_jacobian(J[[o]][[i]], ex$theta[[i]],
+                                             ex$gamma[[i]])
+  }
+  J
+}
+
+#' TRUE when a block carries non-FIRE expectations
+#' @noRd
+.ssj_block_is_behavioural <- function(blk) {
+  !is.null(blk$expectations) &&
+    !is.null(.ssj_expectations_resolve(blk$expectations, blk$inputs,
+                                       paste0("block '", blk$name, "'")))
+}

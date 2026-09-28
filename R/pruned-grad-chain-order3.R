@@ -54,23 +54,24 @@
   params <- .apply_theta_to_params(model, theta)
   ss_result <- tryCatch(
     solve_steady_state(model, compiled, params, verbose = FALSE),
-    error = function(e) NULL)
+    error = function(e) .dynhr_reraise_bug(e, NULL))
   if (is.null(ss_result) || !isTRUE(ss_result$converged)) return(NULL)
   params <- ss_result$params %||% params
 
   dr3 <- tryCatch(
     solve_perturbation(model, compiled, ss_result$ss, params,
                        order = 3L, verbose = FALSE),
-    error = function(e) NULL)
+    error = function(e) .dynhr_reraise_bug(e, NULL))
   if (is.null(dr3) || !isTRUE(dr3$bk_satisfied)) return(NULL)
 
-  pss3 <- tryCatch(pruned_state_space3(dr3, model, params), error = function(e) NULL)
+  pss3 <- tryCatch(pruned_state_space3(dr3, model, params),
+                   error = function(e) .dynhr_reraise_bug(e, NULL))
   if (is.null(pss3)) return(NULL)
 
   inp <- tryCatch(
     .order3_pruned_kf_inputs(pss3$sys, pss3$ys, obs_vars, pss3$endo_names,
                              me_variance = me_variance),
-    error = function(e) NULL)
+    error = function(e) .dynhr_reraise_bug(e, NULL))
   if (is.null(inp)) return(NULL)
 
   list(Tlin = inp$Tlin, ZZ = inp$ZZ, d_y = inp$d_y, c_drift = inp$c_drift,
@@ -137,7 +138,7 @@
     .pruned_kf_correlated_adjoint(Y, base$Tlin, base$ZZ, base$d_y,
                                   base$c_drift, base$QQ, base$HH, base$SS,
                                   base$mu0, base$Sxi0),
-    error = function(e) NULL)
+    error = function(e) .dynhr_reraise_bug(e, NULL))
   if (is.null(ad)) return(NULL)
 
   grad <- setNames(rep(NA_real_, length(par_names)), par_names)
@@ -145,7 +146,7 @@
     dM <- tryCatch(
       .pgo3_assembly_fd(theta, nm, model, compiled, par_names, obs_vars,
                         me_variance = me_variance),
-      error = function(e) NULL)
+      error = function(e) .dynhr_reraise_bug(e, NULL))
     if (is.null(dM)) next
     gj <- 0
     ok <- TRUE

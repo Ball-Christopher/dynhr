@@ -176,7 +176,8 @@ solve_global <- function(compiled,
     tryCatch(
       solve_perturbation(model, compiled, ss_vals, params, verbose = FALSE),
       error = function(e) {
-        if (verbose) cat("solve_global: order-1 perturbation failed:",
+        if (.dynhr_is_programming_error(e)) stop(e)
+        if (verbose) .dynhr_cat("solve_global: order-1 perturbation failed:",
                          conditionMessage(e), "\n")
         NULL
       })
@@ -245,7 +246,7 @@ solve_global <- function(compiled,
   n_basis <- ncol(Phi)
 
   if (verbose)
-    cat(sprintf(
+    .dynhr_cat(sprintf(
       "solve_global: %d states, %d endo, %d coll.nodes, %d basis fns, %d quad pts\n",
       n_state, n_endo, n_coll, n_basis, n_quad))
 
@@ -261,7 +262,7 @@ solve_global <- function(compiled,
     if (!is.null(dr1)) {
       coefs <- .init_coefs_from_dr1(dr1, endo, state_names, ss_vals,
                                     grid_nat, state_domain, Phi, n_coll, n_basis)
-      if (verbose) cat("solve_global: warm-started from order-1 perturbation\n")
+      if (verbose) .dynhr_cat("solve_global: warm-started from order-1 perturbation\n")
     } else {
       ## Constant at SS
       for (i in seq_len(n_endo)) coefs[i, 1L] <- ss_vals[endo[i]]
@@ -555,7 +556,8 @@ solve_global <- function(compiled,
       ## Solve
       sol <- tryCatch(
         solve_at_node(y_lag_j, y_init),
-        error = function(e) list(termcd = 99L, x = y_init)
+        error = function(e)
+          .dynhr_reraise_bug(e, list(termcd = 99L, x = y_init))
       )
 
       if (sol$termcd <= 3L) {
@@ -567,7 +569,7 @@ solve_global <- function(compiled,
     }
 
     if (verbose && n_fail > 0L)
-      cat(sprintf("  iter %3d: %d/%d nodes failed nleqslv\n",
+      .dynhr_cat(sprintf("  iter %3d: %d/%d nodes failed nleqslv\n",
                   iter, n_fail, n_coll))
 
     ## Update coefficients via least squares
@@ -580,7 +582,7 @@ solve_global <- function(compiled,
 
     last_delta <- max(abs(new_coefs - coefs))
     if (verbose)
-      cat(sprintf("  iter %3d: max_delta_coef = %.3e  failures = %d/%d\n",
+      .dynhr_cat(sprintf("  iter %3d: max_delta_coef = %.3e  failures = %d/%d\n",
                   iter, last_delta, n_fail, n_coll))
 
     coefs <- new_coefs
@@ -588,14 +590,14 @@ solve_global <- function(compiled,
     if (last_delta < tol && n_fail == 0L) {
       converged <- TRUE
       if (verbose)
-        cat(sprintf("solve_global: converged in %d iterations (delta=%.2e)\n",
+        .dynhr_cat(sprintf("solve_global: converged in %d iterations (delta=%.2e)\n",
                     iter, last_delta))
       break
     }
   }
 
   if (!converged && verbose)
-    cat(sprintf(
+    .dynhr_cat(sprintf(
       "solve_global: did NOT converge in %d iter (delta=%.2e, failures=%d)\n",
       max_iter, last_delta, n_fail))
 
@@ -632,15 +634,16 @@ solve_global <- function(compiled,
   domain_clip_frac <- if (is.null(erg_grid)) NA_real_ else clip_at(erg_grid)
 
   if (isTRUE(is.finite(domain_clip_frac) && domain_clip_frac > 0))
-    .gs_warn_once("domain_clip", sprintf(
+    .dynhr_warn(sprintf(
       paste0("solve_global: %.2f%% of the Euler-quadrature t+1 state ",
              "coordinates leave `state_domain` over the ergodic +-%g ",
              "stationary-sd box, where predict() CLIPS them silently. The ",
              "collocation box is too narrow for its own quadrature; widen ",
              "it (`state_domain=`, or a larger `endo_cover`/`domain_cover` ",
              "through .auto_state_domain()). See `$domain_clip_frac`. ",
-             "This warning fires at most once per session."),
-      100 * domain_clip_frac, .gs_clip_n_sd))
+             "This warning fires at most once per run."),
+      100 * domain_clip_frac, .gs_clip_n_sd),
+    once = TRUE, key = "domain_clip")
 
   ## ------------------------------------------------------------------
   ## Return GlobalSolution
@@ -712,7 +715,7 @@ solve_global <- function(compiled,
   exo <- model$varexo_names
   sds <- setNames(rep(0.01, length(exo)), exo)
   se  <- tryCatch(.get_shock_stderr(model, exo, params),
-                  error = function(e) NULL)
+                  error = function(e) .dynhr_reraise_bug(e, NULL))
   if (!is.null(se)) {
     ok <- is.finite(se) & se > 0
     sds[ok] <- se[ok]
@@ -740,7 +743,7 @@ solve_global <- function(compiled,
   TT <- dr$ghx[dr$state_idx, , drop = FALSE]
   RR <- dr$ghu[dr$state_idx, , drop = FALSE]
   Se <- tryCatch(.get_shock_cov(model, dr$exo_names, params),
-                 error = function(e) NULL)
+                 error = function(e) .dynhr_reraise_bug(e, NULL))
   if (is.null(Se)) return(NULL)
   if (!is.null(shock_sds)) {
     s0 <- sqrt(pmax(diag(as.matrix(Se)), 0))
@@ -753,7 +756,8 @@ solve_global <- function(compiled,
       Se     <- D %*% as.matrix(Se) %*% D
     }
   }
-  P0 <- tryCatch(kf_stationary_init(TT, RR, Se), error = function(e) NULL)
+  P0 <- tryCatch(kf_stationary_init(TT, RR, Se),
+                 error = function(e) .dynhr_reraise_bug(e, NULL))
   if (is.null(P0)) return(NULL)
   stats::setNames(sqrt(pmax(diag(P0), 0)), dr$state_vars)
 }
@@ -770,27 +774,18 @@ solve_global <- function(compiled,
 ## stay inside the collocation box.
 .gs_clip_n_sd <- 3
 
-## Package-private store for one-time warnings (the projection solve is
-## re-run at EVERY theta inside make_log_posterior_global_pf(), so a
-## per-solve warning would spam an entire MCMC run).  Same pattern as
-## `.hank_egm_warn_once()` / `.cumulant_warn_once()`.
-.gs_warn_env <- new.env(parent = emptyenv())
+## NOTE: the projection solve is re-run at EVERY theta inside
+## make_log_posterior_global_pf(), so the domain warning below must stay
+## `once = TRUE` or it spams an entire MCMC run.
 
-#' Emit a warning at most once per session, keyed by \code{key}.
-#' @keywords internal
-#' @noRd
-.gs_warn_once <- function(key, ...) {
-  if (isTRUE(.gs_warn_env[[key]])) return(invisible(NULL))
-  .gs_warn_env[[key]] <- TRUE
-  warning(paste0(...), call. = FALSE)
-}
 
 ## Largest Gauss-Hermite abscissa at `n_quad` nodes, in shock-sd units: how
 ## far into the tail of eps_{t+1} the Euler quadrature actually reaches.  The
 ## default AR(1) cover is sized so that even THAT node stays inside the box.
 #' @noRd
 .gs_quad_reach <- function(n_quad) {
-  q <- tryCatch(gauss_hermite(n_quad)$nodes, error = function(e) NULL)
+  q <- tryCatch(gauss_hermite(n_quad)$nodes,
+                error = function(e) .dynhr_reraise_bug(e, NULL))
   if (is.null(q) || !length(q) || !all(is.finite(q))) return(3)
   max(abs(q))
 }
@@ -1188,9 +1183,9 @@ solve_global <- function(compiled,
     dy
   }
   J1 <- tryCatch(dyn$jacobian_fn(probe(1e-3), params, ss_vals),
-                 error = function(e) NULL)
+                 error = function(e) .dynhr_reraise_bug(e, NULL))
   J2 <- tryCatch(dyn$jacobian_fn(probe(-7e-3), params, ss_vals),
-                 error = function(e) NULL)
+                 error = function(e) .dynhr_reraise_bug(e, NULL))
   if (is.null(J1) || is.null(J2) || !all(is.finite(J1)) || !all(is.finite(J2)))
     stop(context, ": could not evaluate the model Jacobian near the steady ",
          "state, so the shock/state structure cannot be validated.",

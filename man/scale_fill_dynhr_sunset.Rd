@@ -15,5 +15,6 @@ scale_fill_dynhr_sunset(..., midpoint = 0, na.value = dynhr_na_fill)
 \item{na.value}{Fill colour for missing values (default: dynhr NA fill).}
 }
 \description{
-Diverging fill scale using Paul Tol sunset (continuous)
+\code{midpoint} is the value that gets the ramp's neutral centre colour;
+see \code{\link{scale_colour_dynhr_sunset}} (it was ignored before 0.9.4).
 }

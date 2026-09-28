@@ -106,8 +106,7 @@ that costs \eqn{\Psi(a', a)} to move (\code{\link{.hank_psi}}).  With
 one-asset model cannot: rich in illiquid wealth, constrained in liquid.
 }
 \details{
-Ported from and validated against SSJ's \code{hh_twoasset.py} (see
-\code{briefs/19-twoasset-hank-scope.md}).
+Ported from and validated against SSJ's \code{hh_twoasset.py}.
 }
 \examples{
 inc <- hank_income_rouwenhorst(0.9, 0.7, 3)

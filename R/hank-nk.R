@@ -38,7 +38,9 @@
 #' @param beta,eis Household discount factor and elasticity of intertemporal
 #'   substitution.
 #' @param r_ss Target steady-state real rate (also the Taylor-rule intercept).
-#' @param phi Taylor-rule inflation coefficient (\code{> 1} for determinacy).
+#' @param phi Taylor-rule inflation coefficient. The determinacy threshold is
+#'   model-specific (with household heterogeneity it need not sit at
+#'   \code{phi = 1}); check a calibration with \code{\link{hank_determinacy}}.
 #' @param kappa NKPC slope on the output gap.
 #' @param beta_p NKPC discount factor (default \code{1/(1+r_ss)}).
 #' @param T_h Integer horizon.
@@ -133,7 +135,9 @@ hank_nk_hank <- function(a_grid, Pi, e, beta, eis, r_ss = 0.005,
 #' @param eis Elasticity of intertemporal substitution, shared (scalar; only
 #'   \code{beta} varies across types here).
 #' @param r_ss Target steady-state real rate (also the Taylor-rule intercept).
-#' @param phi Taylor-rule inflation coefficient (\code{> 1} for determinacy).
+#' @param phi Taylor-rule inflation coefficient. The determinacy threshold is
+#'   model-specific (with household heterogeneity it need not sit at
+#'   \code{phi = 1}); check a calibration with \code{\link{hank_determinacy}}.
 #' @param kappa NKPC slope on the output gap.
 #' @param beta_p NKPC discount factor (default \code{1/(1+r_ss)}).
 #' @param T_h Integer horizon.

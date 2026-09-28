@@ -4,45 +4,52 @@
 \alias{dm_sample}
 \title{Sample the posterior of a dynhr_model}
 \usage{
-dm_sample(
-  dm,
-  sampler = c("rwmh", "nuts", "smc", "dime"),
-  theta0 = NULL,
-  Sigma_prop = NULL,
-  ...
-)
+dm_sample(dm, sampler = NULL, ...)
 }
 \arguments{
-\item{dm}{A \code{\link{dynhr_model}} whose `$log_post` is set}
+\item{dm}{A \code{\link{dynhr_model}} carrying \code{data} and a prior
+spec}
 
-\item{sampler}{One of `"rwmh"` (default), `"nuts"`, `"smc"`, `"dime"`}
+\item{sampler}{A method name (\code{"rwmh"}, \code{"pmmh"}, \code{"nuts"},
+\code{"hmc"}, \code{"mala"}, \code{"chees"}, \code{"smc"}, \code{"dsmh"},
+\code{"dime"}) or a \code{\link{sampler_spec}}. \code{NULL} (default)
+keeps the held sampler (\code{"rwmh"} unless set).}
 
-\item{theta0}{Named numeric starting vector for `"rwmh"` / `"nuts"`
-(see Starting point)}
-
-\item{Sigma_prop}{Proposal covariance for `"rwmh"` (see Starting point)}
-
-\item{...}{Further arguments for the chosen sampler (e.g.
-`n_draws`, `n_warmup`, `n_particles`, `verbose`).}
+\item{...}{Fields of that sampler (\code{n_draws}, \code{n_warmup},
+\code{n_chains}, \code{n_particles}, \code{Sigma_prop},
+\code{transform_params}, \code{extra}, ...; see
+\code{\link{sampler_spec}}) or of \code{\link{compute_spec}}
+(\code{seed}, \code{verbose}, \code{parallel}, ...), recorded in the
+returned object's spec. For the held sampler's method the given fields
+are merged into it; another method starts from that method's defaults.}
 }
 \value{
-The updated `dynhr_model`, with `$chains` set to a
-  \code{\link{dynhr_chains}} object.
+The updated \code{dynhr_model}, with \code{$chains} and \code{$fit}
+  set (and \code{$mode} when the mode stage ran).
 }
 \description{
-Dispatches to \code{\link{mcmc}} (RWMH), \code{\link{nuts}},
-\code{\link{smc}} or \code{\link{dime}} on the object's `$log_post`
-closure and stores the returned \code{\link{dynhr_chains}} in `$chains`.
+Runs the sampler stage of \code{\link{run_estimation}} on the held spec
+(\code{outputs$form = "posterior"}) and stores the draws as a
+\code{\link{dynhr_chains}} in \code{$chains} (all chains pooled, with
+\code{chain_list} for several) and the \code{dynhr_posterior_result} in
+\code{$fit} (convergence / R-hat, the posterior mean, the run record).
+Every sampler the runner runs is available, with its defaults: several
+chains, \code{compute$seed} (\code{seed = NULL} keeps the ambient RNG
+stream), the proposal covariance from the mode stage, the
+unconstrained-space transform.
 }
 \section{Starting point}{
 
-For the two point-started samplers (`"rwmh"`, `"nuts"`), `theta0` defaults
-to `$mode$theta_mode` when \code{\link{dm_mode}} has been run and to the
-prior means otherwise -- starting from the prior is a documented default,
-not an error.  `Sigma_prop` (RWMH only) defaults to
-`diag(prior_spec$std^2)`; pass the scaled inverse Hessian from the mode
-finder explicitly for a production run.  `"smc"` and `"dime"` initialise
-from the prior and use neither argument.
+The point-started samplers (\code{"rwmh"}, \code{"pmmh"}, \code{"nuts"},
+\code{"hmc"}, \code{"mala"}, \code{"chees"}) start at the mode and use its
+proposal covariance (unless \code{Sigma_prop} is given): the stored
+\code{$mode} when \code{\link{dm_mode}} has run, else the runner's mode
+stage runs first and its result is stored in \code{$mode}. The
+prior-initialised samplers (\code{"smc"}, \code{"dsmh"}, \code{"dime"})
+need no mode and run none. An SMC cloud is resampled to equal weights
+(\code{$chains$chain}; the weighted particles stay in
+\code{$chains$particles} / \code{$chains$smc_weights}), so the diagnostics
+and posterior means see the weighted posterior.
 }
 
 \examples{
@@ -50,15 +57,15 @@ from the prior and use neither argument.
 obs_vars <- c("ygr", "infl", "intr")
 Y <- as.matrix(read.csv(system.file("extdata/models/nk_demo_data.csv",
                                     package = "dynhr"))[, obs_vars])
-dm <- dm_posterior(dynhr_model(
-  system.file("extdata/models/nk_demo.mod", package = "dynhr"),
-  data = Y, obs_vars = obs_vars))
-set.seed(1)
-dm <- dm_sample(dm, n_draws = 50L, n_warmup = 50L, verbose = FALSE)
+dm <- dynhr_model(system.file("extdata/models/nk_demo.mod", package = "dynhr"),
+                  data = Y, obs_vars = obs_vars)
+dm <- dm_mode(dm, n_iter = 50L)
+dm <- dm_sample(dm, n_draws = 200L, n_warmup = 100L, n_chains = 2L, seed = 1L)
 dm$chains
+dm$fit$convergence$rhat
 }
 }
 \seealso{
-\code{\link{dynhr_model}}, \code{\link{mcmc}},
-  \code{\link{nuts}}, \code{\link{smc}}, \code{\link{dime}}
+\code{\link{dynhr_model}}, \code{\link{run_estimation}},
+  \code{\link{sampler_spec}}
 }

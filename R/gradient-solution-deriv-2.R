@@ -84,20 +84,29 @@
   if (is.null(dyn$param_hessian2_fn) || is.null(dyn$param2_jacobian_fn) ||
       is.null(dyn$hessian3_fn) || is.null(dyn$hessian2_fn)) return(NULL)
 
-  layout <- .dsys_layout(compiled)
+  dy <- .build_dy_ss_o2(compiled, ys)
+  ## The row permutation must be extract_system_matrices()'s, whose compound-LHS
+  ## refinement reads the numeric base Jacobian (see .dsys_layout).
+  J0 <- dyn$jacobian_fn(dy, params, ys)
+  if (any(!is.finite(J0))) return(NULL)
+  layout <- .dsys_layout(compiled, J0)
   tc     <- layout$total_cols
   np     <- ncol(dys)
   col_var_idx <- layout$col_var_idx
   endo_cols   <- which(!is.na(col_var_idx))
-  dy <- .build_dy_ss_o2(compiled, ys)
 
   V <- matrix(0, tc, np)
   V[endo_cols, ] <- dys[col_var_idx[endo_cols], , drop = FALSE]
 
-  ph2 <- tryCatch(dyn$param_hessian2_fn(dy, params, ys), error = function(e) NULL)
-  h2  <- tryCatch(dyn$hessian2_fn(dy, params, ys),        error = function(e) NULL)
-  h3  <- tryCatch(dyn$hessian3_fn(dy, params, ys),        error = function(e) NULL)
-  p2j <- tryCatch(dyn$param2_jacobian_fn(dy, params, ys), error = function(e) NULL)
+  ## (all four are checked non-NULL above, so a bug here is not "absent fn")
+  ph2 <- tryCatch(dyn$param_hessian2_fn(dy, params, ys),
+                  error = function(e) .dynhr_reraise_bug(e, NULL))
+  h2  <- tryCatch(dyn$hessian2_fn(dy, params, ys),
+                  error = function(e) .dynhr_reraise_bug(e, NULL))
+  h3  <- tryCatch(dyn$hessian3_fn(dy, params, ys),
+                  error = function(e) .dynhr_reraise_bug(e, NULL))
+  p2j <- tryCatch(dyn$param2_jacobian_fn(dy, params, ys),
+                  error = function(e) .dynhr_reraise_bug(e, NULL))
   if (is.null(ph2) || is.null(h2) || is.null(h3) || is.null(p2j)) return(NULL)
   if (any(!is.finite(ph2)) || any(!is.finite(h2)) || any(!is.finite(h3)) ||
       any(!is.finite(p2j))) return(NULL)

@@ -26,7 +26,7 @@
     return(model$deep)
   sf <- model$source_file
   if (!is.null(sf) && length(sf) == 1 && !is.na(sf) && file.exists(sf)) {
-    md <- tryCatch(extract_mod_metadata(sf), error = function(e) NULL)
+    md <- tryCatch(extract_mod_metadata(sf), error = function(e) .dynhr_reraise_bug(e, NULL))
     if (!is.null(md$deep) && length(md$deep) > 0) return(md$deep)
   }
   list()
@@ -149,15 +149,31 @@ build_deep_spec <- function(model = NULL, param_names = NULL, block = NULL) {
 #' @return \code{x}, invisibly.
 #' @export
 print.dynhr_deep_spec <- function(x, ...) {
-  n_deep <- sum(x$is_deep)
-  n_aux  <- sum(!x$is_deep)
-  n_auto <- sum(x$source == "auto")
-  cat(sprintf("dynhr deep-parameter taxonomy: %d params (%d deep, %d auxiliary)\n",
-              nrow(x), n_deep, n_aux))
+  ## `[.data.frame` keeps the class on a SUBSET, so a column subset such as
+  ## `spec[, c("param", "partition")]` (or `spec[, "param", drop = FALSE]`)
+  ## still dispatches here, with the taxonomy columns gone. Until 0.9.4 that
+  ## errored with "invalid argument type" out of split(). A subset that no
+  ## longer carries the taxonomy is just a data frame -- print it as one.
+  need <- c("param", "is_deep", "source", "partition")
+  if (!all(need %in% names(x))) {
+    y <- x
+    class(y) <- "data.frame"
+    print(y, ...)
+    return(invisible(x))
+  }
+  n_deep <- sum(vapply(x$is_deep, isTRUE, logical(1)))
+  n_aux  <- nrow(x) - n_deep
+  n_auto <- sum(!is.na(x$source) & x$source == "auto")
+  cat(sprintf(
+    "dynhr deep-parameter taxonomy: %d params (%d deep, %d auxiliary)\n",
+    nrow(x), n_deep, n_aux))
   if (n_auto > 0)
-    cat(sprintf("  note: %d auto-classified (declare a @dynhr:deep block to override)\n",
-                n_auto))
-  by_part <- split(x$param, x$partition)
+    cat(sprintf(
+      "  note: %d auto-classified (declare a @dynhr:deep block to override)\n",
+      n_auto))
+  part <- as.character(x$partition)
+  part[is.na(part) | !nzchar(part)] <- "unclassified"
+  by_part <- split(as.character(x$param), part)
   for (p in names(by_part))
     cat(sprintf("  [%-9s] %s\n", p, paste(by_part[[p]], collapse = ", ")))
   invisible(x)
@@ -209,10 +225,11 @@ print.dynhr_deep_spec <- function(x, ...) {
   if (is.null(loglik_fn)) return(NULL)
   k <- length(theta)
   H <- matrix(NA_real_, k, k)
-  f0 <- tryCatch(loglik_fn(theta), error = function(e) NA_real_)
+  f0 <- tryCatch(loglik_fn(theta), error = function(e) .dynhr_reraise_bug(e, NA_real_))
   if (!is.finite(f0)) return(NULL)
   h <- pmax(abs(theta), 1) * eps
-  ll <- function(p) tryCatch(loglik_fn(p), error = function(e) NA_real_)
+  ll <- function(p) tryCatch(loglik_fn(p),
+                             error = function(e) .dynhr_reraise_bug(e, NA_real_))
   for (i in seq_len(k)) {
     for (j in i:k) {
       tpp <- theta; tpp[i] <- tpp[i] + h[i]; tpp[j] <- tpp[j] + h[j]
@@ -250,8 +267,6 @@ print.dynhr_deep_spec <- function(x, ...) {
     stringsAsFactors = FALSE)
 }
 
-# TRUE if the two intervals do not overlap.
-.ci_disjoint <- function(lo1, hi1, lo2, hi2) (hi1 < lo2) || (hi2 < lo1)
 
 
 # ---------------------------------------------------------------------------
@@ -296,7 +311,7 @@ deep_laplace_draws <- function(loglik_fn, start, lower = NULL, upper = NULL,
     opt <- tryCatch(suppressWarnings(
       stats::optim(m0, neg_fn, method = "Nelder-Mead",
                    control = list(maxit = 1000))),
-      error = function(e) NULL)
+      error = function(e) .dynhr_reraise_bug(e, NULL))
     mode <- if (is.null(opt)) m0 else opt$par
     H <- .deep_observed_information(ll_fn, mode)
     if (is.null(H)) H <- diag(length(mode))
@@ -316,7 +331,7 @@ deep_laplace_draws <- function(loglik_fn, start, lower = NULL, upper = NULL,
     # ---- legacy: Gaussian in x-space, draws truncated to the bounds ----
     g <- .laplace_gauss(
       neg_fn = function(th) { v <- tryCatch(loglik_fn(stats::setNames(th, nm)),
-                                            error = function(e) NA_real_)
+                                            error = function(e) .dynhr_reraise_bug(e, NA_real_))
                               if (is.finite(v)) -v else 1e10 },
       ll_fn  = function(th) loglik_fn(stats::setNames(th, nm)),
       m0 = start)
@@ -332,7 +347,7 @@ deep_laplace_draws <- function(loglik_fn, start, lower = NULL, upper = NULL,
   u0 <- tr$to_u(start)
   g  <- .laplace_gauss(
     neg_fn = function(u) { v <- tryCatch(loglik_fn(stats::setNames(tr$to_x(u), nm)),
-                                         error = function(e) NA_real_)
+                                         error = function(e) .dynhr_reraise_bug(e, NA_real_))
                            if (is.finite(v)) -v else 1e10 },
     ll_fn  = function(u) loglik_fn(stats::setNames(tr$to_x(u), nm)),
     m0 = u0)

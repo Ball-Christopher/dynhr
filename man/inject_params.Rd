@@ -46,7 +46,7 @@ pars <- read_mat_params("grids.mat")           # load from .mat
 m    <- inject_params(m, pars)                 # fills 25 grid params; warns on extras
 comp <- compile_model(m)
 ss   <- solve_steady(comp, m$param_values, y0 = external_ss_vector)
-dr   <- solve_perturbation(comp, ss, order = 1)
+dr   <- solve_perturbation(m, comp, ss$values, m$param_values, order = 1)
 }
 }
 \seealso{

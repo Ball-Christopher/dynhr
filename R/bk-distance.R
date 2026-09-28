@@ -52,8 +52,29 @@
   out <- tryCatch(
     .solve_from_system(sys, model, compiled, ss, params, verbose = FALSE,
                        pencil_only = TRUE),
-    error = function(e) NULL)
+    error = function(e) .dynhr_reraise_bug(e, NULL))
   out
+}
+
+
+## Generalized eigenproblem A v = (alpha / beta) B v: alpha, beta and the right
+## eigenvectors (columns). geigen is in Suggests, so it is used only when
+## installed; otherwise LAPACK's zggev through QZ (Imports) solves the same
+## problem. The eigenvalues agree to rounding; the eigenvectors may differ in
+## scale and phase, which every consumer here divides out (y^H D x ratios).
+.bk_has_geigen <- function() requireNamespace("geigen", quietly = TRUE)
+.bk_ggev <- function(A, B) {
+  if (.bk_has_geigen()) {
+    ge <- geigen::geigen(A, B, symmetric = FALSE)
+    return(list(alpha = ge$alpha, beta = ge$beta, vectors = ge$vectors))
+  }
+  ge <- QZ::qz.zggev(A + 0i, B + 0i, vl = FALSE, vr = TRUE)
+  if (!identical(as.integer(ge$INFO), 0L))
+    .dynhr_abort("generalized eigenvalue solve (LAPACK zggev via QZ) failed ",
+                 "with INFO = ", ge$INFO, "; installing the 'geigen' package ",
+                 "provides the alternative solver.",
+                 class = "dynhr_error_numerical")
+  list(alpha = ge$ALPHA, beta = ge$BETA, vectors = ge$VR)
 }
 
 
@@ -65,12 +86,12 @@
 #'
 #' @keywords internal
 .bk_geigen <- function(D, E, finite_tol = 1e-9) {
-  ge <- geigen::geigen(E, D, symmetric = FALSE)   # E v = (alpha/beta) D v
+  ge <- .bk_ggev(E, D)                             # E v = (alpha/beta) D v
   lam <- ge$alpha / ge$beta
   V   <- ge$vectors                                # right eigenvectors (columns)
   ## Left eigenvectors: right eigenvectors of the transposed pencil
   ## E^H w = conj(lambda) D^H w.
-  geL <- geigen::geigen(Conj(t(E)), Conj(t(D)), symmetric = FALSE)
+  geL <- .bk_ggev(Conj(t(E)), Conj(t(D)))
   lamL <- geL$alpha / geL$beta
   W    <- geL$vectors
   finite <- is.finite(lam) & (abs(ge$beta) > finite_tol * max(abs(ge$alpha), 1))

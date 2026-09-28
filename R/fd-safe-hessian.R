@@ -86,7 +86,8 @@
 #'   return non-finite (or a large penalty, see \code{penalty_tol}) for
 #'   infeasible \code{theta}, not error -- but the routine also tolerates
 #'   \code{fn} raising an error at infeasible points (caught and treated as
-#'   non-finite).
+#'   non-finite). A programming error inside \code{fn} (subscript out of
+#'   bounds, object not found, unused argument, ...) is re-raised instead.
 #' @param theta Named numeric vector, the point to differentiate at.
 #' @param lower,upper Optional named (or plain, matched by position) numeric
 #'   vectors of box constraints; defaults to \code{-Inf}/\code{Inf}. Steps are
@@ -157,7 +158,7 @@ fd_safe_hessian <- function(fn, theta,
   hi <- .fdsh_expand_bound(upper, pnames,  Inf)
 
   safe_fn <- function(th) {
-    v <- tryCatch(fn(th), error = function(e) NA_real_)
+    v <- tryCatch(fn(th), error = function(e) .dynhr_reraise_bug(e, NA_real_))
     if (length(v) != 1L || !is.numeric(v)) return(NA_real_)
     as.numeric(v)
   }

@@ -36,7 +36,7 @@
 #' @param params           Named parameter vector; defaults to model$param_values.
 #' @param planner_objective Character string: the planner objective expression.
 #' @param method           "linear" (faster, default) or "newton" (more robust).
-#' @param beta             Discount factor; defaults to params["beta"] or 0.99.
+#' @param beta             Discount factor; defaults as in ramsey_model() (no 0.99 default).
 #' @param verbose          Print progress messages.
 #'
 #' @return A list with:
@@ -71,13 +71,9 @@
   if (is.null(obj_text) || !nzchar(trimws(obj_text))) {
     stop("No planner objective provided.")
   }
-  if (is.null(beta)) {
-    beta <- if ("beta" %in% names(params) && is.finite(params[["beta"]])) {
-      as.numeric(params[["beta"]])
-    } else {
-      0.99
-    }
-  }
+  if (is.null(beta))
+    beta <- .ramsey_discount(NULL, model, params,
+                             ".compute_ramsey_ss_multipliers")$value
 
   endo_names <- model$var_names
   n_endo <- length(endo_names)
@@ -90,9 +86,9 @@
   }
   if (n_eq < n_endo) {
     if (verbose) {
-      cat(sprintf("  Note: %d equations for %d vars (%d instrument(s)). ",
+      .dynhr_cat(sprintf("  Note: %d equations for %d vars (%d instrument(s)). ",
                   n_eq, n_endo, n_endo - n_eq))
-      cat("Using least-squares for multiplier system.\n")
+      .dynhr_cat("Using least-squares for multiplier system.\n")
     }
   }
 
@@ -109,7 +105,7 @@
   n_forw <- length(forward_idx)
 
   if (verbose) {
-    cat(sprintf("[nn1_multipliers] %d backward, %d forward equations\n",
+    .dynhr_cat(sprintf("[nn1_multipliers] %d backward, %d forward equations\n",
                 n_back, n_forw))
   }
 
@@ -174,7 +170,7 @@
   rank_A <- qr(A)$rank
   if (rank_A < n_eq) {
     if (verbose) {
-      cat(sprintf("  A matrix is rank-deficient (rank %d < %d). Using QR solve.\n",
+      .dynhr_cat(sprintf("  A matrix is rank-deficient (rank %d < %d). Using QR solve.\n",
                   rank_A, n_eq))
     }
     mult <- qr.solve(A, b, tol = 1e-10)
@@ -196,17 +192,17 @@
   max_resid <- max(abs(resid), na.rm = TRUE)
 
   if (verbose) {
-    cat(sprintf("  Multiplier SS solved. Max residual: %.2e\n", max_resid))
+    .dynhr_cat(sprintf("  Multiplier SS solved. Max residual: %.2e\n", max_resid))
     if (n_back > 0) {
-      cat("  Backward multipliers (lambda):\n")
+      .dynhr_cat("  Backward multipliers (lambda):\n")
       for (k in seq_along(lambda)) {
-        cat(sprintf("    %s = %.6f\n", names(lambda)[k], lambda[k]))
+        .dynhr_cat(sprintf("    %s = %.6f\n", names(lambda)[k], lambda[k]))
       }
     }
     if (n_forw > 0) {
-      cat("  Forward multipliers (psi):\n")
+      .dynhr_cat("  Forward multipliers (psi):\n")
       for (k in seq_along(psi)) {
-        cat(sprintf("    %s = %.6f\n", names(psi)[k], psi[k]))
+        .dynhr_cat(sprintf("    %s = %.6f\n", names(psi)[k], psi[k]))
       }
     }
   }

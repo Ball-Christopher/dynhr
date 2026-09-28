@@ -4,18 +4,27 @@
 \alias{pruned_ss_moments3}
 \title{Compute unconditional moments from an order-3 pruned state-space object}
 \usage{
-pruned_ss_moments3(pss3)
+pruned_ss_moments3(pss3, n_ar = 5L)
 }
 \arguments{
 \item{pss3}{A \code{pruned_ss3} object from \code{\link{pruned_state_space3}}.}
+
+\item{n_ar}{Number of autocovariance lags to compute (default 5; 0 to skip).}
 }
 \value{
 A list with \code{mean} (named n_endo vector), \code{var_cov}
-  (n_endo x n_endo), \code{std_dev}, \code{Sigma_x}, \code{Var_x2},
+  (n_endo x n_endo), \code{std_dev}, \code{autocov} and \code{autocorr}
+  (n_endo x n_endo x n_ar arrays), \code{Sigma_x}, \code{Var_x2},
   \code{mean_x2}.
 }
 \description{
 P1 sub-increment: analytic stationary mean and variance of the
 observables under the order-3 AFVRR pruned recursion, via
 \code{.order3_stationary_moments}.
+}
+\details{
+Since 0.9.4 it also returns the exact lag-\eqn{\tau} autocovariances and
+autocorrelations, the order-3 analogue of the \code{autocorr} slot of
+\code{\link{compute_moments_order2}} / \code{\link{pruned_ss_moments}} (which
+order 3 previously did not provide at all).
 }

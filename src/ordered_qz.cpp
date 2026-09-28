@@ -17,31 +17,49 @@
 // Blanchard-Kahn counting logic are unchanged (dgges computes the same Schur
 // form and generalized eigenvalues as QZ::qz; only the ordering routine differs).
 
-// This file calls LAPACK's dgges_ directly (declared below) and uses Armadillo
+// This file calls LAPACK's dgges directly (declared below) and uses Armadillo
 // only as a matrix container -- no Armadillo LAPACK-backed ops. Suppress
 // Armadillo's own LAPACK prototypes so its dgges_ declaration (which carries
 // hidden Fortran string-length args) does not conflict with ours. Newer
 // RcppArmadillo (>= 15) + clang turn that clash into a hard error.
 #define ARMA_DONT_USE_LAPACK
 
+// Fortran hidden string-length arguments (Writing R Extensions, "Fortran
+// character strings"): dgges takes three CHARACTER*1 arguments, and gfortran
+// passes a hidden length for each after the regular arguments. Omitting them
+// is undefined behaviour that LTO / newer gfortran builds flag. USE_FC_LEN_T
+// must be defined BEFORE any R header is included (RcppArmadillo.h pulls them
+// in) so that Rconfig.h defines FC_LEN_T and R_ext/RS.h defines FCLEN/FCONE.
+#define USE_FC_LEN_T
 #include <RcppArmadillo.h>
+#include <R_ext/RS.h>
 // [[Rcpp::depends(RcppArmadillo)]]
+#ifndef FCLEN
+# define FCLEN
+#endif
+#ifndef FCONE
+# define FCONE
+#endif
 
 using Rcpp::List;
 using Rcpp::_;
 
 // LAPACK dgges (double real generalized Schur). Declared explicitly so we do not
 // depend on Armadillo's internal LAPACK wrappers (signatures vary across
-// versions). R ships LAPACK (linked via -lRlapack).
+// versions), and not via R_ext/Lapack.h, whose prototype types the SELCTG
+// callback as `int (*)()` (an empty parameter list in C++). R ships LAPACK
+// (linked via -lRlapack). The three FCLEN are the hidden lengths of JOBVSL,
+// JOBVSR and SORT.
 typedef int (*dgges_selctg)(const double*, const double*, const double*);
 
 extern "C" {
-  void dgges_(const char* JOBVSL, const char* JOBVSR, const char* SORT,
-              dgges_selctg SELCTG, const int* N,
-              double* A, const int* LDA, double* B, const int* LDB,
-              int* SDIM, double* ALPHAR, double* ALPHAI, double* BETA,
-              double* VSL, const int* LDVSL, double* VSR, const int* LDVSR,
-              double* WORK, const int* LWORK, int* BWORK, int* INFO);
+  void F77_NAME(dgges)(const char* JOBVSL, const char* JOBVSR, const char* SORT,
+                       dgges_selctg SELCTG, const int* N,
+                       double* A, const int* LDA, double* B, const int* LDB,
+                       int* SDIM, double* ALPHAR, double* ALPHAI, double* BETA,
+                       double* VSL, const int* LDVSL, double* VSR,
+                       const int* LDVSR, double* WORK, const int* LWORK,
+                       int* BWORK, int* INFO FCLEN FCLEN FCLEN);
 }
 
 // Stability threshold for the SORT callback. dgges's SELCTG takes no extra
@@ -89,11 +107,11 @@ List ordered_qz_cpp(const arma::mat& E, const arma::mat& D,
   // Workspace query.
   double work_query = 0.0;
   int LWORK = -1;
-  dgges_(&JOBVSL, &JOBVSR, &SORT, &qz_selctg, &N,
+  F77_CALL(dgges)(&JOBVSL, &JOBVSR, &SORT, &qz_selctg, &N,
          A.memptr(), &N, B.memptr(), &N, &SDIM,
          ALPHAR.memptr(), ALPHAI.memptr(), BETA.memptr(),
          VSL.memptr(), &N, VSR.memptr(), &N,
-         &work_query, &LWORK, BWORK.data(), &INFO);
+         &work_query, &LWORK, BWORK.data(), &INFO FCONE FCONE FCONE);
   if (INFO != 0)
     return List::create(_["ok"] = false, _["info"] = INFO, _["stage"] = "query");
 
@@ -101,17 +119,25 @@ List ordered_qz_cpp(const arma::mat& E, const arma::mat& D,
   if (LWORK < 8 * N + 16) LWORK = 8 * N + 16;   // LAPACK minimum guard
   std::vector<double> WORK(LWORK);
 
-  dgges_(&JOBVSL, &JOBVSR, &SORT, &qz_selctg, &N,
+  F77_CALL(dgges)(&JOBVSL, &JOBVSR, &SORT, &qz_selctg, &N,
          A.memptr(), &N, B.memptr(), &N, &SDIM,
          ALPHAR.memptr(), ALPHAI.memptr(), BETA.memptr(),
          VSL.memptr(), &N, VSR.memptr(), &N,
-         WORK.data(), &LWORK, BWORK.data(), &INFO);
+         WORK.data(), &LWORK, BWORK.data(), &INFO FCONE FCONE FCONE);
 
-  // INFO in [1, N]: QZ iteration failed. INFO == N+1: reordering failed but
-  // eigenvalues are still correct. INFO == N+2: after reordering, roundoff made
-  // a selected pair no longer satisfy the criterion (cosmetic). Treat <=0 and
-  // N+1/N+2 as usable; hard failures (1..N) signal the caller to fall back.
-  bool ok = (INFO == 0) || (INFO == N + 1) || (INFO == N + 2);
+  // LAPACK dgges INFO codes (LAPACK 3.x reference):
+  //   1..N : the QZ iteration failed;
+  //   N+1  : a failure in DHGEQZ other than the QZ iteration;
+  //   N+2  : after reordering, roundoff changed some complex eigenvalues so
+  //          the leading block no longer satisfies SELCTG (the stable/unstable
+  //          split the caller relies on is not the one computed);
+  //   N+3  : reordering failed in DTGSEN.
+  // Every non-zero code is a FAILURE -- the Schur factors are not a valid
+  // stable-first ordering -- and so is any negative (argument) code. The old
+  // test accepted N+1 and N+2 as "usable". Dynare's mjdgges caller likewise
+  // treats any non-zero info as a QZ failure. `ok = FALSE` makes .solve_qz()
+  // fall back to the QZ-package path.
+  bool ok = (INFO == 0);
 
   return List::create(_["ok"] = ok, _["info"] = INFO, _["sdim"] = SDIM,
                       _["S"] = A, _["T"] = B, _["Q"] = VSL, _["Z"] = VSR,

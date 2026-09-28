@@ -90,6 +90,24 @@
   .interp_only_if_large(gen, txt)
 }
 
+## Dense [n_eq x total_cols x n_params] parameter-Jacobian accessor over the
+## sparse value function (W91): scatters vals_fn()'s entries to their linear
+## indices `lin`. Built here, not inside build_dynamic_model(), so the closure
+## captures only its three arguments -- not the (large) build frame, which
+## would bloat every compiled model in memory and in the compile cache.
+.dense_param_jacobian_fn <- function(vals_fn, lin, dims) {
+  force(vals_fn); force(lin); force(dims)
+  function(dy, params, ss = numeric(0)) {
+    P <- array(0, dim = dims)
+    if (length(lin)) P[lin] <- vals_fn(dy, params, ss)
+    P
+  }
+}
+
+## Parameter-Jacobian value function of a model with no parameter-dependent
+## Jacobian entry (e.g. fully log-linear): no non-zeros.
+.zero_param_jacobian_vals_fn <- function(dy, params, ss = numeric(0)) numeric(0L)
+
 #' Build dynamic model residual and Jacobian functions
 #'
 #' The dynamic model preserves all leads and lags. The Jacobian columns
@@ -589,27 +607,42 @@ build_dynamic_model <- function(model, max_order = 1L,
     # -----------------------------------------------------------------------
     # 5a. Build the parameter-Jacobian function (Tier 11 #3)
     #
-    # Returns an [n_eq x total_cols x n_params] array P with
-    #   P[i, c, k] = ∂²F_i/(∂w_c ∂θ_k)   (explicit, ss held fixed).
+    # SPARSE (W91), in the model-Hessian convention: param_jacobian_vals_fn
+    # returns the numeric vector of the non-zero entries
+    #   v[t] = ∂²F_i/(∂w_c ∂θ_k)   (explicit, ss held fixed)
+    # parallel to param_jac_triplets (row i, col c, param k); param_jac_rc is
+    # the linear index i + (c - 1) n_eq of each entry in an n_eq x total_cols
+    # matrix and param_jac_k its parameter index. (NZSIM: 289 non-zeros of a
+    # 74 x 140 x 75 array.) param_jacobian_fn stays as the DENSE accessor --
+    # the [n_eq x total_cols x n_params] array P[i, c, k] -- scattered from
+    # the same values, for callers that want the full array.
     # NULL when parameter differentiation is unsupported for this model.
     # -----------------------------------------------------------------------
-    if (param_deriv_ok && length(param_jac_triplets) > 0L) {
-        param_jacobian_fn <- .cse_fn(
+    n_param_jac  <- length(param_jac_triplets)
+    param_jac_rc <- vapply(param_jac_triplets, function(t)
+        as.integer(t$row + (t$col - 1L) * n_eq), integer(1))
+    param_jac_k  <- vapply(param_jac_triplets, function(t)
+        as.integer(t$param), integer(1))
+    if (param_deriv_ok && n_param_jac > 0L) {
+        param_jacobian_vals_fn <- .cse_fn(
             lapply(param_jac_triplets, `[[`, "ast"),
-            vapply(param_jac_triplets, function(t)
-                paste0("P[", t$row, ",", t$col, ",", t$param, "]"), character(1)),
-            paste0("P <- array(0, dim = c(", n_eq, "L, ", total_cols,
-                   "L, ", n_params, "L))"), "P",
+            paste0("v[", seq_len(n_param_jac), "L]"),
+            paste0("v <- numeric(", n_param_jac, "L)"), "v",
             endo, exo, params,
             local_vars = local_vars)
     } else if (param_deriv_ok) {
         # Differentiable but no entry depends on any parameter (e.g. a fully
         # log-linear model): the parameter-Jacobian is identically zero.
-        param_jacobian_fn <- function(dy, params, ss = numeric(0))
-            array(0, dim = c(n_eq, total_cols, n_params))
+        param_jacobian_vals_fn <- .zero_param_jacobian_vals_fn
     } else {
-        param_jacobian_fn <- NULL
+        param_jacobian_vals_fn <- NULL
     }
+    param_jacobian_fn <- if (param_deriv_ok)
+        .dense_param_jacobian_fn(param_jacobian_vals_fn,
+                                 param_jac_rc + (param_jac_k - 1L) *
+                                     (n_eq * total_cols),
+                                 c(n_eq, total_cols, n_params))
+    else NULL
 
     # -----------------------------------------------------------------------
     # 5a-2. Build the param-Hessian2 function (Tier 11 #3, order-2 layer)
@@ -799,6 +832,9 @@ build_dynamic_model <- function(model, max_order = 1L,
         residual_asts  = residual_asts,
         jac_triplets   = jac_triplets,
         param_jacobian_fn  = param_jacobian_fn,
+        param_jacobian_vals_fn = param_jacobian_vals_fn,
+        param_jac_rc       = param_jac_rc,
+        param_jac_k        = param_jac_k,
         param_jac_triplets = param_jac_triplets,
         param_deriv_ok     = param_deriv_ok,
         hessian2_built     = build_hess2,

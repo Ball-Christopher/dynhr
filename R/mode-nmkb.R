@@ -36,7 +36,7 @@ nmkb_optimize <- function(fn, par, lower = -Inf, upper = Inf,
   }
 
   if (verbose)
-    cat(sprintf("  nmkb: n=%d  maxfeval=%d  tol=%.1e\n", n, max_iter, tol))
+    .dynhr_cat(sprintf("  nmkb: n=%d  maxfeval=%d  tol=%.1e\n", n, max_iter, tol))
 
   res <- dfoptim::nmkb(par, fn_safe, lower = lower, upper = upper,
                        control = list(maxfeval = max_iter, tol = tol))
@@ -46,7 +46,7 @@ nmkb_optimize <- function(fn, par, lower = -Inf, upper = Inf,
   n_evals  <- res$feval
 
   if (verbose)
-    cat(sprintf("  nmkb done: logpost=%.4f  evals=%d  %s\n",
+    .dynhr_cat(sprintf("  nmkb done: logpost=%.4f  evals=%d  %s\n",
                 -best_val, n_evals, res$message))
 
   list(par        = best_par,

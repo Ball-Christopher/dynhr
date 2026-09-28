@@ -43,7 +43,7 @@
   hit <- sys$exo_names %in% sys$endo_names
   if (any(hit)) {
     exo_in_endo <- sys$exo_names[hit]
-    message(sprintf(
+    .dynhr_inform(sprintf(
       "Removing %d varexo names found in endo list: %s",
       length(exo_in_endo), paste(exo_in_endo, collapse = ", ")))
 
@@ -202,7 +202,16 @@
 #'                 model equations are linearised. Defaults to \code{NULL}
 #'                 (the steady state \code{ss}); supply a non-steady centre to
 #'                 expand around an alternative path.
-#' @return For order=1: DecisionRules object.
+#' @return For order=1: DecisionRules object. Its \code{bk_satisfied} field is
+#'   \code{FALSE} when EITHER half of Blanchard-Kahn fails: the unstable-root
+#'   COUNT, or the RANK condition (a singular QZ block \eqn{Z_{11}}, which
+#'   additionally sets \code{bk_rank_deficient = TRUE}). Before 0.9.4 a rank
+#'   failure returned a pseudo-inverse rule with \code{bk_satisfied = TRUE}.
+#'   The shock loading \code{ghu} solves \eqn{(f_0 + f_+ P) ghu = -f_u} by
+#'   plain LU (as Dynare), however ill-conditioned; only an EXACTLY singular
+#'   system falls back to a pseudo-inverse, with a warning of class
+#'   \code{dynhr_warning_ghu_singular}, \code{ghu_singular = TRUE} and
+#'   \code{bk_satisfied = FALSE}.
 #'   For order=2: DecisionRules2 object.
 #'   For order=3: DecisionRules3 object.
 #'   For order=4: DecisionRules4 object (Levintal compact).
@@ -294,14 +303,14 @@ solve_perturbation <- function(model, compiled, ss, params, verbose = FALSE,
   #   numeric vector → use directly
   # ------------------------------------------------------------------
   if (is.null(ss)) {
-    if (verbose) cat("  Solving steady state (ss=NULL)...\n")
+    if (verbose) .dynhr_cat("  Solving steady state (ss=NULL)...\n")
     ss_result <- solve_steady(compiled, params,
                                y0 = setNames(rep(0, length(compiled$model$var_names)),
                                              compiled$model$var_names),
                                verbose = verbose)
     if (isTRUE(ss_result$converged)) {
       ss <- ss_result$values
-      if (verbose) cat(sprintf("  Steady state solved (max|ss| = %.6e)\n",
+      if (verbose) .dynhr_cat(sprintf("  Steady state solved (max|ss| = %.6e)\n",
                                max(abs(ss))))
     } else {
       stop("Auto steady-state solve failed. ",
@@ -411,7 +420,7 @@ solve_perturbation <- function(model, compiled, ss, params, verbose = FALSE,
       !is.null(compiled$occbin) &&
       compiled$dynamic$n_eq > length(model$var_names)) {
     if (verbose)
-      message(sprintf(
+      .dynhr_inform(sprintf(
         "OccBin perturbation: using slow extract path, selecting relax-regime rows from %d equations",
         compiled$dynamic$n_eq))
     sys <- extract_system_matrices(compiled, ss, params, center = center)
@@ -427,8 +436,8 @@ solve_perturbation <- function(model, compiled, ss, params, verbose = FALSE,
   }
 
   if (verbose){
-    cat("\n=== Full variable classification check ===\n")
-    cat(sprintf("  %-15s  %12s  %12s  %-10s  %s\n",
+    .dynhr_cat("\n=== Full variable classification check ===\n")
+    .dynhr_cat(sprintf("  %-15s  %12s  %12s  %-10s  %s\n",
                 "variable", "max|f_minus|", "max|f_plus|", "class", "flag"))
     for (i in seq_along(sys$endo_names)) {
       fm <- max(abs(sys$f_minus[, i]))
@@ -450,7 +459,7 @@ solve_perturbation <- function(model, compiled, ss, params, verbose = FALSE,
       # Classification says lead, but Jacobian has no lead
       if ((sys$is_fwd[i] || sys$is_mixed[i]) && fp < 1e-10)
         flag <- "*** CLASSIFIED AS FWD/MIXED BUT NO LEAD IN JACOBIAN"
-      cat(sprintf("  %-15s  %12.2e  %12.2e  %-10s  %s\n",
+      .dynhr_cat(sprintf("  %-15s  %12.2e  %12.2e  %-10s  %s\n",
                   sys$endo_names[i], fm, fp, cls, flag))
     }
   }
@@ -545,6 +554,56 @@ solve_perturbation_fast <- function(model, compiled, ss, params,
   .solve_from_system(sys, model, compiled, ss, params, verbose)
 }
 
+## Solve the first-order shock-loading system  M ghu = rhs  by plain LU
+## (LAPACK dgesv, Dynare's backslash), falling back to a pseudo-inverse ONLY
+## when M is EXACTLY singular.
+##
+## Why not base solve(M, rhs): its default tol = .Machine$double.eps refuses
+## any M with rcond below 2.2e-16 ("system is computationally singular") even
+## though LU with partial pivoting is backward-stable there and the solution
+## is accurate to rcond-limited relative error. The old call sites caught that
+## refusal and SILENTLY substituted .safe_inv(M) %*% rhs -- a truncated-SVD
+## pseudo-inverse (rtol 1e-12, no warn_label). On the paper's nk_small corner
+## (rcond(M) = 7.3e-19) that returned a rank-deficient ghu whose AR(1) shock
+## rows were (-0.10, 0.28, -0.29) instead of (0, 1, 0): O(1) model-equation
+## residuals, and a Kalman likelihood that silently dropped most of the data.
+## tol = 0 matches Dynare and a 256-bit reference to ~1e-16 relative there.
+##
+## "Exactly singular" = LAPACK's own verdict: dgetrf meets an exact zero pivot.
+## rcond() runs the SAME dgetrf factorisation and returns 0 in exactly that
+## case (La_dgecon), so `rcond(M) > 0` is the explicit precondition for
+## solve(M, rhs, tol = 0) not to error -- no tryCatch needed. A non-finite M
+## or rhs has no solution to report either way.
+##
+## Returns list(x, singular). `singular = TRUE` means x is a pseudo-inverse
+## artefact (or NaN), NOT a solution: the caller must mark its decision rule
+## invalid (bk_satisfied = FALSE), exactly like a BK rank failure.
+.solve_ghu_lu <- function(M, rhs, warn_label) {
+  M   <- as.matrix(M)
+  rhs <- as.matrix(rhs)
+  n   <- nrow(M)
+  if (n == 0L)
+    return(list(x = matrix(0, 0L, ncol(rhs)), singular = FALSE))
+  if (!all(is.finite(M)) || !all(is.finite(rhs))) {
+    .dynhr_warn(warn_label, ": the system matrix or right-hand side is ",
+                "non-finite, so there is no shock loading ghu; returning NaN ",
+                "and marking the decision rule invalid (bk_satisfied = FALSE).",
+                class = "dynhr_warning_ghu_singular")
+    return(list(x = matrix(NaN, n, ncol(rhs)), singular = TRUE))
+  }
+  rc <- rcond(M)
+  if (isTRUE(rc > 0))
+    return(list(x = solve(M, rhs, tol = 0), singular = FALSE))
+  .dynhr_warn(warn_label, ": the system matrix is EXACTLY singular (LU met a ",
+              "zero pivot), so the shock loading ghu is not determined; ",
+              "returning a pseudo-inverse artefact and marking the decision ",
+              "rule invalid (bk_satisfied = FALSE).",
+              class = "dynhr_warning_ghu_singular")
+  ## One classed warning (above, carrying warn_label) per singular solve;
+  ## .safe_inv's own label-triggered warning would only repeat it.
+  list(x = .safe_inv(M) %*% rhs, singular = TRUE)
+}
+
 # =====================================================================
 # Core solver: Villemot (2011) approach
 # =====================================================================
@@ -573,6 +632,22 @@ solve_perturbation_fast <- function(model, compiled, ss, params,
   if (!isTRUE(getOption("dynhr.use_rcpp", TRUE))) return(FALSE)
   exists("qr_static_transform_cpp", envir = asNamespace("dynhr"),
          inherits = FALSE, mode = "function")
+}
+
+## TRUE when some equation sets endogenous `v` literally to zero (`v = 0` or
+## `0 = v` at date t, the other side after constant simplification, e.g.
+## `v = 0*y`) -- the equations Dynare's preprocessor folds away.  Used by
+## Step 9b below; only the (usually one) equation with a bare `v` side is
+## simplified, so the scan stays cheap inside a posterior loop.
+.is_literal_zero_endo <- function(equations, v) {
+  is_v <- function(a) is.list(a) && identical(a$type, "variable") &&
+    identical(a$name, v) && identical(as.integer(a$lead_lag %||% 0L), 0L)
+  for (eq in equations) {
+    if (!is.list(eq) || is.null(eq$lhs) || is.null(eq$rhs)) next
+    if (is_v(eq$lhs) && ast_is_zero(ast_simplify(eq$rhs))) return(TRUE)
+    if (is_v(eq$rhs) && ast_is_zero(ast_simplify(eq$lhs))) return(TRUE)
+  }
+  FALSE
 }
 
 .solve_from_system <- function(sys, model, compiled, ss, params, verbose,
@@ -620,7 +695,7 @@ solve_perturbation_fast <- function(model, compiled, ss, params,
   if (has_bad) {
     bad_vars_all <- unique(bad_vars_all)
     bad_eqs_all  <- sort(unique(bad_eqs_all))
-    warning(sprintf(
+    .dynhr_warn(sprintf(
       paste0("Non-finite values (NA/NaN/Inf) in system Jacobian matrices ",
              "after extract_system_matrices. Affected variables: %s. ",
              "Affected equations: %s. ",
@@ -653,10 +728,10 @@ solve_perturbation_fast <- function(model, compiled, ss, params,
   p       <- n_minus + n_plus                 # companion pencil dimension
 
   if (verbose) {
-    cat("Variable classification:\n")
-    cat("  static:", n_s, " backward-only:", n_bkw,
+    .dynhr_cat("Variable classification:\n")
+    .dynhr_cat("  static:", n_s, " backward-only:", n_bkw,
         " mixed:", n_mix, " forward-only:", n_fonly, "\n")
-    cat("  n_minus (state):", n_minus, " n_plus (forward):", n_plus,
+    .dynhr_cat("  n_minus (state):", n_minus, " n_plus (forward):", n_plus,
         " p (pencil dim):", p, "\n")
   }
 
@@ -713,13 +788,13 @@ solve_perturbation_fast <- function(model, compiled, ss, params,
     }
 
     if (verbose) {
-      cat("--- QZ diagnostic ---\n")
-      cat("  n =", n, " n_s =", n_s, " n_minus =", n_minus, " n_plus =", n_plus, "\n")
-      cat("  dim(Qf_minus) =", paste(dim(Qf_minus), collapse=" x "), "\n")
-      cat("  row index: (n_s+1):n =", (n_s+1), ":", n, "\n")
-      cat("  cols_minus =", paste(cols_minus, collapse=","), "\n")
-      cat("  # stable eigenvalues =", n_s, " (BK requires", n_minus, ")\n")
-      cat("------------------------\n")
+      .dynhr_cat("--- QZ diagnostic ---\n")
+      .dynhr_cat("  n =", n, " n_s =", n_s, " n_minus =", n_minus, " n_plus =", n_plus, "\n")
+      .dynhr_cat("  dim(Qf_minus) =", paste(dim(Qf_minus), collapse=" x "), "\n")
+      .dynhr_cat("  row index: (n_s+1):n =", (n_s+1), ":", n, "\n")
+      .dynhr_cat("  cols_minus =", paste(cols_minus, collapse=","), "\n")
+      .dynhr_cat("  # stable eigenvalues =", n_s, " (BK requires", n_minus, ")\n")
+      .dynhr_cat("------------------------\n")
     }
 
     # Static recovery block: top n_s rows (undo column pivoting)
@@ -749,11 +824,11 @@ solve_perturbation_fast <- function(model, compiled, ss, params,
   } else {
     # n_d == 0: all variables are static (degenerate case)
     ghx <- matrix(0, nrow = n, ncol = 0)
-    M <- sys$f_zero
-    ghu <- tryCatch(
-      solve(M, -sys$f_exo),
-      error = function(e) .safe_inv(M) %*% (-sys$f_exo)
-    )
+    ## Plain LU (see .solve_ghu_lu): an ill-conditioned but nonsingular M is
+    ## solved, not silently pseudo-inverted.
+    ghu_sol <- .solve_ghu_lu(sys$f_zero, -sys$f_exo,
+                             "solve_perturbation: static ghu system f_zero")
+    ghu <- ghu_sol$x
     rownames(ghx) <- endo
     rownames(ghu) <- endo
     if (n_exo > 0) colnames(ghu) <- sys$exo_names
@@ -763,7 +838,8 @@ solve_perturbation_fast <- function(model, compiled, ss, params,
       state_vars = character(0), state_idx = integer(0),
       n_state = 0L, n_exo = n_exo,
       eigenvalues = complex(0), n_stable = 0L, n_unstable = 0L,
-      bk_satisfied = TRUE
+      bk_satisfied = !ghu_sol$singular, bk_rank_deficient = FALSE,
+      ghu_singular = ghu_sol$singular
     )
     class(dr) <- "DecisionRules"
     return(dr)
@@ -825,8 +901,8 @@ solve_perturbation_fast <- function(model, compiled, ss, params,
   }
 
   if (verbose) {
-    cat("Pencil dimensions:", p, "x", p, "\n")
-    cat("Solving generalized eigenvalue problem...\n")
+    .dynhr_cat("Pencil dimensions:", p, "x", p, "\n")
+    .dynhr_cat("Solving generalized eigenvalue problem...\n")
   }
 
   ## Early exit for callers that only need the reduced companion-form pencil
@@ -905,9 +981,9 @@ solve_perturbation_fast <- function(model, compiled, ss, params,
   }
 
   if (verbose) {
-    cat("  Eigenvalues:", n_unstable_base, "unstable_finite,",
+    .dynhr_cat("  Eigenvalues:", n_unstable_base, "unstable_finite,",
         n_on_unit, "on_unit_circle,", n_unstable, "total_unstable\n")
-    cat("  Required stable:", n_minus, "\n")
+    .dynhr_cat("  Required stable:", n_minus, "\n")
   }
 
   if (verbose) {
@@ -916,22 +992,22 @@ solve_perturbation_fast <- function(model, compiled, ss, params,
     ev_mod <- Mod(ev)
     ev_ord <- order(ev_mod)
     tol_tag <- 1e-6
-    cat("  Eigenvalue moduli (sorted):\n")
+    .dynhr_cat("  Eigenvalue moduli (sorted):\n")
     for (j in ev_ord) {
       tag <- if (ev_mod[j] < 1 - tol_tag) "S"
              else if (abs(ev_mod[j] - 1.0) < tol_tag) "~1"
              else "U"
-      cat(sprintf("    [%2d] |??| = %.10f  %s\n", j, ev_mod[j], tag))
+      .dynhr_cat(sprintf("    [%2d] |??| = %.10f  %s\n", j, ev_mod[j], tag))
     }
-    cat("  n_unstable reported by .solve_qz:", n_unstable, "\n")
+    .dynhr_cat("  n_unstable reported by .solve_qz:", n_unstable, "\n")
     # -----------------------------
   }
 
   if (verbose) {
-    cat("  n_plus (pencil):", n_plus, " n_plus_bk (Jacobian):", n_plus_bk,
+    .dynhr_cat("  n_plus (pencil):", n_plus, " n_plus_bk (Jacobian):", n_plus_bk,
         " n_plus_bk_adj (model-based):", n_plus_bk_adj,
         " n_unstable:", n_unstable, "\n")
-    cat("    model: n_fwd=", n_fwd_model, " n_mix=", n_mix_model,
+    .dynhr_cat("    model: n_fwd=", n_fwd_model, " n_mix=", n_mix_model,
         " n_pred_mix=", n_pred_mix_model, "\n")
   }
 
@@ -946,7 +1022,7 @@ solve_perturbation_fast <- function(model, compiled, ss, params,
     bk_ok <- TRUE
     n_plus_bk_adj <- n_plus_bk_alt
     if (verbose) {
-      cat("  BK satisfied using n_plus_bk_alt (excl. AUX forward-only):",
+      .dynhr_cat("  BK satisfied using n_plus_bk_alt (excl. AUX forward-only):",
           n_plus_bk_alt, "\n")
     }
   }
@@ -965,7 +1041,7 @@ solve_perturbation_fast <- function(model, compiled, ss, params,
         n_unstable, n_plus_bk_adj
       )
     }
-    warning(msg, " Returning DR with bk_satisfied=FALSE.")
+    .dynhr_warn(msg, " Returning DR with bk_satisfied=FALSE.")
     bk_ok <- FALSE
     # Continue to compute decision rules so callers can inspect the result
     # and decide how to handle (e.g. OSR loss function returns a penalty).
@@ -985,8 +1061,19 @@ solve_perturbation_fast <- function(model, compiled, ss, params,
 
     ## Rank truncation here means the QZ blocks are numerically singular, so
     ## `g_minus_y` below is built from a PSEUDO-inverse rather than an inverse
-    ## -- the returned rule is then only one of infinitely many solutions, yet
-    ## `bk_satisfied` stays TRUE. Warn (once per solve) instead of hiding it.
+    ## -- the returned rule is then only one of infinitely many solutions.
+    ##
+    ## Blanchard-Kahn has TWO parts: the root COUNT (checked in step 5) and the
+    ## RANK condition, which is exactly `Z11` (equivalently `Z22`) nonsingular
+    ## -- the unstable deflating subspace must be spanned by the jump
+    ## variables. Before 0.9.4 only `.safe_inv()` noticed, with a warning, and
+    ## `bk_satisfied` stayed TRUE, so the pseudo-inverse artefact was fed
+    ## straight to the Kalman filter and estimation could accept such points.
+    ## Record the failure and flip `bk_satisfied` below (see `bk_rank_ok`).
+    z11_sv <- svd(Z11, nu = 0L, nv = 0L)$d
+    bk_rank_ok <- length(z11_sv) > 0L && all(is.finite(z11_sv)) &&
+      min(z11_sv) > 1e-12 * max(z11_sv)
+
     Z11_inv <- .safe_inv(Z11, warn_label = "solve_perturbation: QZ block Z11")
     T11_inv <- .safe_inv(T11, warn_label = "solve_perturbation: QZ block T11")
 
@@ -1001,6 +1088,21 @@ solve_perturbation_fast <- function(model, compiled, ss, params,
   } else {
     g_minus_y <- matrix(0, nrow = 0, ncol = 0)
     g_plus_y  <- matrix(0, nrow = 0, ncol = 0)
+    bk_rank_ok <- TRUE
+  }
+
+  ## BK rank condition (see the `bk_rank_ok` note above). A rank failure makes
+  ## the returned rule non-unique, so it is NOT a solution: report it the same
+  ## way a root-count violation is reported, i.e. bk_satisfied = FALSE, so that
+  ## every `isTRUE(dr$bk_satisfied)` gate (make_log_posterior, the Kalman
+  ## likelihood path, order-2/3 recursions, ...) rejects the point.
+  if (!bk_rank_ok) {
+    .dynhr_warn(
+      "Blanchard-Kahn RANK condition violated: the QZ block Z11 is singular, ",
+      "so the decision rule is a pseudo-inverse artefact and is not unique. ",
+      "Returning DR with bk_satisfied=FALSE.",
+      class = "dynhr_warning_bk_rank")
+    bk_ok <- FALSE
   }
 
   # ------------------------------------------------------------------
@@ -1110,11 +1212,16 @@ solve_perturbation_fast <- function(model, compiled, ss, params,
     P[, state_idx] <- ghx
   }
 
+  ## Plain LU, tol = 0 (Dynare's backslash): see .solve_ghu_lu. Base solve()'s
+  ## default rcond refusal used to route an ill-conditioned but NONSINGULAR M
+  ## to a silent truncated-SVD pseudo-inverse, i.e. a wrong ghu marked
+  ## bk_satisfied = TRUE. Only an exactly singular M (zero LU pivot) falls
+  ## back now, with a warning, and the rule is then flagged invalid below.
   M <- sys$f_zero + sys$f_plus %*% P
-  ghu <- tryCatch(
-    solve(M, -sys$f_exo),
-    error = function(e) .safe_inv(M) %*% (-sys$f_exo)
-  )
+  ghu_sol <- .solve_ghu_lu(M, -sys$f_exo,
+                           "solve_perturbation: ghu system f_zero + f_plus P")
+  ghu <- ghu_sol$x
+  if (ghu_sol$singular) bk_ok <- FALSE
 
   # NOTE (2026-05-31): a hardcoded `shock_ar1_map` patch used to live here. It
   # zeroed the ghu column of `eps_pref_` (keeping only the unit impact on
@@ -1152,12 +1259,25 @@ solve_perturbation_fast <- function(model, compiled, ss, params,
   # Iid shocks (e.g. ireland_2004 zt with rho_z=0) have ghx[v,] = 0
   # but ghu[v,] != 0, so they are NOT zeroed -- matching Dynare which
   # keeps iid shock states (harmless zero-root state).
+  #
+  # Scope (0.9.4, W45): Dynare 7.1 folds v away ONLY when an equation
+  # reads literally `v = 0` (either side, after constant simplification:
+  # `v = 0`, `0 = v`, `v = 0*y` are folded; `rho*v = 0` and `v = rho`
+  # are NOT -- v stays a state with its true, non-zero ghx column).  So
+  # a zero ghx/ghu ROW alone is not enough: a state that is zero along
+  # every path from the steady state can still carry a real column.
+  # The canonical case is a Ramsey multiplier whose FOC pins it to zero
+  # (`MULT_2*sigma = 0`): MULT_2(-1) enters the other FOCs, Dynare
+  # reports the column, and the OBC slack rule needs it after a period
+  # in which a constraint made MULT_2 non-zero.  Zeroing it gave a
+  # discretion-like rule for that state.
   # ------------------------------------------------------------------
   if (n_minus > 0) {
     const_tol <- 1e-10
     for (ci in seq_len(n_minus)) {
       vi <- state_idx[ci]
-      if (max(abs(ghx[vi, ])) < const_tol && max(abs(ghu[vi, ])) < const_tol) {
+      if (max(abs(ghx[vi, ])) < const_tol && max(abs(ghu[vi, ])) < const_tol &&
+          .is_literal_zero_endo(model$equations, endo[vi])) {
         ghx[, ci] <- 0
       }
     }
@@ -1197,7 +1317,7 @@ solve_perturbation_fast <- function(model, compiled, ss, params,
       error = function(e) NA_real_)
     if (is.finite(state_sr) && state_sr > 1 + 1e-6) {
       if (verbose)
-        cat(sprintf(paste0("  Post-solve guard: realized state transition is ",
+        .dynhr_cat(sprintf(paste0("  Post-solve guard: realized state transition is ",
                            "explosive (radius %.4g > 1); bk_satisfied = FALSE.\n"),
                     state_sr))
       bk_ok <- FALSE
@@ -1217,14 +1337,22 @@ solve_perturbation_fast <- function(model, compiled, ss, params,
     n_exo        = n_exo,
     eigenvalues  = qz_result$eigenvalues,
     n_unstable   = n_unstable,
-    bk_satisfied = bk_ok
+    bk_satisfied = bk_ok,
+    ## TRUE when BK failed specifically through the RANK condition (singular
+    ## QZ block Z11) rather than the root count. D39 classifies on this
+    ## instead of matching warning text.
+    bk_rank_deficient = !bk_rank_ok,
+    ## TRUE when the ghu system M = f_zero + f_plus P was EXACTLY singular
+    ## (zero LU pivot), so ghu is a pseudo-inverse artefact and bk_satisfied
+    ## was set FALSE (see .solve_ghu_lu).
+    ghu_singular = ghu_sol$singular
   )
   class(dr) <- "DecisionRules"
 
   if (verbose) {
-    cat("Decision rules computed.\n")
-    cat("  ghx:", nrow(dr$ghx), "x", ncol(dr$ghx), "\n")
-    cat("  ghu:", nrow(dr$ghu), "x", ncol(dr$ghu), "\n")
+    .dynhr_cat("Decision rules computed.\n")
+    .dynhr_cat("  ghx:", nrow(dr$ghx), "x", ncol(dr$ghx), "\n")
+    .dynhr_cat("  ghu:", nrow(dr$ghu), "x", ncol(dr$ghu), "\n")
   }
 
   dr

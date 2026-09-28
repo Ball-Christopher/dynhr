@@ -115,6 +115,68 @@
 ### The C++ backend (src/kalman_univariate.cpp) runs the whole loop in one
 ### call; .kf_univariate_loop_R is the bit-mirroring fallback (same
 ### options(dynhr.use_rcpp) switch as the standard filter).
+###
+### DIFFUSE-PHASE TOLERANCES (W77, 2026-09-26). P_inf is the unit-free
+### diffuse direction (A_inf A_inf' from .kf_diffuse_P0), so F_inf = Z P_inf Z'
+### and P_inf itself carry NO units of the data, while F_star / P_star carry
+### the data's squared units. The diffuse update / diffuse-exit tests are
+### therefore on F_inf and P_inf ALONE -- F_inf > diffuse_tol and
+### max|P_inf| < conv_tol, Dynare's form (univariate_kalman_filter_d.m:
+### Finf > diffuse_kalman_tol). They used to be scaled by max(1, F_star) /
+### max(1, max|P_star|): with every shock std and the data's deviations x c
+### the threshold grew as c^2, so at c = 1e4 the diffuse phase ended while
+### P_inf was still O(1) -- a local linear trend's exact diffuse loglik was
+### 10 nats off the rescale identity loglik + (N - d) log c = const, and the
+### diffuse smoother's states 2% off. Same rule in .kf_diffuse_phase, the
+### diffuse smoother (R/smoother-diffuse.R), the diffuse adjoint
+### (R/gradient-adjoint-diffuse.R, src/kf_adjoint_diffuse.cpp) and
+### src/kalman_univariate.cpp.
+
+### INFORMATIVE SKIPS (dynhr_warning_dropped_observations). A component whose
+### forecast variance F is <= kalman_tol is skipped -- the right thing when it
+### is an exact linear combination of what was already processed, because then
+### it is perfectly predicted and v = y - Z a is round-off. But a skipped
+### component with a LARGE innovation is an observation the model assigns
+### (numerically) zero probability, and skipping it discards data: on a solver
+### artefact (a rank-deficient ghu) 866 of 900 observations went this way and
+### the log-likelihood came out ~13000 nats too HIGH. The rule counting such a
+### skip as informative is
+###     |v| > sqrt(kalman_tol) * max(1, |y|)
+### F <= kalman_tol bounds the predictive sd by sqrt(kalman_tol) (both in the
+### data's units, like Dynare's absolute kalman_tol), so |v| above it is at
+### least a one-sd surprise that the filter did not see. The max(1, |y|) floor
+### keeps round-off out: v carries error ~ eps * |y|, 11 orders below
+### sqrt(1e-10) * |y|, so a perfectly predicted component never counts. Same
+### rule in src/kalman_univariate.cpp.
+.kf_informative_skip <- function(v, y, kalman_tol) {
+  abs(v) > sqrt(kalman_tol) * max(1, abs(y))
+}
+
+### Diagnostic only: the log-likelihood is NOT changed (no -Inf) -- the skip is
+### Dynare's convention and the number stays comparable with it. Throttled the
+### way the condition layer asks for anything reachable from a per-draw
+### likelihood: inside a run epoch (an estimation / mode-finding / SMC entry
+### point) it fires ONCE per run with the repeats counted in the epoch summary;
+### a direct kalman_filter() call outside any run warns every time.
+.kf_warn_dropped_informative <- function(n_skipped, n_skipped_inf, n_present) {
+  n_inf <- sum(as.integer(n_skipped_inf))
+  if (!(n_inf > 0L)) return(invisible(FALSE))
+  n_drop <- sum(as.integer(n_skipped))
+  .dynhr_warn(sprintf(paste0(
+    "kalman_filter: the univariate filter skipped %d of %d observation ",
+    "component(s) because their forecast variance was <= kalman_tol, and %d ",
+    "of those had a NON-negligible innovation (|v| > sqrt(kalman_tol) * ",
+    "max(1, |y|)): the model assigns them (numerically) zero probability, so ",
+    "the log-likelihood silently ignores real data and can be far TOO HIGH. ",
+    "Typical causes: a degenerate decision rule, a stochastically singular ",
+    "model, or badly scaled observables. See $diagnostics$n_dropped_informative ",
+    "/ $diagnostics$dropped_informative_by_period; the log-likelihood value ",
+    "itself is unchanged."), n_drop, n_present, n_inf),
+    once = !is.null(.dynhr_msg_state$epoch),
+    key  = "kalman_filter:dropped_informative_observations",
+    class = "dynhr_warning_dropped_observations")
+  invisible(TRUE)
+}
 
 .HAS_RCPP_KALMAN_UNI <- function() {
   if (!isTRUE(getOption("dynhr.use_rcpp", TRUE))) return(FALSE)
@@ -159,6 +221,12 @@
   ## already been processed. Reported in kalman_filter()'s diagnostics so a
   ## parity harness can see it without parsing a warning.
   n_skipped <- integer(n_T)
+  ## ...and how many of those skipped components carried a NON-NEGLIGIBLE
+  ## innovation. A skipped component is only harmless when it is perfectly
+  ## predicted (v ~ 0); a zero forecast variance with |v| well above round-off
+  ## is an observation the model says is impossible, and skipping it silently
+  ## discards information (see .kf_informative_skip for the rule).
+  n_skipped_inf <- integer(n_T)
 
   loglik <- 0
   ok     <- TRUE
@@ -202,7 +270,7 @@
       if (diffuse) {
         K_inf <- drop(P_inf %*% Zi)
         F_inf <- sum(Zi * K_inf)
-        if (F_inf > diffuse_tol * max(1, F_star)) {
+        if (F_inf > diffuse_tol) {         # unit-free (see header, W77)
           ## Diffuse update (DK 2012 sec. 7.2.5); same renormalization
           ## convention as the multivariate Case B in .kf_diffuse_phase.
           ll_t   <- ll_t - 0.5 * log(F_inf)
@@ -223,6 +291,8 @@
         ## it. A deterministic known-shock row is not counted -- it was
         ## applied above, not dropped.
         n_skipped[t] <- n_skipped[t] + 1L
+        if (.kf_informative_skip(v, y_i, kalman_tol))
+          n_skipped_inf[t] <- n_skipped_inf[t] + 1L
       }
     }
 
@@ -242,7 +312,7 @@
     if (diffuse) {
       P_inf <- Tb %*% P_inf %*% t(Tb)
       P_inf <- (P_inf + t(P_inf)) * 0.5
-      if (max(abs(P_inf)) < conv_tol * max(1, max(abs(P_star)))) {
+      if (max(abs(P_inf)) < conv_tol) {  # P_inf is unit-free (W77)
         diffuse   <- FALSE
         d_diffuse <- t
       }
@@ -254,7 +324,7 @@
   list(loglik = loglik, a = a, filtered = filtered, ok = ok,
        d_diffuse = d_diffuse, diffuse_failed = diffuse_failed,
        ll_contrib = ll_contrib, det_applied = det_applied, P = P_star,
-       n_skipped = n_skipped)
+       n_skipped = n_skipped, n_skipped_informative = n_skipped_inf)
 }
 
 ### Builds the augmented system and dispatches to C++ or the R fallback.
@@ -280,6 +350,15 @@
   ## ss_lock (runs unlocked), so univariate_ss degrades gracefully without Rcpp.
   ## A time-varying shock_scale is likewise incompatible with a frozen gain.
   ss_lock <- isTRUE(ss_lock) && !anyNA(Y_minus_d) && is.null(shock_scale)
+  ## Per-observable me_variance (H = diag(me)): the C++ kernel takes ONE
+  ## scalar, so a vector travels as the time-constant part of me_extra and
+  ## runs the R loop, whose F_star adds me_extra[i, t] observable by
+  ## observable. A scalar is left alone (bit-identical, C++ eligible).
+  if (length(me_variance) > 1L) {
+    me_full  <- matrix(me_variance, nrow(Y_minus_d), ncol(Y_minus_d))
+    me_extra <- if (is.null(me_extra)) me_full else me_full + me_extra
+    me_variance <- 0
+  }
   n_state <- nrow(TT)
   n_exo   <- ncol(RR)
   nb      <- n_state + n_exo
@@ -525,7 +604,7 @@
     from_dr <- from_dr[exo, exo, drop = FALSE]
   if (isTRUE(all.equal(unname(from_dr), unname(resolved), tolerance = 1e-12)))
     return(invisible(FALSE))
-  warning(what, ": `dr$Sigma_e` disagrees with the covariance implied by the ",
+  .dynhr_warn(what, ": `dr$Sigma_e` disagrees with the covariance implied by the ",
           "model's shocks block at these `params`, and it is NOT used here -- ",
           "`params` is authoritative, so that a decision rule solved once can ",
           "be reused while the likelihood is evaluated at many parameter ",
@@ -557,10 +636,14 @@
 ### so kappa's round-off lands directly in the initial state and s_1 no longer
 ### equals T s_0. Give the model a `shocks;` block and the same case balances
 ### to 1.1e-10 (kappa) or 1.7e-16 (the exact-diffuse/stationary default).
+### (Since the 2026-09-25 fix wave a singular F restarts kalman_smoother on the
+### univariate recursion, which never forms that product, so the reported
+### case itself now balances to ~1e-17; the warning stays, because the model
+### is still degenerate.)
 .kf_warn_zero_shock_cov <- function(Sigma_e, what) {
   if (is.null(Sigma_e) || !length(Sigma_e)) return(invisible(FALSE))
   if (any(abs(Sigma_e) > 0)) return(invisible(FALSE))
-  warning(what, ": every shock has zero variance -- Sigma_e is entirely zero, ",
+  .dynhr_warn(what, ": every shock has zero variance -- Sigma_e is entirely zero, ",
           "so the model has no stochastic structure and the likelihood and ",
           "smoothed states are degenerate. The usual cause is a `.mod` file ",
           "with no `shocks;` block. A per-shock `stderr 0` is supported (it is ",
@@ -584,17 +667,50 @@
 ### is -26.8. A likelihood that is too HIGH is the dangerous direction -- an
 ### optimiser walks straight into it.
 ###
-### The right test is already in the package, twice: the univariate filter
-### skips an observable whose conditional variance is below `kalman_tol`, and
-### .smoother_informative_obs() picks the informative subset by the same rule.
-### The i-th squared diagonal of the Cholesky factor IS that conditional
-### variance, so the test costs one `diag()` on a factorisation that has
-### already been computed.
-.kf_F_singular <- function(Fc, Ft, tol = .KF_ZERO_VAR_TOL) {
-  piv <- diag(Fc)^2
+### The rule is Dynare 7.1's (kalman/likelihood/kalman_filter.m, the
+### `badly_conditioned_F` block), which sends the step to the univariate filter
+### only when
+###     rcond(F) < kalman_tol  AND
+###     ( any(diag(F) < kalman_tol)  OR  rcond(F ./ (sig*sig')) < kalman_tol )
+### with sig = sqrt(diag(F)); an F that is ill-conditioned only by the SCALE
+### of its components is inverted through its correlation form instead. rcond
+### is the reciprocal 1-norm condition number, computed here exactly from the
+### inverse the caller needs anyway (Dynare's LAPACK rcond is an estimate of the
+### same quantity), so the test is scale-INVARIANT wherever rcond(F) >= tol.
+###
+### The rule it replaces cut the Cholesky pivots (the conditional variances) at
+### the ABSOLUTE kalman_tol = 1e-10, which misclassified a well-conditioned F
+### of small scale as singular: art_zlb_mcp (observable variances ~1e-9,
+### rcond(F) ~0.01, correlation rcond 0.05-0.14) had 220 of its 360
+### components dropped by the univariate fallback, and multiplying every shock
+### std and the data by c gave loglik + n*log(c) = -2486.79 / 1227.49 /
+### 3280.36 at c = 1e-3 / 1 / 1e3 against the dense Gaussian 3280.365. An
+### EXACT singularity (an observable that is an exact combination of others,
+### no measurement error) has rcond(corr F) at round-off at every scale and is
+### still caught. The univariate filter's own drop (conditional variance <=
+### the absolute kalman_tol) is Dynare's univariate rule and is unchanged.
+###
+### `Fc` is the (upper) Cholesky factor of `Ft` -- or of Ft[piv, piv] for a
+### pivoted factor (attr "pivot"); `Fi`, when supplied, is the inverse of
+### crossprod(Fc) (saves the chol2inv the caller does anyway). Mirrored by
+### kalman_standard_loop_cpp() in src/kalman_ss.cpp; keep the two in step.
+.kf_rcond1 <- function(A, Ai) {
+  1 / (max(colSums(abs(A))) * max(colSums(abs(Ai))))
+}
+.kf_F_singular <- function(Fc, Ft, tol = .KF_ZERO_VAR_TOL, Fi = NULL) {
+  piv <- diag(Fc)
   if (!length(piv)) return(FALSE)
-  cut <- max(tol, nrow(Ft) * max(abs(diag(Ft))) * .Machine$double.eps)
-  !all(is.finite(piv)) || min(piv) <= cut
+  dF <- diag(Ft)
+  if (!all(is.finite(piv)) || any(piv <= 0) || !all(is.finite(dF)) ||
+      any(dF <= 0)) return(TRUE)
+  if (is.null(Fi)) Fi <- chol2inv(Fc)
+  if (!all(is.finite(Fi))) return(TRUE)
+  if (!(.kf_rcond1(Ft, Fi) < tol)) return(FALSE)
+  if (any(dF < tol)) return(TRUE)
+  sg  <- sqrt(dF)
+  perm <- attr(Fc, "pivot")
+  sgp <- if (is.null(perm)) sg else sg[perm]
+  .kf_rcond1(Ft / outer(sg, sg), Fi * outer(sgp, sgp)) < tol
 }
 
 
@@ -675,6 +791,62 @@
 }
 
 
+### -- Measurement-error variance: scalar or one value per observable ---------
+###
+### `me_variance` is the variance of iid Gaussian measurement error u_t with
+### Var(u_t) = H = diag(me). A SCALAR means H = me * I (every observable the
+### same) and is returned untouched, so every scalar code path stays
+### bit-identical. A length-n_obs vector is the per-observable diagonal
+### H = diag(me_1, ..., me_n); named entries are matched to `obs_vars` by name
+### (a same-length vector in another order is a reorder request, the rule
+### .kf_init_mean() applies to `a0`). An all-equal vector IS the scalar case and
+### is collapsed to it. Before 0.9.4 a vector reached `if (me_variance > 0)`
+### and died with "the condition has length > 1" -- inside make_log_posterior's
+### tryCatch that became loglik = -Inf for EVERY draw, silently.
+###
+### `allow_vector = FALSE` is for the consumers that only implement H = me * I
+### (particle filters, the PSKF-free non-Kalman likelihoods, ...): a genuine
+### per-observable vector is refused there with a classed error instead of
+### being recycled or misread.
+.kf_me_variance <- function(me_variance, obs_vars, what = "kalman_filter",
+                            allow_vector = TRUE) {
+  n_obs <- length(obs_vars)
+  if (!is.numeric(me_variance) || length(me_variance) == 0L ||
+      anyNA(me_variance) || any(!is.finite(me_variance)) ||
+      any(me_variance < 0))
+    .dynhr_abort(what, ": `me_variance` must be a non-negative finite number ",
+                 "-- a scalar, or one variance per observable.",
+                 class = "dynhr_error_me_variance")
+  if (length(me_variance) == 1L) return(me_variance)
+  if (!allow_vector && length(unique(as.numeric(me_variance))) > 1L)
+    .dynhr_abort(what, ": a per-observable `me_variance` vector (length ",
+                 length(me_variance), ") is not supported here -- this ",
+                 "likelihood implements a common measurement-error variance ",
+                 "(H = me_variance * I) only. Pass a scalar, or use the Kalman ",
+                 "filter (kalman_filter(), likelihood = \"gaussian\"), which ",
+                 "takes H = diag(me_variance).",
+                 class = c("dynhr_error_me_variance_vector",
+                           "dynhr_error_me_variance"))
+  if (!allow_vector) return(as.numeric(me_variance)[1L])
+  if (length(me_variance) != n_obs)
+    .dynhr_abort(what, ": `me_variance` must be a scalar or have one entry per ",
+                 "observable (", n_obs, "); got length ", length(me_variance),
+                 ".", class = "dynhr_error_me_variance")
+  nm <- names(me_variance)
+  if (!is.null(nm) && any(nzchar(nm))) {
+    if (anyDuplicated(nm) || !setequal(nm, obs_vars))
+      .dynhr_abort(what, ": the names of `me_variance` (",
+                   paste(nm, collapse = ", "), ") must be exactly the ",
+                   "observables (", paste(obs_vars, collapse = ", "), ").",
+                   class = "dynhr_error_me_variance")
+    me_variance <- me_variance[obs_vars]
+  }
+  me_variance <- as.numeric(me_variance)
+  if (all(me_variance == me_variance[1L])) return(me_variance[1L])
+  me_variance
+}
+
+
 ### -- User-supplied initial condition (a0 / P0) ------------------------------
 ###
 ### Both entry points hard-coded a zero-mean state and a lik_init-derived P0,
@@ -720,6 +892,23 @@
   as.numeric(a0)
 }
 
+### Is a Lyapunov solution a usable STATIONARY initial covariance? Finite, and
+### positive semi-definite up to round-off RELATIVE to its own scale (W77).
+### lik_init = "auto" (kalman_filter, kalman_filter_student_t, the Kim filters)
+### and the gradient kernels' init choice (.grad_needs_diffuse_init) all ask
+### this on a near-unit-root TT. The test used to be ABSOLUTE,
+### min eig > -1e-8: a singular-but-valid P0 (an exact linear dependence
+### among states) has a round-off eigenvalue ~ -eps * max|P0|, which crosses
+### -1e-8 once max|P0| ~ 1e8 -- so the same model with every shock std and
+### the data x 1e4 switched to the exact-diffuse init (18 nats off the
+### rescale identity), and a genuinely non-PSD P0 of small scale passed.
+.kf_stationary_P0_ok <- function(P0, tol = 1e-8) {
+  if (is.null(P0) || !all(is.finite(P0))) return(FALSE)
+  if (length(P0) == 0L) return(TRUE)
+  ev <- eigen((P0 + t(P0)) / 2, symmetric = TRUE, only.values = TRUE)$values
+  min(ev) >= -tol * max(abs(ev))
+}
+
 ### P0 validation. Symmetrised on the way through (round-off in a
 ### user-constructed covariance is expected); a genuinely asymmetric or
 ### negative-definite matrix is refused rather than silently repaired.
@@ -738,14 +927,19 @@
            call. = FALSE)
     P0 <- P0[state_names, state_names, drop = FALSE]
   }
+  ## Both checks RELATIVE to the matrix's own scale (W77): with a max(1, .)
+  ## floor they were absolute below max|P0| = 1, so a small-scale P0 (a model
+  ## in small units, or every std x 1e-4) passed with an asymmetry or a
+  ## negative eigenvalue of 1e-9 -- i.e. 10% of its size.
+  p0_scale <- max(abs(P0))
   asym <- max(abs(P0 - t(P0)))
-  if (asym > 1e-8 * max(1, max(abs(P0))))
+  if (asym > 1e-8 * p0_scale)
     stop(sprintf("%s: `P0` is not symmetric (max |P0 - t(P0)| = %.3g).",
                  what, asym), call. = FALSE)
   P0 <- (P0 + t(P0)) * 0.5
   ev <- tryCatch(min(eigen(P0, symmetric = TRUE, only.values = TRUE)$values),
                  error = function(e) NA_real_)
-  if (is.finite(ev) && ev < -1e-8 * max(1, max(abs(P0))))
+  if (is.finite(ev) && ev < -1e-8 * p0_scale)
     stop(sprintf("%s: `P0` is not positive semi-definite (smallest eigenvalue %.3g).",
                  what, ev), call. = FALSE)
   dimnames(P0) <- if (is.null(state_names)) NULL else list(state_names, state_names)
@@ -755,8 +949,20 @@
 
 ### -- DARE solver (unchanged from v3) --------------------------------------------
 
+### `relative = TRUE` stops on max|P_new - P| < tol * max(|P_new|, |QQ|)
+### (scale-equivariant; |QQ| is the size of the terms whose round-off
+### floors the iteration, so a fixed point at P = 0 -- a state the
+### observables reveal exactly -- still converges); the default absolute
+### test is kept for the one caller that
+### scales `tol` itself (diag-pre-d37-komunjer-ng.R). kalman_filter's drift
+### diagnostic uses the relative form at the steady-state lock's 1e-12
+### (.LYAP_TOL; W77): with an absolute 1e-14 the fixed point was unreachable
+### once P ~ 1e4 (round-off alone is ~1e-12), so method = "dare" warned "did
+### not converge" whenever every shock std and the data were scaled by
+### >= 100, and stopped ~1e-6-relative early at 1e-4. (1e-14 RELATIVE is
+### below round-off for a P of order 1e-2: it never converged either.)
 .solve_dare <- function(TT, ZZ, QQ, HH, SS, me_diag = NULL,
-                        tol = .DARE_TOL, max_iter = 1000) {
+                        tol = .DARE_TOL, max_iter = 1000, relative = FALSE) {
   n_s <- nrow(TT)
   tZZ <- t(ZZ)
   P   <- solve_lyapunov(TT, QQ)
@@ -771,7 +977,8 @@
     K      <- (TT %*% PZ + SS) %*% Fi
     P_new  <- tcrossprod(TT %*% P, TT) + QQ - tcrossprod(K %*% Ft, K)
     P_new  <- (P_new + t(P_new)) * 0.5
-    if (max(abs(P_new - P)) < tol) {
+    if (max(abs(P_new - P)) <
+        (if (relative) tol * max(abs(P_new), abs(QQ)) else tol)) {
       return(list(P = P_new, K = K, F = Ft, F_inv = Fi,
                   F_chol = Fc, log_det_F = 2 * sum(log(diag(Fc))),
                   converged = TRUE, iterations = i))
@@ -858,7 +1065,8 @@
 ###   F_inf  = ZZ P_inf  ZZ'
 ###   F_star = ZZ P_star ZZ' + HH + me_diag
 ###
-### Case A (F_inf ~= 0, i.e. max|F_inf| < diffuse_tol * max(1, max|F_star|)):
+### Case A (F_inf ~= 0, i.e. max|F_inf| < diffuse_tol; F_inf is unit-free --
+###   W77, see above .HAS_RCPP_KALMAN_UNI):
 ###   the diffuse part of the state has nothing left to learn from this
 ###   observation; run a STANDARD exact .kf_step on (s, P_star) (with its
 ###   usual likelihood contribution) and propagate P_inf <- TT P_inf TT'.
@@ -923,9 +1131,10 @@
     F_star <- ZZ %*% P_star %*% t(ZZ) + HH + me_diag
     F_star <- (F_star + t(F_star)) * 0.5
 
-    scale_star <- max(1, max(abs(F_star)))
-
-    if (max(abs(F_inf)) < diffuse_tol * scale_star) {
+    ## F_inf is unit-free: tested on its own (W77; see the note above
+    ## .HAS_RCPP_KALMAN_UNI -- a max(1, max|F_star|) scale grew with the data's
+    ## units and ended the diffuse phase early at large scale).
+    if (max(abs(F_inf)) < diffuse_tol) {
       ## -- Case A: diffuse part uninformative this period -----------------
       step <- kf_step(s, P_star, v)
       if (is.null(step))
@@ -987,7 +1196,7 @@
       s <- s_new; P_inf <- P_inf_new; P_star <- P_star_new
     }
 
-    if (max(abs(P_inf)) < conv_tol * max(1, max(abs(P_star)))) {
+    if (max(abs(P_inf)) < conv_tol) {    # P_inf is unit-free (W77)
       return(list(s = s, P = P_star, loglik = loglik, t_next = t + 1L,
                   ok = TRUE, d_diffuse = t, fallback = FALSE,
                   P_inf_final = P_inf))
@@ -995,7 +1204,7 @@
   }
 
   ## Hard cap reached without convergence.
-  warning("kf_diffuse_phase: P_inf did not converge to zero within ",
+  .dynhr_warn("kf_diffuse_phase: P_inf did not converge to zero within ",
           cap, " periods; falling back to lik_init = \"kappa\".")
   list(s = s, P = P_star, loglik = loglik, t_next = cap + 1L,
        ok = TRUE, d_diffuse = NA_integer_, fallback = TRUE,
@@ -1020,11 +1229,19 @@
 #' @param obs_vars character vector of observed variable names.
 #' @param return_filtered logical; if \code{TRUE}, return filtered state estimates
 #'   (one column per time step).
-#' @param ss_tol tolerance for steady-state lock detection (default \code{.LYAP_TOL}).
-#' @param me_variance scalar variance of iid Gaussian measurement error on
-#'   every observable (default \code{0}). It enters the innovation covariance
-#'   \code{F} AND the state-covariance (Joseph) update on every method --
-#'   the exact likelihood of the noise-augmented model. See Details.
+#' @param ss_tol tolerance for steady-state lock detection (default
+#'   \code{.LYAP_TOL} = 1e-12): the gain is frozen once
+#'   \code{max(abs(P[t+1] - P[t])) < ss_tol * max(abs(P[t+1]))} (relative,
+#'   so the lock is invariant to the scale of the data).
+#' @param me_variance variance of iid Gaussian measurement error (default
+#'   \code{0}): a scalar applies the same variance to every observable
+#'   (\eqn{H = me I}); a vector of length \code{n_obs} gives each observable
+#'   its own variance (\eqn{H = diag(me)}; named entries are matched to
+#'   \code{obs_vars}, unnamed ones are taken in \code{obs_vars} order). It
+#'   enters the innovation covariance \code{F} AND the state-covariance
+#'   (Joseph) update on every method -- the exact likelihood of the
+#'   noise-augmented model. See Details. A per-observable vector runs the
+#'   univariate method on its R loop (the C++ kernel takes a scalar).
 #' @param return_ll_contrib logical; if \code{TRUE}, return per-step
 #'   log-likelihood contributions (prediction-error decomposition).
 #' @param method character; filtering algorithm: \code{"auto"} (default; picks
@@ -1093,8 +1310,12 @@
 #'   where \eqn{s_t} is column \code{t} of \code{shock_scale}.
 #'   \code{NULL} (default) and an all-ones matrix are treated as identity
 #'   (no heteroskedasticity). Rows must be ordered to match \code{dr$exo_names}.
-#'   Incompatible with \code{method = "chandrasekhar"}, \code{"univariate"},
-#'   and \code{lik_init = "diffuse"}. \code{P0} always uses the baseline
+#'   Incompatible with \code{method = "chandrasekhar"}. An exact-diffuse
+#'   initialization (\code{lik_init = "diffuse"}, or \code{"auto"} on a model
+#'   with a unit root) runs on the sequential (univariate) filter, which
+#'   rescales the shock covariance every period inside the diffuse phase too;
+#'   \code{$method} then reports \code{"univariate"}. \code{P0} (and the
+#'   finite part of the diffuse initialization) always uses the baseline
 #'   (unscaled) \eqn{\\Sigma_e}.
 #' @param obs_aggregation Optional named list declaring one or more
 #'   observables as TEMPORAL AGGREGATES of a higher-frequency model variable,
@@ -1211,7 +1432,8 @@
 #'   \code{.pruned_me_floor_ratio}). Default
 #'   \code{getOption("dynhr.me_floor_check", TRUE)}. Only evaluated on the
 #'   stationary (non-\code{shock_scale}) baseline system; scoped to the
-#'   scalar \code{me_variance} floor, not \code{me_extra}.
+#'   \code{me_variance} floor (its largest entry when it is a vector), not
+#'   \code{me_extra}.
 #'
 #' @details
 #' \strong{Measurement-error convention:}
@@ -1354,9 +1576,16 @@
 #'       (a data frame of \code{from} / \code{to} / \code{reason} rows, one
 #'       per automatic reroute or fallback), \code{diffuse_periods},
 #'       \code{missing_by_period} / \code{n_missing} (observations that were
-#'       absent), \code{dropped_by_period} / \code{n_dropped} (observations
-#'       that were present but exactly predictable, hence carried no
-#'       information), \code{known_shocks} (how many injected cells, and how
+#'       absent), \code{dropped_by_period} / \code{n_dropped} (observation
+#'       components that were present but skipped by the univariate filter
+#'       because their forecast variance was at most \code{kalman_tol}),
+#'       \code{dropped_informative_by_period} / \code{n_dropped_informative}
+#'       (the subset of those whose innovation was NOT negligible,
+#'       \eqn{|v| > \sqrt{kalman\_tol} \max(1, |y|)}: data the likelihood
+#'       ignored although the model deemed it impossible; a positive count
+#'       raises a warning of class
+#'       \code{dynhr_warning_dropped_observations}, and the log-likelihood
+#'       value is left unchanged), \code{known_shocks} (how many injected cells, and how
 #'       many of them were deterministic) and \code{loglik_type}
 #'       (\code{"marginal"}, \code{"joint"} or \code{"conditional"}).
 #'       \code{\link{kalman_smoother}} returns the same fields.}
@@ -1537,7 +1766,15 @@ kalman_filter <- function(data, dr, model, params, obs_vars,
   n_obs     <- length(obs_vars)
 
   if (n_obs > n_exo)
-    warning(sprintf("Stochastic singularity: %d obs but only %d shocks.", n_obs, n_exo))
+    .dynhr_warn(sprintf("Stochastic singularity: %d obs but only %d shocks.", n_obs, n_exo))
+
+  ## Measurement error: scalar (H = me I, every path unchanged) or one variance
+  ## per observable (H = diag(me)); see .kf_me_variance(). `me_vec` is the
+  ## length-n_obs diagonal either way, `me_scalar` selects the original scalar
+  ## expressions wherever they differ in form.
+  me_variance <- .kf_me_variance(me_variance, obs_vars, "kalman_filter")
+  me_scalar   <- length(me_variance) == 1L
+  me_vec      <- rep(me_variance, length.out = n_obs)
 
   ## ---- Mixed-frequency / temporal aggregation ----------------------------
   ## Resolve the aggregation spec BEFORE the observation rows are cut: an
@@ -1601,7 +1838,8 @@ kalman_filter <- function(data, dr, model, params, obs_vars,
   HH      <- tcrossprod(DD %*% Sigma_e, DD)
   SS      <- RR %*% Sigma_e %*% t(DD)
   tZZ     <- t(ZZ)
-  me_diag <- me_variance * diag(n_obs)
+  me_diag <- if (me_scalar) me_variance * diag(n_obs)
+             else diag(me_vec, nrow = n_obs)
 
   ## -- Measurement-error floor guard (near-degenerate-F hazard) ------------
   ## Same detector as pruned_ss_loglik() (see R/pruned-state-space.R): a
@@ -1614,12 +1852,16 @@ kalman_filter <- function(data, dr, model, params, obs_vars,
   ## an unchanged system cost only the Lyapunov solve + a hash (the
   ## un-memoized Riccati was ~13x a small-model KF sweep; kf_rbc_standard
   ## perf-gate regression, 2026-08-05).
-  if (me_variance > 0 && isTRUE(me_floor_check)) {
+  ## A per-observable vector is checked at its LARGEST entry: the inflation
+  ## of the smallest eigenvalue by diag(me) is at most 1 + max(me) / e_min, so
+  ## this is the conservative (warn-if-possibly-dominant) bound.
+  if (any(me_vec > 0) && isTRUE(me_floor_check)) {
+    me_chk   <- if (me_scalar) me_variance else max(me_vec)
     Sxi0_chk <- tryCatch(solve_lyapunov(TT, QQ), error = function(e) NULL)
     if (!is.null(Sxi0_chk) && all(is.finite(Sxi0_chk))) {
       .warn_me_floor_lock(
-        .pruned_me_floor_ratio(TT, ZZ, QQ, HH, SS, Sxi0_chk, me_variance),
-        obs_vars, me_variance)
+        .pruned_me_floor_ratio(TT, ZZ, QQ, HH, SS, Sxi0_chk, me_chk),
+        obs_vars, me_chk)
     }
   }
 
@@ -1725,12 +1967,13 @@ kalman_filter <- function(data, dr, model, params, obs_vars,
     ## C++ standard fast path bakes HH/Sigma_e -- bypass it.
     has_missing <- TRUE
   }
-  ## Diffuse phase with non-unity scales: stop() (scaling inside the diffuse
-  ## phase would require per-step P_inf updates not currently implemented).
-  if (has_shock_scale && lik_init == "diffuse")
-    stop("kalman_filter: lik_init = 'diffuse' is incompatible with shock_scale. ",
-         "Use lik_init = 'kappa' or 'stationary' with heteroskedastic shocks.",
-         call. = FALSE)
+  ## Exact-diffuse init with non-unity scales runs on the SEQUENTIAL filter
+  ## (see the lik_init == "diffuse" branch below): P_inf's recursion does not
+  ## involve the shock covariance at all, and .kf_univariate_loop_R rebuilds
+  ## the eps block of QQb from shock_scale every period, inside the diffuse
+  ## phase as after it. (This used to stop() here, and make_log_posterior
+  ## rejected every unit-root draw whenever shock_scale was supplied -- a
+  ## silent -Inf log-likelihood on any nonstationary model.)
 
   ## ---- Known-shock metadata (R4) -----------------------------------------
   ## Which injected cells are DETERMINISTIC -- zero prior variance, hence a
@@ -1775,6 +2018,14 @@ kalman_filter <- function(data, dr, model, params, obs_vars,
     data     <- data - det_path$y_det
   }
 
+  ## ---- Deterministic observation trends (Dynare `observation_trends`) ----
+  ## A time-varying part of the observation intercept: y_t - ys - g*(first_obs
+  ## + t - 1) is what the recursions see (Dynare's `Y = data - trend`). Taken
+  ## off `data`, for the same reason as the mean path above. Slopes are
+  ## evaluated at `params`, so an estimated slope moves the likelihood.
+  trend_path <- .obs_trend_path(model, params, obs_vars, n_T)
+  if (!is.null(trend_path)) data <- data - trend_path
+
   Y_minus_d <- data - d
   ## Per-period count of observations that are simply absent, kept apart from
   ## the components a singular F drops: "not there" and "carries no
@@ -1809,25 +2060,17 @@ kalman_filter <- function(data, dr, model, params, obs_vars,
       ## (PSD). A genuine unit root => NaN P0; an explosive root (|lambda| > 1,
       ## which a BK-satisfying dr never produces, but guard anyway) => a finite
       ## but NON-PSD P0 (negative variance). Both must fall back to diffuse.
-      ok_stat <- !is.null(P0_auto) && all(is.finite(P0_auto)) &&
-        min(Re(eigen((P0_auto + t(P0_auto)) / 2, symmetric = TRUE,
-                     only.values = TRUE)$values)) > -1e-8
+      ok_stat <- .kf_stationary_P0_ok(P0_auto)
       lik_init <- if (ok_stat) "stationary" else "diffuse"
       if (lik_init == "diffuse") P0_auto <- NULL   # not reusable on the diffuse path
     } else {
       lik_init <- "stationary"
     }
   }
-  ## has_shock_scale + diffuse is rejected above when the caller passes
-  ## lik_init = "diffuse" literally, but lik_init = "auto" (the default) can
-  ## also RESOLVE to "diffuse" here on a unit-root TT -- catch that case too,
-  ## since the diffuse phase (.kf_diffuse_phase) has no shock_scale awareness.
-  if (has_shock_scale && lik_init == "diffuse")
-    stop("kalman_filter: lik_init = \"auto\" resolved to the diffuse ",
-         "initialization (TT has unit-root eigenvalues), which is ",
-         "incompatible with shock_scale. Pass lik_init = \"kappa\" or ",
-         "\"stationary\" explicitly when using heteroskedastic shocks on a ",
-         "nonstationary model.", call. = FALSE)
+  ## has_shock_scale + "diffuse" (passed literally, or "auto" resolved to it
+  ## on a unit-root TT) is routed to the sequential filter in the
+  ## lik_init == "diffuse" branch below: the multivariate diffuse phase
+  ## (.kf_diffuse_phase) holds QQ/HH/SS fixed.
   d_diffuse <- NA_integer_
 
   ## -- M23: warn about diffuse loglik convention on unit-root models ------
@@ -1853,7 +2096,7 @@ kalman_filter <- function(data, dr, model, params, obs_vars,
     else
       any(Mod(eigen(TT, symmetric = FALSE, only.values = TRUE)$values) > 1 - 1e-6)
     if (has_unit_roots) {
-      warning("kalman_filter: unit-root model detected with method = \"",
+      .dynhr_warn("kalman_filter: unit-root model detected with method = \"",
               method, "\". ",
               "The univariate and multivariate diffuse methods use different ",
               "normalizations of the diffuse-phase log-determinant term: ",
@@ -1914,7 +2157,7 @@ kalman_filter <- function(data, dr, model, params, obs_vars,
       ## a diffuse-init likelihood runs through. me_extra likewise forces the
       ## univariate R loop. Keep "standard" in both cases.
       method <- if (.HAS_RCPP_KALMAN_UNI() && is.null(me_extra) &&
-                    me_variance == 0)
+                    all(me_vec == 0))
         "univariate" else "standard"
       route_log[[length(route_log) + 1L]] <-
         c(from = "auto", to = method,
@@ -1959,7 +2202,7 @@ kalman_filter <- function(data, dr, model, params, obs_vars,
   ## call made for the exact-diffuse phase with missing data.
   if (!is.null(known) && method != "univariate") {
     if (method_orig != "auto")
-      warning("kalman_filter: `known_shocks` observes eps directly, which only ",
+      .dynhr_warn("kalman_filter: `known_shocks` observes eps directly, which only ",
               "the univariate (Koopman-Durbin) filter can express -- it runs on ",
               "the augmented state [s_{t-1}; eps_t], where the shocks ARE state ",
               "components. Ignoring method = \"", method, "\" and reporting ",
@@ -2033,6 +2276,7 @@ kalman_filter <- function(data, dr, model, params, obs_vars,
   .kf_result <- function(loglik, filtered_states, method_used, lik_init_used,
                          d_diffuse, final_state = NULL, final_cov = NULL,
                          loglik_contrib = NULL, dropped = NULL,
+                         dropped_informative = NULL,
                          known_applied = NULL, fallback = NULL,
                          extra = list()) {
     ## ---- Timing contract, and the deterministic add-back ----------------
@@ -2081,6 +2325,7 @@ kalman_filter <- function(data, dr, model, params, obs_vars,
     dd <- if (is.null(d_diffuse) || length(d_diffuse) != 1L) NA_integer_
           else as.integer(d_diffuse)
     if (is.null(dropped)) dropped <- integer(n_T)
+    if (is.null(dropped_informative)) dropped_informative <- integer(n_T)
     ## Likelihood convention. Only the injected shocks can move it off
     ## "marginal": a shock observed with a prior density contributes it
     ## (JOINT), a deterministic one is a point mass and contributes nothing
@@ -2107,6 +2352,12 @@ kalman_filter <- function(data, dr, model, params, obs_vars,
              n_missing          = sum(missing_by_period),
              dropped_by_period  = as.integer(dropped),
              n_dropped          = sum(as.integer(dropped)),
+             ## Of the dropped components, those whose innovation was NOT
+             ## negligible (|v| > sqrt(kalman_tol) * max(1, |y|); see
+             ## .kf_informative_skip): data the likelihood silently ignored.
+             ## > 0 raises dynhr_warning_dropped_observations.
+             dropped_informative_by_period = as.integer(dropped_informative),
+             n_dropped_informative = sum(as.integer(dropped_informative)),
              known_shocks       = if (is.null(known_meta)) NULL
                                   else c(known_meta,
                                          list(n_applied = known_applied)),
@@ -2137,8 +2388,8 @@ kalman_filter <- function(data, dr, model, params, obs_vars,
     ## ...and a successful chol() is not enough: see .kf_F_singular. Returning
     ## NULL routes to .kf_fail(), whose univariate retry drops the
     ## uninformative component instead of inverting through it.
-    if (.kf_F_singular(Fc, Ft)) return(NULL)
     Fi  <- chol2inv(Fc)
+    if (.kf_F_singular(Fc, Ft, Fi = Fi)) return(NULL)
     ldf <- 2 * sum(log(diag(Fc)))
     ll  <- ll_const - 0.5 * (ldf + drop(crossprod(v, Fi %*% v)))
     if (!is.finite(ll) || ll < .KF_LL_MIN) return(NULL)
@@ -2152,7 +2403,12 @@ kalman_filter <- function(data, dr, model, params, obs_vars,
     ## gain K. Before F3-D `me_variance` entered F only (a regulariser), which
     ## made the multivariate paths disagree with the univariate filter, the
     ## smoother and the DARE fixed point by O(me_variance).
-    if (me_variance != 0) P_n <- P_n + me_variance * tcrossprod(K)
+    ## Per-observable H = diag(me_vec): P' += K diag(me_vec) K'.
+    if (me_scalar) {
+      if (me_variance != 0) P_n <- P_n + me_variance * tcrossprod(K)
+    } else {
+      P_n <- P_n + K %*% (me_vec * t(K))
+    }
     P_n  <- (P_n + t(P_n)) * 0.5
     list(ll = ll, s = s_n, P = P_n, K = K, F_inv = Fi, log_det_F = ldf, F_mat = Ft)
   }
@@ -2201,7 +2457,7 @@ kalman_filter <- function(data, dr, model, params, obs_vars,
       ## P_inf never decayed (unobserved unit root) or the sample ended
       ## inside the diffuse phase: same kappa fallback as the multivariate
       ## diffuse path.
-      warning("kalman_filter: univariate diffuse phase: P_inf did not ",
+      .dynhr_warn("kalman_filter: univariate diffuse phase: P_inf did not ",
               "converge to zero; falling back to lik_init = \"kappa\".")
       fb_diffuse <- c(from = "diffuse", to = "kappa",
                       reason = "P_inf did not converge to zero within the sample")
@@ -2223,12 +2479,15 @@ kalman_filter <- function(data, dr, model, params, obs_vars,
       filt <- out$filtered
       rownames(filt) <- state_names_out
     }
+    .kf_warn_dropped_informative(out$n_skipped, out$n_skipped_informative,
+                                 sum(is.finite(Y_minus_d)))
     .kf_result(out$loglik, filt, "univariate", li, out$d_diffuse,
                final_state = out$a[seq_len(n_state)],
                final_cov   = out$P_state,
                loglik_contrib = if (return_ll_contrib)
                  as.numeric(out$ll_contrib) else NULL,
                dropped = out$n_skipped,
+               dropped_informative = out$n_skipped_informative,
                known_applied = if (is.null(out$det_applied)) NULL
                                else sum(out$det_applied),
                fallback = fallback)
@@ -2283,19 +2542,35 @@ kalman_filter <- function(data, dr, model, params, obs_vars,
             reason = paste("singular / non-positive-definite innovation",
                            "covariance (or a non-finite step)"))
     hard_fail <- .kf_result(-Inf, NULL, failed_method, lik_init, d_diffuse)
-    if (!(me_variance == 0 && !has_me_extra && lik_init != "diffuse"))
+    if (!(all(me_vec == 0) && !has_me_extra && lik_init != "diffuse"))
       return(hard_fail)
     out <- tryCatch(.run_univariate(lik_init, fallback = fb),
-                    error = function(e) NULL)
+                    error = function(e) .dynhr_reraise_bug(e, NULL))
     if (is.null(out)) return(hard_fail)
     if (!.kf_fallback_warned) {
       .kf_fallback_warned <<- TRUE
-      warning("kalman_filter: method = \"", failed_method, "\" hit a ",
+      ## "The two agree" only holds when the univariate filter processed every
+      ## component. When it skipped some (F <= kalman_tol) it evaluated the
+      ## likelihood of the REMAINING components -- say so, with the counts,
+      ## rather than claim an exact agreement that has no meaning there.
+      n_drop <- as.integer(out$diagnostics$n_dropped %||% 0L)
+      n_drop_inf <- as.integer(out$diagnostics$n_dropped_informative %||% 0L)
+      agree_txt <- if (n_drop > 0L) {
+        paste0("It SKIPPED ", n_drop, " observation component(s) whose ",
+               "forecast variance was <= kalman_tol (", n_drop_inf, " of them ",
+               "with a non-negligible innovation), so the value is the ",
+               "likelihood of the remaining components, not of the full data ",
+               "(see $diagnostics$n_dropped / $diagnostics$n_dropped_informative).")
+      } else {
+        paste0("The two agree exactly under the current settings ",
+               "(me_variance = 0, no me_extra, lik_init = \"", lik_init,
+               "\") and no component was skipped.")
+      }
+      .dynhr_warn("kalman_filter: method = \"", failed_method, "\" hit a ",
               "singular / non-positive-definite innovation covariance ",
               "(or a non-finite step); the log-likelihood was evaluated ",
-              "with the UNIVARIATE (Koopman-Durbin) filter instead. The two ",
-              "agree exactly under the current settings (me_variance = 0, ",
-              "no me_extra, lik_init = \"", lik_init, "\"), but $method is ",
+              "with the UNIVARIATE (Koopman-Durbin) filter instead. ",
+              agree_txt, " $method is ",
               "reported as \"univariate\" -- expect this on some draws only.",
               call. = FALSE)
     }
@@ -2319,6 +2594,23 @@ kalman_filter <- function(data, dr, model, params, obs_vars,
   } else if (lik_init == "kappa") {
     init_P <- .build_P0(TT, QQ)
   } else if (lik_init == "diffuse") {
+    if (has_shock_scale) {
+      ## Per-period shock variances inside the diffuse phase: the multivariate
+      ## recursion (.kf_diffuse_phase) bakes the baseline QQ/HH/SS, the
+      ## sequential one rebuilds the shock block every period (P_inf itself
+      ## is shock-free). Same exact-diffuse likelihood; on a model with TWO OR
+      ## MORE unit roots the sequential convention differs from a
+      ## multivariate run by an additive constant (see ?kalman_filter). Every
+      ## call with this shock_scale takes this route, so posterior draws stay
+      ## mutually comparable. (has_missing is also TRUE here -- shock_scale
+      ## sets it to bypass the C++ kernels -- so this test must come first.)
+      route_log[[length(route_log) + 1L]] <-
+        c(from = method, to = "univariate",
+          reason = paste("exact diffuse initialisation with shock_scale:",
+                         "per-period shock variances inside the diffuse",
+                         "phase run on the sequential filter"))
+      return(.run_univariate("diffuse"))
+    }
     if (has_missing) {
       ## The caller asked for a multivariate method explicitly (method = "auto"
       ## already routes this combination to the univariate filter). Route it
@@ -2326,7 +2618,7 @@ kalman_filter <- function(data, dr, model, params, obs_vars,
       ## EXACT diffuse likelihood with gaps, which is what was asked for, while
       ## the old "kappa" downgrade answered a different question -- on the
       ## local-level fixture with three gaps, -44.097 instead of -36.271.
-      warning("kalman_filter: method = \"", method, "\" cannot run the ",
+      .dynhr_warn("kalman_filter: method = \"", method, "\" cannot run the ",
               "exact-diffuse recursion with missing observations (the ",
               "multivariate diffuse phase has no way to drop one component of ",
               "the observation vector). Using the UNIVARIATE (Koopman-Durbin) ",
@@ -2393,15 +2685,15 @@ kalman_filter <- function(data, dr, model, params, obs_vars,
     dare_diag_ok <- lik_init == "stationary" && !has_me_extra &&
       !has_shock_scale
     dare <- if (dare_diag_ok)
-      tryCatch(.solve_dare(TT, ZZ, QQ, HH, SS, me_diag, tol = .DARE_TOL,
-                           max_iter = 500),
+      tryCatch(.solve_dare(TT, ZZ, QQ, HH, SS, me_diag, tol = .LYAP_TOL,
+                           max_iter = 500, relative = TRUE),
                error = function(e)       # chol failure on singular F: the
                  list(converged = FALSE, # textbook loop below still runs
                       P = NULL, iterations = NA_integer_))
     else
       list(converged = FALSE, P = NULL, iterations = NA_integer_)
     if (dare_diag_ok && !dare$converged)
-      warning("DARE solver did not converge; method=\"dare\" still proceeds ",
+      .dynhr_warn("DARE solver did not converge; method=\"dare\" still proceeds ",
               "as exact textbook KF.")
 
     s <- init_s; loglik <- init_loglik
@@ -2420,6 +2712,50 @@ kalman_filter <- function(data, dr, model, params, obs_vars,
 
     for (t in t_start:n_T) {
       v    <- data[, t] - as.numeric(ZZ %*% s) - d
+      ## Missing observations: the same per-period subset step as the
+      ## "standard" loop (this branch had none, so an explicit method = "dare"
+      ## with any NA returned -Inf whenever me_variance > 0 -- with
+      ## me_variance = 0 a singular-F fallback happened to rescue it).
+      if (any(is.na(v))) {
+        obs_ok  <- which(!is.na(v))
+        Se_miss <- if (has_shock_scale) {
+          sc_t_m <- shock_scale[, t]
+          Sigma_e * outer(sc_t_m, sc_t_m)
+        } else Sigma_e
+        if (length(obs_ok) == 0L) {
+          s <- drop(TT %*% s)
+          P <- tcrossprod(TT %*% P, TT) + tcrossprod(RR %*% Se_miss, RR)
+          P <- (P + t(P)) * 0.5
+          if (return_ll_contrib) ll_contrib[t] <- 0
+          if (return_filtered) filtered[, t] <- s
+          next
+        }
+        ZZ_t <- ZZ[obs_ok, , drop = FALSE]; DD_t <- DD[obs_ok, , drop = FALSE]
+        n_obs_t <- length(obs_ok); v <- v[obs_ok]
+        me_vec_t <- me_vec[obs_ok]
+        if (has_me_extra) me_vec_t <- me_vec_t + me_extra[obs_ok, t]
+        Ft <- ZZ_t %*% P %*% t(ZZ_t) + tcrossprod(DD_t %*% Se_miss, DD_t) +
+          diag(me_vec_t, nrow = n_obs_t)
+        Ft <- (Ft + t(Ft)) * 0.5
+        Fc <- tryCatch(chol(Ft), error = function(e) NULL)
+        if (is.null(Fc)) return(.kf_fail("dare"))
+        Fi   <- chol2inv(Fc)
+        ## .kf_step's singularity rule, as in the "standard" loop's branches.
+        if (.kf_F_singular(Fc, Ft, Fi = Fi)) return(.kf_fail("dare"))
+        ll_t <- -0.5 * (n_obs_t * log(2 * pi) + 2 * sum(log(diag(Fc))) +
+                          drop(crossprod(v, Fi %*% v)))
+        if (!is.finite(ll_t) || ll_t < .KF_LL_MIN) return(.kf_fail("dare"))
+        K    <- (TT %*% P %*% t(ZZ_t) + RR %*% Se_miss %*% t(DD_t)) %*% Fi
+        s    <- drop(TT %*% s) + drop(K %*% v)
+        TmKZ <- TT - K %*% ZZ_t; RmKD <- RR - K %*% DD_t
+        P    <- tcrossprod(TmKZ %*% P, TmKZ) + tcrossprod(RmKD %*% Se_miss, RmKD)
+        if (any(me_vec_t != 0)) P <- P + K %*% (me_vec_t * t(K))
+        P    <- (P + t(P)) * 0.5
+        loglik <- loglik + ll_t
+        if (return_ll_contrib) ll_contrib[t] <- ll_t
+        if (return_filtered) filtered[, t] <- s
+        next
+      }
       ## me_extra active at this period? Per-period F diagonal + Joseph term
       ## below -- previously the dare path silently IGNORED me_extra whenever
       ## F was nonsingular (.kf_step closure-captures the time-invariant
@@ -2448,6 +2784,7 @@ kalman_filter <- function(data, dr, model, params, obs_vars,
         Fc    <- tryCatch(chol(Ft), error = function(e) NULL)
         if (is.null(Fc)) return(.kf_fail("dare"))
         Fi    <- chol2inv(Fc)
+        if (.kf_F_singular(Fc, Ft, Fi = Fi)) return(.kf_fail("dare"))
         ldf   <- 2 * sum(log(diag(Fc)))
         ll_t  <- ll_const - 0.5 * (ldf + drop(crossprod(v, Fi %*% v)))
         if (!is.finite(ll_t) || ll_t < .KF_LL_MIN) return(.kf_fail("dare"))
@@ -2458,7 +2795,7 @@ kalman_filter <- function(data, dr, model, params, obs_vars,
         ## Joseph true-noise term for the FULL measurement-error diagonal
         ## (base me_variance + this period's me_extra):
         ## P' += K_t diag(me_variance + me_extra[, t]) K_t'.
-        me_vec_t <- rep(me_variance, n_obs)
+        me_vec_t <- me_vec
         if (me_x_t) me_vec_t <- me_vec_t + me_extra[, t]
         if (any(me_vec_t != 0)) P <- P + K_t %*% (me_vec_t * t(K_t))
         P     <- (P + t(P)) * 0.5
@@ -2568,6 +2905,7 @@ kalman_filter <- function(data, dr, model, params, obs_vars,
     ## Lyapunov prior, which the scope guard above enforces).
     s <- a0_vec; loglik <- 0
     ch_ss_step <- NA_integer_
+    P_ch <- P0                              # P_t, for the relative lock only
 
     for (t in seq_len(n_T)) {
       v    <- Y_minus_d[, t] - as.numeric(ZZ %*% s)
@@ -2589,7 +2927,11 @@ kalman_filter <- function(data, dr, model, params, obs_vars,
       ## standard filter compares against ss_tol (max|P_{t+1} - P_t|), and
       ## the frozen (K_t, F_t) are the same ones -- so the two methods lock
       ## at the same period with the same gain.
-      if (t > 1L && max(abs(tcrossprod(WM, W))) < ss_tol) {
+      ## RELATIVE to max|P_{t+1}| (P_ch tracks it: P_{t+1} = P_t + dP_t),
+      ## as in the standard filter's lock.
+      dP_ch <- tcrossprod(WM, W)
+      P_ch  <- P_ch + dP_ch
+      if (t > 1L && max(abs(dP_ch)) < ss_tol * max(abs(P_ch))) {
         ch_ss_step  <- t
         ll_ss_const <- ll_const - 0.5 * log_det_F
         tail_start  <- t + 1L
@@ -2666,7 +3008,7 @@ kalman_filter <- function(data, dr, model, params, obs_vars,
     out <- kalman_standard_loop_cpp(Y_minus_d, ZZ, TT, RR, DD, HH + me_diag,
                                     Sigma_e, SS, P, ll_const, ss_tol,
                                     .KF_LL_MIN, return_filtered,
-                                    rep(me_variance, n_obs),
+                                    me_vec,
                                     .KF_ZERO_VAR_TOL)
     if (!out$ok)
       return(.kf_fail("standard"))
@@ -2715,12 +3057,18 @@ kalman_filter <- function(data, dr, model, params, obs_vars,
       HH_t <- tcrossprod(DD_t %*% Se_miss, DD_t)
       SS_t_miss <- RR %*% Se_miss %*% t(DD_t)
       v <- v[obs_ok]; n_obs_t <- length(obs_ok)
-      me_t <- me_variance * diag(n_obs_t)
+      me_t <- if (me_scalar) me_variance * diag(n_obs_t)
+              else diag(me_vec[obs_ok], nrow = n_obs_t)
       if (has_me_extra) diag(me_t) <- diag(me_t) + me_extra[obs_ok, t]
       Ft <- ZZ_t %*% P %*% t(ZZ_t) + HH_t + me_t
       Fc <- tryCatch(chol(Ft), error = function(e) NULL)
       if (is.null(Fc)) return(.kf_fail("standard"))
       Fi <- chol2inv(Fc); ldf <- 2 * sum(log(diag(Fc)))
+      ## The complete-data step's singularity rule (.kf_F_singular, Dynare's),
+      ## not chol() success alone: a relatively singular observed subset used
+      ## to be inverted through here while the same F on a complete period
+      ## went to the univariate fallback (W76, 2026-09-26).
+      if (.kf_F_singular(Fc, Ft, Fi = Fi)) return(.kf_fail("standard"))
       ## Constant is -0.5 * n_obs_t * log(2*pi): correct ll_const (which
       ## bakes in the full n_obs) UP by the number of missing components.
       loglik <- loglik + ll_const + (n_obs - n_obs_t) * 0.5 * log(2*pi) -
@@ -2732,7 +3080,7 @@ kalman_filter <- function(data, dr, model, params, obs_vars,
       ## Joseph true-noise term for the FULL ME diagonal (observed subset
       ## only): y = Z s + D e + u with Var(u) = diag(me_variance +
       ## me_extra[obs_ok, t]) requires P' += K diag(.) K' for ANY gain K.
-      me_vec_t <- rep(me_variance, n_obs_t)
+      me_vec_t <- me_vec[obs_ok]
       if (has_me_extra) me_vec_t <- me_vec_t + me_extra[obs_ok, t]
       if (any(me_vec_t != 0)) P <- P + K %*% (me_vec_t * t(K))
       P <- (P + t(P)) * 0.5; ss_reached <- FALSE
@@ -2759,6 +3107,8 @@ kalman_filter <- function(data, dr, model, params, obs_vars,
         Fc_t <- tryCatch(chol(Ft_t), error = function(e) NULL)
         if (is.null(Fc_t)) return(.kf_fail("standard"))
         Fi_t  <- chol2inv(Fc_t)
+        ## Same singularity rule as .kf_step (see the missing-data branch).
+        if (.kf_F_singular(Fc_t, Ft_t, Fi = Fi_t)) return(.kf_fail("standard"))
         ldf_t <- 2 * sum(log(diag(Fc_t)))
         ll_t  <- ll_const - 0.5 * (ldf_t + drop(crossprod(v, Fi_t %*% v)))
         if (!is.finite(ll_t) || ll_t < .KF_LL_MIN) return(.kf_fail("standard"))
@@ -2768,7 +3118,7 @@ kalman_filter <- function(data, dr, model, params, obs_vars,
         P     <- tcrossprod(TmKZ %*% P, TmKZ) + tcrossprod(RmKD %*% Se_t, RmKD)
         ## Joseph true-noise term for the FULL ME diagonal me_diag_t
         ## (base me_variance + this period's me_extra).
-        me_vec_t <- rep(me_variance, n_obs)
+        me_vec_t <- me_vec
         if (has_me_extra) me_vec_t <- me_vec_t + me_extra[, t]
         if (any(me_vec_t != 0)) P <- P + K_t %*% (me_vec_t * t(K_t))
         P     <- (P + t(P)) * 0.5
@@ -2785,6 +3135,8 @@ kalman_filter <- function(data, dr, model, params, obs_vars,
         Fc_t <- tryCatch(chol(Ft_t), error = function(e) NULL)
         if (is.null(Fc_t)) return(.kf_fail("standard"))
         Fi_t <- chol2inv(Fc_t)
+        ## Same singularity rule as .kf_step (see the missing-data branch).
+        if (.kf_F_singular(Fc_t, Ft_t, Fi = Fi_t)) return(.kf_fail("standard"))
         ldf_t <- 2 * sum(log(diag(Fc_t)))
         ll_t <- ll_const - 0.5 * (ldf_t + drop(crossprod(v, Fi_t %*% v)))
         if (!is.finite(ll_t) || ll_t < .KF_LL_MIN) return(.kf_fail("standard"))
@@ -2794,14 +3146,20 @@ kalman_filter <- function(data, dr, model, params, obs_vars,
         P     <- tcrossprod(TmKZ %*% P, TmKZ) + tcrossprod(RmKD %*% Sigma_e, RmKD)
         ## Joseph true-noise term for the FULL ME diagonal (base me_variance
         ## + me_extra[, t]): P' += K diag(.) K'.
-        P     <- P + K_t %*% ((me_variance + me_extra[, t]) * t(K_t))
+        P     <- P + K_t %*% ((me_vec + me_extra[, t]) * t(K_t))
         P     <- (P + t(P)) * 0.5
         loglik <- loglik + ll_t
       } else {
         step <- .kf_step(s, P, v)
         if (is.null(step)) return(.kf_fail("standard"))
         loglik <- loglik + step$ll; s <- step$s
-        if (!has_me_extra && !has_shock_scale && t > 1L && max(abs(step$P - P)) < ss_tol) {
+        ## RELATIVE lock (max|dP| < ss_tol * max|P|): an absolute 1e-12 froze
+        ## the gain at t = 2 on a model whose P is ~1e-15 (art_zlb_mcp with
+        ## every shock std x 1e-3: 0.66 nats off), and never locked on a
+        ## large-scale one. Mirrored in kalman_standard_loop_cpp() and the
+        ## Chandrasekhar recursion, which lock at the same period.
+        if (!has_me_extra && !has_shock_scale && t > 1L &&
+            max(abs(step$P - P)) < ss_tol * max(abs(step$P))) {
           ss_reached   <- TRUE
           K_ss         <- step$K; F_inv_ss <- step$F_inv
           log_det_F_ss <- step$log_det_F

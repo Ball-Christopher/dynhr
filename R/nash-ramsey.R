@@ -108,9 +108,9 @@ nash_ramsey_cooperative <- function(model,
   combined_obj <- paste(combined_parts, collapse = " + ")
 
   if (verbose) {
-    cat("[nash_ramsey_cooperative] Combined objective:", combined_obj, "\n")
+    .dynhr_cat("[nash_ramsey_cooperative] Combined objective:", combined_obj, "\n")
     for (k in seq_len(n_players)) {
-      cat(sprintf("  Player %d (%s): weight = %.4f, objective = %s\n",
+      .dynhr_cat(sprintf("  Player %d (%s): weight = %.4f, objective = %s\n",
                   k, names(objectives)[k], weights[k], objectives[[k]]))
     }
   }
@@ -224,10 +224,10 @@ nash_ramsey_openloop <- function(model,
   if (is.null(params)) params <- model$param_values
 
   if (verbose) {
-    cat(sprintf("[nash_ramsey_openloop] Solving open-loop Nash with %d players:\n",
+    .dynhr_cat(sprintf("[nash_ramsey_openloop] Solving open-loop Nash with %d players:\n",
                 n_players))
     for (k in seq_len(n_players)) {
-      cat(sprintf("  %s: %s\n", names(objectives)[k], objectives[[k]]))
+      .dynhr_cat(sprintf("  %s: %s\n", names(objectives)[k], objectives[[k]]))
     }
   }
 
@@ -240,7 +240,7 @@ nash_ramsey_openloop <- function(model,
     obj_text <- objectives[[k]]
 
     if (verbose) {
-      cat(sprintf("\n[Player %d: %s] Solving Ramsey with objective: %s\n",
+      .dynhr_cat(sprintf("\n[Player %d: %s] Solving Ramsey with objective: %s\n",
                   k, player_name, obj_text))
     }
 

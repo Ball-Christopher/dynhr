@@ -235,53 +235,6 @@ ast_shift_timing <- function(node, shift) {
 }
 
 
-#' Shift the lead/lag of NAMED variables in an AST by a fixed offset
-#'
-#' Selective counterpart to \code{\link{ast_shift_timing}}: only variables whose
-#' name is in \code{names} have their \code{lead_lag} adjusted; every other node
-#' is left untouched.  Used to implement Dynare's \code{predetermined_variables}
-#' convention, where a beginning-of-period stock variable \code{k} written in the
-#' model means standard-timing \code{k(-1)}.  EVERY occurrence of such a variable
-#' must be re-timed by \code{-1} (so \code{k(+1)} -> \code{k}, \code{k} -> \code{k(-1)},
-#' \code{k(+2)} -> \code{k(+1)}, ...), which makes the variable appear as a plain
-#' lagged state to the LLI, dynamic Jacobian, classification, and QZ solver.
-#'
-#' Steady-state references (\code{STEADY_STATE(...)}) are time-invariant and are
-#' never descended into, matching \code{ast_shift_timing}.
-#'
-#' @param node  AST node.
-#' @param names Character vector of variable names to shift.
-#' @param shift Integer offset added to the matched variables' \code{lead_lag}
-#'   (default \code{-1L} for the predetermined convention).
-#' @return AST with the named variables' lead/lags shifted; all other nodes
-#'   structurally unchanged.
-#' @noRd
-ast_shift_named_timing <- function(node, names, shift = -1L) {
-    if (is.null(node) || length(names) == 0L || shift == 0L) return(node)
-    shift <- as.integer(shift)
-    switch(node$type,
-        "number"    = node,
-        "parameter" = node,
-        "local_variable" = node,
-        "variable"  = if (node$name %in% names)
-                          ast_variable(node$name, node$lead_lag + shift)
-                      else node,
-        "binop"     = ast_binop(node$op,
-                          ast_shift_named_timing(node$left,  names, shift),
-                          ast_shift_named_timing(node$right, names, shift)),
-        "unaryop"   = ast_unaryop(node$op,
-                          ast_shift_named_timing(node$operand, names, shift)),
-        "funcall"   = {
-            if (node$name %in% c("STEADY_STATE", "steady_state")) return(node)
-            ast_funcall(node$name,
-                lapply(node$args, ast_shift_named_timing,
-                       names = names, shift = shift))
-        },
-        node
-    )
-}
-
-
 #' Convert an AST to an R expression string with all variables replaced by SS
 #'
 #' Used to lower \code{steady_state(EXPR)} when EXPR is a compound expression:

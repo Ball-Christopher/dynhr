@@ -160,7 +160,7 @@ set_param_values <- function(model, params) {
 #' m    <- inject_params(m, pars)                 # fills 25 grid params; warns on extras
 #' comp <- compile_model(m)
 #' ss   <- solve_steady(comp, m$param_values, y0 = external_ss_vector)
-#' dr   <- solve_perturbation(comp, ss, order = 1)
+#' dr   <- solve_perturbation(m, comp, ss$values, m$param_values, order = 1)
 #' }
 #' @export
 inject_params <- function(model, params, .quiet = FALSE) {
@@ -185,7 +185,7 @@ inject_params <- function(model, params, .quiet = FALSE) {
   # Warn on unknown names but don't error — drop them
   unknown <- setdiff(names(params), model$param_names)
   if (length(unknown) > 0L) {
-    warning(sprintf(
+    .dynhr_warn(sprintf(
       "inject_params: %d name(s) not in model$param_names (ignored): %s%s",
       length(unknown),
       paste(head(unknown, 5L), collapse = ", "),
@@ -195,7 +195,7 @@ inject_params <- function(model, params, .quiet = FALSE) {
   }
 
   if (length(params) == 0L) {
-    if (!.quiet) message("inject_params: no matching parameters found; model unchanged.")
+    if (!.quiet) .dynhr_inform("inject_params: no matching parameters found; model unchanged.")
     return(model)
   }
 
@@ -205,7 +205,7 @@ inject_params <- function(model, params, .quiet = FALSE) {
   model$param_values[names(params)] <- params
 
   if (!.quiet && was_na > 0L)
-    message(sprintf(
+    .dynhr_inform(sprintf(
       "inject_params: filled %d previously-NA parameter(s) out of %d injected.",
       was_na, length(params)
     ))
@@ -290,7 +290,7 @@ read_mat_params <- function(path, scalar_only = TRUE) {
   }
 
   if (length(out) == 0L)
-    warning(sprintf("read_mat_params: no numeric scalar fields found in '%s'.", path),
+    .dynhr_warn(sprintf("read_mat_params: no numeric scalar fields found in '%s'.", path),
             call. = FALSE)
 
   out

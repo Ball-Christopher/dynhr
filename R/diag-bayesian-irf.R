@@ -10,17 +10,22 @@
 #'
 #' Re-solves the model at a subsample of posterior draws and collects impulse
 #' responses.  Plots the posterior median plus credible bands (default 10-90%
-#' and 16-84%) against the point estimate at the mode.
+#' and 16-84%).
 #'
-#' Computational note: each draw requires a full perturbation solve
-#' (\code{stoch_simul}).  Use \code{n_subsample} to trade resolution for
-#' speed.  500 draws at a 24-variable model takes ~2-3 minutes.
+#' Each IRF is the response to a ONE-STANDARD-DEVIATION shock at that draw:
+#' estimated shock stds (\code{stderr <shock>} columns, named after the
+#' shock) scale the unit-shock \code{ghu} per shock, so shock-std uncertainty
+#' is part of the bands.
 #'
-#' @param model       dynhr_mod from \code{parse_mod()} (used for parameter
-#'   names and stoch_simul).
+#' Computational note: each draw requires a steady-state + first-order solve
+#' (the likelihood's own pipeline, reusing \code{compiled}).  Use
+#' \code{n_subsample} to trade resolution for speed.
+#'
+#' @param model       dynhr_mod from \code{parse_mod()}.
 #' @param compiled    dynhr_compiled from \code{compile_model()}.
-#' @param draws       Posterior draws matrix (n_draws ?-- n_params); column
-#'   names must match estimated parameter names.
+#' @param draws       Posterior draws matrix (n_draws x n_params); column
+#'   names must match estimated parameter names (structural parameters or
+#'   shock names for estimated shock stds).
 #' @param irf_periods Number of impulse-response horizons (default 20).
 #' @param n_subsample Number of draws to use (default 400; set lower for speed).
 #' @param ci_bands    Two-element numeric vector of lower/upper quantile
@@ -51,7 +56,8 @@ diag_bayesian_irf <- function(model,
     draw_idx <- if (n_use < n_total) sample(n_total, n_use) else seq_len(n_total)
 
     par_names   <- colnames(draws)
-    model_pars  <- names(model$param_values)
+    if (is.null(par_names))
+      .dynhr_abort("diag_bayesian_irf: `draws` needs column names (the estimated parameter names).")
     endo_names  <- model$var_names
     exo_names   <- model$varexo_names
 
@@ -77,41 +83,35 @@ diag_bayesian_irf <- function(model,
 
     n_ok    <- 0L
     n_fail  <- 0L
-    m_work  <- model   # working copy
+
+    ## Each draw is re-solved with the likelihood's own pipeline
+    ## (.d8_irfs_at_theta). Until 0.9.4 this called stoch_simul() on a model
+    ## copy with only STRUCTURAL params overwritten: estimated `stderr <shock>`
+    ## draws (shock-named columns) were dropped, so every band was scaled by
+    ## the calibrated shock stds, and `compiled` was ignored (a recompile per
+    ## draw).
+    if (is.null(compiled$lead_lag_incidence) &&
+        !is.null(compiled$model$lead_lag_incidence))
+      compiled$lead_lag_incidence <- compiled$model$lead_lag_incidence
+    sys_cache <- cache_system_structure(compiled)
+    state <- new.env(parent = emptyenv())
+    state$ss_warm <- NULL
 
     for (ki in seq_len(n_use)) {
       theta_k <- draws[draw_idx[ki], ]
+      names(theta_k) <- par_names
 
-      # Update model parameters
-      pv <- m_work$param_values
-      for (nm in par_names) {
-        if (nm %in% model_pars) pv[[nm]] <- theta_k[nm]
-      }
-      m_work$param_values <- pv
-
-      sim_k <- stoch_simul(m_work, verbose = FALSE)
-
-      if (is.null(sim_k) || is.null(sim_k$irfs)) { n_fail <- n_fail + 1L; next }
-
-      irfs_k <- sim_k$irfs   # named list by shock name
+      irfs_k <- .d8_irfs_at_theta(model, compiled, theta_k, n_periods = n_T,
+                                  sys_cache = sys_cache, state = state)
+      if (is.null(irfs_k)) { n_fail <- n_fail + 1L; next }
 
       for (si in seq_along(shock_sel)) {
-        sh <- shock_sel[si]
-        if (!sh %in% names(irfs_k)) next
-        mat_k <- irfs_k[[sh]]   # n_periods ?-- n_endo (or n_endo ?-- n_periods)
-        if (ncol(mat_k) != length(endo_names)) mat_k <- t(mat_k)
-        if (nrow(mat_k) < n_T || ncol(mat_k) != length(endo_names)) next
-        colnames(mat_k) <- endo_names
-        for (vi in seq_along(var_sel)) {
-          v <- var_sel[vi]
-          if (v %in% colnames(mat_k))
-            irf_array[ki, , vi, si] <- mat_k[seq_len(n_T), v]
-        }
+        mat_k <- irfs_k[[shock_sel[si]]]    # n_T x n_endo, columns named
+        if (is.null(mat_k)) next
+        irf_array[ki, , , si] <- mat_k[, var_sel, drop = FALSE]
       }
       n_ok <- n_ok + 1L
     }
-
-    m_work$param_values <- model$param_values   # restore
 
     if (n_ok == 0L) {
       return(.make_result(
@@ -143,77 +143,68 @@ diag_bayesian_irf <- function(model,
         sh <- shock_sel[si]
         plot_rows <- list()
 
+        ## Quantile rows are looked up by POSITION in probs_all: quantile()'s
+        ## row names keep decimals (0.025 -> "2.5%") while the old
+        ## sprintf("%.0f%%") lookup gave "2%", so any non-integer-percent band
+        ## errored.
+        q_row <- function(p) which.min(abs(probs_all - p))
+        ## A variable that does not respond to this shock (|band| at rounding
+        ## level everywhere) is omitted: its panel would be pure 1e-17 noise.
+        resp_scale <- max(vapply(quant_list[[si]], function(qm)
+          if (is.null(qm)) 0 else max(abs(qm)), numeric(1)))
+        n_flat <- 0L
         for (vi in seq_along(var_sel)) {
           v  <- var_sel[vi]
           qm <- quant_list[[si]][[vi]]
           if (is.null(qm)) next
-
-          horizons <- seq_len(n_T)
-          median_v <- qm["50%", ]
-          lo_out   <- qm[sprintf("%.0f%%", ci_bands[1]    * 100), ]
-          hi_out   <- qm[sprintf("%.0f%%", ci_bands[2]    * 100), ]
-          lo_in    <- qm[sprintf("%.0f%%", inner_bands[1] * 100), ]
-          hi_in    <- qm[sprintf("%.0f%%", inner_bands[2] * 100), ]
+          if (max(abs(qm)) <= 1e-10 * resp_scale) { n_flat <- n_flat + 1L; next }
 
           plot_rows[[v]] <- data.frame(
-            horizon  = rep(horizons, 5),
-            value    = c(median_v, lo_out, hi_out, lo_in, hi_in),
-            band     = rep(c("median","outer_lo","outer_hi","inner_lo","inner_hi"),
-                          each = n_T),
+            horizon  = seq_len(n_T),
             variable = v,
+            med      = qm[q_row(0.50), ],
+            lo_out   = qm[q_row(ci_bands[1]), ],
+            hi_out   = qm[q_row(ci_bands[2]), ],
+            lo_in    = qm[q_row(inner_bands[1]), ],
+            hi_in    = qm[q_row(inner_bands[2]), ],
             stringsAsFactors = FALSE
           )
         }
 
         if (length(plot_rows) == 0L) next
-        df_sh <- do.call(rbind, plot_rows)
-
-        # Pivot to wide for ribbon geoms
-        df_wide <- merge(
-          df_sh[df_sh$band == "median",   c("horizon","value","variable")],
-          df_sh[df_sh$band == "outer_lo", c("horizon","value","variable")],
-          by = c("horizon","variable"), suffixes = c("_med","_lo_out")
-        )
-        df_wide <- merge(df_wide,
-          df_sh[df_sh$band == "outer_hi", c("horizon","value","variable")],
-          by = c("horizon","variable"))
-        names(df_wide)[names(df_wide) == "value"] <- "hi_out"
-        df_wide <- merge(df_wide,
-          df_sh[df_sh$band == "inner_lo", c("horizon","value","variable")],
-          by = c("horizon","variable"))
-        names(df_wide)[names(df_wide) == "value"] <- "lo_in"
-        df_wide <- merge(df_wide,
-          df_sh[df_sh$band == "inner_hi", c("horizon","value","variable")],
-          by = c("horizon","variable"))
-        names(df_wide)[names(df_wide) == "value"] <- "hi_in"
+        df_wide  <- do.call(rbind, plot_rows)
+        n_panels <- length(plot_rows)
 
         p <- ggplot2::ggplot(df_wide, ggplot2::aes(x = horizon)) +
           # Outer band (10-90 or user-defined)
-          ggplot2::geom_ribbon(ggplot2::aes(ymin = value_lo_out, ymax = hi_out),
+          ggplot2::geom_ribbon(ggplot2::aes(ymin = lo_out, ymax = hi_out),
                                fill  = dynhr_colours$light_blue,
-                               alpha = 0.30) +
+                               alpha = 0.35) +
           # Inner band (16-84)
           ggplot2::geom_ribbon(ggplot2::aes(ymin = lo_in, ymax = hi_in),
                                fill  = dynhr_colours$mid_blue,
                                alpha = 0.45) +
-          # Median
-          ggplot2::geom_line(ggplot2::aes(y = value_med),
-                             colour    = dynhr_colours$dark_blue,
-                             linewidth = 0.7) +
           ggplot2::geom_hline(yintercept = 0,
                               colour    = dynhr_colours$grey,
                               linewidth = 0.3) +
+          # Median
+          ggplot2::geom_line(ggplot2::aes(y = med),
+                             colour    = dynhr_colours$dark_blue,
+                             linewidth = 0.7) +
           ggplot2::facet_wrap(~ variable, scales = "free_y",
-                              ncol = min(3L, n_vars)) +
+                              ncol = min(3L, n_panels)) +
           theme_dynhr_diagnostic() +
           ggplot2::labs(
             title    = sprintf("Bayesian IRF: shock = %s", sh),
-            subtitle = sprintf(
-              "%d draws * outer %d-%d%% * inner %d-%d%%",
-              n_ok,
-              round(ci_bands[1] * 100),    round(ci_bands[2] * 100),
-              round(inner_bands[1] * 100), round(inner_bands[2] * 100)),
-            x = "Horizon (quarters)", y = "Response"
+            subtitle = paste0(sprintf(
+              "Posterior median; bands %g-%g%% (light), %g-%g%% (dark); %d draws",
+              ci_bands[1] * 100,    ci_bands[2] * 100,
+              inner_bands[1] * 100, inner_bands[2] * 100, n_ok),
+              if (n_flat > 0L)
+                sprintf("; %d non-responding variable(s) omitted", n_flat)
+              else ""),
+            x = "Horizon (1 = impact)",
+            y = "Response to a 1 s.d. shock"
           )
         p <- .apply_meta(p, meta)
         plots[[paste0("bayesian_irf_", sh)]] <- p

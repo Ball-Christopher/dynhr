@@ -122,8 +122,9 @@
 #' @param eps  Step size
 #' @return Numeric vector (proposal mean) or NULL if non-finite gradient
 #' @noRd
-.mala_proposal_mean <- function(theta, grad_fn, G_inv, eps) {
-  g <- grad_fn(theta)
+.mala_proposal_mean <- function(theta, grad_fn, G_inv, eps, g = NULL) {
+  ## g: the gradient at theta when already known (the fused path, W92)
+  if (is.null(g)) g <- grad_fn(theta)
   if (any(!is.finite(g))) return(NULL)
   theta + (eps^2 / 2) * as.numeric(G_inv %*% g)
 }
@@ -272,6 +273,16 @@ dynhr_mala <- function(
   } else {
     .grad <- grad_fn
   }
+  # ---- Fused value + gradient (W92, .hmc_fused_target()): the proposal's
+  # log-posterior and gradient from ONE evaluation, the gradient carried with
+  # the state; NULL = separate calls exactly as before.
+  fz <- .hmc_fused_target(log_post_fn, grad_fn, state_init, par_names,
+                          transform = transform, verbose = verbose,
+                          sampler = "MALA")
+  vg_fn <- if (is.null(fz)) NULL else fz$vg
+  ## gradient at state_init when known (fused; W94 also the separate-call
+  ## path once the step-size search has taken it)
+  g_init <- if (is.null(fz)) NULL else fz$g0
 
   # ---- Helper: resolve metric at a position --------------------------------
   # Returns list(G, G_inv, chol_Ginv, logdet_G).
@@ -281,7 +292,7 @@ dynhr_mala <- function(
       return(list(G = G, G_inv = G_inv, chol_Ginv = chol_Ginv,
                   logdet_G = logdet_G_const))
     }
-    m <- tryCatch(metric_fn(theta), error = function(e) NULL)
+    m <- tryCatch(metric_fn(theta), error = function(e) .dynhr_reraise_bug(e, NULL))
     if (is.null(m) || !is.list(m) || is.null(m$G) || is.null(m$G_inv)) {
       # Fallback to constant metric
       return(list(G = G, G_inv = G_inv, chol_Ginv = chol_Ginv,
@@ -307,8 +318,10 @@ dynhr_mala <- function(
 
   # ---- Initial step size -----------------------------------------------
   if (is.null(eps)) {
-    eps <- .mala_find_stepsize(state_init, .lp_scalar, .grad, G_inv, G, chol_Ginv)
-    if (verbose) message(sprintf("MALA: initial step_size = %.4e", eps))
+    if (is.null(fz)) g_init <- .grad(state_init)   # W94: taken once
+    eps <- .mala_find_stepsize(state_init, .lp_scalar, .grad, G_inv, G, chol_Ginv,
+                               vg_fn = vg_fn, lp0 = fz$lp0, g0 = g_init)
+    if (verbose) .dynhr_inform(sprintf("MALA: initial step_size = %.4e", eps))
   }
 
   # ---- Dual averaging parameters (identical to sampler-nuts.R:430) ------
@@ -337,7 +350,12 @@ dynhr_mala <- function(
   accepted <- logical(n_total)
 
   theta   <- state_init
-  lp_curr <- .lp_scalar(theta)
+  ## Fused (W92): the start value from the same function as every proposal's;
+  ## g_curr the gradient there. W94: the separate-call path carries it too
+  ## (the proposal's gradient, needed for the reverse density, becomes the
+  ## current one on acceptance) -- the same values, one gradient per step.
+  lp_curr <- if (is.null(fz)) .lp_scalar(theta) else fz$lp0
+  g_curr  <- g_init
   trace_lp_curr <- if (!is.null(transform)) {
     lp_curr - transform$log_jacobian(theta)
   } else {
@@ -362,6 +380,8 @@ dynhr_mala <- function(
     theta         <- st$theta
     lp_curr       <- st$lp_curr
     trace_lp_curr <- st$trace_lp_curr
+    ## fused: the gradient at the saved position (deterministic in it)
+    g_curr <- if (!is.null(vg_fn)) vg_fn(theta)$grad else NULL
     eps           <- st$eps
     eps_bar       <- st$eps_bar
     H_bar         <- st$H_bar
@@ -395,7 +415,8 @@ dynhr_mala <- function(
     logdet_curr   <- met_curr$logdet_G
 
     # ---- Proposal mean at current theta --------------------------------
-    mu_curr <- .mala_proposal_mean(theta, .grad, G_inv_curr, eps)
+    if (is.null(g_curr)) g_curr <- .grad(theta)
+    mu_curr <- .mala_proposal_mean(theta, .grad, G_inv_curr, eps, g = g_curr)
 
     if (is.null(mu_curr)) {
       # Off-support: non-finite gradient -- stay put (auto-reject)
@@ -409,7 +430,15 @@ dynhr_mala <- function(
       names(theta_prop) <- par_names
 
       # ---- Log-posterior at proposal ------------------------------------
-      lp_prop <- .lp_scalar(theta_prop)
+      ## Fused: value and gradient at the proposal from one evaluation.
+      g_prop <- NULL
+      if (is.null(vg_fn)) {
+        lp_prop <- .lp_scalar(theta_prop)
+      } else {
+        e_prop  <- vg_fn(theta_prop)
+        lp_prop <- e_prop$lp
+        g_prop  <- e_prop$grad
+      }
 
       if (!is.finite(lp_prop)) {
         # Off-support proposal: auto-reject
@@ -424,7 +453,9 @@ dynhr_mala <- function(
         logdet_prop <- met_prop$logdet_G
 
         # ---- Proposal mean at theta_prop (for reverse density) ---------
-        mu_prop <- .mala_proposal_mean(theta_prop, .grad, G_inv_prop, eps)
+        if (is.null(g_prop)) g_prop <- .grad(theta_prop)
+        mu_prop <- .mala_proposal_mean(theta_prop, .grad, G_inv_prop, eps,
+                                       g = g_prop)
 
         if (is.null(mu_prop)) {
           # Non-finite gradient at proposal: auto-reject
@@ -460,6 +491,7 @@ dynhr_mala <- function(
           if (log(runif(1)) < log_alpha) {
             theta         <- theta_prop
             lp_curr       <- lp_prop
+            g_curr        <- g_prop
             trace_lp_curr <- if (!is.null(transform)) {
               lp_curr - transform$log_jacobian(theta)
             } else {
@@ -527,7 +559,7 @@ dynhr_mala <- function(
     # Fix step size at end of warmup (use dual-averaged value)
     if (adapt_step && m == n_warmup) {
       eps <- eps_bar
-      if (verbose) message(sprintf("MALA: warmup complete, final step_size = %.4e", eps))
+      if (verbose) .dynhr_inform(sprintf("MALA: warmup complete, final step_size = %.4e", eps))
     }
 
     # ---- Progress -------------------------------------------------------
@@ -543,7 +575,7 @@ dynhr_mala <- function(
       if (!is.null(progressor)) {
         progressor(message = msg, amount = 1)
       } else if (verbose) {
-        message(msg)
+        .dynhr_inform(msg)
       }
     }
   }
@@ -591,7 +623,8 @@ dynhr_mala <- function(
 #'
 #' @noRd
 .mala_find_stepsize <- function(theta, lp_fn, grad_fn, G_inv, G, chol_Ginv,
-                                 target = 0.5, max_iter = 100L) {
+                                 target = 0.5, max_iter = 100L,
+                                 vg_fn = NULL, lp0 = NULL, g0 = NULL) {
   d   <- length(theta)
   eps <- 0.1  # initial trial
 
@@ -606,23 +639,39 @@ dynhr_mala <- function(
     on.exit(assign(".Random.seed", .rng0, envir = .GlobalEnv), add = TRUE)
   }
 
-  # Compute gradient once (reused across iterations)
-  mu0 <- .mala_proposal_mean(theta, grad_fn, G_inv, eps)
+  # Fused path (W92): value and gradient at theta already known, and each
+  # trial proposal is ONE value-and-gradient evaluation.
+  if (!is.null(vg_fn) && (is.null(lp0) || is.null(g0))) {
+    e0  <- vg_fn(theta)
+    lp0 <- e0$lp
+    g0  <- e0$grad
+  }
+
+  # Compute gradient once (reused across iterations; W94 on both paths)
+  if (is.null(g0)) g0 <- grad_fn(theta)
+  mu0 <- .mala_proposal_mean(theta, grad_fn, G_inv, eps, g = g0)
   if (is.null(mu0)) return(0.01)  # non-finite gradient at init
 
-  lp0 <- lp_fn(theta)
+  if (is.null(vg_fn)) lp0 <- lp_fn(theta)
   if (!is.finite(lp0)) return(0.01)
 
   # Single step with current eps
   .try_alpha <- function(eps_try) {
-    g <- grad_fn(theta)
+    g <- g0
     if (any(!is.finite(g))) return(NA_real_)
     mu_try    <- theta + (eps_try^2 / 2) * as.numeric(G_inv %*% g)
     z         <- rnorm(d)
     prop      <- mu_try + eps_try * as.numeric(t(chol_Ginv) %*% z)
-    lp_prop   <- lp_fn(prop)
+    g_prop    <- NULL
+    if (is.null(vg_fn)) {
+      lp_prop <- lp_fn(prop)
+    } else {
+      e_prop  <- vg_fn(prop)
+      lp_prop <- e_prop$lp
+      g_prop  <- e_prop$grad
+    }
     if (!is.finite(lp_prop)) return(0)
-    mu_prop <- .mala_proposal_mean(prop, grad_fn, G_inv, eps_try)
+    mu_prop <- .mala_proposal_mean(prop, grad_fn, G_inv, eps_try, g = g_prop)
     if (is.null(mu_prop)) return(0)
     log_q_fwd  <- .mala_log_q(theta, prop, mu_try, G, eps_try)
     log_q_back <- .mala_log_q(prop, theta, mu_prop, G, eps_try)

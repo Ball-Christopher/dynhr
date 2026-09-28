@@ -116,7 +116,8 @@
   for (t in seq_len(n_T)) {
     eps  <- matrix(stats::rnorm(N * n_exo), N, n_exo) %*% t(Le)
     feed <- .gpf_feed_lag(g, lag, eps)
-    y_t  <- tryCatch(predict(g, feed), error = function(e) NULL)
+    y_t  <- tryCatch(predict(g, feed),
+                     error = function(e) .dynhr_reraise_bug(e, NULL))
     if (is.null(y_t) || !all(is.finite(y_t))) return(-Inf)
 
     yh <- y_t[, obs_idx, drop = FALSE]
@@ -225,6 +226,12 @@ make_log_posterior_global_pf <- function(model, data, prior_spec, obs_vars,
          "in (0, 1].", call. = FALSE)
   power <- as.numeric(power)
 
+  ## A per-observable vector: refused with a classed error; an all-equal
+  ## vector is the scalar.
+  if (length(me_variance) > 1L)
+    me_variance <- .kf_me_variance(me_variance, obs_vars,
+                                   "make_log_posterior_global_pf",
+                                   allow_vector = FALSE)
   if (!is.numeric(me_variance) || length(me_variance) != 1L ||
       !is.finite(me_variance) || me_variance <= 0)
     stop("make_log_posterior_global_pf: `me_variance` must be a positive ",
@@ -244,7 +251,7 @@ make_log_posterior_global_pf <- function(model, data, prior_spec, obs_vars,
          call. = FALSE)
 
   if (!is.null(seed))
-    warning("make_log_posterior_global_pf: a non-NULL `seed` freezes the ",
+    .dynhr_warn("make_log_posterior_global_pf: a non-NULL `seed` freezes the ",
             "particle cloud across evaluations (marginal-likelihood variance ",
             "= 0). Fine for a one-off value, but it BREAKS the ",
             "pseudo-marginal validity of rwmh()/pmmh() -- use seed = NULL ",
@@ -290,7 +297,7 @@ make_log_posterior_global_pf <- function(model, data, prior_spec, obs_vars,
                      tol          = solve_tol,
                      max_iter     = solve_max_iter,
                      verbose      = FALSE),
-        error = function(e) NULL)
+        error = function(e) .dynhr_reraise_bug(e, NULL))
       if (is.null(g) || !isTRUE(g$converged)) return(NULL)
       list(dr = base$dr, sys = base$sys, global = g)
     },
@@ -315,7 +322,7 @@ make_log_posterior_global_pf <- function(model, data, prior_spec, obs_vars,
       TT <- dr$ghx[dr$state_idx, , drop = FALSE]
       RR <- dr$ghu[dr$state_idx, , drop = FALSE]
       P0 <- tryCatch(kf_stationary_init(TT, RR, Sigma_e),
-                     error = function(e) NULL)
+                     error = function(e) .dynhr_reraise_bug(e, NULL))
       if (is.null(P0) || !all(is.finite(P0))) return(NULL)
       pos <- match(sn, dr$state_vars)
       if (anyNA(pos)) return(NULL)
@@ -329,7 +336,7 @@ make_log_posterior_global_pf <- function(model, data, prior_spec, obs_vars,
       ll <- tryCatch(
         .global_pf_loglik(Y, g, obs_idx, s0, L0, Le, me_variance,
                           n_particles, ess_frac),
-        error = function(e) -Inf)
+        error = function(e) .dynhr_reraise_bug(e, -Inf))
       if (!is.finite(ll)) return(NULL)
       list(loglik = ll)
     },
@@ -366,7 +373,7 @@ make_log_posterior_global_pf <- function(model, data, prior_spec, obs_vars,
   params <- model$param_values
   ss     <- tryCatch(
     solve_steady_state(model, compiled, params, verbose = FALSE),
-    error = function(e) NULL)
+    error = function(e) .dynhr_reraise_bug(e, NULL))
   ss_vals <- if (!is.null(ss) && isTRUE(ss$converged)) ss$ss else
     stats::setNames(rep(0, length(endo)), endo)
 

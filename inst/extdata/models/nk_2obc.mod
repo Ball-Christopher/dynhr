@@ -67,9 +67,9 @@ end;
 
 estimated_params;
 // name,      distribution,  p1 (mean/lo), p2 (std/hi), lower,  upper
-rho_r,        beta_pdf,      0.70,          0.10,         0.10,   0.99;
-phi_pi,       normal_pdf,    1.50,          0.20,         1.01,   4.00;
-sigma,        normal_pdf,    1.00,          0.30,         0.10,   5.00;
+rho_r, 0.70, 0.10, 0.99, beta_pdf, 0.70, 0.10;
+phi_pi, 1.50, 1.01, 4.00, normal_pdf, 1.50, 0.20;
+sigma, 1.00, 0.10, 5.00, normal_pdf, 1.00, 0.30;
 end;
 
 steady;

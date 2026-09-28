@@ -2,7 +2,7 @@
 % Please edit documentation in R/obc-filter.R
 \name{kalman_filter_obc_pkf}
 \alias{kalman_filter_obc_pkf}
-\title{Piecewise Kalman Filter with per-period inner convergence (GPR 2021)}
+\title{Piecewise-linear Kalman filter for OBC models (Dynare's OccBin PKF)}
 \usage{
 kalman_filter_obc_pkf(
   data,
@@ -17,6 +17,7 @@ kalman_filter_obc_pkf(
   regime_path_init = NULL,
   me_variance = 1e-08,
   max_inner = 10L,
+  horizon = 200L,
   return_filtered = FALSE,
   return_shocks = FALSE,
   return_store = FALSE,
@@ -28,11 +29,12 @@ kalman_filter_obc_pkf(
 
 \item{dr_slack}{Slack-regime DecisionRules}
 
-\item{regime_cache}{R environment of per-regime policies (modified
-in-place; will be populated lazily as needed)}
+\item{regime_cache}{R environment seeded by obc_ensure_policy(0, ...);
+the filter stores its per-period rules there
+(\code{.pkf_rules}) for kalman_filter_obc() and
+historical_decomposition_obc()}
 
-\item{sys}{System matrices (from extract_system_matrices_fast);
-needed to lazily build new regime policies}
+\item{sys}{System matrices (from extract_system_matrices_fast)}
 
 \item{model}{dynhr_mod}
 
@@ -44,52 +46,81 @@ needed to lazily build new regime policies}
 
 \item{obs_idx}{Integer vector: observable positions in endo vector}
 
-\item{regime_path_init}{Integer vector (length T) for warm-starting the
-inner loop (e.g. from a previous MCMC draw).
-NULL or wrong length: all-slack initial guess.}
+\item{regime_path_init}{NULL, or an integer bitfield vector: the regime
+sequence expected in period 1 (an extra starting
+guess for period 1 only)}
 
-\item{me_variance}{Measurement error variance (default 1e-8)}
+\item{me_variance}{Measurement error variance added to every
+observable (default 1e-8)}
 
-\item{max_inner}{Max inner iterations per period (default 10)}
+\item{max_inner}{Maximum re-updates per period and starting guess
+(default 10, Dynare's default)}
 
-\item{return_filtered}{Logical: return n_state x T filtered state matrix}
+\item{horizon}{Check-ahead horizon of the regime solves (default
+200, Dynare's \code{check_ahead_periods}); doubled
+while a solution binds in its last period}
 
-\item{return_shocks}{Logical: return n_exo x T extracted shock matrix}
+\item{return_filtered}{Logical: return the n_state x T filtered states}
 
-\item{return_store}{Logical: return per-period KF quantities needed by
-pkf_smoother_obc() for fixed-interval smoothing}
+\item{return_shocks}{Logical: return the n_exo x T shocks
+\eqn{\epsilon_{t|t}}}
 
-\item{return_P_last}{Logical: return the final filtered covariance matrix
-\eqn{P_{T|T}} in \code{$P_last} (used by sequential
-estimation routines).}
+\item{return_store}{Logical: return the per-period quantities needed by
+pkf_smoother_obc()}
+
+\item{return_P_last}{Logical: return \eqn{P_{T|T}} in \code{$P_last}}
 }
 \value{
 List with:
-  $loglik          total log-likelihood
-  $regime_path     integer vector (length T): accepted regime per period
-  $filtered_states n_state x T if return_filtered, else NULL
-  $filtered_shocks n_exo   x T if return_shocks,   else NULL
-  $kf_store        smoother input list if return_store, else NULL
-  $n_obs, $n_T
+  \item{loglik}{total log-likelihood (\code{-Inf} on failure)}
+  \item{loglik_t}{per-period log-likelihood contributions (NA after a
+    failed period)}
+  \item{regime_path}{integer vector (length T): regime in period t}
+  \item{regime_expected}{list (length T): the regime sequence expected in
+    period t, trimmed after its last binding period (\code{integer(0)}:
+    all slack)}
+  \item{n_solutions}{integer vector: distinct regime solutions per period}
+  \item{failed_period}{NA, or the period in which no guess converged}
+  \item{filtered_states, filtered_shocks, kf_store, P_last}{as requested}
+  \item{n_obs, n_T}{dimensions}
 }
 \description{
-Implements the full PKF algorithm from Giovannini, Pfeiffer, Ratto (2021)
-S2.2.  At each period t the filter runs an inner guess-and-verify loop:
+Implements the piecewise-linear Kalman filter of Giovannini, Pfeiffer and
+Ratto (2021) as Dynare 7.1 runs it for \code{occbin_setup;
+estimation(...)} (\code{options_.occbin.likelihood.status = true}; files
+\code{+occbin/kalman_update_engine.m} and \code{kalman_update_algo_1.m}).
+In every period t:
+\enumerate{
+  \item a guess of the regime sequence expected at t (over a check-ahead
+    horizon) gives the time-varying OccBin rule of period t;
+  \item a Kalman step with that rule gives the likelihood contribution,
+    the shock estimate \eqn{\epsilon_{t|t}} and the one-step smoothed
+    lagged state \eqn{s_{t-1|t}};
+  \item the OccBin guess-and-verify solve from \eqn{s_{t-1|t}} with shock
+    \eqn{\epsilon_{t|t}} (and no further shocks) gives the expected regime
+    sequence; steps 1-3 repeat until it reproduces the guess
+    (\code{max_inner} re-updates, Dynare's
+    \code{likelihood.max_number_of_iterations = 10}).
+}
+The update is started from the all-slack guess and, when it binds
+somewhere, from the sequence expected in t-1; if one of them fails the
+brute-force guesses of Dynare's engine are tried.  Different converged
+regime sequences contribute the SUM of their densities; the state follows
+the most likely one.  A period in which no guess converges makes the
+log-likelihood \code{-Inf} (Dynare rejects the draw); \code{$failed_period}
+records it.
 }
 \details{
-Step 1: Predict using current regime guess.
-  Step 2: Update state and covariance (standard KF).
-  Step 3: Extract shock \eqn{eps_{t|t}} (eq. 6) and backward-smooth the state
-          to get \eqn{s_{t-1|t}} (eq. 7, one step, \eqn{r_{t+1}=0}).
-  Step 4: Check OBC regime consistency via pkf_check_binding().
-          If regime changed: cache new policy and restart inner loop.
-          If regime matches: accept, record loglik, advance to t+1.
-
-Unlike kalman_filter_obc() + obc_guess_verify(), there is no separate
-outer loop over the full sample; regime discovery is fully local to each t.
+Changed in 0.9.3.93 (W49): the previous filter used ONE policy per
+regime (the next period assumed slack) and checked only period t against
+the slack rule, which is wrong for spells of two or more periods.
+\code{regime_path_init} now plays the role of Dynare's
+\code{likelihood.init_regime_history}: the expected regime sequence for
+the first period (it used to warm-start every period, which made the
+likelihood depend on the warm start).
 }
 \references{
-Boehl, G. (2020). Efficient solution and computation of models with
-    occasionally binding constraints. \emph{Deutsche Bundesbank Discussion
-    Paper}, 38/2020.
+Giovannini, M., Pfeiffer, P. and Ratto, M. (2021). Efficient and robust
+    inference of models with occasionally binding constraints. JRC Working
+    Papers in Economics and Finance 2021/03.
 }

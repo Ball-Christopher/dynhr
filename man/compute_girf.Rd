@@ -75,36 +75,40 @@ An \code{IRFCollection} object (same structure as
 Computes the Koop-Pesaran-Potter (1996) GIRF from the stochastic steady
 state (SSS) of a pruned second-order DSGE model, or from a caller-supplied
 initial state for state-dependent GIRF exercises:
-\deqn{\text{GIRF}_h(k) = E[y_{t+h} \mid \varepsilon_t = e_k,\;
-  x_t = x_0]
-  - E[y_{t+h} \mid x_t = x_0]}
+\deqn{\text{GIRF}_h(k) = E[y_{t+h-1} \mid x_{t-1} = x_0,\;
+  \varepsilon_t = e_k]
+  - E[y_{t+h-1} \mid x_{t-1} = x_0,\; \varepsilon_t = 0]}
 for each shock \eqn{k}, where \eqn{e_k} is the \eqn{k}-th column of the
 lower Cholesky factor of \eqn{\Sigma_\varepsilon} (scaled by
-\code{shock_size}) and \eqn{x_0} is the initial state (defaults to the
-stochastic steady state).
+\code{shock_size}), \eqn{x_0} is the initial state (defaults to the
+stochastic steady state) and the future shocks
+\eqn{\varepsilon_{t+1}, \ldots} are integrated out in both terms.  The
+baseline carries a zero impact shock (not a random one), so the h = 1
+response is deterministic; the analytic and the Monte-Carlo
+(\code{n_replications}) paths use this same convention.
 }
 \details{
-Future shocks are integrated out analytically using
-\code{.order2_conditional_moments} (augmented Lyapunov propagation); no
-Monte Carlo is needed.  At order 1 (all quadratic terms zero), GIRFs equal
-standard IRFs from the deterministic SS.
+Initial-state convention: the pruned state is started at
+\eqn{x^{(1)} = x_0 - y^*} (deviation from the deterministic SS) and
+\eqn{x^{(2)} = 0}.  The GIRF does not depend on the \eqn{x^{(2)}} split,
+which enters the pruned recursion linearly and cancels in the difference.
 
 Period-indexing: row h of the returned matrix corresponds to h periods
 after the shock (h = 1 is the impact period, the same convention as
-\code{compute_irfs()}).  The h = 1 impact is computed explicitly via the
-output policy functions:
-\deqn{\text{GIRF}_1(k) = g_{hu} e_k + g_{hxu}(e_k \otimes x^*_1)
-  + \tfrac{1}{2} g_{huu}(e_k \otimes e_k)}
-where \eqn{x^*_1} is the first-order state deviation from the deterministic
-SS (from \code{initial_state}, or the ergodic mean when
-\code{initial_state = NULL}).
-Periods h = 2, \ldots, n use analytic Lyapunov propagation from the
-post-shock state \eqn{x^*_1 + h_u e_k}; the second-order correction
-\eqn{E[x^{(2)}]} is initialized to 0 in the propagator (see
-\code{.order2_conditional_moments}), introducing an \eqn{O(\sigma^2)}
-approximation that is absorbed into the \eqn{c_u / c_v} constants after
-a few steps.  This error is negligible for typical DSGE calibrations
-(shock stderr 1--3 \%); full augmented-state initialization is deferred.
+\code{compute_irfs()}).  The h = 1 impact is
+\deqn{\text{GIRF}_1(k) = g_{u} e_k + g_{xu}(e_k \otimes x^{(1)})
+  + \tfrac{1}{2} g_{uu}(e_k \otimes e_k).}
+For h >= 2 the analytic path is EXACT for the pruned order-2 system: with
+the augmented state \eqn{\xi = (x^{(1)}, x^{(2)}, x^{(1)} \otimes x^{(1)})}
+(Andreasen, Fernandez-Villaverde & Rubio-Ramirez 2018) the conditional
+means \eqn{E[\xi_{t+1} \mid \xi_t] = T \xi_t + c} and
+\eqn{E[y_t \mid \xi_t] = D \xi_t + d} are affine with state-independent
+constants, so
+\deqn{\text{GIRF}_h(k) = D\, T^{h-2} (\xi^{e_k}_{t} - \xi^{0}_{t}),}
+where \eqn{\xi^{e}_{t}} is the (known) augmented state one period after
+the impact shock \eqn{e}.  No Monte Carlo and no approximation beyond the
+pruned order-2 solution itself is involved.  At order 1 (all quadratic
+terms zero), GIRFs equal standard IRFs from the deterministic SS.
 }
 \seealso{
 \code{\link{stochastic_steady_state}},

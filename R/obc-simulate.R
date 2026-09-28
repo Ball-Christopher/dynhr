@@ -3,54 +3,38 @@
 ## OBC deterministic forward simulation.
 ##
 ## Provides:
-##   obc_simulate() -- forward simulation switching between slack/binding policy
+##   obc_simulate() -- forward simulation under a given regime path
 ##
 ## Used primarily for post-estimation scenario analysis and OBC-aware IRF
 ## comparison against Dynare / Julia PATHSolver output.
 ## --------------------------------------------------------------------------
 
 
-#' OccBin forward simulation
+#' OccBin forward simulation under a given regime path
 #'
-#' Simulates the OBC model forward from a zero initial state, switching
-#' between slack and binding policy matrices at each period according to
-#' regime_path. Useful for post-estimation scenario analysis and OBC-aware
-#' IRF comparison against Julia PF output.
+#' Simulates the OBC model forward from an initial state (default zero) under
+#' the piecewise-linear OccBin rules of \code{regime_path}: the rule of period
+#' t comes from the backward recursion over the regimes of periods t, t+1,
+#' ... (slack after the last binding period), so a binding period that is
+#' followed by another binding period is NOT solved with the one-period
+#' binding policy of \code{obc_solve_binding()} (which assumes the next
+#' period slack; fixed 2026-09-25, W48).  Shocks are surprises.
 #'
-#' y_t = ghx_regime * s_{t-1} + ghu_regime * eps_t + c_full_regime
-#' s_t = T_regime   * s_{t-1} + R_regime   * eps_t + c_state_regime
+#' y_t = ghx_t * s_{t-1} + ghu_t * eps_t + c_t
 #'
 #' @param shock_seq   n_exo x T numeric matrix of shock values at each period
 #' @param dr_slack    Slack-regime DecisionRules (from solve_perturbation)
-#' @param dr_bind     Binding-regime DecisionRules (from obc_solve_binding)
-#' @param c_state     Binding-regime state constant (length n_state)
-#' @param c_full      Binding-regime full-endo constant (length n_endo)
-#' @param regime_path Integer vector (length T): 0 = slack, nonzero = binding
-#' @return n_endo x T matrix of endogenous variable paths; rownames = endo names
+#' @param sys         System matrices (from extract_system_matrices)
+#' @param specs       OBC spec list (from obc_parse_tags)
+#' @param regime_path Integer vector (length T): bitfield regime per period
+#'                    (0 = slack; bit j set = spec j binds)
+#' @param state_init  Initial state (length n_state); NULL = zero
+#' @return n_endo x T matrix of endogenous variable paths (deviations);
+#'         rownames = endo names
 #' @noRd
-obc_simulate <- function(shock_seq, dr_slack, dr_bind, c_state, c_full, regime_path) {
-  si    <- dr_slack$state_idx
-  n_endo <- nrow(dr_slack$ghx)
-  n_T    <- ncol(shock_seq)
-
-  gs_st <- dr_slack$ghx[si, , drop = FALSE]
-  gu_st <- dr_slack$ghu[si, , drop = FALSE]
-  gb_st <- dr_bind$ghx[si, , drop = FALSE]
-  ub_st <- dr_bind$ghu[si, , drop = FALSE]
-
-  s     <- numeric(length(si))
-  paths <- matrix(NA_real_, n_endo, n_T)
-  rownames(paths) <- dr_slack$endo_names
-
-  for (t in seq_len(n_T)) {
-    eps <- shock_seq[, t]
-    if (regime_path[t] != 0L) {
-      paths[, t] <- drop(dr_bind$ghx %*% s) + drop(dr_bind$ghu %*% eps) + c_full
-      s          <- drop(gb_st %*% s)        + drop(ub_st %*% eps)       + c_state
-    } else {
-      paths[, t] <- drop(dr_slack$ghx %*% s) + drop(dr_slack$ghu %*% eps)
-      s          <- drop(gs_st %*% s)         + drop(gu_st %*% eps)
-    }
-  }
-  paths
+obc_simulate <- function(shock_seq, dr_slack, sys, specs, regime_path,
+                         state_init = NULL) {
+  ctx   <- .obc_pwl_context(sys, dr_slack, specs)
+  rules <- .obc_pwl_rules(ctx, regime_path)
+  .obc_pwl_forward(ctx, rules, shock_seq, state_init)$paths
 }

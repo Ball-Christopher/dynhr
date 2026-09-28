@@ -36,29 +36,7 @@
 }
 
 
-## ---- B5: CPM-buffer exhaustion warnings, raised from R --------------------
-##
-## tpf_run_period_cpp() used to call Rcpp::warning() when a pre-drawn CPM
-## buffer ran out mid-sweep. That is unsafe: under options(warn = 2) R turns a
-## warning into an ERROR, and an R error is a LONGJMP -- it unwinds past every
-## C++ destructor still on the stack, including the kernel's ~RNGScope, which
-## is the thing that writes the advanced RNG state back into .Random.seed.
-## The strictest users therefore got a silently stale .Random.seed (plus
-## leaked Armadillo buffers) on exactly the runs they asked to be strict.
-##
-## The kernel now returns counters and this raises the warnings after the
-## .Call has returned. Neither condition affects correctness: the fallback is
-## a fresh draw from the same N(0,1)/Uniform laws the exhausted buffer held.
-.tpf_warn_env <- new.env(parent = emptyenv())
 
-#' Emit a warning at most once per session, keyed by \code{key}.
-#' @noRd
-.tpf_warn_once <- function(key, ...) {
-  if (isTRUE(.tpf_warn_env[[key]])) return(invisible(NULL))
-  .tpf_warn_env[[key]] <- TRUE
-  warning(paste0(...), call. = FALSE)
-  invisible(NULL)
-}
 
 #' Raise the CPM-buffer-exhaustion warnings a tpf_run_period_cpp() result
 #' reports. Once per session per condition: a particle filter calls the kernel
@@ -67,20 +45,18 @@
 .tpf_report_cpm_exhaustion <- function(res) {
   n_mid <- res$u_mid_exhausted
   if (!is.null(n_mid) && isTRUE(as.integer(n_mid) > 0L))
-    .tpf_warn_once(
-      "u_mid_exhausted",
-      "tpf_run_period: U_mid slots exhausted (K = ",
+    .dynhr_warn("tpf_run_period: U_mid slots exhausted (K = ",
       as.integer(res$u_mid_slots), "); fell back to a fresh RNG draw for ",
       as.integer(n_mid), " mid-stage resample(s). Increase max_stages_u to ",
-      "suppress.")
+      "suppress.",
+    once = TRUE, key = "u_mid_exhausted")
   need <- res$u_mut_need_col
   if (!is.null(need) && isTRUE(as.integer(need) >= 0L))
-    .tpf_warn_once(
-      "u_mut_exhausted",
-      "tpf_run_period: U_mutation columns exhausted (have ",
+    .dynhr_warn("tpf_run_period: U_mutation columns exhausted (have ",
       as.integer(res$u_mut_have_cols), ", need column ",
       as.integer(need) + 1L, "); fell back to fresh RNG draws. Increase ",
-      "max_stages_u or n_mh in max_stages_u.")
+      "max_stages_u or n_mh in max_stages_u.",
+    once = TRUE, key = "u_mut_exhausted")
   invisible(NULL)
 }
 
@@ -96,7 +72,7 @@
 #' matches R's \code{kronecker()} convention). Verified \code{identical()}
 #' TRUE against a \code{for (i in seq_len(N)) kronecker(A[,i], B[,i])} loop;
 #' ~230x faster at N=150, n=2. Triple Kronecker products MUST group
-#' inner-first (\code{a %x% (b %x% c)}, not left-to-right) to stay
+#' inner-first (\code{a \%x\% (b \%x\% c)}, not left-to-right) to stay
 #' bit-identical to \code{kronecker(a, kronecker(b, c))} (floating-point
 #' reassociation is NOT identical).
 #'
@@ -791,7 +767,7 @@ tpf_run_period <- function(particles, y_t, dr2, Sigma_e, L_e,
       } else {
         ## Non-CPM path or U_mid exhausted: fresh RNG draw (bit-identical)
         if (!is.null(U_mid) && u_mid_idx_R > length(U_mid)) {
-          warning("tpf_run_period R fallback: U_mid slots exhausted (K=",
+          .dynhr_warn("tpf_run_period R fallback: U_mid slots exhausted (K=",
                   length(U_mid), "); falling back to fresh RNG draw. ",
                   "Increase max_stages_u to suppress.")
         }
@@ -868,7 +844,7 @@ tpf_run_period <- function(particles, y_t, dr2, Sigma_e, L_e,
             log_u <- log(pnorm(z_u))
           } else {
             if (has_u_mut && !u_mut_warned) {
-              warning("tpf_run_period R fallback: U_mutation columns exhausted ",
+              .dynhr_warn("tpf_run_period R fallback: U_mutation columns exhausted ",
                        "(have ", u_mut_ncols, ", need col ", col_idx0,
                        "); falling back to fresh RNG draws. ",
                        "Increase max_stages_u or n_mh to suppress.")
@@ -1110,7 +1086,7 @@ tpf_run_period3 <- function(particles, y_t, dr3, Sigma_e, L_e,
         idx <- sort_ord[idx_sorted]
       } else {
         if (!is.null(U_mid) && u_mid_idx_R > length(U_mid)) {
-          warning("tpf_run_period3: U_mid slots exhausted (K=",
+          .dynhr_warn("tpf_run_period3: U_mid slots exhausted (K=",
                   length(U_mid), "); falling back to fresh RNG draw.")
         }
         idx <- .smc_systematic_resample(w_norm, N)
@@ -1165,7 +1141,7 @@ tpf_run_period3 <- function(particles, y_t, dr3, Sigma_e, L_e,
             log_u <- log(pnorm(z_u))
           } else {
             if (has_u_mut && !u_mut_warned) {
-              warning("tpf_run_period3 R fallback: U_mutation columns exhausted ",
+              .dynhr_warn("tpf_run_period3 R fallback: U_mutation columns exhausted ",
                        "(have ", u_mut_ncols, ", need col ", col_idx0,
                        "); falling back to fresh RNG draws. ",
                        "Increase max_stages_u or n_mh to suppress.")
@@ -1268,19 +1244,19 @@ tpf_run_period3 <- function(particles, y_t, dr3, Sigma_e, L_e,
                 skipped = TRUE))
   }
 
-  if (verbose) message(sprintf("  [TPF preflight] evaluating loglik SD (K = %d)...", K))
+  if (verbose) .dynhr_inform(sprintf("  [TPF preflight] evaluating loglik SD (K = %d)...", K))
 
   logliks <- vapply(seq_len(K), function(k) {
     ## Vary the RNG stream externally; the closure MUST have seed = NULL for
     ## this to bite (enforced by the exactly-equal check below).
     set.seed(k)
-    res <- tryCatch(log_post_fn(theta_mode), error = function(e) NULL)
+    res <- tryCatch(log_post_fn(theta_mode), error = function(e) .dynhr_reraise_bug(e, NULL))
     if (is.null(res) || !is.finite(res$loglik)) NA_real_ else res$loglik
   }, numeric(1L))
 
   valid_ll <- logliks[is.finite(logliks)]
   if (length(valid_ll) < 2L) {
-    warning(".tpf_pmcmc_preflight: fewer than 2 finite loglik evaluations; ",
+    .dynhr_warn(".tpf_pmcmc_preflight: fewer than 2 finite loglik evaluations; ",
             "SD cannot be estimated. Check that the model evaluates at theta_mode.",
             call. = FALSE)
     return(list(sd = NA_real_, mean = NA_real_, logliks = logliks,
@@ -1357,9 +1333,9 @@ tpf_loglik_sd_preflight <- function(log_post_fn, theta, K = 30L,
   pf$n_needed <- n_needed
 
   if (verbose && !is.na(pf$sd)) {
-    message(sprintf("  TPF loglik SD at mode = %.3f  (K = %d evaluations)", pf$sd, K))
+    .dynhr_inform(sprintf("  TPF loglik SD at mode = %.3f  (K = %d evaluations)", pf$sd, K))
     if (pf$sd > 1) {
-      message(sprintf(
+      .dynhr_inform(sprintf(
         paste0(
           "  WARNING: SD > 1 (Dynare threshold). PMCMC acceptance will be dominated by\n",
           "  loglik noise. Current n_particles = %s; estimated n_particles needed for\n",
@@ -1367,7 +1343,7 @@ tpf_loglik_sd_preflight <- function(log_post_fn, theta, K = 30L,
         if (is.na(n_particles)) "unknown" else format(n_particles),
         if (is.na(n_needed))    "unknown" else format(n_needed)))
     }
-    message(sprintf("  Acceptance noise factor exp(-SD^2/2) = %.3f",
+    .dynhr_inform(sprintf("  Acceptance noise factor exp(-SD^2/2) = %.3f",
                     pf$accept_noise_factor))
   }
 
@@ -1579,6 +1555,12 @@ make_log_posterior_tpf <- function(model, data, prior_spec, obs_vars,
   ## Note: U_list is an argument to the INNER function (not captured here),
   ## which avoids rebuilding the outer closure on every CPM MCMC step.
 
+  ## A per-observable vector: refused with a classed error (the tempering
+  ## schedule scales ONE variance); an all-equal vector is the scalar.
+  if (length(me_variance) > 1L)
+    me_variance <- .kf_me_variance(me_variance, obs_vars,
+                                   "make_log_posterior_tpf",
+                                   allow_vector = FALSE)
   ## --- Hard stop: me_variance = 0 is degenerate (Landmine 1) --------------
   if (!is.numeric(me_variance) || length(me_variance) != 1L ||
       !is.finite(me_variance) || me_variance <= 0) {
@@ -1593,7 +1575,7 @@ make_log_posterior_tpf <- function(model, data, prior_spec, obs_vars,
 
   ## Warn on very small me_variance (weight-collapse risk, Landmine 3)
   if (me_variance < 1e-6) {
-    warning(
+    .dynhr_warn(
       "make_log_posterior_tpf: me_variance = ", me_variance, " is very small. ",
       "The particle filter may suffer weight collapse (ESS -> 1). ",
       "Consider me_variance >= 1e-4 or at least 1% of data variance."
@@ -1623,14 +1605,14 @@ make_log_posterior_tpf <- function(model, data, prior_spec, obs_vars,
       dr2 <- tryCatch(
         solve_perturbation(model, compiled, ss, params,
                            order = 3L, Sigma_e = Sigma_e, verbose = FALSE),
-        error = function(e) NULL
+        error = function(e) .dynhr_reraise_bug(e, NULL)
       )
       if (is.null(dr2) || !isTRUE(dr2$bk_satisfied)) return(NULL)
     } else {
       dr2 <- tryCatch(
         solve_perturbation_order2(model, compiled, ss, params,
                                    dr1, Sigma_e = Sigma_e, verbose = FALSE),
-        error = function(e) NULL
+        error = function(e) .dynhr_reraise_bug(e, NULL)
       )
       if (is.null(dr2)) return(NULL)
     }
@@ -1781,7 +1763,11 @@ make_log_posterior_tpf <- function(model, data, prior_spec, obs_vars,
     ## the diagonal version silently discards every state CORRELATION, so a
     ## near-singular P0 (the exact case where chol fails) is replaced by an
     ## independent-states cloud with the right marginals and the wrong joint.
-    L_P0 <- tryCatch(t(chol(P0 + diag(1e-12, n_s))),
+    ## The jitter is RELATIVE to each state's own variance (W77): an absolute
+    ## 1e-12 was 1e-4 of a state variance of 1e-8 (every shock std x 1e-4),
+    ## which moved the fixed-seed loglik by 8e-8 against the rescale identity
+    ## -- and is invariant to any rescaling of the states this way.
+    L_P0 <- tryCatch(t(chol(P0 + diag(1e-12 * pmax(diag(P0), 0), n_s))),
                      error = function(e) .tpf_psd_sqrt(P0))
     z_init <- if (!is.null(U_init_normals)) U_init_normals else
               matrix(rnorm(n_s * N), nrow = n_s)

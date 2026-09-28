@@ -4,27 +4,44 @@
 \alias{dm_solve}
 \title{Solve the model's perturbation decision rules}
 \usage{
-dm_solve(dm, order = 1L, ...)
+dm_solve(dm, order = 1L, at = c("params", "mode", "posterior_mean"), ...)
 }
 \arguments{
 \item{dm}{A \code{\link{dynhr_model}}}
 
-\item{order}{Perturbation order (default `1L`).  The object's compiled
-derivatives must be deep enough -- see `max_order` in
+\item{order}{Perturbation order (default \code{1L}).  The object's compiled
+derivatives must be deep enough -- see \code{max_order} in
 \code{\link{dynhr_model}}.}
 
+\item{at}{Where to solve: \code{"params"}, \code{"mode"} or
+\code{"posterior_mean"} (see Solution point).}
+
 \item{...}{Further arguments for \code{\link{solve_perturbation}}
-(e.g. `Sigma_e`, `loglinear`).}
+(e.g. \code{Sigma_e}, \code{loglinear}).}
 }
 \value{
-The updated `dynhr_model`, with `$steady`, `$solution` and
-  `$order` set.
+The updated \code{dynhr_model}.
 }
 \description{
-Computes the steady state (cached on the object as `$steady`) and calls
-\code{\link{solve_perturbation}} at `order`, storing the resulting
-`DecisionRules*` object in `$solution` and the order in `$order`.
+Computes the steady state (stored as \code{$steady}) and calls
+\code{\link{solve_perturbation}} at \code{order}, storing the resulting
+\code{DecisionRules*} object in \code{$solution}, the order in
+\code{$order}, the point in \code{$solution_at} and the parameter vector in
+\code{$solution_params}.
 }
+\section{Solution point}{
+
+\code{at = "params"} (default) solves at \code{dm$params} (the calibration
+unless changed), exactly as \code{solve_steady()} +
+\code{solve_perturbation()} do. \code{"mode"} and \code{"posterior_mean"}
+solve at the posterior mode (\code{\link{dm_mode}}) or the mean of the
+draws (\code{\link{dm_sample}}), mapped to parameters by
+\code{\link{apply_theta_to_params}} (estimated shock standard deviations
+and correlations included) and solved through
+\code{solve_steady_state()}, as the estimation runner's diagnostics do;
+they are an error naming the verb to run when that estimate is absent.
+}
+
 \examples{
 dm <- dynhr_model(system.file("extdata/models/rbc.mod", package = "dynhr"))
 dm <- dm_solve(dm)

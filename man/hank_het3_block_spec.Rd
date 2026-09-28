@@ -8,7 +8,8 @@ hank_het3_block_spec(
   name,
   block,
   inputs = c("rd", "rf", "ra", "w"),
-  outputs = c("D", "F", "A", "C")
+  outputs = c("D", "F", "A", "C"),
+  expectations = NULL
 )
 }
 \arguments{
@@ -27,6 +28,11 @@ fails at spec time rather than inside the Jacobian dispatch.}
 the capital/foreign adjustment resources). \code{CHI} and \code{PHI} are
 real goods absorbed by rebalancing, so a resource constraint that nets
 them out must request them.}
+
+\item{expectations}{\code{NULL} (FIRE, default) or a behavioural
+expectations spec (Lenney and Rosso 2026), applied to this block's
+Jacobian before GE assembly; see \code{\link{hank_het_block_spec}} and
+\code{\link{hank_het_jacobian}}.}
 }
 \value{
 An object of class \code{hank_block} (kind \code{"het3"}).

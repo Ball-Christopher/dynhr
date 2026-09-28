@@ -73,7 +73,7 @@ as_posterior_draws <- function(smc_result,
   if (has_weights && !is.null(ess_warn) && is.numeric(ess_warn)) {
     ess <- 1 / sum(w_norm^2)
     if (ess < ess_warn * n_draws) {
-      warning(sprintf(
+      .dynhr_warn(sprintf(
         paste0("as_posterior_draws: SMC effective sample size (ESS = %.0f) is ",
                "below %.0f%% of n_draws = %d (threshold = %.0f). The ",
                "resampled draws may not adequately represent the posterior. ",
@@ -87,7 +87,7 @@ as_posterior_draws <- function(smc_result,
   if (strategy == "direct" || !has_weights) {
     ## No-weight path: return as-is or uniformly subsample / re-index.
     if (n_draws == N) return(chain)
-    if (!is.null(seed)) set.seed(seed)
+    .local_seed(seed)  # caller's RNG stream restored on exit (C1)
     idx <- if (n_draws <= N) {
       sample.int(N, n_draws, replace = FALSE)
     } else {
@@ -97,7 +97,7 @@ as_posterior_draws <- function(smc_result,
   }
 
   ## Systematic resampling (low-variance, O(N))
-  if (!is.null(seed)) set.seed(seed)
+  .local_seed(seed)  # caller's RNG stream restored on exit (C1)
   idx <- .smc_systematic_resample(w_norm, n_draws)
   chain[idx, , drop = FALSE]
 }

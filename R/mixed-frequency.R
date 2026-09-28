@@ -280,7 +280,7 @@ mf_aggregation_weights <- function(type = .MF_TYPES, k = 1L) {
     obs_t <- which(!is.na(data[i, ]))
     if (length(obs_t) < 2L) next
     if (any(diff(obs_t) %% mf$k[i] != 0L))
-      warning(sprintf(
+      .dynhr_warn(sprintf(
         paste0("kalman_filter: observable '%s' is declared as a %d-period ",
                "aggregate but its non-missing observations are not spaced in ",
                "multiples of %d. Low-frequency observations must sit at the ",

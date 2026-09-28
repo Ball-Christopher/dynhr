@@ -449,7 +449,7 @@ rwmh_da <- function(log_post_fn, screen_fn, theta0, Sigma_prop,
         label, i, n_draws, rate * 100, scr * 100, n_expensive,
         lp_exp_curr, scale, eta)
       if (!is.null(progressor)) progressor(message = msg, amount = 1)
-      else if (verbose) cat("  ", msg, "\n")
+      else if (verbose) .dynhr_cat("  ", msg, "\n")
     }
   }
 

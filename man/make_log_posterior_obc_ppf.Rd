@@ -39,10 +39,11 @@ make_log_posterior_obc_ppf(
 \item{proposal}{"bootstrap" (prior proposal) or "copf" (conditionally
 optimal proposal with regime verification and general-ratio fallback)}
 
-\item{regime_guess}{For proposal = "copf": "ancestor" (default) guesses
-each particle's regime from its resampled ancestor's verified regime
-(all-slack at t = 1); "slack" always guesses all-slack. Pure variance
-reduction — weights are valid for any guess.}
+\item{regime_guess}{For proposal = "copf": the starting guess of each
+particle's expected regime sequence, which is then iterated on the mean
+of the proposal: "ancestor" (default) starts from the sequence the
+resampled ancestor expected (all slack at t = 1); "slack" starts all
+slack. Pure variance reduction -- weights are valid for any guess.}
 
 \item{seed}{Integer RNG seed (NULL = not fixed; each call differs)}
 
@@ -58,11 +59,21 @@ package option ONCE, at factory time.}
 Function(theta) -> list(logpost, loglik, logprior)
 }
 \description{
-Bootstrap particle filter variant of \code{make_log_posterior_obc_pkf}.
+Particle filter variant of \code{make_log_posterior_obc_pkf}.
 Each evaluation builds a FRESH regime_cache (theta-dependent) and runs
-the bootstrap PPF with N particles.
+the piecewise particle filter with N particles.  Each particle follows the
+OccBin piecewise-linear solution from its own state: in every period the
+regime sequence expected from the particle's state and drawn shock is
+solved by guess-and-verify (as \code{kalman_filter_obc_pkf} does for the
+filtered state) and the period's time-varying rule is applied.
 }
 \details{
+Changed in W50 (2026-09-25): the particles used to check the current
+period only, against the slack rule, and to apply the one-period binding
+policy (next period slack), which is wrong for spells of two or more
+periods; and a period with no observation was skipped instead of
+propagated.
+
 me_variance > 0 is required (hard stop): the bootstrap weights degenerate
 when me_variance = 0 with n_obs < n_exo.
 }

@@ -223,6 +223,9 @@ occbin_build_regime_fns <- function(compiled, regime_map) {
 #' @return List with:
 #'   $J   — sparse dgCMatrix (T*n_endo × T*n_endo)
 #'   $R   — numeric vector (T*n_endo): stacked residual
+#'   $mag — numeric vector (T*n_endo): magnitude of each equation's terms,
+#'          sum_k |dF/d dy_k| |dy_k| (the scale of its round-off, as the
+#'          term magnitudes of .obc_mult_keeps())
 #' @noRd
 .occbin_build_stacked_system <- function(Y, y0_num, y_ss_num, eps_mat,
                                           pf_meta, col_meta,
@@ -231,7 +234,8 @@ occbin_build_regime_fns <- function(compiled, regime_map) {
   n_total <- T * n_endo
 
   # Pre-allocate residual vector
-  R <- numeric(n_total)
+  R   <- numeric(n_total)
+  mag <- numeric(n_total)
 
   # Build the sparse Jacobian incrementally
   # We'll use the Matrix package to create a sparse matrix
@@ -262,6 +266,7 @@ occbin_build_regime_fns <- function(compiled, regime_map) {
 
     # Store residual
     R[row_off + seq_len(n_endo)] <- Rt
+    mag[row_off + seq_len(n_endo)] <- as.numeric(abs(Jt) %*% abs(dy))
 
     # Route Jacobian columns to global sparse entries
     # Lag columns -> block (t, t-1)
@@ -318,7 +323,7 @@ occbin_build_regime_fns <- function(compiled, regime_map) {
     dims = c(n_total, n_total)
   )
 
-  list(J = J, R = R)
+  list(J = J, R = R, mag = mag)
 }
 
 
@@ -368,7 +373,7 @@ occbin_build_regime_fns <- function(compiled, regime_map) {
 
   # Build evaluation environment: params + endo SS values
   # (endo SS values are needed for steady_state(X) resolution)
-  eval_env <- as.list(params)
+  eval_env <- .dynhr_param_eval_env(params)
 
   for (j in seq_len(n_constraints)) {
     cn <- if (is.list(constraints) && !is.null(names(constraints))) {
@@ -380,7 +385,7 @@ occbin_build_regime_fns <- function(compiled, regime_map) {
     # Column index of the constrained variable
     vi <- match(cn$var_name, dyn$endo_names)
     if (is.na(vi)) {
-      warning(sprintf(
+      .dynhr_warn(sprintf(
         ".occbin_eval_bind_condition: variable '%s' not found in endo_names; skipping.",
         cn$var_name))
       next
@@ -402,7 +407,7 @@ occbin_build_regime_fns <- function(compiled, regime_map) {
           vname <- sub("steady_state\\s*\\(\\s*(\\w+)\\s*\\)", "\\1", cap, perl = TRUE)
           vi_ss <- match(vname, dyn$endo_names)
           if (is.na(vi_ss)) {
-            warning(sprintf(
+            .dynhr_warn(sprintf(
               ".occbin_eval_bind_condition: steady_state(%s) not found; replacing with NA.",
               vname))
             ss_val <- NA_real_
@@ -421,10 +426,16 @@ occbin_build_regime_fns <- function(compiled, regime_map) {
     bound_val <- if (is.na(bound_text)) {
       NA_real_
     } else {
-      tryCatch(
-        eval(parse(text = bound_text), envir = eval_env),
+      ## A-SEC: .mod text -> params-seeded allowlist sandbox, never the
+      ## function frame; an unsafe call aborts (re-raised past the fallback).
+      tryCatch({
+        v <- .dynhr_sandbox_eval(bound_text, eval_env, .dynhr_safe_fn_names,
+                                 context = "the occbin_constraints bound")
+        if (is.null(v)) NA_real_ else v
+      },
         error = function(e) {
-          warning(sprintf(
+          .dynhr_reraise_unsafe(e, NULL)
+          .dynhr_warn(sprintf(
             ".occbin_eval_bind_condition: bound_expr '%s' evaluation failed: %s",
             bound_text, conditionMessage(e)))
           NA_real_
@@ -433,7 +444,7 @@ occbin_build_regime_fns <- function(compiled, regime_map) {
     }
 
     if (is.na(bound_val)) {
-      warning(sprintf(
+      .dynhr_warn(sprintf(
         ".occbin_eval_bind_condition: constraint '%s' has no evaluable bound; all slack.",
         cn$name %||% paste0("j=", j)))
       next
@@ -491,7 +502,7 @@ occbin_build_regime_fns <- function(compiled, regime_map) {
   dr_slack <- tryCatch(
     solve_perturbation(model, compiled, y_ss_num, params),
     error = function(e) {
-      warning(".occbin_build_pwlinear_drs: slack DR failed: ", conditionMessage(e))
+      .dynhr_warn(".occbin_build_pwlinear_drs: slack DR failed: ", conditionMessage(e))
       NULL
     }
   )
@@ -503,7 +514,7 @@ occbin_build_regime_fns <- function(compiled, regime_map) {
   sys <- tryCatch(
     extract_system_matrices(compiled, y_ss_num, params),
     error = function(e) {
-      warning(".occbin_build_pwlinear_drs: extract_system_matrices failed: ",
+      .dynhr_warn(".occbin_build_pwlinear_drs: extract_system_matrices failed: ",
               conditionMessage(e))
       NULL
     }
@@ -531,7 +542,7 @@ occbin_build_regime_fns <- function(compiled, regime_map) {
     }
 
     if (is.na(eq_idx_j)) {
-      warning(sprintf(
+      .dynhr_warn(sprintf(
         ".occbin_build_pwlinear_drs: cannot locate relax equation for '%s'; aborting DR build.",
         cn$name))
       return(NULL)
@@ -539,7 +550,7 @@ occbin_build_regime_fns <- function(compiled, regime_map) {
 
     var_idx_j <- match(cn$var_name, endo_names)
     if (is.na(var_idx_j)) {
-      warning(sprintf(
+      .dynhr_warn(sprintf(
         ".occbin_build_pwlinear_drs: bind var '%s' not in endo_names; aborting.",
         cn$var_name))
       return(NULL)
@@ -560,7 +571,7 @@ occbin_build_regime_fns <- function(compiled, regime_map) {
     }
 
     if (is.na(bound_val)) {
-      warning(sprintf(
+      .dynhr_warn(sprintf(
         ".occbin_build_pwlinear_drs: cannot resolve bound for constraint '%s'; aborting.",
         cn$name))
       return(NULL)
@@ -568,6 +579,7 @@ occbin_build_regime_fns <- function(compiled, regime_map) {
 
     obc_specs[[j]] <- list(
       eq_idx  = eq_idx_j,
+      row_idx = eq_idx_j,        # already the declaration-order system row
       var_idx = var_idx_j,
       bound   = bound_val
     )
@@ -577,51 +589,39 @@ occbin_build_regime_fns <- function(compiled, regime_map) {
   bind_res <- tryCatch(
     obc_solve_binding(sys, dr_slack, obc_specs, obs_idx),
     error = function(e) {
-      warning(".occbin_build_pwlinear_drs: obc_solve_binding failed: ",
+      .dynhr_warn(".occbin_build_pwlinear_drs: obc_solve_binding failed: ",
               conditionMessage(e))
       NULL
     }
   )
   if (is.null(bind_res)) return(NULL)
 
-  # Build the binding system matrices once (for backward recursion reuse)
-  built_b <- obc_build_binding_sys(sys, obc_specs)
-  const_b  <- built_b$const_b  # zero before SS correction (done in solve loop)
-
   list(
     dr_slack  = dr_slack,
     dr_bind   = bind_res$dr,
     c_bind    = bind_res$c_full,
     state_idx = state_idx,
-    sys_b     = built_b$sys_b,
-    obc_specs = obc_specs,
-    const_b   = const_b
+    sys       = sys,
+    obc_specs = obc_specs
   )
 }
 
 
-#' Piecewise-linear backward recursion for OccBin (Dynare-exact)
+#' Piecewise-linear OccBin path for a fixed regime path
 #'
-#' Replicates Dynare's OccBin piecewise-linear algorithm exactly.
+#' Replicates Dynare's OccBin piecewise-linear algorithm: PERIOD-SPECIFIC
+#' decision rules from the backward recursion of \code{.obc_pwl_rules()}
+#' (R/obc-binding.R), starting from the slack rule after the last binding
+#' period.  The expectation term carries the next period's rule AND its
+#' constant, E_t y_{t+1} = G_{t+1} s_t + c_{t+1}, and a slack period that
+#' precedes a binding period is solved with the slack system and that
+#' anticipating terminal rule -- not with ghx_slack.  (Before 2026-09-25,
+#' W48, the recursion dropped c_{t+1}, so the bound's constant never reached
+#' the earlier periods of a spell, and every slack period used ghx_slack.)
+#' Shocks are surprises; the rules are then propagated forward from t = 1.
 #'
-#' For a fixed regime path, Dynare builds PERIOD-SPECIFIC decision rules
-#' backward from t=T:
-#'   - At each slack period: use ghx_slack (infinite-horizon DR)
-#'   - At each binding period t: compute a binding DR with the NEXT period's
-#'     forward DR as terminal condition (obc_solve_binding with ghx_fwd(t+1))
-#'
-#' For consecutive binding periods, each has a different ghx because the
-#' terminal condition changes.  Slack periods all share ghx_slack.
-#'
-#' Once period-specific DRs are computed backward, propagate forward from t=1.
-#'
-#' For single-period binding episodes, this collapses to the standard
-#' obc_solve_binding approach.  For multi-period episodes, this correctly
-#' handles the backward telescoping.
-#'
-#' @param drs       List from .occbin_build_pwlinear_drs() with $dr_slack,
-#'                  $sys_b, $obc_specs, $state_idx (sys_b and specs for the
-#'                  backward recursion)
+#' @param drs       List from .occbin_build_pwlinear_drs() ($dr_slack, $sys,
+#'                  $obc_specs)
 #' @param y0_num    Named numeric (n_endo): initial condition in levels
 #' @param y_ss_num  Named numeric (n_endo): steady-state levels
 #' @param eps_mat   T x n_exo matrix: structural shocks
@@ -633,112 +633,17 @@ occbin_build_regime_fns <- function(compiled, regime_map) {
 #' @noRd
 .occbin_pwlinear_solve <- function(drs, y0_num, y_ss_num, eps_mat,
                                     regime_path, T, n_endo, endo_names) {
-  dr_slack  <- drs$dr_slack
-  state_idx <- drs$state_idx
-  n_state   <- length(state_idx)
-  n_exo     <- ncol(eps_mat)
+  ctx <- .obc_pwl_context(drs$sys, drs$dr_slack, drs$obc_specs)
+  ## bound rows in deviations from the steady state of THIS solve
+  ctx$bnd <- vapply(drs$obc_specs, function(s)
+    s$bound - as.numeric(y_ss_num[[s$var_idx]]), numeric(1))
 
-  # Selection matrix E_s: E_s[i, state_idx[i]] = 1 (n_state x n_endo)
-  E_s <- matrix(0, n_state, n_endo)
-  for (k in seq_len(n_state)) E_s[k, state_idx[k]] <- 1
+  rules <- .obc_pwl_rules(ctx, regime_path)
+  s0    <- (as.numeric(y0_num) - as.numeric(y_ss_num))[ctx$si]
+  sim   <- .obc_pwl_forward(ctx, rules, t(eps_mat), s0)
 
-  # ==========================================================================
-  # Backward pass: compute period-specific DRs
-  # ==========================================================================
-  # period_dr[[t]] = list(ghx, ghu, c) for the forward DR at period t.
-  # For slack periods: period_dr = (ghx_slack, ghu_slack, 0).
-  # For binding periods: computed via backward substitution.
-  #
-  # ghx_fwd[t+1] is the DR used as terminal condition when solving period t.
-  # ghx_fwd[T+1] = ghx_slack (beyond horizon, return to slack).
-  period_ghx <- vector("list", T)
-  period_ghu <- vector("list", T)
-  period_c   <- vector("list", T)
-
-  # Forward DR at t+1 (start with slack for t+1 = T+1 = beyond horizon)
-  ghx_fwd <- dr_slack$ghx
-  ghu_fwd <- dr_slack$ghu
-
-  has_bind_sys <- !is.null(drs$sys_b) && !is.null(drs$obc_specs)
-
-  for (t in seq(T, 1L)) {
-    is_binding <- (regime_path[t] != 0L)
-
-    if (!is_binding) {
-      # Slack period: use slack DR; next-period terminal is also slack DR
-      period_ghx[[t]] <- dr_slack$ghx
-      period_ghu[[t]] <- dr_slack$ghu
-      period_c[[t]]   <- numeric(n_endo)
-      # Forward DR remains slack for next (earlier) period
-      ghx_fwd <- dr_slack$ghx
-      ghu_fwd <- dr_slack$ghu
-    } else if (!has_bind_sys) {
-      # No system matrices available: fall back to precomputed single bind DR
-      period_ghx[[t]] <- drs$dr_bind$ghx
-      period_ghu[[t]] <- drs$dr_bind$ghu
-      period_c[[t]]   <- drs$c_bind
-      ghx_fwd <- drs$dr_bind$ghx
-      ghu_fwd <- drs$dr_bind$ghu
-    } else {
-      # Binding period: solve bind DR with current ghx_fwd as terminal condition.
-      # A_b(t) = f_zero_b + f_plus_b * ghx_fwd * E_s
-      sys_b   <- drs$sys_b
-      A_b     <- sys_b$f_zero + sys_b$f_plus %*% ghx_fwd %*% E_s
-      const_b <- drs$const_b
-
-      # Adjust const_b for SS deviations (same as obc_solve_binding)
-      ys_vals <- y_ss_num
-      for (s in drs$obc_specs) const_b[s$eq_idx] <- s$bound - ys_vals[s$var_idx]
-
-      rcond_Ab <- rcond(A_b)
-      if (!is.finite(rcond_Ab) || rcond_Ab <= .Machine$double.eps) {
-        # Singular: fall back to single bind DR
-        period_ghx[[t]] <- drs$dr_bind$ghx
-        period_ghu[[t]] <- drs$dr_bind$ghu
-        period_c[[t]]   <- drs$c_bind
-        ghx_fwd <- drs$dr_bind$ghx
-        ghu_fwd <- drs$dr_bind$ghu
-      } else {
-        rhs_ghx_t <- -sys_b$f_minus[, state_idx, drop = FALSE]
-        rhs_ghu_t <- -sys_b$f_exo
-        rhs_c_t   <- const_b
-
-        ghx_t <- tryCatch(solve(A_b, rhs_ghx_t), error = function(e) NULL)
-        ghu_t <- tryCatch(solve(A_b, rhs_ghu_t), error = function(e) NULL)
-        c_t   <- tryCatch(solve(A_b, rhs_c_t),   error = function(e) NULL)
-
-        if (is.null(ghx_t) || is.null(ghu_t) || is.null(c_t)) {
-          period_ghx[[t]] <- drs$dr_bind$ghx
-          period_ghu[[t]] <- drs$dr_bind$ghu
-          period_c[[t]]   <- drs$c_bind
-          ghx_fwd <- drs$dr_bind$ghx
-        } else {
-          period_ghx[[t]] <- ghx_t
-          period_ghu[[t]] <- ghu_t
-          period_c[[t]]   <- as.numeric(c_t)
-          ghx_fwd <- ghx_t
-          ghu_fwd <- ghu_t
-        }
-      }
-    }
-  }
-
-  # ==========================================================================
-  # Forward pass: propagate using period-specific DRs
-  # ==========================================================================
-  Y      <- matrix(0, nrow = T, ncol = n_endo)
+  Y <- t(sim$paths) + matrix(as.numeric(y_ss_num), T, n_endo, byrow = TRUE)
   colnames(Y) <- endo_names
-  s_prev <- (y0_num - y_ss_num)[state_idx]
-
-  for (t in seq_len(T)) {
-    eps_t  <- eps_mat[t, ]
-    delta  <- as.numeric(period_ghx[[t]] %*% s_prev +
-                         period_ghu[[t]] %*% eps_t +
-                         period_c[[t]])
-    Y[t, ] <- y_ss_num + delta
-    s_prev <- delta[state_idx]
-  }
-
   list(Y = Y, converged = TRUE)
 }
 
@@ -787,7 +692,13 @@ occbin_build_regime_fns <- function(compiled, regime_map) {
 #'                       exact Dynare parity.  "nonlinear" uses the stacked
 #'                       Newton solver for higher accuracy.
 #' @param max_iter       Maximum Newton iterations per regime (default 50; ignored for pwlinear)
-#' @param tol            Newton convergence tolerance on max|R| (default 1e-8; ignored for pwlinear)
+#' @param tol            Relative Newton convergence tolerance (default 1e-8;
+#'                       ignored for pwlinear): the iteration stops when
+#'                       every stacked equation's residual is within tol
+#'                       times the magnitude of its terms (sum over the terms
+#'                       of |dF/dy| |y|, shocks included; plus a round-off
+#'                       floor), so the solution does not depend on the units
+#'                       of the model (an absolute max|R| < tol before W79)
 #' @param max_regime_iter Maximum outer regime-switching iterations (default 30)
 #' @param step_size      Newton step-length (default 1.0; ignored for pwlinear)
 #' @param line_search    Logical: perform backtracking line search (default TRUE; ignored for pwlinear)
@@ -940,14 +851,14 @@ occbin_solve_path <- function(compiled,
     pwl_drs <- tryCatch(
       .occbin_build_pwlinear_drs(compiled, y_ss_num, params),
       error = function(e) {
-        warning("occbin_solve_path: pwlinear DR build failed: ",
+        .dynhr_warn("occbin_solve_path: pwlinear DR build failed: ",
                 conditionMessage(e), "; falling back to nonlinear.")
         NULL
       }
     )
     if (is.null(pwl_drs)) {
       method <- "nonlinear"
-      warning("occbin_solve_path: pwlinear setup failed, using nonlinear.")
+      .dynhr_warn("occbin_solve_path: pwlinear setup failed, using nonlinear.")
     }
   }
 
@@ -987,8 +898,16 @@ occbin_solve_path <- function(compiled,
 
         max_res <- max(abs(sys$R))
         max_res_final <- max_res
+        ## RELATIVE stop (W79): every stacked equation's residual within tol
+        ## times the magnitude of its own terms (sum |J| |dy|, as
+        ## .obc_mult_keeps() does with M), plus a round-off floor relative to
+        ## the largest one (an equation whose terms are all round-off).
+        ## Absolute before (max|R| < tol): in small units the shock's own
+        ## residual passed at the steady-state start and the path stayed at
+        ## the steady state; in large units round-off never passed.
+        res_tol <- tol * sys$mag + 64 * .Machine$double.eps * max(sys$mag)
 
-        if (max_res < tol) {
+        if (all(abs(sys$R) <= res_tol)) {
           newton_converged <- TRUE
           break
         }
@@ -1000,7 +919,7 @@ occbin_solve_path <- function(compiled,
         }
 
         if (anyNA(delta_vec)) {
-          warning("occbin_solve_path: singular Jacobian at Newton iter ", newton_iter,
+          .dynhr_warn("occbin_solve_path: singular Jacobian at Newton iter ", newton_iter,
                   "; aborting Newton for current regime.")
           break
         }
@@ -1023,8 +942,11 @@ occbin_solve_path <- function(compiled,
               regime_fns, regime_path, params, T, n_endo
             )
             norm_R1 <- max(abs(trial_res))
-            # Armijo condition: norm_R1 <= (1 - alpha/2) * norm_R0
-            if (norm_R1 <= (1 - alpha * 0.5) * norm_R0 || norm_R1 < tol) break
+            # Armijo condition: norm_R1 <= (1 - alpha/2) * norm_R0, or the
+            # trial point already passes the (relative) stop above
+            if (norm_R1 <= (1 - alpha * 0.5) * norm_R0 ||
+                all(abs(trial_res) <= res_tol))
+              break
             alpha <- alpha * 0.5
           }
         }
@@ -1071,56 +993,32 @@ occbin_solve_path <- function(compiled,
     # equals Y (no-op). We then run the SAME bind-condition evaluator on this
     # notional path, so the bound/direction logic is shared and sign-robust.
     #
-    # For pwlinear: compute the notional using the slack DR propagation path.
-    # The notional at binding periods = y_ss + ghx_slack * s_{t-1}^{actual} + ghu * eps_t
-    # where s_{t-1}^{actual} is the state from the actual (regime-aware) path.
+    # The same holds for pwlinear: the relax residual is evaluated on the
+    # piecewise-linear path itself.  (Before 2026-09-25, W48, pwlinear took
+    # the notional from the ALL-SLACK path -- the slack-policy prediction --
+    # which ignores how the binding periods themselves move the path.)
     Y_notional <- Y
     any_binding <- any(regime_path != 0L)
     if (any_binding) {
-      # Compute the notional (slack-regime) path to check complementarity.
-      # The notional is the all-slack-regime linear solve at the current Y.
       # For slack periods: Y_notional = Y (relax eq is satisfied).
       # For binding periods: Y_notional[t, bind_var] = what the bind var
-      # would be if not constrained (the slack-regime prediction).
-      # We get this from the all-slack residual of the RELAX equation:
+      # would be if not constrained, from the all-slack residual of the RELAX
+      # equation on the current path:
       #   relax_eq residual = var - notional, so notional = var - residual.
-      if (method == "pwlinear" && !is.null(pwl_drs)) {
-        # For pwlinear: compute the notional path using the all-slack DR
-        # (propagate with dr_slack for every period).
-        slack_path_res <- .occbin_pwlinear_solve(
-          pwl_drs, y0_num, y_ss_num, eps_mat, integer(T),
-          T, n_endo, dyn$endo_names
-        )
-        if (slack_path_res$converged) {
-          Y_notional_slack <- slack_path_res$Y
-          # Override notional only for binding periods and bind vars
-          for (j in seq_len(n_constraints)) {
-            bind_bit <- 2L^(j - 1L)
-            vj       <- match(constraints[[j]]$var_name, dyn$endo_names)
-            if (is.na(vj)) next
-            for (t in seq_len(T)) {
-              if (bitwAnd(regime_path[t], bind_bit) != 0L) {
-                Y_notional[t, vj] <- Y_notional_slack[t, vj]
-              }
-            }
-          }
-        }
-      } else {
-        R_slack <- .occbin_eval_residual(
-          Y, y0_num, y_ss_num, eps_mat, meta,
-          regime_fns, integer(T), params, T, n_endo
-        )
-        slack_eq_indices <- regime_fns[[1L]]$eq_indices   # regime 0 = all slack
-        for (j in seq_len(n_constraints)) {
-          bind_bit <- 2L^(j - 1L)
-          vj   <- match(constraints[[j]]$var_name, dyn$endo_names)
-          posj <- match(constraints[[j]]$eq_relax, slack_eq_indices)
-          if (is.na(vj) || is.na(posj)) next
-          for (t in seq_len(T)) {
-            if (bitwAnd(regime_path[t], bind_bit) != 0L) {
-              relax_resid <- R_slack[(t - 1L) * n_endo + posj]
-              Y_notional[t, vj] <- Y[t, vj] - relax_resid
-            }
+      R_slack <- .occbin_eval_residual(
+        Y, y0_num, y_ss_num, eps_mat, meta,
+        regime_fns, integer(T), params, T, n_endo
+      )
+      slack_eq_indices <- regime_fns[[1L]]$eq_indices   # regime 0 = all slack
+      for (j in seq_len(n_constraints)) {
+        bind_bit <- 2L^(j - 1L)
+        vj   <- match(constraints[[j]]$var_name, dyn$endo_names)
+        posj <- match(constraints[[j]]$eq_relax, slack_eq_indices)
+        if (is.na(vj) || is.na(posj)) next
+        for (t in seq_len(T)) {
+          if (bitwAnd(regime_path[t], bind_bit) != 0L) {
+            relax_resid <- R_slack[(t - 1L) * n_endo + posj]
+            Y_notional[t, vj] <- Y[t, vj] - relax_resid
           }
         }
       }

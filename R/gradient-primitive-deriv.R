@@ -127,7 +127,9 @@
 #' @noRd
 .ssm_consistent_params <- function(model, params) {
   if (!.ssm_assigns_param(model)) return(params)
-  a <- tryCatch(solve_steady_state_analytical(model, params), error = function(e) NULL)
+  ## A-SEC: an unsafe SSM statement is re-raised, not mapped to "no-op".
+  a <- tryCatch(solve_steady_state_analytical(model, params),
+                error = function(e) .dynhr_reraise_unsafe(e, NULL))
   if (is.null(a) || is.null(a$params)) return(params)
   common <- intersect(names(params), names(a$params))
   params[common] <- a$params[common]
@@ -329,21 +331,41 @@
 #' (built in compiled/equation order) is partitioned into df_minus/df_zero/
 #' df_plus/df_exo exactly as the finite-difference path would be.
 #'
+#' The row permutation MUST be the one \code{extract_system_matrices()} applies
+#' to the level Jacobian (the eq-to-decl consistency invariant): the implicit
+#' solution-derivative solve combines these df blocks with the level f blocks of
+#' \code{extract_system_matrices()} row by row. That mapping is not purely
+#' structural -- \code{.build_eq_to_decl()} re-matches a positionally-assigned
+#' equation whose assigned variable has zero contemporaneous weight (the H5
+#' compound-LHS refinement) using the numeric static Jacobian. \code{J} supplies
+#' that Jacobian (compiled equation order, the one \code{extract_system_matrices()}
+#' evaluates at the same point), so the permutation here is the extract one.
+#' Omitting it (pre-0.9.4) reproduced only the structural part: on SW2007
+#' (\code{0*(1-calfa)*a + 1*a = ...}, a second \code{yf = ...}/\code{y = ...})
+#' the refinement fires, two df rows landed in the wrong equations, and every
+#' analytic/adjoint gradient was wrong for crhoa, cfc and calfa.
+#'
 #' @param compiled dynhr_compiled.
-#' @return list(perm, cache, col_var_idx, ...) -- structure-only, value-free.
+#' @param J        Dynamic Jacobian \code{[n_eq x total_cols]} in compiled
+#'   equation order at the expansion point (as \code{dyn$jacobian_fn} returns).
+#' @return list(perm, cache, col_var_idx, ...).
 #' @noRd
-.dsys_layout <- function(compiled) {
+.dsys_layout <- function(compiled, J) {
   model <- compiled$model
   dyn   <- compiled$dynamic
   endo  <- model$var_names
   n_eq  <- dyn$n_eq
 
-  ## eq_to_decl: same LHS-variable matching as extract_system_matrices().
-  perm <- .eq_to_decl_perm(model, n_eq)
-
   ## Reuse the cached timing-column maps (minus/zero/plus/exo) -- identical to
   ## the partition the fast/slow extractors apply after the row reorder.
-  cache <- cache_system_structure(compiled)
+  ## Memoized per compiled model (.get_sys_cache): the structure is
+  ## parameter-free, and rebuilding it here cost ~0.7 ms of every NZSIM
+  ## adjoint_solution gradient (W89).
+  cache <- .get_sys_cache(compiled)
+
+  ## eq_to_decl: the SAME mapping extract_system_matrices() builds, including
+  ## the f_zero-based compound-LHS refinement.
+  perm <- .eq_to_decl_perm(model, n_eq, f_zero = .f_zero_raw(J, cache))
 
   ## Map each dynamic column -> endogenous index (for the dys lookup); NA for
   ## the shock columns (whose steady-state value is a parameter-free 0).
@@ -356,38 +378,64 @@
 }
 
 
+#' Raw (equation-order) contemporaneous Jacobian block from a dynamic Jacobian.
+#'
+#' The \code{f_zero_raw} that \code{extract_system_matrices()} hands to
+#' \code{.build_eq_to_decl()}: rows in ORIGINAL equation order, one column per
+#' endogenous variable (declaration order), taken from the t = 0 columns.
+#'
+#' @param J     \code{[n_eq x total_cols]} dynamic Jacobian, equation order.
+#' @param cache \code{cache_system_structure()} output.
+#' @return \code{[n_eq x n_endo]} matrix.
+#' @noRd
+.f_zero_raw <- function(J, cache) {
+  f0 <- matrix(0, nrow(J), cache$n_endo, dimnames = list(NULL, cache$endo))
+  zi <- cache$zero_idx
+  if (nrow(zi)) f0[, zi[, 1]] <- J[, zi[, 2]]
+  f0
+}
+
+
 #' Equation->declaration-order row permutation.
 #'
-#' Replicates the LHS-variable matching used inside
-#' \code{extract_system_matrices()} (each equation's LHS endogenous variable
-#' fixes its row position; unmatched equations fill the remaining slots in
-#' order). Returns \code{order(eq_to_decl)} -- the permutation that reorders
-#' Jacobian rows from equation order to declaration order, or
-#' \code{seq_len(n_eq)} when the orders already coincide.
+#' \code{order(.build_eq_to_decl(model, f_zero))} -- the permutation that
+#' reorders Jacobian rows from equation order to declaration order, or
+#' \code{seq_len(n_eq)} when the orders already coincide. Delegates to the
+#' shared \code{.build_eq_to_decl()} so it cannot drift from
+#' \code{extract_system_matrices()}; pass the raw static Jacobian
+#' \code{f_zero} (see \code{.f_zero_raw()}) to get the exact extract mapping.
+#' Without it only the structural (LHS-name + positional) part is applied.
 #'
 #' @noRd
-.eq_to_decl_perm <- function(model, n_eq) {
-  endo <- model$var_names
-  ## Use the shared package-level LHS-variable helper (.lhs_endo_var in
-  ## solve-extract-system.R) -- fixes the dead "uniop" branch and eliminates
-  ## the duplicate copy of this logic.
-  used <- logical(length(endo)); names(used) <- endo
-  eq_to_decl <- integer(n_eq)
-  for (i in seq_len(n_eq)) {
-    v <- .lhs_endo_var(model$equations[[i]]$lhs)
-    if (!is.null(v) && nzchar(v) && v %in% endo && !used[[v]]) {
-      used[[v]] <- TRUE
-      eq_to_decl[i] <- match(v, endo)
-    }
-  }
-  unassigned <- which(!used)
-  unmapped   <- which(eq_to_decl == 0)
-  for (k in seq_along(unmapped))
-    if (k <= length(unassigned)) eq_to_decl[unmapped[k]] <- unassigned[k]
-  if (all(eq_to_decl > 0) && !identical(eq_to_decl, seq_len(n_eq)))
+.eq_to_decl_perm <- function(model, n_eq, f_zero = NULL) {
+  eq_to_decl <- .build_eq_to_decl(model, f_zero = f_zero)
+  if (length(eq_to_decl) == n_eq && all(eq_to_decl > 0) &&
+      !identical(eq_to_decl, seq_len(n_eq)))
     order(eq_to_decl)
   else
     seq_len(n_eq)
+}
+
+
+#' The equation->declaration map \code{extract_system_matrices()} uses at a point.
+#'
+#' Equal to \code{extract_system_matrices(compiled, ys, params)$eq_to_decl}
+#' (same Jacobian, same \code{.build_eq_to_decl(model, f_zero)} call) without
+#' building the full system. For the solution-derivative layers that permute a
+#' model Hessian (or its parameter derivative) into declaration order to match
+#' level blocks from \code{extract_system_matrices()}; when such a level
+#' \code{sys} is in scope, use \code{sys$eq_to_decl} directly.
+#'
+#' @param compiled dynhr_compiled (non-OccBin: the OccBin relax-row selection
+#'   of \code{extract_system_matrices()} is not reproduced).
+#' @param ys       Named steady state.
+#' @param params   Named parameter vector.
+#' @return integer vector (length n_eq).
+#' @noRd
+.extract_eq_to_decl <- function(compiled, ys, params) {
+  J  <- compiled$dynamic$jacobian_fn(.build_dy_ss_o2(compiled, ys), params, ys)
+  f0 <- .f_zero_raw(J, cache_system_structure(compiled))
+  .build_eq_to_decl(compiled$model, f_zero = f0)
 }
 
 
@@ -456,50 +504,75 @@
 }
 
 
+#' Sparse explicit parameter-Jacobian at a point (W91).
+#'
+#' The non-zero entries \eqn{v_t = \partial^2 F_i / (\partial w_c \partial
+#' \theta_k)} from \code{param_jacobian_vals_fn}, with their linear
+#' (row, column) index \code{rc = i + (c - 1) n_eq} and parameter index
+#' \code{k}. NULL when the compiled model predates the sparse fields (the
+#' caller then uses the dense \code{param_jacobian_fn}).
+#' @noRd
+.param_jac_sparse <- function(dyn, dy, params, ys) {
+  vf <- dyn$param_jacobian_vals_fn
+  if (is.null(vf) || is.null(dyn$param_jac_rc) || is.null(dyn$param_jac_k))
+    return(NULL)
+  list(v = vf(dy, params, ys), rc = dyn$param_jac_rc, k = dyn$param_jac_k)
+}
+
+
 #' Analytic total parameter-derivatives of the dynamic-Jacobian primitives.
 #'
 #' For every parameter, returns the total first derivatives
 #' \code{df_plus/df_zero/df_minus/df_exo} of the dynamic-Jacobian blocks --
 #' the analytic replacement for the central-FD primitives in
-#' \code{.solution_deriv_one()}.
+#' \code{.solution_deriv_one()}. Rows are in the declaration order
+#' \code{extract_system_matrices()} gives the level blocks: the layout is keyed
+#' on the base Jacobian so the compound-LHS row refinement matches.
 #'
 #' @param compiled dynhr_compiled.
 #' @param ys       Named steady state.
 #' @param params   Named parameter vector.
 #' @param dys      n_endo x n_params matrix from \code{.analytic_dys()}.
-#' @param layout   Output of \code{.dsys_layout()} (optional; built if NULL).
 #' @return named-by-parameter list, each list(df_plus, df_zero, df_minus,
 #'   df_exo); or NULL on failure (caller falls back to FD).
 #' @noRd
-.analytic_dprimitives <- function(compiled, ys, params, dys, layout = NULL) {
+.analytic_dprimitives <- function(compiled, ys, params, dys) {
   if (is.null(dys)) return(NULL)
   dyn <- compiled$dynamic
   if (is.null(dyn$param_jacobian_fn)) return(NULL)
-  if (is.null(layout)) layout <- .dsys_layout(compiled)
+
+  ## Dynamic point dy[c] = ȳ[var(c)] (shock columns 0), as extract builds it.
+  dy <- .build_dy_ss_o2(compiled, ys)
+
+  ## Bail to FD if the base Jacobian is non-finite (0/0 at ss repaired by FD).
+  Jbase <- dyn$jacobian_fn(dy, params, ys)
+  if (any(!is.finite(Jbase))) return(NULL)
+
+  ## Row permutation + timing partition, keyed on the SAME base Jacobian that
+  ## extract_system_matrices() builds its equation->declaration mapping from.
+  layout <- .dsys_layout(compiled, Jbase)
 
   n_eq       <- layout$n_eq
   n_endo     <- layout$n_endo
   n_exo      <- layout$n_exo
   total_cols <- layout$total_cols
   np         <- ncol(dys)
-  perm       <- layout$perm
-  cache      <- layout$cache
   col_var_idx <- layout$col_var_idx
-
-  ## Dynamic point dy[c] = ȳ[var(c)] (shock columns 0), as extract builds it.
-  dy <- numeric(total_cols)
-  endo_cols <- which(!is.na(col_var_idx))
-  dy[endo_cols] <- ys[compiled$model$var_names[col_var_idx[endo_cols]]]
-  names(dy) <- cache$dy_keys
-
-  ## Bail to FD if the base Jacobian is non-finite (0/0 at ss repaired by FD).
-  Jbase <- dyn$jacobian_fn(dy, params, ys)
-  if (any(!is.finite(Jbase))) return(NULL)
+  endo_cols  <- which(!is.na(col_var_idx))
 
   ## Explicit channel: P[i,c,k] = ∂²F_i/(∂w_c ∂θ_k), flattened to [n_eq*tc, np].
-  P <- dyn$param_jacobian_fn(dy, params, ys)
-  if (any(!is.finite(P))) return(NULL)
-  dJ_all <- matrix(P, nrow = n_eq * total_cols, ncol = np)
+  ## Sparse values (W91) scattered straight into dJ_all when the compiled
+  ## model carries them; the dense accessor otherwise (older compiled objects).
+  pj <- .param_jac_sparse(dyn, dy, params, ys)
+  if (!is.null(pj)) {
+    if (any(!is.finite(pj$v))) return(NULL)
+    dJ_all <- matrix(0, nrow = n_eq * total_cols, ncol = np)
+    dJ_all[pj$rc + (pj$k - 1L) * (n_eq * total_cols)] <- pj$v
+  } else {
+    P <- dyn$param_jacobian_fn(dy, params, ys)
+    if (any(!is.finite(P))) return(NULL)
+    dJ_all <- matrix(P, nrow = n_eq * total_cols, ncol = np)
+  }
 
   ## SSM-computed-parameter chain (Tier 12 #2): capture the PURE param-Jacobian
   ## columns ∂²F/(∂w ∂p_c) for the SSM-derived parameters BEFORE the steady-state
@@ -565,6 +638,186 @@
   for (k in seq_len(np))
     out[[k]] <- .partition_dJ(matrix(dJ_all[, k], n_eq, total_cols), layout, compiled)
   out
+}
+
+
+#' Reverse-mode contraction of the analytic primitive derivatives (W89).
+#'
+#' Returns, for EVERY model parameter k (the columns of \code{dys}),
+#' \deqn{g_k = <B_+, df_{+,k}> + <B_0, df_{0,k}> + <B_-, df_{-,k}>
+#'           + <B_u, df_{u,k}> + <b_y, dys_k>}
+#' -- exactly the per-parameter Frobenius contraction
+#' \code{.solution_adjoint()} forms against \code{.analytic_dprimitives()}
+#' output, but WITHOUT materializing the per-parameter df blocks. The bars
+#' are un-partitioned once into the compiled-order dynamic-Jacobian layout
+#' (the transpose of \code{.partition_dJ()}), after which each of the three
+#' channels of \code{.analytic_dprimitives()} contracts in one pass:
+#' \itemize{
+#'   \item explicit: \eqn{P' \mathrm{vec}(\bar J)}, summed over the
+#'     non-zeros of the sparse param-Jacobian only (W91; the dense array's
+#'     crossprod for compiled objects without the sparse fields);
+#'   \item steady-state chain: the model-Hessian triplets fold \eqn{\bar J}
+#'     into a per-column weight, i.e. a length-\code{n_endo} vector that
+#'     contracts with \code{dys};
+#'   \item SSM-computed-parameter chain: the explicit contraction of each
+#'     computed parameter's column times its total derivative.
+#' }
+#' On NZSIM the per-parameter path materialized 75 dense
+#' \code{74 x 140} slices of a param Jacobian with 289 non-zeros
+#' (with the partitions and GC, about 40% of a ~46 ms gradient); this is
+#' O(size of P) once.
+#'
+#' Kept in lockstep with \code{.analytic_dprimitives()} (same inputs, same
+#' failure gates, returning NULL exactly where it returns NULL); the two are
+#' pinned against each other in test-fix-0928-grad-perf.R.
+#'
+#' @param compiled dynhr_compiled.
+#' @param ys       Named steady state.
+#' @param params   Named parameter vector.
+#' @param dys      n_endo x n_params matrix from \code{.analytic_dys()}.
+#' @param bar_df_plus,bar_df_zero,bar_df_minus \code{[n_eq x n_endo]} adjoints
+#'   of the declaration-order df blocks (\code{bar_df_minus} full width).
+#' @param bar_df_exo \code{[n_eq x n_exo]} adjoint of \code{df_exo}.
+#' @param bar_ys   length-\code{n_endo} adjoint of \code{dys} (row order of
+#'   \code{dys}).
+#' @return named numeric (names = \code{colnames(dys)}), or NULL when the
+#'   analytic primitives are unavailable (caller falls back to FD).
+#' @noRd
+.analytic_dprim_contract <- function(compiled, ys, params, dys,
+                                     bar_df_plus, bar_df_zero, bar_df_minus,
+                                     bar_df_exo, bar_ys) {
+  if (is.null(dys)) return(NULL)
+  dyn <- compiled$dynamic
+  if (is.null(dyn$param_jacobian_fn)) return(NULL)
+
+  dy <- .build_dy_ss_o2(compiled, ys)
+  Jbase <- dyn$jacobian_fn(dy, params, ys)
+  if (any(!is.finite(Jbase))) return(NULL)
+  layout <- .dsys_layout(compiled, Jbase)
+
+  n_eq       <- layout$n_eq
+  total_cols <- layout$total_cols
+  np         <- ncol(dys)
+  col_var_idx <- layout$col_var_idx
+  endo_cols  <- which(!is.na(col_var_idx))
+
+  ## ---- un-partition the bars (transpose of .partition_dJ) -----------------
+  cache <- layout$cache
+  mi <- cache$minus_idx; zi <- cache$zero_idx
+  pri <- cache$plus_idx; ej <- cache$exo_jcols
+  evalid <- which(ej <= total_cols)
+  bar_decl <- matrix(0, n_eq, total_cols)
+  if (nrow(mi))
+    bar_decl[, mi[, 2]] <- bar_decl[, mi[, 2], drop = FALSE] +
+      bar_df_minus[, mi[, 1], drop = FALSE]
+  if (nrow(zi))
+    bar_decl[, zi[, 2]] <- bar_decl[, zi[, 2], drop = FALSE] +
+      bar_df_zero[, zi[, 1], drop = FALSE]
+  if (nrow(pri))
+    bar_decl[, pri[, 2]] <- bar_decl[, pri[, 2], drop = FALSE] +
+      bar_df_plus[, pri[, 1], drop = FALSE]
+  if (length(evalid))
+    bar_decl[, ej[evalid]] <- bar_decl[, ej[evalid], drop = FALSE] +
+      bar_df_exo[, evalid, drop = FALSE]
+  barJ <- matrix(0, n_eq, total_cols)            # compiled equation order
+  barJ[layout$perm, ] <- bar_decl                # .partition_dJ: dJ[perm, ]
+
+  ## ---- explicit channel: P[(i,c), k] contracted with vec(barJ) -------------
+  ## W91: over the NON-ZEROS only -- g_k = sum_t v_t barJ[rc_t] over the
+  ## entries t of parameter k (NZSIM: 289 of 74 x 140 x 75). The dense
+  ## accessor (build + scan of the full array) remains for compiled objects
+  ## without the sparse fields.
+  pj <- .param_jac_sparse(dyn, dy, params, ys)
+  if (!is.null(pj)) {
+    ## same gate as .analytic_dprimitives()'s any(!is.finite())
+    if (any(!is.finite(pj$v))) return(NULL)
+    g <- numeric(np)
+    if (length(pj$v)) {
+      a  <- rowsum(pj$v * barJ[pj$rc], group = pj$k, reorder = FALSE)
+      kk <- as.integer(rownames(a))
+      g[kk] <- a[, 1]
+    }
+    ## The dense product spread a non-finite bar to EVERY parameter (0 * NaN);
+    ## keep that contract (the caller routes non-finite bars itself).
+    if (!all(is.finite(barJ))) g[] <- NaN
+  } else {
+    P <- dyn$param_jacobian_fn(dy, params, ys)
+    ## sum() is finite iff every entry is (up to a 1e308 overflow, which only
+    ## routes to the FD fallback): the same gate as .analytic_dprimitives()'s
+    ## any(!is.finite(P)), without its length(P) logical temporary.
+    if (!is.finite(sum(P))) return(NULL)
+    dim(P) <- c(n_eq * total_cols, np)
+    g <- as.numeric(crossprod(P, as.numeric(barJ)))
+  }
+
+  ## SSM-computed-parameter chain (channel 3 of .analytic_dprimitives): the
+  ## pure param-Jacobian column of each computed p_c (its explicit contraction
+  ## g_P[p_c], taken BEFORE the steady-state chain is added) times the total
+  ## dp_c/dtheta_k, for every free k.
+  if (.ssm_assigns_param(compiled$model)) {
+    ssm_ch <- .ssm_param_chain_derivs(compiled, ys, params)
+    if (is.null(ssm_ch)) return(NULL)
+    endo <- compiled$model$var_names
+    pars <- compiled$model$param_names
+    free <- setdiff(pars, ssm_ch$computed)
+    gP_pc <- g[match(ssm_ch$computed, colnames(dys))]
+    names(gP_pc) <- ssm_ch$computed
+    g_ssm <- numeric(np)
+    for (pc in ssm_ch$computed) {
+      for (k in free) {
+        kc  <- match(k, colnames(dys))
+        dpc <- ssm_ch$dg_dtheta[pc, k] + sum(ssm_ch$dg_dy[pc, endo] * dys[endo, kc])
+        if (dpc != 0) g_ssm[kc] <- g_ssm[kc] + gP_pc[[pc]] * dpc
+      }
+    }
+  } else {
+    g_ssm <- NULL
+  }
+
+  ## ---- steady-state chain: Hessian triplets fold barJ onto the columns -----
+  ## dJ[(eq,c1), k] += hv * V[c2, k]  (and (eq,c2) += hv * V[c1, k] off the
+  ## diagonal), V[c, k] = dys[var(c), k]; contracted with barJ this is
+  ## sum_c w[c] V[c, k] with w[c2] += hv * barJ[eq, c1], w[c1] += hv * barJ[eq, c2].
+  w_endo <- numeric(nrow(dys))
+  hv <- dyn$hessian2_fn(dy, params, ys)
+  if (length(hv) > 0L && any(!is.finite(hv))) return(NULL)
+  if (length(hv) > 0L) {
+    trip <- dyn$hess2_triplets
+    eqs  <- vapply(trip, `[[`, integer(1), "eq")
+    c1s  <- vapply(trip, `[[`, integer(1), "col1")
+    c2s  <- vapply(trip, `[[`, integer(1), "col2")
+    wcol <- numeric(total_cols)
+    b1 <- hv * barJ[eqs + (c1s - 1L) * n_eq]
+    a1 <- rowsum(b1, group = c2s, reorder = FALSE)
+    r1 <- as.integer(rownames(a1))
+    wcol[r1] <- wcol[r1] + a1[, 1]
+    off <- which(c1s != c2s)
+    if (length(off)) {
+      b2 <- hv[off] * barJ[eqs[off] + (c2s[off] - 1L) * n_eq]
+      a2 <- rowsum(b2, group = c1s[off], reorder = FALSE)
+      r2 <- as.integer(rownames(a2))
+      wcol[r2] <- wcol[r2] + a2[, 1]
+    }
+    ## Shock columns carry V = 0; fold endogenous columns onto their variable.
+    if (length(endo_cols)) {
+      a3 <- rowsum(wcol[endo_cols], group = col_var_idx[endo_cols],
+                   reorder = FALSE)
+      r3 <- as.integer(rownames(a3))
+      w_endo[r3] <- w_endo[r3] + a3[, 1]
+    }
+  }
+
+  ## ---- dys channel: steady-state chain + the direct bar_ys term ------------
+  g <- g + as.numeric(crossprod(dys, w_endo + bar_ys))
+  if (!is.null(g_ssm)) g <- g + g_ssm
+  ## A non-finite total primitive (the dJ_all / SSM-chain overflow that makes
+  ## .analytic_dprimitives() return NULL) shows up here with finite bars:
+  ## route it to the FD primitives exactly as before. Non-finite BARS are the
+  ## caller's (they make every contraction non-finite on either path).
+  if (any(!is.finite(g)) && all(is.finite(barJ)) && all(is.finite(bar_ys)))
+    return(NULL)
+  names(g) <- colnames(dys)
+  g
 }
 
 

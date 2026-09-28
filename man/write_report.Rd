@@ -25,8 +25,10 @@ for \code{format = "llm"}, \code{"dynhr_report.html"} for \code{"html"}.}
 
 \item{model_name}{Optional character label embedded in the report header.}
 
-\item{irfs}{Optional named list of IRF matrices for interactive
-plots in the HTML report.}
+\item{irfs}{Optional IRF input for the report's IRF section: a named
+list of \code{horizon x variable} matrices, or a \code{solve_model()} /
+\code{stoch_simul()} result, whose \code{$irfs} element is unwrapped.
+Entries that are not matrices are dropped with a warning naming them.}
 
 \item{...}{Additional arguments passed to the underlying writer.}
 }
@@ -41,8 +43,8 @@ Dispatches on \code{format}:
     external dependencies.}
   \item{\code{"html"}}{Renders the package's Quarto template
     (\code{inst/templates/report.qmd}) to a self-contained HTML file with
-    tabsets, callout blocks, and (optionally) interactive plotly IRFs.
-    Requires the \code{quarto} R package and a Quarto CLI installation.}
+    tabsets, callout blocks and pre-rendered IRF facet plots.  Requires the
+    \code{quarto} R package and a Quarto CLI installation.}
   \item{\code{"pdf"}}{Renders the package's Typst template
     (\code{inst/templates/report-pdf.qmd}) to PDF via Quarto's Typst
     engine.  No LaTeX required.  Requires the \code{quarto} R package

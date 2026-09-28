@@ -30,8 +30,13 @@ deviations when \code{shocks = NULL}.}
 \item{burn_in}{Integer.  Number of initial periods to discard.}
 
 \item{pruning}{Logical.  If \code{TRUE} (default), run the full pruned
-three-layer recursion.  If \code{FALSE}, set x^s = x^rd = 0 every
-period, reducing to a first-order simulation.}
+three-layer recursion.  \code{FALSE} runs the genuine \strong{unpruned}
+order-3 recursion on a single full state -- the quadratic and cubic terms
+are evaluated at the full state rather than at its first-order component.
+That recursion has no stationary distribution in general and can explode
+on long simulations; it is provided for comparison, not for estimation.
+(Before 0.9.4 this argument set x^s = x^rd = 0 every period, i.e. it
+silently propagated the state with the ORDER-ONE law of motion.)}
 
 \item{init_state}{Optional named numeric vector of initial state deviations
 loaded into the first-order pruned component x^f; pair with

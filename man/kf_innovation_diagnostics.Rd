@@ -35,8 +35,9 @@ this thin diagnostic; use a burn-in and stick with \code{"stationary"}
 on near-unit-root models, or pre-filter with \code{\link{kalman_filter}}
 and inspect its residuals directly.}
 
-\item{me_variance}{scalar measurement-error jitter added to the
-innovation covariance diagonal, matching \code{\link{kalman_filter}}'s
+\item{me_variance}{scalar measurement-error variance: true i.i.d.
+observation noise, entering both the innovation covariance and the
+state-covariance update, matching \code{\link{kalman_filter}}'s
 \code{me_variance} convention (default \code{0}).}
 }
 \value{

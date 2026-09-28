@@ -13,7 +13,7 @@ make_posterior_grad(
   me_variance = 0,
   theta_ref = NULL,
   verbose = FALSE,
-  grad_method = c("hybrid", "implicit", "adjoint", "adjoint_solution"),
+  grad_method = c("auto", "hybrid", "implicit", "adjoint", "adjoint_solution"),
   me_extra = NULL,
   shock_scale = NULL,
   likelihood = "gaussian",
@@ -21,7 +21,10 @@ make_posterior_grad(
   cumulant_orders = 1:4,
   cumulant_weight = "identity",
   debias = TRUE,
-  pruned_order = 2L
+  pruned_order = 2L,
+  power = NULL,
+  system_priors = NULL,
+  lik_init = c("auto", "stationary", "diffuse", "kappa")
 )
 }
 \arguments{
@@ -33,8 +36,41 @@ equivalence classification (default: prior means).}
 
 \item{verbose}{print the analytic/numerical parameter split.}
 
-\item{grad_method}{\code{"hybrid"} (default), \code{"implicit"},
-  \code{"adjoint"}, or \code{"adjoint_solution"}.
+\item{grad_method}{\code{"auto"} (default), \code{"hybrid"},
+  \code{"implicit"}, \code{"adjoint"} or \code{"adjoint_solution"}.
+  \code{"auto"} (also the default of the \code{grad_method} package option
+  -- see \code{\link{dynhr_set_options}} -- so mode finding, the Hessian,
+  SBC and the samplers all take it since 0.9.3.127) picks, once at build
+  time, the fastest
+  EXACT method supported for the likelihood: \code{"adjoint_solution"} for
+  the Gaussian likelihood and for the cumulant likelihood when
+  \code{cumulant_orders} contains 3 but not 4 (the orders its reverse-mode
+  path covers; e.g. rbc2shock, orders 1:3: 22 ms against 1921 ms for
+  \code{"implicit"}), and \code{"implicit"} for the Whittle and pruned
+  likelihoods and the other cumulant orders. (Cumulant orders within
+  \code{1:2} -- no skewness or kurtosis -- are matched on the first-order
+  rule, and every \code{grad_method} then takes the same exact analytic
+  mean/covariance gradient: \code{solution_derivatives} plus a derivative
+  Lyapunov equation; this used to be finite differences of the forward.)
+  On the Gaussian likelihood it picks
+  \code{"hybrid"} instead when no analytic Kalman kernel covers the data at
+  \code{theta_ref} (missing observations together with \code{me_extra} or
+  a unit root; a unit root together with \code{me_extra} or
+  \code{shock_scale}), since every draw would then take the FD-hybrid
+  fallback anyway, always under \code{lik_init = "kappa"} (see
+  \code{lik_init}), and when the filter drops observation components at
+  \code{theta_ref} (a singular innovation covariance; see Details). The
+  rule is fitted to a benchmark (median of 20
+  interleaved calls; 2 to 68 parameters, 1 to 37 states):
+  \code{"adjoint_solution"} was the fastest, or tied within timing noise,
+  of the exact methods on every model -- e.g. Smets-Wouters (2007),
+  36 parameters: 16 ms against 32 (\code{"adjoint"}), 91
+  (\code{"implicit"}) and 97 (\code{"hybrid"}); a 68-parameter
+  small-open-economy model: 45 ms against 120, 391 and 316 -- so no size
+  threshold is applied. Every returned closure carries the method actually
+  used as \code{attr(g, "grad_method")} (and the requested one as
+  \code{attr(g, "grad_method_requested")}).
+
   \code{"hybrid"} is the behaviour described above: an analytic Kalman
   score for the shock-std (sigma) parameters and a relative-step central
   difference for the rest.
@@ -76,11 +112,13 @@ equivalence classification (default: prior means).}
   through the filter adjoint's \code{G_Sig}. Agrees with \code{"adjoint"}
   to ~1e-10. Draws needing the missing-data or exact-diffuse kernels (which
   do not export bars) fall back to the \code{"adjoint"} construction for
-  that draw; whittle/cumulant/pruned likelihoods treat it as
-  \code{"implicit"}. Benchmark before preferring it as a default: on
-  small/medium models the forward layer's shared factorization is already
-  cheap and the savings may not clear the R-level overhead (see the
-  E-wave lesson in the NZSIM records).}
+  that draw; whittle/pruned likelihoods treat it as \code{"implicit"}. For
+  the cumulant likelihood it reverses orders 1-3 on the order-2 rule (the
+  moment cotangent is taken back through the third-cumulant tensor
+  Lyapunov, then one first-order and one order-2 solution adjoint);
+  requests including order 4 take the \code{"implicit"} path, and orders
+  within \code{1:2} the exact first-order mean/covariance gradient. It is what \code{"auto"} selects for the Gaussian
+  likelihood and for cumulant orders containing 3 but not 4 (see above).}
 
 \item{me_extra}{Optional n_obs x T matrix of per-period additive
 measurement-error variances (filter_tunes); the gradient is of the same
@@ -108,10 +146,60 @@ Gaussian likelihood.}
 
 \item{pruned_order}{Integer perturbation order for the pruned state-space
 likelihood path (default \code{2L}); currently \code{2L} or \code{3L}.}
+
+\item{power}{Power-posterior (generalised-Bayes) exponent zeta in (0, 1].
+\code{NULL} (default) resolves the \code{power_posterior} option ONCE at
+build time, exactly as the \code{make_log_posterior*} factories do, so the
+gradient is of the SAME tempered target
+\code{log p(theta) + zeta * loglik(theta) + log p_sys(theta)}: the
+likelihood score is multiplied by zeta, the prior score is not.}
+
+\item{system_priors}{Optional \code{system_prior_spec} (as passed to
+\code{make_log_posterior}). Its log-density is part of the target, so its
+gradient is added: for the Gaussian and Whittle likelihoods by a central
+difference of the system-prior density alone (one first-order solve per
+side, no filter pass); for the cumulant and pruned likelihoods (whose
+system prior sees a lifted decision rule) by a central difference of the
+system-prior term the forward posterior closure itself evaluates.}
+
+\item{lik_init}{Kalman filter \code{P0} initialization of the Gaussian
+likelihood being differentiated: \code{"auto"} (default),
+\code{"stationary"}, \code{"diffuse"} or \code{"kappa"}, exactly as in
+\code{\link{make_log_posterior}} -- it must match the \code{lik_init} of
+the posterior being sampled or optimized, because the initializations
+are different likelihoods (on a root within \code{1e-6} of the unit
+circle \code{"diffuse"} puts a diffuse prior on it where \code{"auto"}
+keeps the stationary one). The analytic kernels follow the init in force
+per draw: the stationary kernels, or the exact-diffuse adjoint where the
+init in force is diffuse; under \code{"stationary"} a draw with a unit
+root (whose log-posterior is \code{-Inf}) gets the prior score only.
+\code{"kappa"} (the big-\code{kappa} approximation) has no analytic
+kernel: \code{"implicit"}, \code{"adjoint"} and
+\code{"adjoint_solution"} refuse it (an error of class
+\code{dynhr_error_grad_lik_init}), \code{"auto"} resolves to
+\code{"hybrid"}, and \code{"hybrid"} then differentiates every parameter
+by finite differences of the kappa-initialized likelihood. Ignored by
+the Whittle, cumulant and pruned likelihoods (as by their posteriors).}
 }
 \value{
 \code{function(theta)} returning the gradient vector, suitable for the
-  \code{grad_fn} argument of \code{\link{nuts}}.
+  \code{grad_fn} argument of \code{\link{nuts}}, named and in
+  \code{prior_spec$name} order. \code{theta} is read as the log-posterior
+  closures read it: by name in any order, an unnamed \code{theta} of length
+  \code{nrow(prior_spec)} in \code{prior_spec$name} order, anything else an
+  error of class \code{dynhr_error_theta_names}. For the Gaussian
+  likelihood it carries \code{attr(, "logpost_grad")}, a
+  \code{function(theta)} returning \code{list(logpost, grad)} from ONE
+  gradient pass: \code{grad} is the gradient above and \code{logpost} the
+  log-posterior of \code{\link{make_log_posterior}} with the same
+  arguments (\code{power}, \code{system_priors}, \code{lik_init},
+  \code{me_extra}, \code{shock_scale}; no infeasibility penalty), assembled
+  from the log-likelihood the pass already computed and \code{-Inf} exactly
+  where that posterior is. The gradient samplers (\code{\link{nuts}}, HMC,
+  ChEES, MALA) use it -- one evaluation per new position instead of a
+  gradient plus a separate log-posterior call, the gradient carried along
+  the trajectory -- once it agrees with their own \code{log_post_fn} at the
+  start point to \code{1e-10} relative; otherwise they keep separate calls.
 }
 \description{
 Returns \code{function(theta) -> named numeric} giving d/dtheta log p(theta|Y),
@@ -140,6 +228,30 @@ factorization, see \code{solution_derivatives}) and obtains the
 likelihood gradient for every parameter from a single tangent Kalman-filter
 pass (\code{.kf_loglik_tangent}), avoiding the per-parameter re-solve and
 re-filter of \code{"hybrid"}.
+
+\strong{Singular innovation covariance.} When the Gaussian filter at
+\code{theta_ref} falls back to the univariate filter (Dynare's rule:
+\code{rcond(F) < kalman_tol} and either a diagonal entry of \code{F} or the
+\code{rcond} of its correlation form below \code{kalman_tol = 1e-10}) and
+drops observation components (conditional variance below the absolute
+\code{kalman_tol}; reported as \code{$diagnostics$n_dropped} by
+\code{\link{kalman_filter}}) while the analytic kernels still evaluate a
+finite, different (undropped) likelihood -- typically an observable whose
+variance, or whose variance conditional on the other observables, is
+below \code{1e-10} while the others are of ordinary scale -- the dropped
+set can change with the parameters and the log-posterior is then
+discontinuous. (An EXACT
+singularity, e.g. an observable that is an exact combination of others
+without measurement error, is not affected: the kernels fail on it and
+every draw takes finite differences of the posterior.) The analytic
+kernels would differentiate the wrong function, so \code{"implicit"},
+\code{"adjoint"} and \code{"adjoint_solution"} refuse such a model (class
+\code{dynhr_error_grad_singular_F}); \code{"auto"} resolves to
+\code{"hybrid"}, which then warns (class
+\code{dynhr_warning_grad_singular_F}) and differentiates every parameter by
+finite differences of the log-posterior. On every draw \code{"hybrid"}
+also uses its analytic shock-std score only where the score recursion's
+log-likelihood equals the posterior's own.
 }
 \references{
 Childers, D., Fernandez-Villaverde, J., Perla, J., Rackauckas,

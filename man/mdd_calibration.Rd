@@ -69,7 +69,7 @@ Two built-in cases:
     variance). Log-evidence is closed form. Uses hand-rolled log-density
     closures (no dynhr model object) -- a pure check on the estimator
     FORMULAS/implementations, decoupled from the estimation pipeline.
-    Supports a `prior_scale` VECTOR: one subproblem is built per entry
+    Supports a \code{prior_scale} VECTOR: one subproblem is built per entry
     (distinct \eqn{V_0} => distinct truth), letting a single call track a
     multi-value prior-scale sensitivity case.}
   \item{\code{"local_level"}}{The local-level (random-walk-plus-noise)
@@ -78,16 +78,16 @@ Two built-in cases:
     \code{\link{solve_steady}} -> \code{\link{solve_perturbation}} ->
     \code{\link{run_mode_finding}} pipeline (mirrors the fixture in
     \code{tests/testthat/test-kalman-diffuse.R}). One free parameter (the
-    observation-noise stderr `sigma_eps`) with a proper inverse-gamma
+    observation-noise stderr \code{sigma_eps}) with a proper inverse-gamma
     prior; the model has a unit root, so \code{lik_init} auto-resolves to
     \code{"diffuse"} exact initialization. Ground truth is a quadrature
     (default 800-point grid) of prior x exact diffuse-KF likelihood, built
     from the SAME \code{\link{kalman_filter}}/prior-density primitives the
     pipeline uses, independent of \code{run_mode_finding()}'s internal
     wiring. This is the rung that exercises the real estimation
-    machinery rather than hand-rolled closures. Supports a `T_obs` VECTOR
+    machinery rather than hand-rolled closures. Supports a \code{T_obs} VECTOR
     (sample-size ladder, for showing the Laplace residual shrink with T)
-    and/or a `prior_sd` vector (prior-scale sensitivity ladder); the two
+    and/or a \code{prior_sd} vector (prior-scale sensitivity ladder); the two
     are recycled against each other (a parallel, not Cartesian, ladder).}
   \item{\code{"dsge_var"}}{The DSGE-VAR tightness diagnostic
     (\code{d15_dsge_var()}), Del Negro & Schorfheide (2004): a small
@@ -109,7 +109,7 @@ Estimators (\code{estimators}, any of):
   \item{\code{"thames"}}{\code{\link{thames_mdd}}
     (\code{conjugate_regression}: applied to i.i.d. exact-Gaussian
     posterior draws) or \code{\link{thames_mdd_from_chains}}
-    (\code{local_level}: applied to \code{\link{mcmc}} RWMH draws around
+    (\code{local_level}: applied to \code{\link{dynhr_mcmc}} RWMH draws around
     the mode). Reports a self-reported Monte Carlo \code{se}.}
   \item{\code{"smc"}}{The internal data-tempered SMC evidence estimator
     (\code{conjugate_regression}: raw \code{dynhr_smc()}; \code{local_level}:

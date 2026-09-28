@@ -118,7 +118,7 @@ fresh regardless; see Correctness above).}
 \value{
 A \code{\link{dynhr_chains}} object (so \code{print()},
   \code{summary()} and \code{plot()} work exactly as for
-  \code{\link{mcmc}} / \code{\link{smc}} / \code{\link{nuts}} /
+  \code{\link{dynhr_mcmc}} / \code{\link{smc}} / \code{\link{nuts}} /
   \code{\link{dime}}).  Every field of \code{dynhr_smc()}'s return value is
   retained unchanged (particles/chain, smc_weights, log_liks,
   log_marginal_lik, lambda_schedule, ess_schedule, accept_schedule,

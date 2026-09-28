@@ -43,12 +43,20 @@ kalman_filter(
 \item{return_filtered}{logical; if \code{TRUE}, return filtered state estimates
 (one column per time step).}
 
-\item{ss_tol}{tolerance for steady-state lock detection (default \code{.LYAP_TOL}).}
+\item{ss_tol}{tolerance for steady-state lock detection (default
+\code{.LYAP_TOL} = 1e-12): the gain is frozen once
+\code{max(abs(P[t+1] - P[t])) < ss_tol * max(abs(P[t+1]))} (relative,
+so the lock is invariant to the scale of the data).}
 
-\item{me_variance}{scalar variance of iid Gaussian measurement error on
-every observable (default \code{0}). It enters the innovation covariance
-\code{F} AND the state-covariance (Joseph) update on every method --
-the exact likelihood of the noise-augmented model. See Details.}
+\item{me_variance}{variance of iid Gaussian measurement error (default
+\code{0}): a scalar applies the same variance to every observable
+(\eqn{H = me I}); a vector of length \code{n_obs} gives each observable
+its own variance (\eqn{H = diag(me)}; named entries are matched to
+\code{obs_vars}, unnamed ones are taken in \code{obs_vars} order). It
+enters the innovation covariance \code{F} AND the state-covariance
+(Joseph) update on every method -- the exact likelihood of the
+noise-augmented model. See Details. A per-observable vector runs the
+univariate method on its R loop (the C++ kernel takes a scalar).}
 
 \item{return_ll_contrib}{logical; if \code{TRUE}, return per-step
 log-likelihood contributions (prediction-error decomposition).}
@@ -106,8 +114,12 @@ the effective shock covariance is
 where \eqn{s_t} is column \code{t} of \code{shock_scale}.
 \code{NULL} (default) and an all-ones matrix are treated as identity
 (no heteroskedasticity). Rows must be ordered to match \code{dr$exo_names}.
-Incompatible with \code{method = "chandrasekhar"}, \code{"univariate"},
-and \code{lik_init = "diffuse"}. \code{P0} always uses the baseline
+Incompatible with \code{method = "chandrasekhar"}. An exact-diffuse
+initialization (\code{lik_init = "diffuse"}, or \code{"auto"} on a model
+with a unit root) runs on the sequential (univariate) filter, which
+rescales the shock covariance every period inside the diffuse phase too;
+\code{$method} then reports \code{"univariate"}. \code{P0} (and the
+finite part of the diffuse initialization) always uses the baseline
 (unscaled) \eqn{\\Sigma_e}.}
 
 \item{obs_aggregation}{Optional named list declaring one or more
@@ -248,7 +260,8 @@ combination of observables (see
 \code{.pruned_me_floor_ratio}). Default
 \code{getOption("dynhr.me_floor_check", TRUE)}. Only evaluated on the
 stationary (non-\code{shock_scale}) baseline system; scoped to the
-scalar \code{me_variance} floor, not \code{me_extra}.}
+\code{me_variance} floor (its largest entry when it is a vector), not
+\code{me_extra}.}
 }
 \value{
 A list with
@@ -276,9 +289,16 @@ A list with
       (a data frame of \code{from} / \code{to} / \code{reason} rows, one
       per automatic reroute or fallback), \code{diffuse_periods},
       \code{missing_by_period} / \code{n_missing} (observations that were
-      absent), \code{dropped_by_period} / \code{n_dropped} (observations
-      that were present but exactly predictable, hence carried no
-      information), \code{known_shocks} (how many injected cells, and how
+      absent), \code{dropped_by_period} / \code{n_dropped} (observation
+      components that were present but skipped by the univariate filter
+      because their forecast variance was at most \code{kalman_tol}),
+      \code{dropped_informative_by_period} / \code{n_dropped_informative}
+      (the subset of those whose innovation was NOT negligible,
+      \eqn{|v| > \sqrt{kalman\_tol} \max(1, |y|)}: data the likelihood
+      ignored although the model deemed it impossible; a positive count
+      raises a warning of class
+      \code{dynhr_warning_dropped_observations}, and the log-likelihood
+      value is left unchanged), \code{known_shocks} (how many injected cells, and how
       many of them were deterministic) and \code{loglik_type}
       (\code{"marginal"}, \code{"joint"} or \code{"conditional"}).
       \code{\link{kalman_smoother}} returns the same fields.}

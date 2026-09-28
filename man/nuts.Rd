@@ -18,15 +18,20 @@ then discarded (default 1000)}
 
 \item{...}{Additional arguments forwarded to the internal sampler:
 \code{step_size}, \code{max_treedepth}, \code{target_accept},
-\code{adapt_mass}, \code{verbose}}
+\code{adapt_mass}, \code{metric} (\code{"diagonal"} (default),
+\code{"warmup_dense"}, \code{"fisher_diag"}, \code{"lowrank"}),
+\code{verbose}}
 }
 \value{
 A \code{\link{dynhr_chains}} object.  The \code{$n_divergent}
   slot reports divergent transitions (should be 0 in a well-tuned run)
 }
 \description{
-Runs NUTS with dual-averaging step-size adaptation and optional diagonal
-mass-matrix adaptation.  Returns a \code{\link{dynhr_chains}} object.
+Runs NUTS with dual-averaging step-size adaptation and (by default)
+windowed mass-matrix adaptation.  The adapted quantity is the INVERSE mass,
+set to the warmup posterior variance (Stan's convention; releases before
+0.9.3.50 set the mass itself to the variance, i.e. inverted -- see NEWS).
+Returns a \code{\link{dynhr_chains}} object.
 }
 \examples{
 ## NUTS needs a gradient; without an analytic one it finite-differences the
@@ -51,6 +56,6 @@ Hoffman, M. D., & Gelman, A. (2014). The No-U-Turn sampler: Adaptively
     In \emph{Handbook of Markov Chain Monte Carlo}. Chapman & Hall/CRC.
 }
 \seealso{
-\code{\link{mcmc}}, \code{\link{smc}}, \code{\link{find_mode}},
+\code{\link{dynhr_mcmc}}, \code{\link{smc}}, \code{\link{find_mode}},
   \code{\link{dm_sample}}
 }

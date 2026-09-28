@@ -159,7 +159,7 @@ hank_egm3_regrid_values <- function(hh, d_grid, f_grid, a_grid,
                  f = length(f_grid) < length(old_f),
                  a = length(a_grid) < length(old_a))
   if (any(coarsened))
-    warning("hank_egm3_regrid_values: this regrid COARSENS the ",
+    .dynhr_warn("hank_egm3_regrid_values: this regrid COARSENS the ",
             paste(names(coarsened)[coarsened], collapse = "/"),
             " axis. Warm-starting hank_egm3_solve() from a coarsened regrid ",
             "is a MEASURED failure mode: the endogenous-grid safeguard trips ",

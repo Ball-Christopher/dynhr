@@ -34,24 +34,35 @@ estimate_gmm_weight_matrix(
 
 \item{method}{\code{"newey_west"} (default): Newey–West HAC long-run
 covariance of per-observation moment contributions.
-\code{"analytic"}: block-diagonal analytic long-run covariance for
-\code{orders} \eqn{\subseteq \{1, 2\}} (Gaussian state-space formula using
-model-implied autocovariances).  Errors for \code{orders} including 3 or 4
-(requires order-6/8 cumulants not yet implemented).}
+\code{"analytic"}: block-diagonal analytic long-run covariance from the
+model-implied autocovariances (Gaussian state-space formula, Isserlis'
+theorem).  For orders 3 and 4 it is the long-run covariance of the sample
+k-statistics under Gaussianity: exact for a linear (Gaussian) model, and
+for a non-Gaussian order-2 decision rule the Gaussian-null weight (the
+terms involving cumulants of order 3 and above are omitted, so the weight
+is valid and unit-free but not the efficient one).  As on the Newey-West
+path, the order-3/4 blocks are included only when \code{dr} is of order
+2 or higher (the orders \code{.cumulant_loglik()} matches for that rule).}
 
 \item{bandwidth}{Integer or \code{NULL}.  Newey–West lag truncation \eqn{L}.
 \code{NULL} (default) uses the rule \eqn{L = \lfloor 4 (T/100)^{2/9} \rfloor}.}
 
 \item{ridge}{Ridge regularization fraction (default \code{1e-6}).
 The regularized covariance is
-\eqn{\hat\Omega_{reg} = \hat\Omega_{NW} + \delta \cdot \max_i(\hat\Omega_{ii}) \cdot I_p},
-where \eqn{\delta} = \code{ridge}.}
+\eqn{\hat\Omega_{reg} = \hat\Omega + \delta \cdot \mathrm{diag}(\hat\Omega_{11}, \ldots, \hat\Omega_{pp})},
+where \eqn{\delta} = \code{ridge}: a ridge on the correlation form, so
+each moment is regularized relative to its own variance and the weight
+matrix is invariant to the units of the data (the moments of orders 1
+to 4 scale as \eqn{\sigma} to \eqn{\sigma^4}).  A moment with a
+non-positive variance gets \eqn{\delta \max_i \hat\Omega_{ii}}.}
 }
 \value{
 A \eqn{p \times p} symmetric positive-definite numeric matrix
   \eqn{W = \hat\Omega_{reg}^{-1}}.  Attributes: \code{p} (number of
   moments), \code{T_obs} (sample size), \code{bandwidth} (lag truncation
-  used), \code{condition_number} (condition of \eqn{\hat\Omega_{reg}}).
+  used), \code{condition_number} (condition number of the correlation
+  form of \eqn{\hat\Omega_{reg}}, which does not depend on the units of
+  the moments).
 }
 \description{
 Computes the inverse long-run covariance matrix of the empirical moment

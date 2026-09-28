@@ -32,7 +32,8 @@ This vignette walks through Bayesian estimation of a DSGE model in dynhr:
 5. Inspect convergence and run diagnostics (D0–D41)
 6. (Optional) Evaluate Ramsey, OSR, discretionary, or Nash welfare
 
-For a one-call pipeline skip to §7.
+For a one-call pipeline skip to §7; for specs, run records, reruns and
+reproducibility checks see §13.
 
 The running example is `nk_demo.mod` — a three-equation New Keynesian
 model — together with `nk_demo_data.csv`, 200 quarters of simulated
@@ -48,20 +49,20 @@ Priors live in the `estimated_params` block of the `.mod` file:
 ```
 // inst/extdata/models/nk_demo.mod
 estimated_params;
-// name,        distribution,  p1,    p2,    lower, upper
-  kappa,        beta_pdf,      0.10,  0.05,  0.001, 0.95;   // Phillips slope
-  phi_pi,       normal_pdf,    1.50,  0.25,  1.010, 4.00;   // Taylor: inflation
-  phi_y,        normal_pdf,    0.25,  0.10,  0.000, 2.00;   // Taylor: output gap
-  rho_r,        beta_pdf,      0.75,  0.10,  0.010, 0.99;   // rate smoothing
-  rho_g,        beta_pdf,      0.85,  0.08,  0.010, 0.99;   // demand persistence
-  rho_u,        beta_pdf,      0.50,  0.15,  0.010, 0.99;   // cost-push persistence
+// name, init, lower, upper, distribution, p1 (mean), p2 (std)
+  kappa, 0.10, 0.001, 0.95, beta_pdf, 0.10, 0.05;   // Phillips slope
+  phi_pi, 1.50, 1.010, 4.00, normal_pdf, 1.50, 0.25;   // Taylor: inflation
+  phi_y, 0.25, 0.000, 2.00, normal_pdf, 0.25, 0.10;   // Taylor: output gap
+  rho_r, 0.75, 0.010, 0.99, beta_pdf, 0.75, 0.10;   // rate smoothing
+  rho_g, 0.85, 0.010, 0.99, beta_pdf, 0.85, 0.08;   // demand persistence
+  rho_u, 0.50, 0.010, 0.99, beta_pdf, 0.50, 0.15;   // cost-push persistence
   stderr e_g,   inv_gamma_pdf, 0.30,  2.00;
   stderr e_u,   inv_gamma_pdf, 0.15,  2.00;
   stderr e_m,   inv_gamma_pdf, 0.20,  2.00;
 end;
 ```
 
-The optional fifth and sixth columns are hard bounds; `phi_pi`'s lower bound
+The third and fourth columns are hard bounds; `phi_pi`'s lower bound
 of 1.01 keeps the sampler inside the determinacy region.
 
 Extract the prior specification in R:
@@ -75,7 +76,17 @@ print(priors)
 ```
 
 `priors` is a data.frame with columns `name`, `distribution`, `p1`, `p2`,
-`lower`, `upper`, `mean`, `std`.
+`lower`, `upper`, `mean`, `std`, `p3`, `p4` and `init`.
+
+`p1`/`p2` are Dynare's hyperparameters: the prior **mean** and **standard
+deviation** for every shape. For `uniform_pdf` that means
+`name, uniform_pdf, m, s;` is uniform on `[m - sqrt(3) s, m + sqrt(3) s]`,
+exactly as in Dynare; a uniform given by its bounds is written with empty
+`p1`/`p2` and the bounds in the third and fourth prior parameters,
+`name, uniform_pdf, , , lb, ub;`. In the extracted spec a uniform carries its
+mean/sd in `p1`/`p2` and its support in `p3`/`p4` (Dynare's layout), and a
+row whose `p1`/`p2` look like bounds read as mean/sd triggers a
+`dynhr_warning_uniform_parameterisation` warning.
 
 ---
 
@@ -141,7 +152,7 @@ log_post_cumulant <- make_posterior(model, data = Y,
   obs_vars     = obs_vars,
   compiled     = compiled,
   likelihood   = "cumulant",
-  orders       = 1:4        # which cumulants to match
+  cumulant_orders = 1:4     # which cumulants to match
 )
 ```
 
@@ -186,16 +197,21 @@ aggregate of a higher-frequency model variable, so a monthly model can be
 estimated on quarterly data without leaving the monthly frequency:
 
 ```{r mixedfreq, eval = FALSE, purl = FALSE}
-agg <- list(
+# The aggregation spec lives on the model; the Gaussian (Kalman) likelihood
+# reads it from model$obs_aggregation. obs_vars must include "gdp_q".
+model$obs_aggregation <- list(
   gdp_q = list(of = "gdp_m", type = "flow_sum", k = 3L)
 )
 
 log_post_mf <- make_posterior(model, data = Y,
                               prior_spec = priors,
                               obs_vars   = obs_vars,
-                              compiled   = compiled,
-                              obs_aggregation = agg)
+                              compiled   = compiled)
 ```
+
+`kalman_filter()` also takes the spec directly as its `obs_aggregation`
+argument. The other likelihoods refuse a model that carries one rather than
+silently scoring the aggregate as a contemporaneous observable.
 
 The aggregated observable is `NA` in the periods where it is not observed;
 the filter's existing missing-data path handles those unchanged. Four
@@ -235,51 +251,66 @@ cat("Mode estimate:\n")
 print(round(mode$theta_mode, 4))
 ```
 
-The `mode` list contains `theta_mode`, `logpost`, `hessian` (numerical),
-`V_mode` (inverse-Hessian as proposal covariance), and `se_mode`.
+The `mode` list contains `theta_mode`, `logpost`, `convergence`,
+`iterations` and `method`. `find_mode()` optimises a bare closure only; for
+the mode together with a proposal covariance (`Sigma_prop`, the scaled
+inverse Hessian at the mode, and `V_mode`), the exact gradient and a run
+record, use `run_mode_finding()`:
+
+```{r mode-full, purl = FALSE}
+mode_res <- run_mode_finding(solve_model(model), data = Y,
+                             obs_vars = obs_vars, verbose = FALSE)
+mode_res$theta_mode
+mode_res$Sigma_prop      # RWMH proposal covariance, used in §4
+```
 
 #### Choosing the optimizer
 
 The default `method = "newrat"` is the csminwel quasi-Newton optimizer —
-the same algorithm as Dynare's `mode_compute = 4`. It is gradient-based
-(using the analytic gradient, built automatically for Gaussian/cumulant/
-Whittle likelihoods) with an infeasibility-backtracking line search, which
-makes it both the most robust and the cheapest choice on near-unit-root
-models: it typically converges in hundreds of evaluations, where the
-gradient-free CMA-ES search needs thousands and tends to stall on the
-feasibility boundary. If the posterior is multimodal or the starting point is
-poor, use `method = "cmaes_newrat"` (CMA-ES global search to escape poor
-starts, then newrat polish) or the previous default `method = "combined"`
-(CMA-ES then L-BFGS-B).
+the same algorithm as Dynare's `mode_compute = 4`. It is gradient-based with
+an infeasibility-backtracking line search, which makes it both the most
+robust and the cheapest choice on near-unit-root models: it typically
+converges in hundreds of evaluations, where the gradient-free CMA-ES search
+needs thousands and tends to stall on the feasibility boundary.
+`run_mode_finding()` builds the exact analytic gradient automatically for
+Gaussian, cumulant and Whittle likelihoods (`grad_method = "auto"`); on a
+bare closure `find_mode()` uses csminwel's numerical gradient. If the
+posterior is multimodal or the starting point is poor, use
+`method = "cmaes_newrat"` (CMA-ES global search to escape poor starts, then
+newrat polish) or the previous default `method = "combined"` (CMA-ES then
+L-BFGS-B).
 
 #### Hessian performance levers
 
 The proposal-covariance Hessian (the inverse of which is `V_mode`) is the
-main cost after the optimizer itself. Two knobs control it, and the
-performance-optimal choice depends on model size:
+main cost of `run_mode_finding()` after the optimizer itself. When the mode
+stage has an exact gradient (Gaussian, cumulant or Whittle likelihood, no
+OBC, `grad_method` not `"hybrid"`), that Hessian is a central difference of
+the gradient: \eqn{2 n_{par}} gradient calls (about 0.7 s for Smets–Wouters'
+36 parameters and 5 s for a 68-parameter model, installed build). Otherwise
+it falls back to the \eqn{2 n_{par}(n_{par}+1)}-evaluation log-posterior
+stencil. Two knobs control it:
 
-- **`parallel = TRUE`** (default `FALSE`) is the single biggest lever. The
-  default computes the finite-difference Hessian serially
-  (\eqn{O(n_{par}^2)} likelihood evaluations); `parallel = TRUE` spreads
-  those over a mirai daemon pool for a roughly \eqn{n}-fold speed-up on
-  \eqn{n} cores. It is opt-in (not auto-enabled) because the daemon pool has
-  setup/teardown cost and is undesirable in CI or embedded runs — but for a
-  large parameter vector it is the recommended setting.
+- **`parallel = TRUE`** (default `FALSE`) spreads those calls over a mirai
+  daemon pool for a roughly \eqn{n}-fold speed-up on \eqn{n} cores. It is
+  opt-in (not auto-enabled) because the daemon pool has setup/teardown cost
+  and is undesirable in CI or embedded runs — but for a large parameter
+  vector it is the recommended setting.
 
-- **`use_exact_hessian = TRUE`** (default `FALSE`) swaps the finite-difference
+- **`use_exact_hessian = TRUE`** (default `FALSE`) swaps the difference
   Hessian for the analytic `posterior_hessian`. This is *not* a universal
   speed-up: the analytic Hessian costs
   \eqn{O(n_{par}^2 \cdot n_{state}^3)} and is the faster route only for a
   small parameter vector / long sample. For a large state and many parameters
-  (e.g. \eqn{n_{par} \gtrsim 60}, \eqn{n_{state} \gtrsim 70}) the
-  finite-difference Hessian wins, which is why it is the default — reach for
-  `parallel = TRUE` rather than `use_exact_hessian = TRUE` on big models. (A
-  related option, `use_analytic_hess`, default `TRUE`, uses the analytic
-  Hessian only to seed the newrat optimizer's initial curvature; set
-  `dynhr_set_options(use_analytic_hess = FALSE)` to skip that expensive seed
-  on a large model.)
+  (e.g. \eqn{n_{par} \gtrsim 60}, \eqn{n_{state} \gtrsim 70}) the difference
+  Hessian wins, which is why it is the default — reach for `parallel = TRUE`
+  rather than `use_exact_hessian = TRUE` on big models. (Separately,
+  `mode_options = list(use_analytic_hess = FALSE)` skips the analytic
+  Hessian that otherwise seeds the newrat optimizer's initial curvature,
+  which is itself expensive on a large model.)
 
-Both can be set per call or globally via `dynhr_set_options()`.
+`parallel` and `use_exact_hessian` can be set per call; `use_exact_hessian`
+also globally via `dynhr_set_options()`.
 
 #### Exact-Hessian curvature, model evidence, and weak identification
 
@@ -329,13 +360,12 @@ these into a one-call pre-flight report for an estimation problem.
 ## 4  RWMH sampling
 
 ```{r rwmh, purl = FALSE}
-# Scale the Hessian-based proposal
-n_par      <- length(mode$theta_mode)
-Sigma_prop <- mode$V_mode * (2.38^2 / n_par)
+# The proposal from run_mode_finding() (§3), already scaled by 2.38^2 / n_par
+Sigma_prop <- mode_res$Sigma_prop
 
-chains_rwmh <- mcmc(
+chains_rwmh <- dynhr_mcmc(
   log_post_fn = log_post,
-  theta0      = mode$theta_mode,
+  theta0      = mode_res$theta_mode,
   Sigma_prop  = Sigma_prop,
   n_draws     = 100000L,
   n_warmup    = 25000L
@@ -382,12 +412,21 @@ sampler/likelihood pairs are certified.
 
 ## 6  NUTS
 
-NUTS adapts its step size and mass matrix automatically:
+NUTS adapts its step size and mass matrix automatically. It needs the
+gradient of the log-posterior: pass the exact one from
+`make_posterior_grad()`, whose default `grad_method = "auto"` resolves to the
+finite-difference-free `"adjoint_solution"` for a Gaussian likelihood. Called
+without `grad_fn`, `nuts()` falls back to forward finite differences of
+`log_post`, which costs one log-posterior evaluation per parameter per
+gradient and is only approximate:
 
 ```{r nuts, purl = FALSE}
+grad <- make_posterior_grad(model, data = Y, prior_spec = priors,
+                            obs_vars = obs_vars, compiled = compiled)
 chains_nuts <- nuts(
   log_post_fn = log_post,
   theta0      = mode$theta_mode,
+  grad_fn     = grad,
   n_draws     = 4000L,
   n_warmup    = 2000L
 )
@@ -395,7 +434,10 @@ print(chains_nuts)
 ```
 
 Check divergences with `chains_nuts$n_divergent`.  A well-tuned run
-should have zero divergences.
+should have zero divergences. `nuts()` samples in raw parameter space; the
+runner (`run_posterior_estimation()`, `run_full_estimation()`,
+`run_estimation()`) adds the unconstrained reparameterisation and, by
+default, the exact gradient for you (`analytic_grad = TRUE`, see §7).
 
 ---
 
@@ -420,6 +462,20 @@ result <- run_full_estimation(
 ```{r onecall-summary, eval = TRUE, purl = FALSE}
 summary(result$chains)
 result$chains$log_marginal_lik
+```
+
+The draws also convert to the formats of the wider R ecosystem:
+`posterior::as_draws()` (chains kept apart; a weighted SMC cloud keeps its
+weights), `coda::as.mcmc.list()`, `as.data.frame()`, `coef()` (posterior
+mean) and `vcov()` — so `posterior::summarise_draws()` and the
+`bayesplot::mcmc_*()` plots take dynhr output directly. SMC particles are
+not a Markov chain, so ask for location/scale summaries only (R-hat and ESS
+are for MCMC chains):
+
+```{r onecall-posterior, eval = requireNamespace("posterior", quietly = TRUE), purl = FALSE}
+draws <- posterior::as_draws(result$chains)
+posterior::summarise_draws(draws, "mean", "sd", "median")
+coef(result$chains)   # posterior mean
 ```
 
 A production run would use many more particles, or the random-walk sampler
@@ -447,23 +503,109 @@ written automatically.
 
 ### Gradient samplers, the parameter transform, and metrics
 
-`method = "NUTS"`, `"MALA"`, `"CHEES"` and `"HMC"` are gradient-based. By default
+`method = "NUTS"`, `"MALA"`, `"CHEES"` and `"HMC"` are gradient-based. By
+default (`analytic_grad = TRUE`, also the `sampler_spec()` default) the
+runners give them the exact gradient: `grad_method = "auto"` (the default of
+the `grad_method` option) resolves to `"adjoint_solution"` for the Gaussian
+likelihood and to an analytic method for the Whittle, cumulant and pruned
+likelihoods (see `?make_posterior_grad`). A likelihood without an analytic
+gradient (the OBC filters, `"tpf"`, `"pskf"`, ...) keeps the numerical one
+without a warning; `analytic_grad = FALSE` always finite-differences the
+log-posterior. By default
 (`transform_params = TRUE`) they sample on an unconstrained reparameterisation of
 the bounded parameter vector, built from the priors. This is the recommended
-default: in the constrained geometry of parameters near a unit root every
-gradient sampler suffers step-size collapse, which the transform resolves while
-leaving the target distribution unchanged. Set `transform_params = FALSE` to
-sample in raw parameter space.
+default, and it leaves the target distribution unchanged. In the constrained
+geometry of parameters near a unit root the gradient samplers run into the
+bounds. On a 68-parameter New Zealand DSGE (20 simulated observables,
+T = 132), NUTS with the default adapted diagonal metric (300 warmup + 300 draws) gave:
 
-`MALA` and `NUTS` accept a `metric`: `"diagonal"` (default, identity mass),
-`"hessian"` (a constant dense metric from the mode covariance — the best choice
-for ill-conditioned posteriors), or `"monge"`. **The `"monge"` metric is
-experimental and disabled by default**: \(G = I + \alpha^2 g g^\top\) inflates
-along the gradient, so the proposal step collapses on sharp / near-unit-root
-posteriors (in testing it explored a tight direction to only ~1% of its variance
-where `"hessian"` recovered it fully). It errors unless you set
-`dynhr_set_options(allow_monge_metric = TRUE)`, and warns when used — prefer
-`"hessian"`.
+- without the transform: 246 of 300 transitions divergent, minimum bulk ESS 1.3;
+- with the transform: 0 divergences, minimum bulk ESS 57.
+
+Set `transform_params = FALSE` to sample in raw parameter space.
+
+On that model the choice of sampler also matters. The table compares each
+sampler's worst-mixing parameter (minimum bulk ESS). All runs start at the posterior
+mode. The gradient samplers use the transform. RWMH runs in raw parameter
+space with a diagonal proposal scaled from the curvature at the mode, after
+5,000 burn-in draws.
+
+| Sampler | Draws | Min bulk ESS | Min ESS per minute |
+|---|---|---|---|
+| RWMH | 20000 | 2.2 | 1.83 |
+| ChEES | 300 | 132 | 1.58 |
+| NUTS, `"lowrank"` | 300 | 88 | 0.51 |
+| NUTS, `"diagonal"` | 300 | 57 | 0.50 |
+| HMC | 300 | 43 | 0.32 |
+| NUTS, `"fisher_diag"` | 300 | 15 | 0.13 |
+
+RWMH's per-minute figure comes from cheap draws of a chain that has not
+converged: 20,000 draws gave a minimum ESS of 2.2. ChEES gave the best
+minimum ESS. Those timings used the gradient that was then the default,
+at about 0.26 s per gradient. The default `grad_method = "auto"` is now
+exact and about 5–7× cheaper on this model. The gradient samplers'
+ESS per minute should improve by roughly that factor, which would put ChEES
+and NUTS well ahead of RWMH (not re-measured). On large models, do not choose RWMH
+because its draws are cheap. Compare ESS on the worst-mixing parameter.
+
+`NUTS`, `HMC` and `MALA` accept a `metric`. The metric is the mass matrix
+\(M\), and the momentum is drawn as \(p \sim N(0, M)\). dynhr follows Stan's
+convention: what is adapted or supplied is the *inverse* mass \(M^{-1}\), and
+it should approximate the posterior covariance, so each direction is rescaled
+to unit posterior scale.
+
+Before 0.9.3.50 the adapted diagonal set the mass itself to the variance.
+That squared the conditioning instead of removing it. Draws were still valid
+at convergence, but finite NUTS/HMC/ChEES runs could mix badly.
+
+Adapted during warmup:
+
+- `"diagonal"` (default). NUTS starts from the inverse-Hessian diagonal at
+  the mode, and HMC from the identity. During warmup both set a diagonal
+  \(M^{-1}\) to the warmup variance of each parameter. NUTS updates it in
+  expanding windows; HMC updates it once, at 70% of warmup. MALA has no
+  adaptation and uses the identity.
+- `"warmup_dense"` (NUTS, HMC). Diagonal windows first, then one dense
+  Ledoit–Wolf-shrunk \(M^{-1}\) from the final window's draws.
+- `"fisher_diag"` (NUTS, opt-in). A diagonal
+  \(M^{-1} = \sqrt{\mathrm{var}(\theta)/\mathrm{var}(\nabla \log p)}\) from each
+  window's draws *and* gradients. This minimises the sample Fisher divergence
+  to a standard normal (Seyboldt, Carlson & Carpenter 2026).
+  - It is exact after one window when parameters are independent Gaussians,
+    so it helps most with short warmups: about 1.4× ESS per gradient in dynhr's
+    tests.
+  - On strongly correlated posteriors it can do worse than `"diagonal"`.
+  - It costs one extra gradient per warmup iteration.
+- `"lowrank"` (NUTS, opt-in). A low-rank-plus-diagonal \(M^{-1}\) estimated
+  from draws and gradients (the same paper's Algorithm 1), using Lao's (2026)
+  warmup schedule. It captures a few dominant correlated directions at
+  \(O(dk)\) cost per step.
+
+Fixed through warmup and sampling:
+
+- `"hessian"` (NUTS, MALA). A constant dense metric,
+  \(M^{-1} = \Sigma_{\text{prop}}\), the mode covariance. This is the best
+  choice for ill-conditioned, correlated posteriors.
+- `"whittle_fim"` (NUTS). A dense metric from the Whittle Fisher information
+  at the mode. It is experimental and disabled by default:
+  `dynhr_set_options(allow_whittle_fim_metric = TRUE)`.
+- `"monge"` (MALA). A position-dependent metric. **It is experimental and
+  disabled by default.** \(G = I + \alpha^2 g g^\top\) inflates along the
+  gradient, so the proposal step collapses on sharp or near-unit-root
+  posteriors. In testing it explored a tight direction to only ~1% of its
+  variance, where `"hessian"` recovered it fully. It errors unless you set
+  `dynhr_set_options(allow_monge_metric = TRUE)`, and warns when used. Prefer
+  `"hessian"`.
+
+The parallel multi-chain NUTS path (`parallel = TRUE`) takes the adapted
+metrics (`"diagonal"`, `"warmup_dense"`, `"fisher_diag"`, `"lowrank"`). A
+fixed metric (`"hessian"`, `"whittle_fim"`) is not sent to the daemons,
+which run `"diagonal"` instead; `validate_spec()` warns
+(`dynhr_warning_metric_ignored`).
+
+`HMC` runs a fixed number of leapfrog steps `L`. It also jitters the step size
+by ±20% each iteration (`step_jitter`), so a fixed trajectory length cannot
+lock onto a periodic orbit of the target.
 
 ---
 
@@ -507,8 +649,8 @@ Key convergence checks:
 
 | Metric | Good | Concern |
 |---|---|---|
-| R-hat | \(<1.05\) | \(>1.10\) |
-| Bulk ESS | \(>400\) per chain | \(<100\) |
+| R-hat | \(\le 1.01\) | \(>1.01\) (WARN), \(\ge 1.05\) (FAIL) |
+| Bulk **and** tail ESS | both \(\ge 100 \times\) `max(n_chains, 2)` | either below (WARN) |
 | Acceptance rate (RWMH) | 20–35% | \(<10\%\) or \(>50\%\) |
 | Divergences (NUTS) | 0 | \(>0\) |
 
@@ -548,8 +690,16 @@ minimise the unconditional variance of target variables, using CMA-ES:
 ```{r osr, eval = FALSE, purl = FALSE}
 osr_result <- osr(model, free_params = c(phi_pi = 1.5, phi_y = 0.5),
                    loss_vars = c("pi", "y_gap"),
-                   loss_weights = c(pi = 1, y_gap = 0.5))
+                   loss_weights = c(pi = 1, y_gap = 0.5),
+                   lower = c(phi_pi = 1.01, phi_y = 0),
+                   upper = c(phi_pi = 5,    phi_y = 2))
 ```
+
+As in Dynare, the coefficients are unbounded unless you give bounds (here,
+or in an `osr_params_bounds` block): a rule responding to current inflation
+can otherwise run off towards infinity. A `.mod` file with `osr_params`,
+`optim_weights` (including cross terms `var1, var2 w;`) and
+`osr_params_bounds` drives `osr(model)` directly.
 
 ### 9.3  Discretionary policy
 
@@ -620,21 +770,21 @@ chain_mat <- chains$chain
 
 `saveRDS()` preserves the draws but not the sampler: restarting from it
 begins a fresh chain at a fresh adaptation state. For runs long enough to
-outlive a session or a scheduler slot, `mcmc()` checkpoints instead:
+outlive a session or a scheduler slot, `dynhr_mcmc()` checkpoints instead:
 
 ```{r checkpoint, eval = FALSE, purl = FALSE}
 # First leg: writes a state pack every `flush_every` draws
-res1 <- mcmc(log_post, theta0, Sigma_prop,
-             n_draws = 5000, n_warmup = 2000,
-             checkpoint_dir = "output/chain1",
-             flush_every    = 1000)
+res1 <- dynhr_mcmc(log_post, theta0, Sigma_prop,
+                   n_draws = 5000, n_warmup = 2000,
+                   checkpoint_dir = "output/chain1",
+                   flush_every    = 1000)
 
 # Later, in a new session: continue where it stopped.
 # `n_warmup` stays as it was; grow `n_draws` to the new TOTAL.
-res2 <- mcmc(log_post, theta0, Sigma_prop,
-             n_draws = 20000, n_warmup = 2000,
-             checkpoint_dir = "output/chain1",
-             resume = TRUE)
+res2 <- dynhr_mcmc(log_post, theta0, Sigma_prop,
+                   n_draws = 20000, n_warmup = 2000,
+                   checkpoint_dir = "output/chain1",
+                   resume = TRUE)
 ```
 
 The state pack carries the position, the log-posterior, the adaptation
@@ -662,9 +812,9 @@ exact <- make_log_posterior(model, data = Y, prior_spec = priors,
                             obs_vars = obs_vars, compiled = compiled,
                             likelihood = "tpf", me_variance = 0.01)
 
-res <- mcmc(exact, theta0, Sigma_prop,
-            n_draws = 10000, n_warmup = 2000,
-            screen_fn = cheap)
+res <- dynhr_mcmc(exact, theta0, Sigma_prop,
+                  n_draws = 10000, n_warmup = 2000,
+                  screen_fn = cheap)
 ```
 
 The two-stage acceptance ratio corrects for the screening, so the invariant
@@ -697,6 +847,133 @@ back to finite differences otherwise (`jacobian = "auto"`).
 
 ---
 
+## 13  Specs, records and reruns
+
+Every estimation entry point — `run_mode_finding()`,
+`run_posterior_estimation()`, `run_full_estimation()` — builds an
+**estimation spec** from its arguments and hands it to one runner,
+`run_estimation()`. The spec is a single versioned object that fully
+determines a run: the model, the data, the likelihood, the mode stage, the
+sampler(s), the compute settings (parallelism, seed, checkpointing), the
+post-estimation outputs, and every package option that can change a result.
+
+### Building and editing a spec
+
+```{r spec-build, purl = FALSE}
+spec <- dynhr_estimation_spec(
+  mod, data = Y, obs_vars = obs_vars,
+  likelihood = likelihood_spec("gaussian", me_variance = 0),
+  mode       = mode_spec(method = "newrat", n_iter = 2000L),
+  sampler    = sampler_spec("nuts", n_draws = 2000L, n_warmup = 1000L,
+                            n_chains = 4L, metric = "lowrank"),
+  compute    = compute_spec(parallel = TRUE, seed = 1L),
+  outputs    = outputs_spec(diagnostics = TRUE))
+spec                                   # compact, one line per non-default field
+
+spec8 <- update(spec, sampler = list(n_chains = 8L))   # edit only what changes
+diff_specs(spec, spec8)                # sampler$n_chains: 4 -> 8
+```
+
+Each sub-spec validates its own fields when it is built — a field the chosen
+sampler does not use is an error, not silently ignored — and
+`validate_spec()` holds every check that spans components (OBC with a
+Kalman-only likelihood, a checkpoint with a sampler that cannot stream, and
+so on). Options that change results (`transform_params`, `grad_method`,
+`power_posterior`, `seed_base`, ...) are **typed fields** of the sub-spec that
+uses them. They default to the current `dynhr_set_options()` value when the
+spec is built; later changes of the global option do not reach an existing
+spec. While the run executes, the spec's values are the options in force,
+including on parallel daemons, and the session's options are restored
+afterwards.
+
+`as_estimation_spec()` converts what you already have into a spec: the
+arguments of the three entry points, a run record, an estimation result, or
+a `.mod` file whose `estimation(...)` options become defaults.
+
+### Spec files
+
+```{r spec-files, purl = FALSE}
+write_spec(spec, "nk_demo_spec.yaml")      # human-readable, commented
+spec2 <- read_spec("nk_demo_spec.yaml")
+identical(spec2$hashes$spec, spec$hashes$spec)   # TRUE: exact round trip
+fit <- run_estimation(spec2)
+```
+
+YAML (`yaml`, a suggested package) is the primary text format and JSON the
+secondary; both round-trip exactly, doubles included. They reference the
+model and data by path and hash: `read_spec()` refuses a file whose content
+changed since the spec was written (`force = TRUE` overrides). RDS stores
+everything by value and is the canonical format; closures (a custom
+system-prior density, for example) can only go there.
+
+### Run records and `dynhr_rerun()`
+
+Every result carries `$run_record`: the spec it ran (schema 2), the
+resolved arguments, the option snapshot, the RNG state at entry and the
+provenance (dynhr version and `GIT_COMMIT`, R, platform, BLAS/LAPACK,
+cores). A record survives `saveRDS()` / `readRDS()` and replays with
+`dynhr_rerun()`:
+
+```{r rerun, purl = FALSE}
+saveRDS(fit$run_record, "fit_record.rds")
+again  <- dynhr_rerun(readRDS("fit_record.rds"))       # same build: bit-identical
+longer <- dynhr_rerun(fit, sampler = list(n_draws = 10000L))  # edit, then replay
+```
+
+### Checkpoints and resuming
+
+With `compute_spec(checkpoint_dir = ...)` (or the `checkpoint_dir` argument
+of `run_posterior_estimation()` / `run_full_estimation()`) the chains stream
+to disk and `resume = TRUE` continues them. The checkpoint stores the
+spec's per-component content hashes and the build and environment it was
+written under. A resume is **refused** when the target changed (model, data,
+likelihood, mode or sampler settings — the continued chain would sample a
+different posterior, so the pooled chain would be invalid), or when a
+*registered result change* between the two dynhr versions touches a
+component the chain uses. dynhr keeps a registry of every change that alters
+results, tagged with the components it touches (the Whittle likelihood, the
+OBC filter, the PSKF, the NUTS mass adaptation, the analytic gradient, ...),
+and each spec declares the components it uses. `on_mismatch = "warn"`
+resumes anyway; the result is then marked permanently
+(`$provenance$integrity`, the run record and a `print()` banner). Any other
+code or environment difference only warns: the chain stays a valid MCMC
+chain, but it is not bit-identical to an uninterrupted run.
+
+### What to expect across builds and machines, and `dynhr_verify()`
+
+A record is compared with the current session in three classes: **A** the
+target and algorithm (the spec's content hashes), **B** the code (version,
+commit, and the result-change registry), **C** the numerical environment
+(R, platform, BLAS/LAPACK, cores).
+
+| Same A? | B (code) | C (environment) | What to expect |
+|---|---|---|---|
+| yes | same | same | bit-identical |
+| yes | differs, no registered change touches the run | any | deterministic quantities (mode, log-posterior at a point) agree to ~1e-8 relative; MCMC draws are equivalent in distribution (means within MCSE), not bit-identical |
+| yes | same | differs | as above; the number of cores alone does not change seeded draws |
+| yes | a registered change touches the run | any | results are expected to differ; the registry says why |
+| no | — | — | a different run |
+
+| Operation | A differs | B: registered change touches the run | B otherwise, or C differs |
+|---|---|---|---|
+| `dynhr_rerun()` | n/a (the replay uses the record's A) | warning naming the changes and the version to install | message stating the expectation |
+| resume a checkpoint | refused | refused | warning |
+
+`dynhr_verify()` checks a finished result against this table under the
+current build and environment. It rebuilds the log-posterior from the
+record, re-evaluates it at the recorded mode and at a sample of recorded
+draws, re-optimises briefly from the recorded mode (all at 1e-8 relative),
+replays the sampler for a few hundred draws and compares the posterior means
+within Monte Carlo error, and reports PASS or FAIL for each class:
+
+```{r verify, purl = FALSE}
+v <- dynhr_verify(fit)
+v                  # verdict, per-class status, each check and its tolerance
+v$checks
+```
+
+---
+
 ## See also
 
 - `?run_full_estimation` -- complete argument reference
@@ -704,10 +981,12 @@ back to finite differences otherwise (`jacobian = "auto"`).
 - `?make_posterior` -- posterior evaluator options
 - `?find_mode` -- optimiser methods (CMA-ES, Nelder-Mead, JADE)
 - `?run_mode_finding`, `?run_posterior_estimation` -- stepwise estimation API
+- `?run_estimation`, `?dynhr_estimation_spec`, `?write_spec` -- estimation specs (§13)
+- `?dynhr_rerun`, `?dynhr_verify` -- run records, replays and reproducibility checks
 - `?make_log_posterior_cumulant` -- cumulant-based posterior
 - `?make_log_posterior_global_pf`, `?global_pf_sbc` -- projection + particle filter
 - `?kalman_filter` (`obs_aggregation`), `?mf_augment_state_space` -- mixed frequency
-- `?mcmc` (`checkpoint_dir`, `resume`, `screen_fn`) -- checkpointing, delayed acceptance
+- `?dynhr_mcmc` (`checkpoint_dir`, `resume`, `screen_fn`) -- checkpointing, delayed acceptance
 - `?mcmc_chain_state`, `?mcmc_chain_save`, `?mcmc_chain_restore` -- state packs
 - `?method_of_moments` -- GMM / SMM
 - `?forecast_backtest` -- out-of-sample scoring (see `vignette("diagnostics")`)

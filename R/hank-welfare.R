@@ -98,7 +98,7 @@ hank_value_function <- function(block, tol = 1e-11, maxit = 100000L) {
     V <- V_new
   }
   if (!converged)
-    warning("hank_value_function: Bellman fixed-point iteration did not ",
+    .dynhr_warn("hank_value_function: Bellman fixed-point iteration did not ",
             "converge in ", maxit, " iterations")
   V
 }
@@ -394,9 +394,7 @@ hank_welfare_channels <- function(block, r_path = NULL, w_path = NULL,
 #' Efficiency/redistribution decomposition of a cross-sectional welfare change
 #'
 #' The population-measure, first-order form of the Dávila-Schaab (2024)
-#' efficiency/redistribution split (their Proposition 1 / eq. 10; see
-#' \code{references/HANK_WELFARE_SURVEY.md} for the verified statement quoted
-#' from the paper). Given a per-cell consumption-equivalent welfare gain
+#' efficiency/redistribution split (their Proposition 1 / eq. 10). Given a per-cell consumption-equivalent welfare gain
 #' \code{lambda} (e.g. \code{\link{hank_welfare_response}}'s \code{lambda}, or a
 #' per-cell \code{\link{hank_cev}}), a population mass \code{D} over the same
 #' cells, and a welfarist planner's per-cell Pareto weights \code{weights}, it

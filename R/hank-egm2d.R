@@ -178,7 +178,7 @@
 
 #' Solve the discrete-adjustment two-asset household to a stationary policy
 #'
-#' Validation record (briefs/19 sections 9.4-9.8): per-branch budget
+#' Validation record: per-branch budget
 #' identities at machine precision; the F -> large / ra = 0 reduction onto
 #' \code{hank_egm_solve} per slice (8e-11); weak dominance over a brute-force
 #' node-restricted VFI at every cell; the comparative Bellman gate (no worse
@@ -193,9 +193,8 @@
 #' The fixed point of \code{\link{.hank_egm2d_step}}: a household that pays a
 #' fixed cost \code{F_adj} to rebalance its illiquid account, with the choice
 #' smoothed by extreme-value taste shocks of scale \code{sigma_taste}.  See
-#' the file header of \code{R/hank-egm2d.R} for the recursion and
-#' \code{briefs/19-twoasset-hank-scope.md} section 9 for why this variant
-#' exists: the smooth convex cost cannot generate empirical wealthy
+#' the file header of \code{R/hank-egm2d.R} for the recursion. This variant
+#' exists because the smooth convex cost cannot generate empirical wealthy
 #' hand-to-mouth shares (stiffening it REDUCES inaction), while the fixed
 #' cost's non-convexity at zero adjustment can.
 #'

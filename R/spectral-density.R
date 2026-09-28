@@ -14,6 +14,7 @@
 ## Lagged-state (dynhr canonical) transfer function:
 ##   H(e^{iω}) = ZZ * z * (I − TT * z)^{-1} * RR + DD,   z = e^{-iω}
 ##   S_yy(ω)   = H * Sigma_e * H^* + me_variance * I
+##             = 2*pi * f(ω)   (f = spectral density; Gamma_0 = ∫_{-pi}^{pi} f)
 ##
 ## Current-state transfer function (used by D24):
 ##   H(e^{iω}) = obs_mat * (I − T * z)^{-1} * R
@@ -125,9 +126,28 @@
 
 #' Spectral density of a DSGE state-space model at a single frequency
 #'
-#' Computes the one-sided spectral density matrix
-#' \deqn{S_{yy}(\omega) = H(e^{i\omega})\,\Sigma_e\,H(e^{i\omega})^* + \sigma^2_{\rm me} I}
-#' at a single angular frequency \eqn{\omega}.
+#' Computes, at a single angular frequency \eqn{\omega}, the matrix
+#' \deqn{S_{yy}(\omega) = H(e^{i\omega})\,\Sigma_e\,H(e^{i\omega})^* + \sigma^2_{\rm me} I,}
+#' where \eqn{H} is the transfer function from the shocks to the observables.
+#' By default this is \eqn{2\pi} times the spectral density (see
+#' Normalisation).
+#'
+#' @section Normalisation:
+#' With the default \code{normalise = "2pi"} the returned
+#' \eqn{S_{yy}(\omega)} is \eqn{2\pi} times the spectral density
+#' \eqn{f(\omega) = S_{yy}(\omega)/(2\pi)}: it is the two-sided sum
+#' \eqn{\sum_h \Gamma_h e^{-i\omega h}} (no one-sided factor 2).  The
+#' autocovariances are recovered as
+#' \deqn{\Gamma_h = \frac{1}{2\pi}\int_{-\pi}^{\pi} S_{yy}(\omega)\,
+#'       e^{i\omega h}\,d\omega = \int_{-\pi}^{\pi} f(\omega)\,
+#'       e^{i\omega h}\,d\omega,}
+#' so \eqn{\frac{1}{2\pi}\int_{-\pi}^{\pi} S_{yy}(\omega)\,d\omega} is the
+#' lag-0 covariance of the observables (including the measurement-error
+#' variance), and \eqn{S_{yy}(-\omega) = \overline{S_{yy}(\omega)}}.  The
+#' Whittle likelihood divides this matrix by \eqn{2\pi} to put it on the scale
+#' of its periodogram \eqn{I(\omega) = w w^* / (2\pi T)}, which estimates
+#' \eqn{f}.  Pass \code{normalise = "density"} to get \eqn{f(\omega)}
+#' directly.
 #'
 #' @details
 #' The input \code{ss} may carry either the "lagged" or "current" timing
@@ -142,23 +162,32 @@
 #'                    \code{\link{build_dsge_state_space}}).
 #' @param omega       A single angular frequency in \eqn{(0, \pi]}.
 #' @param me_variance Non-negative scalar; added to the diagonal of \eqn{S}
-#'                    as measurement-error variance.
+#'                    as measurement-error variance (before any
+#'                    \code{normalise} scaling).
+#' @param normalise   \code{"2pi"} (default) returns
+#'                    \eqn{S_{yy}(\omega) = 2\pi f(\omega)};
+#'                    \code{"density"} returns
+#'                    \eqn{f(\omega) = S_{yy}(\omega) / (2\pi)}, which
+#'                    integrates over \eqn{(-\pi, \pi]} to \eqn{\Gamma_0}.
 #'
 #' @return An \eqn{n_{\rm obs} \times n_{\rm obs}} complex Hermitian matrix.
 #'
 #' @seealso \code{\link{new_dsge_ss}}, \code{\link{ss_convert_timing}}
 #' @export
-spectral_density <- function(ss, omega, me_variance = 0) {
+spectral_density <- function(ss, omega, me_variance = 0,
+                             normalise = c("2pi", "density")) {
+  normalise <- match.arg(normalise)
   if (!inherits(ss, "dsge_ss"))
     stop("spectral_density: 'ss' must be a dsge_ss object.", call. = FALSE)
   ## Normalise to lagged-state convention
   if (ss$timing != "lagged")
     ss <- ss_convert_timing(ss)
-  .spectral_density_core(omega,
-                          TT        = ss$T_mat,
-                          RR        = ss$R_mat,
-                          ZZ        = ss$Z_mat,
-                          DD        = ss$D_mat,
-                          Sigma_e   = ss$Sigma_e,
-                          me_variance = me_variance)
+  S <- .spectral_density_core(omega,
+                              TT        = ss$T_mat,
+                              RR        = ss$R_mat,
+                              ZZ        = ss$Z_mat,
+                              DD        = ss$D_mat,
+                              Sigma_e   = ss$Sigma_e,
+                              me_variance = me_variance)
+  if (normalise == "density") S / (2 * pi) else S
 }

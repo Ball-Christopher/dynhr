@@ -7,19 +7,19 @@
 .hank_emu_rbf_fit(Xn, Y)
 }
 \arguments{
-\item{Xn}{`n x d` matrix of NORMALIZED (box-mapped to `[0,1]`) node
+\item{Xn}{\code{n x d} matrix of NORMALIZED (box-mapped to \code{[0,1]}) node
 coordinates.}
 
-\item{Y}{`n x m` matrix of stacked node values (`m` = flattened field
+\item{Y}{\code{n x m} matrix of stacked node values (\code{m} = flattened field
 length).}
 }
 \value{
-A list with `W` (`n x m`), `C` (`(d+1) x m`), `Xn` (echoed back for
-  prediction), and `ridge` (the diagonal ridge actually added, `0` if the
+A list with \code{W} (\code{n x m}), \code{C} (\code{(d+1) x m}), \code{Xn} (echoed back for
+  prediction), and \code{ridge} (the diagonal ridge actually added, \code{0} if the
   system solved without one).
 }
 \description{
-Solves the saddle-point system once at BUILD time; the fitted `(W, C)`
+Solves the saddle-point system once at BUILD time; the fitted \code{(W, C)}
 weight matrices are data-independent of any later query.
 }
 \keyword{internal}

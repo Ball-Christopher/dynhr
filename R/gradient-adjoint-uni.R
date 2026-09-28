@@ -160,7 +160,7 @@
 
     if (q == 0L) {
       ## Pure prediction (K = 0): A = TT, B = RR.
-      A_store[[t]] <- NULL; B_store[[t]] <- NULL
+      A_store[t] <- list(NULL); B_store[t] <- list(NULL)  # keep slot t (x[[t]] <- NULL deletes it)
       s <- as.numeric(TT %*% s)
       QQ_t <- if (has_sc) tcrossprod(RR %*% Se_t, RR) else QQ
       P <- .sym(tcrossprod(TT %*% P, TT) + QQ_t)

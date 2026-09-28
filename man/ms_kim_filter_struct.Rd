@@ -16,7 +16,7 @@ ms_kim_filter_struct(
   return_state_path = FALSE,
   return_collapse_diag = FALSE,
   lik_init = c("auto", "stationary", "kappa"),
-  collapse = c("gpb2", "gpb3")
+  collapse = c("gpb2", "gpb3", "imm")
 )
 }
 \arguments{
@@ -88,21 +88,29 @@ faster than in the shock-variance-only model.  Default
 \code{"stationary"}, or \code{"kappa"}.}
 
 \item{collapse}{Character; the GPB collapse depth.  \code{"gpb2"}
-(default, and bit-identical to every release before this argument
-existed) is Kim's filter: it keeps \eqn{h} Gaussians, collapsing
-\eqn{h^2 \to h} each period on the LAST regime.  \code{"gpb3"} keeps
-\eqn{h^2} Gaussians indexed by the last TWO regimes
-\eqn{(s_{t-1}, s_t)}, collapsing \eqn{h^3 \to h^2}; it costs about
-\eqn{h} times as much per period and is exact whenever GPB(2)'s error
-is entirely due to the one-period collapse.  Use it when
-\code{collapse_max} from a \code{"gpb2"} run is O(1) nats or more (see
-the \emph{Collapse quality} section).  \code{return_state_path} is
-supported under \code{"gpb3"}, but the state path then carries the
-\eqn{h^2} pair-indexed components, which the Kim SMOOTHERS route to
-their own PAIR-INDEXED backward pass (F4-D): an adjoint per pair
-collapsed with the \eqn{h^3} smoothed joint
-\eqn{\Pr[s_{t-2}, s_{t-1}, s_t \mid y_{1:T}]}, whose weights come from
-\code{cell_filt}.}
+  (default, and bit-identical to every release before this argument
+  existed) is Kim's filter: it keeps \eqn{h} Gaussians, collapsing
+  \eqn{h^2 \to h} each period on the LAST regime.  \code{"gpb3"} keeps
+  \eqn{h^2} Gaussians indexed by the last TWO regimes
+  \eqn{(s_{t-1}, s_t)}, collapsing \eqn{h^3 \to h^2}; it costs about
+  \eqn{h} times as much per period and is exact whenever GPB(2)'s error
+  is entirely due to the one-period collapse.  Use it when
+  \code{collapse_max} from a \code{"gpb2"} run is O(1) nats or more (see
+  the \emph{Collapse quality} section).  \code{return_state_path} is
+  supported under \code{"gpb3"}, but the state path then carries the
+  \eqn{h^2} pair-indexed components, which the Kim SMOOTHERS route to
+  their own PAIR-INDEXED backward pass (F4-D): an adjoint per pair
+  collapsed with the \eqn{h^3} smoothed joint
+  \eqn{\Pr[s_{t-2}, s_{t-1}, s_t \mid y_{1:T}]}, whose weights come from
+  \code{cell_filt}.
+
+  \code{"imm"} is the interacting-multiple-model filter (\eqn{h} Kalman
+  steps per period instead of \eqn{h^2}); see the \emph{IMM} section.
+  \code{return_regime_probs}, \code{return_collapse_diag}
+  (\code{collapse_diag} is then the one-step cost of the mixing, 0 at
+  \eqn{t = 1}) and \code{return_state_path} (adds \code{mix_filt}, the
+  \eqn{h \times h \times T} mixing weights, consumed by
+  \code{\link{ms_kim_smoother_struct}(collapse = "imm")}) are supported.}
 }
 \value{
 A list with:
@@ -116,10 +124,12 @@ A list with:
       \code{joint_filt}, \code{cell_filt}, \code{collapse},
       \code{TT_list},
       \code{RR_list}, \code{QQ_list}, \code{Sigma_e_list}, \code{P0_list},
-      \code{d_list}, \code{state_names}, \code{shock_names},
+      \code{d_list}, \code{c_list}, \code{b0_list}, \code{state_ref},
+      \code{state_names}, \code{shock_names},
       \code{lik_init}}{Present only when
       \code{return_state_path = TRUE} (\code{cell_filt} is \code{NULL}
-      unless \code{collapse = "gpb3"}).}
+      unless \code{collapse = "gpb3"}; \code{collapse = "imm"} adds
+      \code{mix_filt}).}
     \item{\code{collapse_diag}, \code{collapse_max}}{Present only when
       \code{return_collapse_diag = TRUE}.}
   }
@@ -136,6 +146,67 @@ The shock covariance \eqn{\Sigma_e} is per-regime from the decision rules;
 for shared-\eqn{\Sigma_e} with only structural params switching, supply the
 same \code{Sigma_e} for all regimes (the common case).
 }
+\section{The law}{
+
+\code{\link{solve_ms_perturbation}} returns, per regime \eqn{s}, the
+decision rule of EVERY endogenous variable at \eqn{t} given that \eqn{s}
+is the regime in force at \eqn{t},
+\deqn{x_t = ys_s + k_s + ghx_s (x_{t-1} - ys_s)[\mathrm{state}] +
+  ghu_s \varepsilon_t ,}
+with \eqn{k_s} = \code{c_const} (see its \emph{Details}); the observables
+are rows of that same rule.  The filter's state is the lagged state in ONE
+coordinate system shared by all regimes, \eqn{s_t = x_t[\mathrm{state}] -
+ref}, \eqn{ref = ys_1[\mathrm{state}]}, and with \eqn{j = s_t} it scores
+\deqn{y_t = d_j + Z_j s_{t-1} + D_j \varepsilon_t + u_t, \qquad
+  s_t = c_j + T_j s_{t-1} + R_j \varepsilon_t ,}
+\eqn{Z_j = } \code{ghx_j[obs, ]}, \eqn{D_j = } \code{ghu_j[obs, ]},
+\eqn{T_j = } \code{ghx_j[state, ]}, \eqn{R_j = } \code{ghu_j[state, ]},
+\deqn{c_j = (ys_j + k_j)[\mathrm{state}] - ref - T_j (ys_j[\mathrm{state}]
+  - ref), \qquad d_j = (ys_j + k_j)[\mathrm{obs}] - Z_j
+  (ys_j[\mathrm{state}] - ref),}
+\eqn{\varepsilon_t \sim N(0, \Sigma_e^{(j)})}; only the prior of
+\eqn{s_{t-1}} depends on the previous regime.  Component \eqn{i} of the
+initial state has mean \eqn{(I - T_i)^{-1} c_i}, the stationary mean of
+regime \eqn{i} held forever (the convention of its Lyapunov covariance;
+the regime's own steady state under a diffuse start or a unit root).
+When the regimes share the steady state, \eqn{c_j = 0}, \eqn{d_j =
+ys_j[\mathrm{obs}]} and the initial means are zero, bit-identically to
+earlier releases.  (Releases before 2026-09-25 scored \eqn{y_t} with the
+PREVIOUS regime's \eqn{(Z, d)}, a law no DSGE solution implies; and they
+carried no \eqn{c_j} and no \eqn{k_j}, which was exact only for a shared
+steady state.  Structural log-likelihoods change accordingly.)
+}
+
+\section{IMM}{
+
+With every block indexed by the regime in force at \eqn{t} the law is
+destination-indexed, so \code{collapse = "imm"} is the standard IMM
+(Blom and Bar-Shalom 1988): mix the \eqn{h} filtered components of
+\eqn{s_{t-1}} with \eqn{\Pr[s_{t-1} = i \mid s_t = j, y_{1:t-1}]} into one
+prior per destination \eqn{j}, then predict and update with regime
+\eqn{j}'s blocks.  It is the recursion of \code{\link{ms_kim_filter}}'s
+IMM with regime-specific blocks (one code path), period 1 is scored
+exactly on the \eqn{h^2} unmixed cells, and it is exact for one regime,
+identical regimes and \eqn{P = I}.
+
+Accuracy against the exact all-path enumeration depends on how different
+the regimes' filtered state distributions are, because the mixing merges
+them BEFORE \eqn{y_t}, which loads \eqn{s_{t-1}}.  On the \code{rbc2shock}
+fixture of \code{tests/testthat/test-fix-0925-imm-struct.R} (regimes
+differing in \code{rho_a} and \code{rho_b}, observables \code{c},
+\code{y}, data simulated from the full solved decision rules, \eqn{T = 7},
+six draws) the worst absolute log-likelihood errors were 0.16 nats for
+IMM, 0.15 for GPB(2) and 0.10 for GPB(3).  On that file's synthetic
+fixture, whose regimes have very different transition matrices, IMM was
+about 20x less accurate than GPB(2) (worst 0.31 against 0.015; GPB(3)
+6e-4).  On the \emph{Collapse quality} breakdown draw of
+\code{\link{ms_kim_filter}} (seed 31) IMM misses by the same 3.07 nats as GPB(2),
+and its \code{collapse_diag} --- which measures only the mixing --- does
+not see it.  Prefer \code{"gpb2"} / \code{"gpb3"} unless the \eqn{h}-fold
+speed-up matters, and check \code{"imm"} against \code{"gpb2"} on the
+data at hand.
+}
+
 \seealso{
 \code{\link{ms_kim_smoother_struct}}, \code{\link{ms_kim_filter}}
 }

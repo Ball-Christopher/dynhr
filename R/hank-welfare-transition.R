@@ -105,8 +105,8 @@
 #' \code{V_ss}) needs to be a well-defined discounted-utility value, which it
 #' is by construction.
 #'
-#' This exact finite-horizon transition CEV is the object the welfare survey
-#' (\code{references/HANK_WELFARE_SURVEY.md}) flags as absent from the
+#' This exact finite-horizon transition CEV is the object a survey of the HANK welfare literature
+#' flags as absent from the
 #' literature's marginal/envelope-theorem framework
 #' (\code{\link{hank_welfare_response}}): it agrees with the first-order
 #' envelope response to \eqn{O(\epsilon)} for a small price-path perturbation

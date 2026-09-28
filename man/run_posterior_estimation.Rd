@@ -15,7 +15,7 @@ run_posterior_estimation(
   parallel = FALSE,
   parallel_backend = "mirai",
   n_cores = NULL,
-  analytic_grad = FALSE,
+  analytic_grad = TRUE,
   Sigma_prop = NULL,
   run_stoch_simul = TRUE,
   skip_mode_finding_check = FALSE,
@@ -23,10 +23,12 @@ run_posterior_estimation(
   transform_params = NULL,
   rwmh_adapt_cov = NULL,
   rwmh_n_blocks = NULL,
-  metric = c("diagonal", "hessian", "warmup_dense", "monge", "whittle_fim"),
+  metric = c("diagonal", "hessian", "warmup_dense", "monge", "whittle_fim", "lowrank",
+    "fisher_diag"),
   monge_alpha = NULL,
   checkpoint_dir = NULL,
   resume = FALSE,
+  on_mismatch = "refuse",
   verbose = TRUE,
   seed = NULL,
   ...
@@ -37,7 +39,10 @@ run_posterior_estimation(
 \code{\link{run_mode_finding}}.}
 
 \item{methods}{Character vector of sampler names:
-\code{"RWMH"}, \code{"HMC"}, \code{"NUTS"}, \code{"SMC"}.
+\code{"RWMH"}, \code{"HMC"}, \code{"NUTS"}, \code{"SMC"},
+\code{"DSMH"} (\code{\link{dynhr_dsmh}}; parallel over chain groups on the
+mirai backend when \code{parallel = TRUE}; first tempering rung
+from the number of data rows).
 Default \code{c("RWMH")}.}
 
 \item{n_warmup}{Burn-in / warmup draws per method. Recycled to
@@ -49,7 +54,8 @@ Default \code{20000}.}
 \item{n_chains}{Number of MCMC chains per method (for RWMH). Recycled.
 Default \code{4}.}
 
-\item{n_particles}{Number of SMC particles (only for \code{"SMC"}).
+\item{n_particles}{Number of SMC particles (only for \code{"SMC"}), or
+the DSMH cloud size \eqn{N G} (only for \code{"DSMH"}).
 Recycled.  Default \code{2000}.}
 
 \item{n_walkers}{Number of ensemble walkers for the DIME sampler
@@ -71,10 +77,20 @@ results instead ship the already-built log-posterior closure once via
 \item{n_cores}{Worker (daemon) count when \code{parallel = TRUE}
 (\code{NULL} = auto-detect, capped at \code{n_chains}).}
 
-\item{analytic_grad}{For \code{"NUTS"} on a standard Gaussian model, use the
-exact analytic gradient (\code{\link{make_posterior_grad}}) instead of a
-numerical one. Default \code{FALSE}. Applies to the serial NUTS path; the
-parallel multi-chain path uses the numerical gradient.}
+\item{analytic_grad}{For the gradient samplers (\code{"NUTS"}, \code{"HMC"},
+\code{"MALA"}, \code{"CHEES"}), use the analytic gradient from
+\code{\link{make_posterior_grad}} (method: the \code{grad_method} option,
+default \code{"auto"}, exact \code{"adjoint_solution"} for the Gaussian
+likelihood) instead of a numerical one. Default \code{TRUE}: the exact
+gradient wherever the likelihood has one; a likelihood without one (the
+OBC filters, \code{"tpf"}, \code{"pskf"}, ...) keeps the numerical
+gradient without a warning (the verbose output names the gradient each
+stage used). \code{FALSE} always finite-differences the log-posterior.
+Applies to the serial samplers and to the parallel multi-chain NUTS path
+(each daemon builds the theta-space gradient; the sampler applies the
+eta chain rule once). The low-level \code{\link{nuts}} called without
+\code{grad_fn} still finite-differences; the runners are what supply
+the exact gradient.}
 
 \item{Sigma_prop}{Proposal covariance.  Defaults to the one stored in
 \code{mode_result$Sigma_prop}.  If a list, one per method.}
@@ -98,31 +114,53 @@ and gradient-based samplers -- \code{"RWMH"}, \code{"NUTS"}, \code{"MALA"},
 \code{"CHEES"} and \code{"HMC"} (both the serial and parallel/mirai paths) -- in
 unconstrained eta-space via \code{build_param_transform} (built from
 \code{prior_spec}). \code{Sigma_prop} (theta-space) is converted to an
-eta-space covariance via the delta method, and the NUTS/ChEES
-\code{mass_diag} is similarly converted; draws are mapped back to
+eta-space covariance via the delta method (also for the correlated
+pseudo-marginal RWMH path, which then samples eta too), and the NUTS/ChEES
+\code{mass_diag} and the NUTS/MALA dense \code{metric = "hessian"} are
+similarly converted -- except at a mode on a prior
+bound, where \code{mode_result$Sigma_prop_eta} (see
+\code{\link{run_mode_finding}}) is used instead when no
+\code{Sigma_prop} is supplied (the delta method divides a bound
+parameter's variance by the squared distance to the bound there); draws are mapped back to
 theta-space before being returned, so downstream consumers (convergence
 diagnostics, stoch_simul, etc.) are unaffected. \strong{Strongly
-recommended for models with bounded parameters near a unit root}: in the
-constrained geometry every gradient sampler (MALA/ChEES/NUTS) otherwise
-suffers step-size collapse, which the eta-space transform resolves
-universally. May also be set globally via
-\code{dynhr_set_options(transform_params = TRUE)}.}
+recommended for models with bounded parameters near a unit root}: the
+leapfrog/Langevin steps of the gradient samplers otherwise run into the
+bounds. Measured on a 68-parameter NZ DSGE (20 observables, T = 132;
+NUTS, adapted diagonal metric, 300 warmup + 300 draws, 2026-09-25 on the
+corrected mass adaptation): without the transform 246 of 300
+transitions were divergent and the minimum bulk ESS was 1.3; with it
+there were 0 divergences and a minimum bulk ESS of 57. May also be set
+globally via \code{dynhr_set_options(transform_params = TRUE)}.}
 
 \item{rwmh_adapt_cov}{Opt-in (default \code{FALSE}): forwarded to
-\code{rwmh}'s `adapt_cov` argument on the RWMH chains (serial and
+\code{rwmh}'s \code{adapt_cov} argument on the RWMH chains (serial and
 parallel/mirai paths) -- Haario et al. (2001) adaptive proposal
 covariance, frozen at the end of burn-in. May also be set globally via
 \code{dynhr_set_options(rwmh_adapt_cov = TRUE)}.}
 
 \item{rwmh_n_blocks}{Opt-in (default \code{1L}): forwarded to
-\code{rwmh}'s `n_blocks` argument on the RWMH chains (serial and
+\code{rwmh}'s \code{n_blocks} argument on the RWMH chains (serial and
 parallel/mirai paths) -- randomized parameter blocking
 (Chib & Ramamurthy 2010 / Herbst & Schorfheide 2015 ch. 4). May also be
 set globally via \code{dynhr_set_options(rwmh_n_blocks = 2L)}.}
 
-\item{metric}{Metric for MALA and NUTS:
-\code{"diagonal"} (default, identity mass matrix),
-\code{"hessian"} (dense metric from \code{Sigma_prop}),
+\item{metric}{Metric for MALA, NUTS and HMC:
+\code{"diagonal"} (default; NUTS starts from the inverse-Hessian diagonal,
+HMC from the identity, and both ADAPT a diagonal inverse mass = the
+warmup posterior variance, Stan's convention; MALA uses the identity),
+\code{"warmup_dense"} (NUTS/HMC: diagonal windows, then one Ledoit-Wolf
+dense inverse mass from the final window's draws),
+\code{"fisher_diag"} (NUTS only, opt-in: diagonal inverse mass
+\eqn{\sqrt{\mathrm{var}(x)/\mathrm{var}(\nabla \log p)}} from each
+warmup window's draws and gradients; Seyboldt, Carlson & Carpenter 2026,
+arXiv:2603.18845),
+\code{"lowrank"} (NUTS only, opt-in: low-rank-plus-diagonal inverse mass
+from draws and gradients; Seyboldt et al. 2026 Algorithm 1 with the Lao
+2026 arXiv:2607.23788 schedule),
+\code{"hessian"} (dense metric from \code{Sigma_prop}; in eta-space,
+\eqn{D^{-1} \Sigma D^{-1}} with \eqn{D = diag(d\theta/d\eta)}, under
+\code{transform_params}),
 \code{"monge"} (position-dependent Monge metric \eqn{G = I + \alpha^2 g g^T},
 Stage 3a; MALA only), or \code{"whittle_fim"} (one-shot dense metric from
 the Whittle (frequency-domain) Fisher information at the mode; NUTS only).
@@ -133,7 +171,9 @@ as \code{"hessian"}) and is unvalidated on the full estimation pipeline.
 It therefore errors unless
 \code{dynhr_set_options(allow_whittle_fim_metric = TRUE)} is set. On
 failure (degenerate FIM, non-invertible result) it falls back to the
-\code{"hessian"} metric (Sigma_prop) with a message, mirroring the
+\code{"hessian"} metric (Sigma_prop, converted to eta-space exactly as
+for \code{metric = "hessian"}) with a message, or to the diagonal metric
+when Sigma_prop gives no positive-definite dense metric, mirroring the
 existing \code{"hessian"} branch's own not-PD fallback to diagonal.
 Measured result (2026-07-03, NZSIM 68 params): the NUTS warmup step
 size collapsed to ~1e-13 with divergences under this metric (the
@@ -146,7 +186,12 @@ step collapses on sharp / near-unit-root posteriors -- in testing it
 under-explored a tight direction to ~1\% of its variance (ESS/draw ~0.002)
 where the constant \code{"hessian"} metric recovered it fully. It therefore
 errors unless \code{dynhr_set_options(allow_monge_metric = TRUE)} is set, and
-warns when used. Prefer \code{"hessian"} (constant Laplace) or \code{"diagonal"}.}
+warns when used. Prefer \code{"hessian"} (constant Laplace) or \code{"diagonal"}.
+The parallel multi-chain NUTS path (\code{parallel = TRUE},
+\code{n_chains > 1}, mirai) takes the adapted metrics (\code{"diagonal"},
+\code{"warmup_dense"}, \code{"fisher_diag"}, \code{"lowrank"}); a fixed
+metric (\code{"hessian"}, \code{"whittle_fim"}) is not sent to the
+daemons, which then run \code{"diagonal"}.}
 
 \item{monge_alpha}{Softness parameter \eqn{\alpha \geq 0} for the Monge
 metric (default 1). Only used when \code{metric = "monge"}, which also
@@ -167,7 +212,18 @@ is set via \code{dynhr_set_options(checkpoint_flush_every = ...)} (default 1000)
 run, continue each chain from its saved state -- RNG, position, scale and
 proposal covariance are restored exactly, so the continuation is identical
 to a single longer run -- adding \code{n_draws} more retained draws. The
-saved model / prior / parameter configuration must match (it is enforced).}
+saved model / prior / parameter configuration must match (it is enforced).
+The checkpoint also records the spec's content hashes and the build: a
+resume whose target (model, data, likelihood, mode, sampler settings)
+differs, or that crosses a registered result change touching this run,
+is refused (see \code{\link{run_estimation}}, section Checkpoints).}
+
+\item{on_mismatch}{What a \code{resume} does when the checkpoint's target
+differs from this call's, or a registered result change between the two
+dynhr versions touches this run: \code{"refuse"} (default; an error) or
+\code{"warn"} (resume anyway; the result is then marked in
+\code{$provenance$integrity}, its run record and \code{print()}).
+A code or environment difference without such a change only warns.}
 
 \item{verbose}{Print progress messages.}
 
@@ -184,7 +240,10 @@ yourself (old behaviour). \strong{Note}: previously a \code{seed =}
 argument passed by a caller was silently absorbed by \code{...} and
 forwarded to samplers that do not have a \code{seed} parameter, so it was
 dropped without warning or error -- this explicit argument closes that
-gap.}
+gap. The parallel (mirai) RWMH, NUTS, SMC and DIME paths use it as their
+daemons' base seed (before 0.9.3.105 they ignored it and always used
+their fixed default, so different seeds gave identical parallel draws);
+with \code{seed = NULL} they keep that default.}
 
 \item{...}{Additional arguments forwarded to each sampler
 (e.g. \code{target_accept = 0.25}, \code{adapt_every = 100}).}
@@ -200,6 +259,14 @@ An object of class \code{"dynhr_posterior_result"} containing:
     \item{\code{posterior_irfs}}{IRFs at posterior mean (if computed)}
     \item{\code{posterior_moments}}{Moments at posterior mean (if computed)}
     \item{\code{meta}}{Run metadata}
+    \item{\code{resolved}}{What the sampler stages resolved at run time:
+      \code{grad_method}, the analytic-gradient method each gradient-based
+      stage used (named by method key, e.g. \code{"adjoint_solution"} for
+      a requested \code{"auto"}), and \code{grad_method_requested}. The
+      run record copies it.}
+    \item{\code{run_record}}{A \code{dynhr_run_record}: resolved arguments,
+      option snapshot, RNG state and provenance; replay it with
+      \code{\link{dynhr_rerun}}.}
   }
 }
 \description{
@@ -226,6 +293,6 @@ post <- run_posterior_estimation(mode,
 }
 \seealso{
 \code{\link{solve_model}}, \code{\link{run_mode_finding}},
-  \code{run_all_diagnostics}, \code{\link{mcmc}}, \code{\link{nuts}},
+  \code{run_all_diagnostics}, \code{\link{dynhr_mcmc}}, \code{\link{nuts}},
   \code{\link{smc}}
 }

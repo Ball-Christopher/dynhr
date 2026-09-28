@@ -128,7 +128,11 @@ system_prior_spec <- function(...) {
 #'     \item A \emph{named list} with \code{$dist} (distribution name accepted
 #'       by \code{\link{log_prior_density}}: "normal", "beta", "gamma",
 #'       "inv_gamma", "uniform") and parameters \code{$p1}, \code{$p2}
-#'       (optionally \code{$p3}, \code{$p4} for bounds). Or:
+#'       (optionally \code{$p3}, \code{$p4} for bounds). As in Dynare,
+#'       \code{$p1}/\code{$p2} are the MEAN and STANDARD DEVIATION for every
+#'       shape; a uniform on \code{[a, b]} is written
+#'       \code{list(dist = "uniform", p3 = a, p4 = b)} (its bounds are then
+#'       also its support). Or:
 #'     \item \code{list(type = "hard_sign", sign = "positive")} /
 #'       \code{"negative"} for a hard sign restriction (indicator
 #'       \eqn{1\{x > 0\}}). Or:
@@ -224,7 +228,8 @@ sp_irf <- function(var, shock, horizon, density, n_periods = NULL) {
 #'   \itemize{
 #'     \item \code{list(dist = "beta", p1 = 0.50, p2 = 0.20)} -- soft prior
 #'       that the shock explains about half of the variance.
-#'     \item \code{list(dist = "uniform", p1 = 0, p2 = 1)} -- flat prior
+#'     \item \code{list(dist = "uniform", p3 = 0, p4 = 1)} -- flat prior
+#'       on [0, 1]
 #'       (effectively no restriction); mainly useful as a placeholder.
 #'   }
 #'
@@ -387,13 +392,13 @@ sp_custom <- function(feature, density, label = NULL) {
     if (!is.function(pred))
       stop(".eval_sp_density: hard_predicate$predicate must be a function.",
            call. = FALSE)
-    result <- tryCatch(pred(x), error = function(e) FALSE)
+    result <- tryCatch(pred(x), error = function(e) .dynhr_reraise_bug(e, FALSE))
     return(if (isTRUE(result)) 0 else -Inf)
   }
 
   ## Arbitrary log-density function
   if (is.function(density)) {
-    val <- tryCatch(density(x), error = function(e) -Inf)
+    val <- tryCatch(density(x), error = function(e) .dynhr_reraise_bug(e, -Inf))
     ## +Inf log-density (e.g. degenerate Dirac-like) is treated as 0 penalty
     ## to avoid contaminating the posterior sum.
     return(if (is.nan(val) || is.na(val)) -Inf
@@ -405,14 +410,20 @@ sp_custom <- function(feature, density, label = NULL) {
   if (is.list(density) && !is.null(density$dist)) {
     p3 <- density$p3 %||% -Inf
     p4 <- density$p4 %||%  Inf
-    val <- log_prior_density(x, density$dist, density$p1, density$p2, p3, p4)
+    ## A uniform's p3/p4 are also its SUPPORT (Dynare's bound form); p1/p2
+    ## alone are its mean/sd.
+    uni <- identical(.normalize_dist(density$dist), "uniform")
+    val <- log_prior_density(x, density$dist,
+                             density$p1, density$p2, p3, p4,
+                             gen_p3 = if (uni && is.finite(p3)) p3 else NA_real_,
+                             gen_p4 = if (uni && is.finite(p4)) p4 else NA_real_)
     ## +Inf log-density (boundary of support for beta/uniform) is clamped to 0
     ## so the accumulated sum stays finite.
     if (isTRUE(val == Inf)) return(0)
     return(val)
   }
 
-  warning(".eval_sp_density: unrecognised density specification; returning 0.",
+  .dynhr_warn(".eval_sp_density: unrecognised density specification; returning 0.",
           call. = FALSE)
   0
 }
@@ -443,7 +454,7 @@ sp_custom <- function(feature, density, label = NULL) {
     fval <- tryCatch(
       entry$feature(state),
       error = function(e) {
-        warning(".eval_system_priors: feature '",
+        .dynhr_warn(".eval_system_priors: feature '",
                 entry$label %||% "?", "' threw: ", conditionMessage(e),
                 call. = FALSE)
         NA_real_

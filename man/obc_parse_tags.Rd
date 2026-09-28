@@ -15,11 +15,11 @@ List of OBC spec lists, each with:
   $var_idx  -- index of the constrained variable in model$var_names (1-based)
   $var_name -- name of the constrained variable (for diagnostics)
   $op       -- ">" (lower bound) or "<" (upper bound)
-  $bound    -- numeric bound value (in model deviation units)
+  $bound    -- numeric bound value (a LEVEL of the model variable)
 Stops if the model has no MCP tags, or if a tag references an unknown variable.
 }
 \description{
-Reads `model$equations[[i]]$tag`, which the parser already populates from
+Reads \code{model$equations[[i]]$tag}, which the parser already populates from
 \[ mcp = '...' \] annotations in the .mod/.txt file. Extracts the constrained
 variable name, direction, and numeric bound from each tag.
 }

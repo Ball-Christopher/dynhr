@@ -54,7 +54,8 @@
 #'   \describe{
 #'     \item{\code{dr}}{Length-h list of \code{DecisionRules} objects, one per
 #'       regime. Each has \code{ghx}, \code{ghu}, \code{ys}, \code{state_idx},
-#'       \code{bk_satisfied}, plus \code{c_const} (constant drift term).}
+#'       \code{bk_satisfied}, plus \code{c_const}, the regime constant
+#'       \eqn{k_s} of the law below (named, length \code{n_endo}).}
 #'     \item{\code{P}}{The transition matrix.}
 #'     \item{\code{pi0}}{Ergodic distribution of P.}
 #'     \item{\code{ss_list}}{List of per-regime steady states.}
@@ -69,6 +70,28 @@
 #' \strong{NON-CONVERGENCE:} If the iteration does not converge (max_iter
 #' hit, divergence, or non-finite iterates), the function \code{stop()}s with
 #' a diagnostic message. It never silently returns an unconverged solution.
+#'
+#' \strong{The law (regime-specific steady states):} regime \eqn{s}'s
+#' equations are linearised around its own steady state \eqn{ys_s}, and the
+#' solution is, with \eqn{s = s_t} the regime in force at \eqn{t},
+#' \deqn{x_t = ys_s + k_s + ghx_s (x_{t-1} - ys_s)[\mathrm{state}] +
+#'   ghu_s \varepsilon_t ,}
+#' the lagged state deviating from the CURRENT regime's steady state.  The
+#' constant \eqn{k_s} (\code{c_const}) solves the stacked linear system
+#' \deqn{(f_0^s + f_+^s \Phi_s) k_s + f_+^s \sum_{s'} P_{ss'} k_{s'} =
+#'   -f_+^s \sum_{s'} P_{ss'} (\Delta_{s'} - ghx_{s'}
+#'   \Delta_{s'}[\mathrm{state}]),}
+#' \eqn{\Delta_{s'} = ys_{s'} - ys_s}, \eqn{\Phi_s = \sum_{s'} P_{ss'}
+#' ghx_{s'}} (embedded on the state columns): the effect on today's
+#' forward-looking variables of EXPECTING a move to another regime's steady
+#' state (the first-order term of the Maih 2015 / Foerster et al. 2016
+#' perturbation).  It is zero when all steady states coincide and for
+#' purely backward-looking equations.  For a linear model the law is exact;
+#' for a nonlinear one its error is second order in the steady-state gap.
+#' \code{\link{ms_kim_filter_struct}} and \code{\link{ms_kim_smoother_struct}}
+#' use exactly this law.  (Releases before 2026-09-25 returned
+#' \code{ghx_s[state, ]} times \code{sum_q P[s, q] (ys_q - ys_s)[state]} here, which is
+#' not a term of the solution and was used by nothing.)
 #'
 #' \strong{Reduction oracle:} when all \code{params_by_regime} elements are
 #' identical, the converged \code{ghx_s} must equal the single-regime
@@ -148,13 +171,13 @@ solve_ms_perturbation <- function(model, compiled,
     )
 
     if (!isTRUE(dr0_s$bk_satisfied))
-      warning(sprintf(
+      .dynhr_warn(sprintf(
         "solve_ms_perturbation: BK condition violated in regime %d starting values; iteration may not converge.", s),
         call. = FALSE)
 
     dr0_list[[s]] <- dr0_s
     if (verbose)
-      cat(sprintf("  Regime %d: QZ init done, BK=%s, n_state=%d\n",
+      .dynhr_cat(sprintf("  Regime %d: QZ init done, BK=%s, n_state=%d\n",
                   s, dr0_s$bk_satisfied, dr0_s$n_state))
   }
 
@@ -165,10 +188,13 @@ solve_ms_perturbation <- function(model, compiled,
 
   if (n_state == 0L) {
     ## Degenerate case: no state variables. Return QZ solutions directly.
-    warning("solve_ms_perturbation: no state variables; returning single-regime QZ solutions.", call. = FALSE)
+    .dynhr_warn("solve_ms_perturbation: no state variables; returning single-regime QZ solutions.", call. = FALSE)
     dr_list <- dr0_list
+    k_list  <- .ms_regime_constants(sys_list,
+                                    lapply(dr0_list, function(dr) dr$ghx),
+                                    P, ss_by_regime, state_idx, endo)
     for (s in seq_len(h)) {
-      dr_list[[s]]$c_const     <- numeric(n_endo)
+      dr_list[[s]]$c_const     <- k_list[[s]]
       dr_list[[s]]$mss_satisfied <- TRUE
     }
     return(.build_ms_dr(dr_list, P, ss_by_regime, converged = TRUE,
@@ -256,7 +282,7 @@ solve_ms_perturbation <- function(model, compiled,
   ## (A^s_0 + A^s_+ * Phi_s) and -A^s_-, then solve directly.
   ## See: .ms_reduced_system() helper below.
 
-  if (verbose) cat(sprintf("  MS iteration: h=%d, n_state=%d, tol=%.1e, max_iter=%d\n",
+  if (verbose) .dynhr_cat(sprintf("  MS iteration: h=%d, n_state=%d, tol=%.1e, max_iter=%d\n",
                             h, n_state, tol, max_iter))
 
   ## ---- Step 3: Functional iteration ----------------------------------------
@@ -284,7 +310,7 @@ solve_ms_perturbation <- function(model, compiled,
   G_conv <- iter_result$G_list   # converged ghx, each n_endo x n_state
 
   if (verbose)
-    cat(sprintf("  Converged in %d iterations, final change = %.2e\n",
+    .dynhr_cat(sprintf("  Converged in %d iterations, final change = %.2e\n",
                 iter_result$n_iter, iter_result$final_change))
 
   ## ---- Step 4: Recover ghu_s for each regime (Eq. B) ----------------------
@@ -292,6 +318,12 @@ solve_ms_perturbation <- function(model, compiled,
   ## where Phi_s is the converged coupling (n_endo x n_endo embed matrix).
 
   dr_list <- vector("list", h)
+
+  ## ---- Step 4b: regime constants c_const (the law's intercepts) -----------
+  ## See .ms_regime_constants(): with regime-specific steady states the
+  ## linearised system has a constant term through E_t x_{t+1}.
+  k_list <- .ms_regime_constants(sys_list, G_conv, P, ss_by_regime,
+                                 state_idx, endo)
 
   for (s in seq_len(h)) {
     ## Build converged Phi_s embed (n_endo x n_endo)
@@ -303,10 +335,13 @@ solve_ms_perturbation <- function(model, compiled,
     f_exo_s  <- sys_s$f_exo
 
     M_s  <- f_zero_s + f_plus_s %*% Phi_s_embed
-    ghu_s <- tryCatch(
-      solve(M_s, -f_exo_s),
-      error = function(e) .safe_inv(M_s) %*% (-f_exo_s)
-    )
+    ## Plain LU, tol = 0 (see .solve_ghu_lu in R/solve-perturbation.R): an
+    ## ill-conditioned but nonsingular M_s is solved, not silently replaced
+    ## by a truncated-SVD pseudo-inverse. An EXACTLY singular M_s still falls
+    ## back (with a warning) and the regime's rule is flagged below.
+    ghu_sol_s <- .solve_ghu_lu(M_s, -f_exo_s, sprintf(
+      "ms_solve: regime %d ghu system f_zero + f_plus Phi", s))
+    ghu_s <- ghu_sol_s$x
 
     rownames(ghu_s) <- endo
     if (n_exo > 0) colnames(ghu_s) <- exo
@@ -315,24 +350,14 @@ solve_ms_perturbation <- function(model, compiled,
     ghx_s <- G_conv[[s]]
     if (!is.null(rownames(dr0_list[[s]]$ghx))) rownames(ghx_s) <- endo
     if (!is.null(colnames(dr0_list[[s]]$ghx))) colnames(ghx_s) <- colnames(dr0_list[[s]]$ghx)
-
-    ## Constant drift term c_s = ghx_s * sum_{s'} P[s,s'] * (ys_{s'} - ys_s)
-    ## (FRWZ 2016 Proposition 2 — regime-specific mean shift)
     ys_s <- ss_by_regime[[s]]
-    c_s_arg <- numeric(n_state)
-    for (sp in seq_len(h)) {
-      diff_ss <- ss_by_regime[[sp]][endo[state_idx]] - ys_s[endo[state_idx]]
-      diff_ss[is.na(diff_ss)] <- 0
-      c_s_arg <- c_s_arg + P[s, sp] * diff_ss
-    }
-    c_const_s <- drop(ghx_s[state_idx, , drop = FALSE] %*% c_s_arg)
 
     ## Per-regime BK check (spectral radius of converged ghx state block)
     state_block_s <- ghx_s[state_idx, , drop = FALSE]
     sr_s <- tryCatch(
       max(Mod(eigen(state_block_s, only.values = TRUE)$values)),
       error = function(e) NA_real_)
-    bk_s <- is.finite(sr_s) && sr_s <= 1 + 1e-6
+    bk_s <- is.finite(sr_s) && sr_s <= 1 + 1e-6 && !ghu_sol_s$singular
 
     dr_s <- list(
       ghx          = ghx_s,
@@ -345,7 +370,7 @@ solve_ms_perturbation <- function(model, compiled,
       n_state      = n_state,
       n_exo        = n_exo,
       bk_satisfied = bk_s,
-      c_const      = c_const_s
+      c_const      = k_list[[s]]
     )
     class(dr_s) <- "DecisionRules"
     dr_list[[s]] <- dr_s
@@ -355,7 +380,7 @@ solve_ms_perturbation <- function(model, compiled,
   ## M_Kron = sum_{s,s'} P[s,s'] * (ghx_{s'} kron ghx_{s'}) -- spectral radius < 1
   mss_ok <- .ms_check_mss(G_conv, P, state_idx, h)
   if (verbose)
-    cat(sprintf("  Mean-square stability: %s\n", if (mss_ok) "OK" else "VIOLATED"))
+    .dynhr_cat(sprintf("  Mean-square stability: %s\n", if (mss_ok) "OK" else "VIOLATED"))
 
   for (s in seq_len(h))
     dr_list[[s]]$mss_satisfied <- mss_ok
@@ -411,10 +436,11 @@ solve_ms_perturbation <- function(model, compiled,
       M_s <- f_zero_s + f_plus_s %*% Phi_s_embed
 
       ## Solve: M_s * G_s_new = -f_minus[, state_idx]  (n_endo x n_state)
-      G_s_new <- tryCatch(
-        solve(M_s, rhs_list[[s]]),
-        error = function(e) NULL
-      )
+      ## Plain LU, tol = 0 (as .solve_ghu_lu): base solve()'s rcond refusal
+      ## would declare an ill-conditioned but nonsingular step "diverged".
+      ## Only an exact zero pivot (rcond == 0) or a non-finite M_s stops here.
+      G_s_new <- if (all(is.finite(M_s)) && isTRUE(rcond(M_s) > 0))
+        solve(M_s, rhs_list[[s]], tol = 0) else NULL
 
       if (is.null(G_s_new) || !all(is.finite(G_s_new))) {
         ## Non-finite or singular: iteration diverged
@@ -433,7 +459,7 @@ solve_ms_perturbation <- function(model, compiled,
     G_list <- G_new_list
 
     if (verbose && (k %% 50L == 0L || k <= 5L))
-      cat(sprintf("    iter %d: max_change = %.3e\n", k, final_change))
+      .dynhr_cat(sprintf("    iter %d: max_change = %.3e\n", k, final_change))
 
     if (final_change < tol) {
       return(list(G_list = G_list, converged = TRUE,
@@ -473,6 +499,79 @@ solve_ms_perturbation <- function(model, compiled,
   Phi_embed <- matrix(0, n_endo, n_endo)
   Phi_embed[, state_idx] <- Phi_state
   Phi_embed
+}
+
+## Regime constants c_const (W47, 2026-09-25).
+##
+## THE LAW.  Regime s's equations are linearised around ITS OWN steady state
+## ys_s (sys_list[[s]] holds the Jacobians at (ys_s, ys_s, ys_s, 0)):
+##   f_-^s (x_{t-1} - ys_s) + f_0^s (x_t - ys_s)
+##     + f_+^s (E_t x_{t+1} - ys_s) + f_e^s eps_t = 0 .
+## Its exact solution (given the coupled G_s = ghx_s, H_s = ghu_s) is
+##   x_t = ys_s + k_s + G_s (x_{t-1} - ys_s)[state] + H_s eps_t ,  s = s_t,
+## i.e. the lagged state deviates from the steady state of the regime in
+## force AT t, plus a constant k_s.  Substituting the law of s' = s_{t+1},
+##   E_t x_{t+1} - ys_s = sum_{s'} P[s,s'] ( Delta_{s'} + k_{s'}
+##                          + G_{s'} ((x_t - ys_s) - Delta_{s'})[state] ),
+## Delta_{s'} = ys_{s'} - ys_s, and matching constants gives the stacked
+## (h n_endo) linear system
+##   (f_0^s + f_+^s Phi_s) k_s + f_+^s sum_{s'} P[s,s'] k_{s'}
+##     = - f_+^s sum_{s'} P[s,s'] (Delta_{s'} - G_{s'} Delta_{s'}[state]),
+## Phi_s = the embedded sum_{s'} P[s,s'] G_{s'} of the ghx/ghu solves.  The
+## constant arises only through EXPECTATIONS of a regime change (it is zero
+## for a purely backward-looking model, and when all ys_s coincide); it is the
+## first-order (Maih 2015 sigma / FRWZ 2016 chi) term of the MS perturbation
+## with each regime approximated at its own steady state.
+##
+## The previous c_const, ghx_s[state, ] sum_{s'} P[s,s'] (ys_{s'} - ys_s)[state],
+## was not this term (it is nonzero for backward-looking models, whose law
+## needs no constant) and nothing consumed it.
+##
+## Missing names in ys_s are read as 0, the value extract_system_matrices_fast()
+## linearises them at.  Identical steady states return exact zeros without a
+## solve, so the shared-steady-state case is bit-identical downstream.
+## @return Length-h list of named length-n_endo vectors k_s.
+## @noRd
+.ms_regime_constants <- function(sys_list, G_list, P, ss_by_regime,
+                                 state_idx, endo) {
+  h <- nrow(P)
+  n <- length(endo)
+  ybar <- lapply(ss_by_regime, function(ss) {
+    v <- as.numeric(ss[endo])
+    v[is.na(v)] <- 0
+    v
+  })
+  zero <- stats::setNames(numeric(n), endo)
+  if (all(vapply(ybar, identical, logical(1), ybar[[1L]])))
+    return(rep(list(zero), h))
+
+  A <- matrix(0, h * n, h * n)
+  b <- numeric(h * n)
+  for (s in seq_len(h)) {
+    rows <- (s - 1L) * n + seq_len(n)
+    fp   <- sys_list[[s]]$f_plus
+    A[rows, rows] <- sys_list[[s]]$f_zero +
+      fp %*% .ms_build_Phi_embed(G_list, P, s, state_idx, n)
+    rhs <- numeric(n)
+    for (sp in seq_len(h)) {
+      if (P[s, sp] == 0) next
+      cols <- (sp - 1L) * n + seq_len(n)
+      A[rows, cols] <- A[rows, cols] + P[s, sp] * fp
+      D   <- ybar[[sp]] - ybar[[s]]
+      rhs <- rhs + P[s, sp] *
+        (D - as.numeric(G_list[[sp]] %*% D[state_idx]))
+    }
+    b[rows] <- -as.numeric(fp %*% rhs)
+  }
+  rc <- rcond(A)
+  if (!is.finite(rc) || rc < .Machine$double.eps)
+    .dynhr_abort(sprintf(paste0(
+      "solve_ms_perturbation: the regime-constant system is singular ",
+      "(rcond = %.2e); the regime-conditional means of the linearised MS ",
+      "model are not determined."), rc), class = "dynhr_error_ms_solve")
+  k <- solve(A, b)
+  lapply(seq_len(h), function(s)
+    stats::setNames(k[(s - 1L) * n + seq_len(n)], endo))
 }
 
 ## Check mean-square stability — returns a list with both the per-regime BK
@@ -604,7 +703,7 @@ ms_mss_diagnostics <- function(ms_dr) {
     list(
       dr        = dr_list,
       P         = P,
-      pi0       = .ms_ergodic_dist(P),
+      pi0       = unname(.ergodic_dist(P, "ms transition matrix", reducible = "uniform")),
       ss_list   = ss_list,
       converged = converged,
       n_iter    = n_iter,

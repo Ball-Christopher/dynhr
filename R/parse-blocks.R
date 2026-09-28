@@ -7,6 +7,158 @@
 ## Phase-1 split from parser-monolith.R (no logic changes).
 ## --------------------------------------------------------------------------
 
+# ---------------------------------------------------------------------------
+# .mod EXPRESSION SANDBOX
+# ---------------------------------------------------------------------------
+# Parsing a .mod file EVALUATES R code that came out of that file: calibration
+# assignments, initval/endval/histval right-hand sides, shocks-block variances,
+# verbatim blocks, and macro directives are all `eval(parse(text = ...))`.
+#
+# Until 0.9.4 every one of those evaluation environments was a child of
+# `baseenv()`, which means a .mod file could run ARBITRARY CODE simply by
+# being parsed -- `alpha = system("curl ...");` or `beta = unlink("~", TRUE)`
+# would execute inside `parse_mod()`.  Model files are routinely downloaded
+# from replication archives, so "reading a model" must not be a code-execution
+# primitive.
+#
+# The fix is one shared sandbox constructor.  Its environments are parented at
+# `emptyenv()` and pre-populated with an EXPLICIT ALLOWLIST of functions, so an
+# unlisted name is not reachable at all; on top of that every expression is
+# AST-checked before it is evaluated, so a disallowed call fails LOUDLY with a
+# classed condition naming the symbol instead of failing obscurely at eval time
+# (or, worse, resolving to something harmless-looking).
+#
+# Three allowlists, because the three dialects need different vocabularies:
+#   * `.dynhr_safe_fn_names`        arithmetic + elementary maths.  Calibration,
+#                                   initval/endval, histval, shocks, and D33's
+#                                   reduced-form re-evaluation.
+#   * `.dynhr_safe_matrix_fn_names` + matrix constructors/algebra, for the
+#                                   MATLAB-translated `verbatim` blocks.
+#   * `.dynhr_safe_macro_fn_names`  + comparison/logical/membership operators.
+#                                   The `@#` macro language no longer uses it:
+#                                   since W30 (2026-09-25) macro expressions
+#                                   are run by dynhr's own interpreter
+#                                   (R/parse-macro.R), which evaluates no R
+#                                   code at all.  Kept as a vetted allowlist.
+# None of them contains a function that touches the filesystem, the network,
+# the process table, or any environment outside the sandbox.
+
+.dynhr_safe_fn_names <- c(
+  "(", "+", "-", "*", "/", "^", "%%", "%/%",
+  "exp", "log", "log10", "log2", "log1p", "expm1", "sqrt", "abs", "sign",
+  "sin", "cos", "tan", "asin", "acos", "atan", "atan2",
+  "sinh", "cosh", "tanh", "min", "max", "sum", "prod", "mean",
+  "round", "floor", "ceiling", "trunc",
+  "gamma", "lgamma", "beta", "lbeta", "digamma", "factorial", "choose",
+  "pnorm", "qnorm", "dnorm"
+)
+
+.dynhr_safe_matrix_fn_names <- c(
+  .dynhr_safe_fn_names,
+  "c", "[", "[[", "matrix", "rbind", "cbind", "t", "solve", "diag", "chol",
+  "crossprod", "tcrossprod", "kronecker", "%*%", "%o%",
+  "nrow", "ncol", "dim", "length", "numeric", "rep", "seq_len", "as.numeric",
+  "det", "outer", ".mtimes"
+)
+
+.dynhr_safe_macro_fn_names <- c(
+  .dynhr_safe_fn_names,
+  "c", "[", "length", "%in%", "paste0", "paste", "nchar",
+  "==", "!=", "<", ">", "<=", ">=", "&", "|", "&&", "||", "!", "xor",
+  "isTRUE", "isFALSE", "any", "all", ":"
+)
+
+#' Build an allowlisted sandbox environment for evaluating .mod expressions
+#'
+#' @param seed Optional named list / named numeric vector / environment whose
+#'   bindings seed the sandbox (already-known parameter values).
+#' @param fns  Character vector of allowed function names.
+#' @return An environment whose parent is `emptyenv()`.
+#' @noRd
+.dynhr_sandbox_env <- function(seed = NULL, fns = .dynhr_safe_fn_names) {
+  env <- new.env(parent = emptyenv())
+  for (fn in fns) {
+    if (identical(fn, ".mtimes")) {
+      assign(".mtimes", .mtimes, envir = env)
+      next
+    }
+    ## A handful of the allowlisted maths functions live in stats, not base.
+    src <- if (exists(fn, envir = baseenv(), inherits = FALSE)) baseenv()
+           else asNamespace("stats")
+    assign(fn, get(fn, envir = src), envir = env)
+  }
+  assign("pi", base::pi, envir = env)
+  if (is.environment(seed)) seed <- as.list(seed)
+  if (is.numeric(seed) || is.character(seed)) seed <- as.list(seed)
+  if (is.list(seed) && length(seed) > 0L && !is.null(names(seed)))
+    for (nm in names(seed)) assign(nm, seed[[nm]], envir = env)
+  env
+}
+
+#' Function names called by an expression (AST, function positions only)
+#'
+#' Walks the AST and collects the head of every call. The earlier
+#' `setdiff(all.names(e, functions = TRUE), all.vars(e))` dropped a function
+#' name that ALSO appeared as a variable (`system("x") + system`), so the
+#' allowlist check never saw it. A non-symbol call head (`f()()`,
+#' `(function(x) x)(1)`) is reported as "<call>" so it can never pass.
+#' @noRd
+.dynhr_expr_calls <- function(e) {
+  if (is.call(e)) {
+    h <- e[[1L]]
+    head <- if (is.symbol(h)) as.character(h) else "<call>"
+    return(unique(c(head, unlist(lapply(as.list(e), .dynhr_expr_calls)))))
+  }
+  if (is.expression(e) || is.list(e))
+    return(unique(unlist(lapply(as.list(e), .dynhr_expr_calls))))
+  character(0)
+}
+
+#' Evaluate one .mod expression inside the sandbox
+#'
+#' Security contract: the expression is parsed, its call names are checked
+#' against `allowed`, and only then is it evaluated.  A call to anything
+#' outside the allowlist ABORTS with a `dynhr_error_unsafe_mod_expression`
+#' condition naming the offending symbol -- it is never evaluated.
+#'
+#' Resolution contract (unchanged from the pre-0.9.4 behaviour): text that is
+#' not valid R, or that references a symbol not yet bound in `envir`, yields
+#' `NULL`.  Both are legitimate during parsing (MATLAB-flavoured right-hand
+#' sides, forward references), so they are reported by the caller's own
+#' fail-loud pass rather than aborting the parse here.
+#'
+#' @param text     Expression text from the .mod file.
+#' @param envir    Sandbox environment (see `.dynhr_sandbox_env()`).
+#' @param allowed  Allowlisted function names.
+#' @param context  Short label naming the block, for the error message.
+#' @return The evaluated value, or `NULL` when it could not be resolved.
+#' @noRd
+.dynhr_sandbox_eval <- function(text, envir, allowed = .dynhr_safe_fn_names,
+                                context = ".mod expression") {
+  ## parse() is the one step that can legitimately fail on text that never was
+  ## R (MATLAB matrix literals, Dynare string options). There is no
+  ## non-signalling parser in base R, so this single handler stays; everything
+  ## after it is a plain conditional.
+  parsed <- tryCatch(parse(text = text, keep.source = FALSE),
+                     error = function(e) NULL)
+  if (is.null(parsed) || length(parsed) != 1L) return(NULL)
+  e <- parsed[[1L]]
+
+  bad <- setdiff(.dynhr_expr_calls(e), allowed)
+  if (length(bad) > 0L)
+    .dynhr_abort(
+      "dynhr refuses to evaluate ", context, " `", text, "`: it calls `",
+      bad[1L], "`, which is not on the .mod expression allowlist. Parsing a ",
+      ".mod file must never execute arbitrary code; move any computation that ",
+      "needs `", bad[1L], "` out of the model file.",
+      class = "dynhr_error_unsafe_mod_expression")
+
+  syms <- setdiff(all.vars(e), "pi")
+  for (s in syms) if (!exists(s, envir = envir)) return(NULL)
+
+  eval(e, envir = envir)
+}
+
 #' Extract the content of paired blocks (keyword; ... end;)
 #'
 #' @param txt       Cleaned .mod text (comments already stripped).
@@ -19,7 +171,7 @@
 extract_paired_block <- function(txt, keyword) {
   pat <- paste0(
     "(?si)\\b", keyword,
-    "\\s*(?:\\(([^)]*)\\))?\\s*;",  # optional (options);
+    "\\s*", .dynhr_opts_re, "\\s*;",  # optional (options), bracket-aware;
     "(.*?)",                         # body (non-greedy)
     "\\bend\\s*;"                    # end;
   )
@@ -48,7 +200,7 @@ extract_paired_block <- function(txt, keyword) {
 extract_all_paired_blocks <- function(txt, keyword) {
   pat <- paste0(
     "(?si)\\b", keyword,
-    "\\s*(?:\\(([^)]*)\\))?\\s*;",   # optional (options);
+    "\\s*", .dynhr_opts_re, "\\s*;",   # optional (options), bracket-aware;
     "(.*?)",                           # body (non-greedy)
     "\\bend\\s*;"                      # end;
   )
@@ -79,7 +231,7 @@ extract_all_paired_blocks <- function(txt, keyword) {
 #' @noRd
 extract_paired_block_nested <- function(txt, keyword, nested_keyword = "equations") {
   # Find the outer opening tag: keyword [( options )] ;
-  open_pat <- paste0("(?si)\\b", keyword, "\\s*(?:\\(([^)]*)\\))?\\s*;")
+  open_pat <- paste0("(?si)\\b", keyword, "\\s*", .dynhr_opts_re, "\\s*;")
   open_m   <- regexpr(open_pat, txt, perl = TRUE)
   if (open_m == -1L)
     return(list(options_str = "", body = "", found = FALSE))
@@ -150,16 +302,20 @@ extract_declaration <- function(txt, keyword, debug = FALSE) {
     kw_pat <- paste0("\\b", keyword, "\\b")
   }
 
-  pat <- paste0("(?si)", kw_pat, "(?:\\s*\\([^)]*\\))?\\s+(.*?)\\s*;")
+  ## Options are BALANCED parentheses (group 1, PCRE recursion): a
+  ## `var(deflator = A^(1/(1-alpha))) Y;` used to stop at the first `)`,
+  ## fail the match and silently drop the whole declaration.
+  pat <- paste0("(?si)", kw_pat,
+                "(?:\\s*(\\((?:[^()]++|(?1))*\\)))?\\s+(.*?)\\s*;")
 
   all_positions <- gregexpr(pat, txt, perl = TRUE)
   all_matches   <- regmatches(txt, all_positions)[[1]]
 
   # -- DIAGNOSTIC --
   if (debug){
-    cat(sprintf("  [extract_declaration] keyword='%s'  matches=%d\n", keyword, length(all_matches)))
+    .dynhr_cat(sprintf("  [extract_declaration] keyword='%s'  matches=%d\n", keyword, length(all_matches)))
     for (j in seq_along(all_matches)) {
-      cat(sprintf("    match %d (nchar=%d): %.120s\n", j, nchar(all_matches[j]),
+      .dynhr_cat(sprintf("    match %d (nchar=%d): %.120s\n", j, nchar(all_matches[j]),
                   gsub("\\s+", " ", all_matches[j])))
     }
   }
@@ -169,13 +325,13 @@ extract_declaration <- function(txt, keyword, debug = FALSE) {
 
   bodies <- vapply(all_matches, function(m) {
     parts <- regmatches(m, regexec(pat, m, perl = TRUE))[[1]]
-    if (length(parts) >= 2) trimws(parts[2]) else ""
+    if (length(parts) >= 3) trimws(parts[3]) else ""
   }, character(1))
 
   result <- paste(bodies[nchar(bodies) > 0], collapse = " ")
 
   # -- DIAGNOSTIC --
-  if (debug) cat(sprintf("    -> extracted names text: %.200s\n", gsub("\\s+", " ", result)))
+  if (debug) .dynhr_cat(sprintf("    -> extracted names text: %.200s\n", gsub("\\s+", " ", result)))
   # ----------------
 
   result
@@ -188,10 +344,18 @@ extract_declaration <- function(txt, keyword, debug = FALSE) {
 #' @return A list with options_str, var_list, found.
 #' @noRd
 extract_command <- function(txt, command) {
+  ## `\b` on BOTH sides: without the trailing one, `steady` matched the start
+  ## of `steady_state_model;` (and `steady_state(x)` in an equation), giving a
+  ## bogus `steady` command whose var list was `_state_model`, which
+  ## write_mod() then emitted as `steady _state_model;` (review 2026-09-25).
+  ## The option list may itself hold parenthesised lists
+  ## (`instruments=(i,tau)`, `irf_shocks=(e,u)`): match balanced parentheses
+  ## (PCRE recursion into group 1), not "up to the first `)`", which cut the
+  ## options at the first inner `)` and pushed the rest into the var list.
   pat <- paste0(
-    "(?i)\\b", command,
-    "\\s*(?:\\(([^)]*)\\))?",  # optional (options)
-    "\\s*([^;]*?)\\s*;"        # optional variable list, then ;
+    "(?i)\\b", command, "\\b",
+    "\\s*", .dynhr_opts_re,                    # optional (options)
+    "\\s*([^;]*?)\\s*;"                          # optional var list, then ;
   )
   m <- regmatches(txt, regexec(pat, txt, perl = TRUE))[[1]]
   if (length(m) == 0)
@@ -236,17 +400,20 @@ extract_planner_objective <- function(txt) {
 #' @return Character vector of instrument names, or \code{character(0)} if none.
 #' @noRd
 extract_ramsey_instruments <- function(txt) {
-  # Match ramsey_policy(...instruments=(a b c)...) or instruments=(a,b,c)
-  m <- regmatches(
-    txt,
-    regexec(
-      "(?si)\\bramsey_(?:policy|model)\\s*\\([^)]*\\binstruments\\s*=\\s*\\(([^)]*)\\)",
-      txt, perl = TRUE
-    )
-  )[[1]]
-  if (length(m) < 2 || !nzchar(trimws(m[2])))
-    return(character(0))
-  parse_declaration_names(m[2])
+  # ramsey_policy(...instruments=(a b c)...) or instruments=(a,b,c), read
+  # through the command-option parser: a regex stopping at the first `)`
+  # missed `instruments` whenever an earlier option held a list
+  # (`ramsey_policy(irf_shocks=(e,u), instruments=(i))`).
+  for (cmd in c("ramsey_policy", "ramsey_model")) {
+    ci <- extract_command(txt, cmd)
+    if (!ci$found) next
+    ins <- parse_command_options(ci$options_str)$instruments
+    if (!is.null(ins)) {
+      ins <- as.character(ins)
+      return(ins[nzchar(ins)])
+    }
+  }
+  character(0)
 }
 
 
@@ -256,32 +423,21 @@ extract_ramsey_instruments <- function(txt) {
 #' @return Text with all blocks replaced by whitespace.
 #' @noRd
 remove_blocks <- function(txt) {
-  paired_kw <- c("model", "initval", "endval", "steady_state_model",
-                 "shocks", "mshocks", "estimated_params_init",
-                 "estimated_params_bounds", "estimated_params",
-                 "observation_trends", "optim_weights",
-                 "osr_params_bounds", "ramsey_constraints",
-                 "moment_calibration", "irf_calibration",
-                 "matched_moments", "occbin_constraints",
-                 "epilogue", "pac_model", "var_model",
-                 "trend_component_model", "filter_initial_state",
-                 "homotopy_setup", "histval", "shock_groups",
-                 "conditional_forecast_paths", "deterministic_trends",
-                 "svar_identification", "identification",
-                 "verbatim")
-  for (kw in paired_kw) {
-    pat <- paste0("(?si)\\b", kw, "\\s*(?:\\([^)]*\\))?\\s*;.*?\\bend\\s*;")
-    txt <- gsub(pat, " ", txt, perl = TRUE)
-  }
+  # Paired blocks: the SAME list the declaration scan strips (parse-lexer.R).
+  txt <- .dynhr_strip_paired_blocks(txt)
   decl_kw <- c("var", "varexo_det", "varexo", "varobs", "parameters",
-               "predetermined_variables", "trend_var",
+               "predetermined_variables", "trend_var", "log_trend_var",
                "model_local_variable", "var_expectation",
-               "var_remove", "model_replace", "model_remove")
+               "var_remove", "model_remove")
   # v0.3: handle optional parenthesised options, e.g. var(log) x y;
   for (kw in decl_kw) {
-    pat <- paste0("(?si)\\b", kw, "\\b(?:\\s*\\([^)]*\\))?\\s+.*?;")
+    pat <- paste0("(?si)\\b", kw, "\\b\\s*", .dynhr_opts_re, "\\s+.*?;")
     txt <- gsub(pat, " ", txt, perl = TRUE)
   }
+  ## `model_remove('eq');` has no space before its `;`, so the pattern above
+  ## misses it; its quoted tags may contain `)`.
+  txt <- gsub("(?si)\\bmodel_remove\\b\\s*\\((?:'[^']*'|\"[^\"]*\"|[^)'\"])*\\)\\s*;",
+              " ", txt, perl = TRUE)
   cmd_kw <- c("stoch_simul", "estimation", "steady", "check",
               "model_diagnostics", "model_info", "simul",
               "perfect_foresight_setup", "perfect_foresight_solver",
@@ -293,7 +449,14 @@ remove_blocks <- function(txt) {
               "dynare_sensitivity", "bvar_density",
               "bvar_forecast", "dsample")
   for (kw in cmd_kw) {
-    pat <- paste0("(?i)\\b", kw, "\\b\\s*(?:\\([^)]*\\))?\\s*[^;]*;")
+    pat <- paste0("(?i)\\b", kw, "\\b\\s*", .dynhr_opts_re, "\\s*[^;]*;")
+    txt <- gsub(pat, " ", txt, perl = TRUE)
+  }
+  # Option-only commands (no variable list) that were formerly mis-listed as
+  # `...; end;` blocks -- which deleted everything up to the next `end;`.
+  for (kw in c("identification", "pac_model", "var_model",
+               "trend_component_model")) {
+    pat <- paste0("(?i)\\b", kw, "\\b\\s*", .dynhr_opts_re, "\\s*;")
     txt <- gsub(pat, " ", txt, perl = TRUE)
   }
 
@@ -345,10 +508,57 @@ parse_declaration_names <- function(decl_text) {
 }
 
 
+#' Split top-level .mod text into `NAME = RHS` calibration assignments
+#'
+#' Statements are delimited by `;`, NOT by newlines, so an expression split
+#' over lines (`alpha = 0.3 +\n 0.03;`) is one assignment. The old
+#' single-line regex silently dropped such a statement and the resulting
+#' "no value" warning then blamed an external *_steadystate.m (review
+#' 2026-09-25 B13).
+#'
+#' Within one `;`-terminated statement:
+#' 1. if its LAST line contains `IDENT = rhs`, that is the assignment (the old
+#'    single-line behaviour -- this also skips an unterminated junk line such
+#'    as `title_string='foo'` sitting above a real `beta = 0.99;`);
+#' 2. otherwise the assignment starts at the last line that BEGINS with
+#'    `IDENT =` and its RHS runs to the `;`, newlines included.
+#' Text after the final `;` is unterminated and ignored, as before.
+#'
+#' @param txt Top-level .mod text (blocks, declarations, commands removed).
+#' @return List of length-2 character vectors `c(name, rhs)`, in source order.
+#' @noRd
+.calibration_assignments <- function(txt) {
+  pieces <- strsplit(paste0(txt, "\n"), ";", fixed = TRUE)[[1]]
+  pieces <- pieces[-length(pieces)]          # unterminated remainder
+  out <- list()
+  for (st in pieces) {
+    lines <- strsplit(st, "\n", fixed = TRUE)[[1]]
+    lines <- lines[nzchar(trimws(lines))]
+    if (length(lines) == 0L) next
+    last <- lines[length(lines)]
+    m <- regmatches(last, regexec("([A-Za-z_][A-Za-z0-9_]*)\\s*=(?!=)(.*)$",
+                                  last, perl = TRUE))[[1]]
+    if (length(m) == 3L && nzchar(trimws(m[3]))) {
+      out[[length(out) + 1L]] <- c(m[2], trimws(m[3]))
+      next
+    }
+    starts <- gregexpr("(?m)^[ \\t]*[A-Za-z_][A-Za-z0-9_]*\\s*=(?!=)", st,
+                       perl = TRUE)[[1]]
+    if (starts[1L] < 0L) next
+    frag <- substring(st, starts[length(starts)])
+    m <- regmatches(frag, regexec("(?s)^\\s*([A-Za-z_][A-Za-z0-9_]*)\\s*=(.*)$",
+                                  frag, perl = TRUE))[[1]]
+    rhs <- trimws(m[3])
+    if (nzchar(rhs)) out[[length(out) + 1L]] <- c(m[2], rhs)
+  }
+  out
+}
+
+
 #' Parse top-level parameter assignments outside any block
 #'
-#' Matches lines like:  alpha = 0.33;  beta = 1/(1+0.02/4);
-#' v0.3: Now handles multiline expressions by collapsing whitespace.
+#' Matches statements like:  alpha = 0.33;  beta = 1/(1+0.02/4);
+#' Statements are split on `;`, so an expression may span several lines.
 #'
 #' @param txt         Cleaned .mod text with blocks removed.
 #' @param param_names Declared parameter names.
@@ -357,27 +567,23 @@ parse_declaration_names <- function(decl_text) {
 parse_calibration <- function(txt, param_names, seed_env = NULL, quiet = FALSE) {
   values <- numeric(0)
 
-  # Find statements of the form: IDENT = expression ;
-  # Use [^;\\n] to prevent matching across newlines — this stops a
-  # statement like  title_string='foo' (no trailing ;) from greedily
-  # consuming  beta = 0.99;  on a later line (both lack ;, so the
-  # old [^;]+ would merge them into one giant match).
-  pat <- "([A-Za-z_][A-Za-z0-9_]*)\\s*=\\s*([^;\\n]+)\\s*;"
-  matches <- gregexpr(pat, txt, perl = TRUE)
-  all_matches <- regmatches(txt, matches)[[1]]
+  # Statements of the form  IDENT = expression ;  -- split on `;`, so an
+  # expression may span lines (see .calibration_assignments()).
+  all_assign <- .calibration_assignments(txt)
 
   # `seed_env` (optional) carries intermediate values computed in verbatim;
   # blocks (matrices like V, Correlation_matrix, and scalars like P0_z_bar0)
   # so that top-level assignments referencing them -- e.g.
   # `sigma_z = sqrt(V(1,1));` -- resolve instead of erroring to NA (repl M19).
   # MATLAB-style indexing in such RHS expressions is translated to R below.
-  .pcal_env <- if (is.null(seed_env)) new.env(parent = baseenv())
-               else list2env(as.list(seed_env), parent = baseenv())
+  ## A2: the calibration environment is an ALLOWLIST SANDBOX parented at
+  ## emptyenv(), not a child of baseenv() -- a .mod file must not be able to
+  ## call system()/unlink()/file.remove() merely by being parsed.
+  .pcal_env <- .dynhr_sandbox_env(seed_env, .dynhr_safe_matrix_fn_names)
 
-  for (m in all_matches) {
-    parts <- regmatches(m, regexec(pat, m, perl = TRUE))[[1]]
-    name <- parts[2]
-    expr_text <- parts[3]
+  for (a in all_assign) {
+    name <- a[[1L]]
+    expr_text <- a[[2L]]
 
     # v0.3: collapse multiline expressions to a single line so that
     # R's parse() sees e.g. "(1 - theta) * (1 - beta*theta) / theta"
@@ -389,16 +595,18 @@ parse_calibration <- function(txt, param_names, seed_env = NULL, quiet = FALSE) 
     # so that undeclared intermediate names (e.g. `alpha`, `theta`, `omega` in
     # Adam-Billi 2006) accumulate in .pcal_env before the derived declared
     # param expressions that reference them are reached.
-    val <- tryCatch(eval(parse(text = expr_text), envir = .pcal_env),
-                    error = function(e) NULL)
+    val <- .dynhr_sandbox_eval(expr_text, .pcal_env,
+                               .dynhr_safe_matrix_fn_names,
+                               context = "the calibration assignment")
 
     # M19: when a verbatim seed_env is in play, the RHS may use MATLAB
     # indexing (e.g. `sqrt(V(1,1))`).  Retry with a MATLAB->R translation.
     if (is.null(val) && !is.null(seed_env)) {
       r_expr <- .matlab_stmt_to_r(expr_text)
       if (!is.null(r_expr))
-        val <- tryCatch(eval(parse(text = r_expr), envir = .pcal_env),
-                        error = function(e) NULL)
+        val <- .dynhr_sandbox_eval(r_expr, .pcal_env,
+                                   .dynhr_safe_matrix_fn_names,
+                                   context = "the calibration assignment")
     }
 
     if (is.numeric(val) && length(val) == 1) {
@@ -420,10 +628,9 @@ parse_calibration <- function(txt, param_names, seed_env = NULL, quiet = FALSE) 
     # Identify which names in each failing RHS were undefined in .pcal_env
     .diagnose_unresolved <- function(pn) {
       # Re-scan the assignment list for this param's last RHS
-      for (m in rev(all_matches)) {
-        pts <- regmatches(m, regexec(pat, m, perl = TRUE))[[1]]
-        if (pts[2] != pn) next
-        rhs <- gsub("\\s+", " ", trimws(pts[3]))
+      for (a in rev(all_assign)) {
+        if (a[[1L]] != pn) next
+        rhs <- gsub("\\s+", " ", trimws(a[[2L]]))
         # Collect identifier tokens in the RHS
         toks <- regmatches(rhs, gregexpr("[A-Za-z_][A-Za-z0-9_]*", rhs))[[1]]
         undef <- Filter(function(tok) {
@@ -441,7 +648,7 @@ parse_calibration <- function(txt, param_names, seed_env = NULL, quiet = FALSE) 
       if (!is.null(diag)) paste0(pn, " (undefined: ", diag, ")")
       else pn
     }, character(1))
-    warning(sprintf(
+    .dynhr_warn(sprintf(
       paste0("parse_calibration: %d declared parameter(s) could not be ",
              "resolved -- their values will be NA: %s"),
       length(.unresolved), paste(msgs, collapse = "; ")),
@@ -475,8 +682,8 @@ parse_initval_block <- function(body, env = parent.frame()) {
     expr_text <- parts[3]
     # v0.3: collapse multiline expressions to a single line
     expr_text <- gsub("\\s+", " ", trimws(expr_text))
-    val <- tryCatch(eval(parse(text = expr_text), envir = env),
-                    error = function(e) NULL)
+    val <- .dynhr_sandbox_eval(expr_text, env, .dynhr_safe_matrix_fn_names,
+                               context = "the initval/endval assignment")
     if (is.numeric(val) && length(val) == 1) {
       values[name] <- val
       assign(name, val, envir = env)
@@ -527,8 +734,8 @@ parse_histval_block <- function(body, env = parent.frame()) {
                    name, idx), call. = FALSE)
     lag <- 1L - idx
     expr_text <- gsub("\\s+", " ", trimws(parts[4]))
-    val <- tryCatch(eval(parse(text = expr_text), envir = env),
-                    error = function(e) NULL)
+    val <- .dynhr_sandbox_eval(expr_text, env, .dynhr_safe_matrix_fn_names,
+                               context = "the histval assignment")
     if (!is.numeric(val) || length(val) != 1L)
       stop(sprintf(paste0("histval: could not evaluate the value for '%s' ",
                           "('%s') to a single number."), name, expr_text),
@@ -711,6 +918,259 @@ parse_steady_state_model <- function(body, var_names, param_names) {
 }
 
 
+#' Parse an observation_trends block into per-observable slope expressions
+#'
+#' Dynare syntax (one entry per observed variable, each ending with `;`):
+#' \preformatted{
+#'   observation_trends;
+#'   dy (ctrend/100);
+#'   pinfobs (0);
+#'   end;
+#' }
+#' The expression is the SLOPE of a deterministic linear trend added to the
+#' observed variable's measurement equation; it may use declared parameters
+#' (and so be estimated). It is kept as TEXT and re-evaluated against the
+#' parameter vector in force, exactly as the shocks-block expressions are.
+#'
+#' Dynare's preprocessor rejects an entry for a variable that is not observed
+#' ("variable ... in observation_trends block is not an observed variable");
+#' so does this, whenever a `varobs` list exists. Without one, the variable
+#' must at least be a declared endogenous variable.
+#'
+#' The \code{deterministic_trends} block has the same entry syntax
+#' (\code{block = "deterministic_trends"}); its entries may name any declared
+#' endogenous variable, so it is called with \code{varobs_names =
+#' character(0)}.
+#'
+#' @param body          Body text of the block.
+#' @param var_names     Declared endogenous variable names.
+#' @param param_names   Declared parameter names.
+#' @param varobs_names  Declared observables (`character(0)` if none).
+#' @param block         Block name used in error messages.
+#' @return Named character vector: observable -> slope expression text.
+#' @noRd
+parse_observation_trends_block <- function(body, var_names, param_names,
+                                           varobs_names = character(0),
+                                           block = "observation_trends") {
+  bad_syntax <- function(...)
+    .dynhr_abort("parse_mod: ", block, ": ", ...,
+                 class = "dynhr_error_mod_syntax")
+  stmts <- trimws(strsplit(body, ";", fixed = TRUE)[[1]])
+  stmts <- stmts[nzchar(stmts)]
+  out <- character(0)
+  for (st in stmts) {
+    st <- gsub("\\s+", " ", st)
+    m <- regmatches(st, regexec("^([A-Za-z_][A-Za-z0-9_]*)\\s*\\((.*)\\)$",
+                                st, perl = TRUE))[[1]]
+    if (length(m) != 3L || !nzchar(trimws(m[3])))
+      bad_syntax("cannot read the entry `", st, "`; the form is ",
+                 "`VARIABLE (EXPRESSION);`, e.g. `dy (ctrend/100);`.")
+    nm   <- m[2]
+    expr <- trimws(m[3])
+    if (nm %in% names(out))
+      bad_syntax("variable ", nm, " has more than one entry.")
+    if (length(varobs_names) > 0L && !(nm %in% varobs_names))
+      bad_syntax("variable ", nm, " in observation_trends block is not an ",
+                 "observed variable (declared varobs: ",
+                 paste(varobs_names, collapse = ", "), ").")
+    if (!(nm %in% var_names))
+      bad_syntax("variable ", nm, " is not a declared endogenous variable.")
+    ## A number like 1e-3 yields the identifier-looking fragment "e"; strip
+    ## numeric literals before collecting identifiers.
+    expr_nonum <- gsub("(?<![A-Za-z0-9_])(?:\\d+\\.?\\d*|\\.\\d+)(?:[eE][+-]?\\d+)?", " ",
+                       expr, perl = TRUE)
+    ids <- regmatches(expr_nonum, gregexpr("[A-Za-z_][A-Za-z0-9_]*",
+                                           expr_nonum, perl = TRUE))[[1]]
+    unknown <- setdiff(unique(ids), c(param_names, .KNOWN_FUNCTIONS, "pi"))
+    if (length(unknown) > 0L)
+      bad_syntax("the trend of ", nm, " (`", expr, "`) uses ",
+                 paste(unknown, collapse = ", "), ", which ",
+                 if (length(unknown) == 1L) "is not a" else "are not",
+                 " declared parameter", if (length(unknown) == 1L) "" else "s",
+                 ". A trend slope may only depend on parameters.")
+    out[nm] <- expr
+  }
+  out
+}
+
+
+#' Identifiers used by a .mod expression (numeric literals stripped first)
+#' @noRd
+.osr_expr_ids <- function(expr) {
+  expr_nonum <- gsub("(?<![A-Za-z0-9_])(?:\\d+\\.?\\d*|\\.\\d+)(?:[eE][+-]?\\d+)?",
+                     " ", expr, perl = TRUE)
+  unique(regmatches(expr_nonum, gregexpr("[A-Za-z_][A-Za-z0-9_]*",
+                                         expr_nonum, perl = TRUE))[[1]])
+}
+
+
+#' Parse Dynare's optim_weights block (OSR loss weights)
+#'
+#' Dynare syntax, one entry per statement:
+#' \preformatted{
+#'   optim_weights;
+#'     pie 1;          // weight on Var(pie)
+#'     y 0.5;          // weight on Var(y)
+#'     y, pie 0.2;     // weight on Cov(y, pie)
+#'   end;
+#' }
+#' The Dynare 7.1 preprocessor writes each entry into ONE cell of
+#' \code{M_.osr.variable_weights} (a cross entry \code{y, pie w} sets cell
+#' (y, pie) only) and the loss is \code{sum(W(:) .* vx(:))}, so a cross entry
+#' adds \code{w * Cov(y, pie)} to the loss exactly once.  The weights are
+#' parameter expressions, kept as text and evaluated when \code{osr()} runs.
+#'
+#' @param body Block body text.
+#' @param var_names Declared endogenous variables.
+#' @param param_names Declared parameters.
+#' @return data.frame(var1, var2, expr); \code{var2 == var1} for a variance
+#'   weight.
+#' @noRd
+parse_optim_weights_block <- function(body, var_names, param_names) {
+  bad_syntax <- function(...)
+    .dynhr_abort("parse_mod: optim_weights: ", ...,
+                 class = "dynhr_error_mod_syntax")
+  stmts <- trimws(strsplit(body, ";", fixed = TRUE)[[1]])
+  stmts <- stmts[nzchar(stmts)]
+  v1 <- character(0); v2 <- character(0); ex <- character(0)
+  for (st in stmts) {
+    st <- gsub("\\s+", " ", st)
+    m <- regmatches(st, regexec(
+      "^([A-Za-z_][A-Za-z0-9_]*)\\s*(?:,\\s*([A-Za-z_][A-Za-z0-9_]*))?\\s+(\\S.*)$",
+      st, perl = TRUE))[[1]]
+    if (length(m) != 4L)
+      bad_syntax("cannot read the entry `", st, "`; the forms are ",
+                 "`VARIABLE EXPRESSION;` and `VARIABLE, VARIABLE EXPRESSION;`.")
+    a <- m[2]; b <- if (nzchar(m[3])) m[3] else m[2]; expr <- trimws(m[4])
+    for (nm in unique(c(a, b)))
+      if (!(nm %in% var_names))
+        bad_syntax("`", nm, "` is not a declared endogenous variable.")
+    unknown <- setdiff(.osr_expr_ids(expr),
+                       c(param_names, .KNOWN_FUNCTIONS, "pi"))
+    if (length(unknown) > 0L)
+      bad_syntax("the weight `", expr, "` of ", a,
+                 if (b != a) paste0(", ", b) else "", " uses ",
+                 paste(unknown, collapse = ", "),
+                 ", which is not a declared parameter. A weight may only ",
+                 "depend on parameters.")
+    if (any(v1 == a & v2 == b))
+      bad_syntax("the entry for ", a, if (b != a) paste0(", ", b) else "",
+                 " appears more than once.")
+    v1 <- c(v1, a); v2 <- c(v2, b); ex <- c(ex, expr)
+  }
+  data.frame(var1 = v1, var2 = v2, expr = ex, stringsAsFactors = FALSE)
+}
+
+
+#' Parse Dynare's ramsey_constraints block
+#'
+#' Dynare syntax, one constraint per statement:
+#' \preformatted{
+#'   ramsey_constraints;
+#'     i > 0;
+#'     tau < tau_max;
+#'   end;
+#' }
+#' A constraint bounds an endogenous variable of the Ramsey problem by an
+#' expression in the parameters.  Dynare's preprocessor turns each into a
+#' bound on that variable, complementary to the Ramsey FOC with respect to it
+#' (`dynamic_complementarity_conditions`), which only its mixed-complementarity
+#' perfect-foresight solver uses.  `>=` / `<=` are read as `>` / `<` (the
+#' complementarity problem does not distinguish them).
+#'
+#' @param body Block body text.
+#' @param var_names Declared endogenous variables.
+#' @param param_names Declared parameters.
+#' @return data.frame(var, op, bound): op is ">" (lower bound) or "<" (upper
+#'   bound); bound is expression text.
+#' @noRd
+parse_ramsey_constraints_block <- function(body, var_names, param_names) {
+  bad_syntax <- function(...)
+    .dynhr_abort("parse_mod: ramsey_constraints: ", ...,
+                 class = "dynhr_error_mod_syntax")
+  stmts <- trimws(strsplit(body, ";", fixed = TRUE)[[1]])
+  stmts <- stmts[nzchar(stmts)]
+  v_out <- character(0); op_out <- character(0); b_out <- character(0)
+  for (st in stmts) {
+    st <- gsub("\\s+", " ", st)
+    m <- regmatches(st, regexec(
+      "^([A-Za-z_][A-Za-z0-9_]*)\\s*(>=|<=|>|<)\\s*(\\S.*)$", st,
+      perl = TRUE))[[1]]
+    if (length(m) != 4L)
+      bad_syntax("cannot read the constraint `", st, "`; the form is ",
+                 "`VARIABLE > EXPRESSION;` or `VARIABLE < EXPRESSION;`.")
+    v <- m[2]; op <- substr(m[3], 1L, 1L); bx <- trimws(m[4])
+    if (!(v %in% var_names))
+      bad_syntax("`", v, "` is not a declared endogenous variable.")
+    ## `pi` is the constant only when no variable/parameter is called pi
+    unknown <- setdiff(.osr_expr_ids(bx),
+                       c(param_names, .KNOWN_FUNCTIONS, "Inf", "inf",
+                         setdiff("pi", var_names)))
+    if (length(unknown) > 0L)
+      bad_syntax("the bound `", bx, "` of ", v, " uses ",
+                 paste(unknown, collapse = ", "),
+                 ", which is not a declared parameter. A bound may only ",
+                 "depend on parameters.")
+    if (any(v_out == v & op_out == op))
+      bad_syntax(v, " has more than one ", if (op == ">") "lower" else "upper",
+                 " bound.")
+    v_out <- c(v_out, v); op_out <- c(op_out, op); b_out <- c(b_out, bx)
+  }
+  data.frame(var = v_out, op = op_out, bound = b_out, stringsAsFactors = FALSE)
+}
+
+
+#' Parse Dynare's osr_params_bounds block
+#'
+#' Dynare syntax: \code{PARAMETER, LOWER, UPPER;} per statement.  Bounds are
+#' parameter expressions (\code{Inf} / \code{-Inf} allowed), kept as text.
+#' A parameter of \code{osr_params} without an entry is unbounded, as in
+#' Dynare (\code{M_.osr.param_bounds} defaults to \code{[-Inf, Inf]}).
+#'
+#' @param body Block body text.
+#' @param param_names Declared parameters.
+#' @param osr_params Parameters named by \code{osr_params} (may be empty).
+#' @return data.frame(name, lower, upper) holding expression text.
+#' @noRd
+parse_osr_params_bounds_block <- function(body, param_names,
+                                          osr_params = character(0)) {
+  bad_syntax <- function(...)
+    .dynhr_abort("parse_mod: osr_params_bounds: ", ...,
+                 class = "dynhr_error_mod_syntax")
+  stmts <- trimws(strsplit(body, ";", fixed = TRUE)[[1]])
+  stmts <- stmts[nzchar(stmts)]
+  nm_out <- character(0); lo_out <- character(0); hi_out <- character(0)
+  for (st in stmts) {
+    st <- gsub("\\s+", " ", st)
+    parts <- trimws(.split_top_level(st, sep = ",", open = "(", close = ")"))
+    if (length(parts) != 3L || !all(nzchar(parts)) ||
+        !grepl("^[A-Za-z_][A-Za-z0-9_]*$", parts[1]))
+      bad_syntax("cannot read the entry `", st, "`; the form is ",
+                 "`PARAMETER, LOWER_BOUND, UPPER_BOUND;`.")
+    nm <- parts[1]
+    if (!(nm %in% param_names))
+      bad_syntax("`", nm, "` is not a declared parameter.")
+    if (length(osr_params) > 0L && !(nm %in% osr_params))
+      bad_syntax("`", nm, "` is not listed in osr_params (",
+                 paste(osr_params, collapse = ", "), ").")
+    if (nm %in% nm_out)
+      bad_syntax("parameter ", nm, " has more than one entry.")
+    for (bx in parts[2:3]) {
+      unknown <- setdiff(.osr_expr_ids(bx),
+                         c(param_names, .KNOWN_FUNCTIONS, "pi", "Inf", "inf"))
+      if (length(unknown) > 0L)
+        bad_syntax("the bound `", bx, "` of ", nm, " uses ",
+                   paste(unknown, collapse = ", "),
+                   ", which is not a declared parameter.")
+    }
+    nm_out <- c(nm_out, nm); lo_out <- c(lo_out, parts[2])
+    hi_out <- c(hi_out, parts[3])
+  }
+  data.frame(name = nm_out, lower = lo_out, upper = hi_out,
+             stringsAsFactors = FALSE)
+}
+
+
 #' Parse the shocks block into a structured list
 #'
 #' Handles:
@@ -738,14 +1198,14 @@ parse_steady_state_model <- function(body, var_names, param_names) {
 parse_shocks_block <- function(body, param_env = NULL) {
   # If parameters available, eval expressions in that environment so
   # `var eps_a = sig_a^2;` works. Otherwise default to base env (numeric only).
+  ## A2: every one of these environments is an allowlist sandbox (parented at
+  ## emptyenv()), so a shocks-block RHS cannot reach system() and friends.
   eval_env <- if (is.environment(param_env)) param_env
-              else if (is.list(param_env)) list2env(param_env, parent = baseenv())
-              else if (is.numeric(param_env) && !is.null(names(param_env)))
-                list2env(as.list(param_env), parent = baseenv())
-              else baseenv()
+              else .dynhr_sandbox_env(param_env, .dynhr_safe_matrix_fn_names)
   safe_eval <- function(text) {
-    tryCatch(eval(parse(text = text), envir = eval_env),
-             error = function(e) NA_real_)
+    val <- .dynhr_sandbox_eval(text, eval_env, .dynhr_safe_matrix_fn_names,
+                               context = "the shocks-block expression")
+    if (is.null(val)) NA_real_ else val
   }
   variances    <- data.frame(name = character(0),
                              stderr = numeric(0),
@@ -968,6 +1428,527 @@ parse_shocks_block <- function(body, param_env = NULL) {
 }
 
 
+#' Parse Dynare 7 `shock_paths` blocks into deterministic shock paths
+#'
+#' Dynare 7.2 reference manual, "The model file" > `shock_paths` block (with
+#' the evaluation order of `make_ex_.m` and the preprocessor-generated
+#' `+MODEL/shock_paths_N.m`, checked by running Dynare 7.1).  A stanza
+#' \preformatted{  var X;
+#'   periods 1, 2:4, 6:end;
+#'   values  initval.X*1.05, self.X(-1)*1.05 + a/100, self.X(-1);}
+#' gives one value EXPRESSION per period entry.  Dynare fills a matrix of exo
+#' paths over the simulation periods 1..T plus, when `end` is used, a
+#' terminal column T+1 (the terminal steady state, i.e. `endval`), starting
+#' from the exogenous steady state (the `initval` value, else 0).  For each
+#' period p = 1, 2, ... it evaluates every stanza in order, so an expression
+#' sees earlier periods and, for earlier stanzas, the current one:
+#' \itemize{
+#'   \item `self.Y` / `self.Y(-k)`: the path of exogenous Y at p / p-k;
+#'   \item `initval.Y` / `init.Y`: Y's `initval` value (0 if unset; an
+#'     endogenous Y is its steady state after a `steady` command, which the
+#'     parser cannot compute, so that case aborts);
+#'   \item parameters by name.
+#' }
+#' The result is expressed in the same structure as the `shocks` block's
+#' `periods`/`values` path (`model$det_shocks`: one row per set period
+#' 1..T) plus the terminal values (`model$endval`), so every consumer of those
+#' fields sees a `shock_paths` scenario exactly like the equivalent
+#' `shocks` + `endval` one.
+#'
+#' Needs T (from `perfect_foresight_setup(periods=)` or `first/last_
+#' simulation_period`) only for a range ending at `end` (`6:end`) or an `end`
+#' value that looks back with `self.`; dates need `first_simulation_period`.
+#' Not implemented, each a `dynhr_error_mod_syntax` abort: database scopes
+#' (`db.foo`), `prev.` / `learnt_in(...).` scopes, `learnt_in` other than 1,
+#' and a `shock_paths` block combined with an `endval` block or with
+#' deterministic `shocks` periods (Dynare: "cannot be used in conjunction").
+#' Controlled stanzas (`exogenize Y; periods ...; values ...; endogenize E;`,
+#' see `.dynhr_parse_controlled_stanza()`) are returned in `controlled`, the
+#' same table a `perfect_foresight_controlled_paths` block gives; their values
+#' may use parameters and `initval.` but not `self.` (Dynare rejects it).
+#'
+#' @param blocks      List of blocks from \code{.extract_shock_paths_blocks()}.
+#' @param exo_names   Declared exogenous (varexo + varexo_det) names.
+#' @param endo_names  Declared endogenous names.
+#' @param param_values Named numeric parameter values.
+#' @param initval     Named numeric initval values (endogenous and exogenous).
+#' @param has_steady  Logical: the .mod has a `steady` command.
+#' @param n_periods   Simulation length T, or NA.
+#' @param first_sim   First simulation period as a date literal, or NULL.
+#' @return list(det = data.frame(name, period, value), terminal = named
+#'   numeric of the exogenous values set at `end`, controlled =
+#'   data.frame(exogenize, endogenize, period, value)).
+#' @noRd
+parse_shock_paths_blocks <- function(blocks, exo_names, endo_names,
+                                     param_values, initval, has_steady,
+                                     n_periods = NA_integer_,
+                                     first_sim = NULL) {
+  bad <- function(...) .dynhr_abort("parse_mod: shock_paths: ", ...,
+                                    class = "dynhr_error_mod_syntax")
+  env <- .dynhr_sandbox_env(param_values, .dynhr_safe_fn_names)
+  base <- stats::setNames(rep(0, length(exo_names)), exo_names)
+  iv_exo <- intersect(names(initval), exo_names)
+  base[iv_exo] <- initval[iv_exo]
+
+  ## -- parse the stanzas of every block ---------------------------------
+  period_entry <- function(tok, vname) {
+    tok <- trimws(tok)
+    parts <- trimws(strsplit(tok, ":", fixed = TRUE)[[1]])
+    if (length(parts) == 1L) parts <- c(parts, parts)
+    if (length(parts) != 2L || !all(nzchar(parts)))
+      bad("malformed period '", tok, "' for ", vname, ".")
+    one <- function(s) {
+      if (grepl("^[0-9]+$", s)) return(as.integer(s))
+      if (tolower(s) == "end") return(Inf)
+      if (is.null(.parse_dynare_date(s)))
+        bad("period '", s, "' for ", vname, " is neither an integer, a date ",
+            "nor `end`.")
+      if (is.null(first_sim))
+        .dynhr_abort(
+          "parse_mod: shock_paths: the date '", s, "' (", vname, ") needs ",
+          "perfect_foresight_setup(first_simulation_period = DATE), which ",
+          "gives the date of simulation period 1.",
+          class = c("dynhr_error_mod_date_unresolved", "dynhr_error_mod_syntax"))
+      .date_to_period(s, first_sim, context = "shock_paths")
+    }
+    lo <- one(parts[1L]); hi <- one(parts[2L])
+    if (is.infinite(lo) && !is.infinite(hi))
+      bad("period range '", tok, "' for ", vname, " starts at `end`.")
+    if (lo < 1L) bad("period '", tok, "' for ", vname, " is before period 1.")
+    if (hi < lo) bad("empty period range '", tok, "' for ", vname, ".")
+    c(lo, hi)
+  }
+  split_list <- function(s) {
+    out <- trimws(.split_top_level(s, sep = ",", open = "(", close = ")"))
+    out[nzchar(out)]
+  }
+
+  stanzas_all <- list()
+  controlled <- .dynhr_empty_controlled(expr = TRUE)
+  for (b in blocks) {
+    opts <- parse_command_options(b$options_str)
+    li <- opts$learnt_in
+    if (!is.null(li) && !identical(as.character(li), "1"))
+      bad("learnt_in = ", li, " (a simulation with expectation errors) is ",
+          "not implemented.")
+    stmts <- trimws(strsplit(b$body, ";", fixed = TRUE)[[1]])
+    stmts <- stmts[nzchar(stmts)]
+    stz <- list()
+    i <- 1L
+    while (i <= length(stmts)) {
+      s <- stmts[i]
+      mv <- regmatches(s, regexec("^var\\s+([A-Za-z_][A-Za-z0-9_]*)$", s,
+                                  perl = TRUE))[[1]]
+      mx <- regmatches(s, regexec("^exogenize\\s+", s, perl = TRUE))[[1]]
+      if (length(mv) == 2L) {
+        vname <- mv[2L]
+        if (!(vname %in% exo_names))
+          bad("`var ", vname, "` is not a declared exogenous variable.")
+        if (i + 2L > length(stmts) ||
+            !grepl("^periods\\s", stmts[i + 1L]) ||
+            !grepl("^values\\s", stmts[i + 2L]))
+          bad("`var ", vname, ";` must be followed by `periods ...;` and ",
+              "`values ...;`.")
+        ptoks <- split_list(sub("^periods\\s+", "", stmts[i + 1L]))
+        vtoks <- split_list(sub("^values\\s+", "", stmts[i + 2L]))
+        if (length(ptoks) != length(vtoks))
+          bad(vname, " has ", length(ptoks), " period entries but ",
+              length(vtoks), " values (they must match one to one).")
+        rng <- lapply(ptoks, period_entry, vname = vname)
+        stz[[length(stz) + 1L]] <- list(var = vname, lo = vapply(rng, `[`, 0, 1L),
+                                        hi = vapply(rng, `[`, 0, 2L),
+                                        values = vtoks)
+        i <- i + 3L
+      } else if (length(mx) == 1L) {
+        ## Controlled stanza: values are evaluated below, once eval_value()
+        ## exists; Dynare rejects `self.` here.
+        cs <- .dynhr_parse_controlled_stanza(
+          stmts, i, endo_names = endo_names, exo_names = exo_names,
+          first_sim = first_sim, bad = bad)
+        if (any(grepl("\\bself\\s*\\.", cs$rows$expr, perl = TRUE)))
+          bad("`self.` is not accepted in an exogenize/endogenize stanza ",
+              "(exogenize ", cs$rows$exogenize[1L], "), as in Dynare.")
+        controlled <- rbind(controlled, cs$rows)
+        i <- cs$i
+      } else {
+        bad("unrecognised statement `", s, "`.")
+      }
+    }
+    stanzas_all[[length(stanzas_all) + 1L]] <-
+      list(stanzas = stz, overwrite = isTRUE(opts$overwrite))
+  }
+  ## -- horizon ------------------------------------------------------------
+  all_stz <- unlist(lapply(stanzas_all, `[[`, "stanzas"), recursive = FALSE)
+  if (length(all_stz) == 0L && nrow(controlled) == 0L)
+    return(list(det = data.frame(name = character(0), period = integer(0),
+                                 value = numeric(0), stringsAsFactors = FALSE),
+                terminal = numeric(0),
+                controlled = .dynhr_empty_controlled()))
+  his <- unlist(lapply(all_stz, `[[`, "hi"))
+  los <- unlist(lapply(all_stz, `[[`, "lo"))
+  has_end <- any(is.infinite(his))
+  open_range <- any(is.infinite(his) & is.finite(los))
+  T_known <- !is.na(n_periods)
+  if (open_range && !T_known)
+    bad("a period range ending at `end` needs the simulation length: add ",
+        "perfect_foresight_setup(periods = T).")
+  T_sim <- if (T_known) as.integer(n_periods) else as.integer(max(c(0, his[is.finite(his)])))
+  if (T_known && any(his[is.finite(his)] > T_sim))
+    bad("a period is beyond the simulation length T = ", T_sim, ".")
+  n_col <- T_sim + as.integer(has_end)
+  end_col <- if (has_end) n_col else NA_integer_
+
+  ## -- evaluation ---------------------------------------------------------
+  P   <- matrix(base, nrow = length(exo_names), ncol = max(n_col, 1L),
+                dimnames = list(exo_names, NULL))
+  SET <- matrix(FALSE, nrow = length(exo_names), ncol = max(n_col, 1L),
+                dimnames = list(exo_names, NULL))
+  scope_value <- function(nm, expr) {
+    if (nm %in% exo_names) return(if (nm %in% names(initval)) initval[[nm]] else 0)
+    if (nm %in% endo_names) {
+      if (has_steady)
+        bad("`initval.", nm, "` in `", expr, "` is the steady state of ",
+            "endogenous ", nm, " (a `steady` command follows initval), which ",
+            "the parser cannot compute; use a number or a parameter.")
+      return(if (nm %in% names(initval)) initval[[nm]] else 0)
+    }
+    bad("`initval.", nm, "` in `", expr, "` is not a declared variable.")
+  }
+  eval_value <- function(expr, p, vname) {
+    txt <- expr
+    if (grepl("\\b(?:prev|learnt_in)\\b\\s*[.(]", txt, perl = TRUE))
+      bad("`", expr, "` uses a `prev.` / `learnt_in(...)` scope (expectation ",
+          "errors), which is not implemented.")
+    ## initval.X / init.X
+    txt <- .dynhr_gsub_fn(txt, "\\b(?:initval|init)\\.([A-Za-z_][A-Za-z0-9_]*)",
+                   function(m) sprintf("(%.17g)", scope_value(m[2L], expr)))
+    ## self.X(k) / self.X
+    txt <- .dynhr_gsub_fn(txt, paste0("\\bself\\.([A-Za-z_][A-Za-z0-9_]*)",
+                               "(?:\\s*\\(\\s*([+-]?)\\s*(\\d+)\\s*\\))?"),
+                   function(m) {
+      nm <- m[2L]
+      if (!(nm %in% exo_names))
+        bad("`self.", nm, "` in `", expr, "`: not a declared exogenous variable.")
+      k <- if (nzchar(m[4L])) as.integer(m[4L]) * (if (m[3L] == "-") -1L else 1L)
+           else 0L
+      if (k > 0L)
+        bad("`self.", nm, "(", k, ")` in `", expr, "` looks ahead; only the ",
+            "current or a previous period can be referenced.")
+      if (nm == vname && k == 0L)
+        bad("`self.", vname, "` in its own values must reference a previous ",
+            "period (`self.", vname, "(-1)`).")
+      if (is.na(p))
+        bad("`", expr, "` at `end` looks back with `self.` and needs the ",
+            "simulation length: add perfect_foresight_setup(periods = T).")
+      q <- p + k
+      if (q < 1L)
+        bad("`self.", nm, "(", k, ")` in `", expr, "` at period ", p,
+            " refers to a period before 1.")
+      sprintf("(%.17g)", P[nm, q])
+    })
+    if (grepl("\\b[A-Za-z_][A-Za-z0-9_]*\\s*\\.\\s*[A-Za-z_]", txt, perl = TRUE))
+      bad("`", expr, "` refers to a database (`DB.VAR`), which is not ",
+          "implemented; give the values explicitly.")
+    v <- .dynhr_sandbox_eval(txt, env, .dynhr_safe_fn_names,
+                             context = "the shock_paths value")
+    if (!is.numeric(v) || length(v) != 1L || !is.finite(v))
+      bad("value `", expr, "` for ", vname, " does not evaluate to a finite ",
+          "number (unknown name?).")
+    as.numeric(v)
+  }
+
+  for (blk in stanzas_all) {
+    if (blk$overwrite) {
+      P[] <- base
+      SET[] <- FALSE
+    }
+    cols <- seq_len(n_col)
+    for (p in cols) {
+      is_end <- has_end && p == end_col
+      for (st in blk$stanzas) {
+        k <- if (is_end) which(is.infinite(st$hi))
+             else which(st$lo <= p & (st$hi >= p & (is.finite(st$lo))))
+        if (length(k) == 0L) next
+        k <- k[length(k)]
+        p_eval <- if (is_end && !T_known) NA_integer_ else p
+        P[st$var, p]   <- eval_value(st$values[[k]], p_eval, st$var)
+        SET[st$var, p] <- TRUE
+      }
+    }
+  }
+
+  ## -- express as det_shocks rows + terminal values ------------------------
+  vorder <- unique(vapply(all_stz, `[[`, "", "var"))
+  det <- data.frame(name = character(0), period = integer(0),
+                    value = numeric(0), stringsAsFactors = FALSE)
+  terminal <- numeric(0)
+  sim_cols <- seq_len(T_sim)
+  for (v in vorder) {
+    ps <- sim_cols[SET[v, sim_cols]]
+    if (length(ps) > 0L)
+      det <- rbind(det, data.frame(name = v, period = ps, value = P[v, ps],
+                                   stringsAsFactors = FALSE))
+    if (has_end && SET[v, end_col]) terminal[v] <- P[v, end_col]
+  }
+  rownames(det) <- NULL
+
+  ## -- controlled (exogenize / endogenize) stanzas --------------------------
+  ctl <- .dynhr_empty_controlled()
+  if (nrow(controlled) > 0L)
+    ctl <- data.frame(
+      exogenize  = controlled$exogenize,
+      endogenize = controlled$endogenize,
+      period     = controlled$period,
+      value      = vapply(seq_len(nrow(controlled)), function(r)
+        eval_value(controlled$expr[r], NA_integer_, controlled$exogenize[r]),
+        numeric(1)),
+      stringsAsFactors = FALSE)
+  list(det = det, terminal = terminal, controlled = ctl)
+}
+
+
+## Empty controlled-paths table (optionally with the unevaluated `expr`).
+.dynhr_empty_controlled <- function(expr = FALSE) {
+  out <- data.frame(exogenize = character(0), endogenize = character(0),
+                    period = integer(0), value = numeric(0),
+                    stringsAsFactors = FALSE)
+  if (expr) {
+    out$value <- NULL
+    out$expr <- character(0)
+  }
+  out
+}
+
+#' Parse one controlled-paths stanza (Dynare 7)
+#'
+#' \preformatted{  exogenize Y;
+#'   periods 1:2, 3;
+#'   values 0.5, (a + 1);
+#'   endogenize E;}
+#' as it appears in a `perfect_foresight_controlled_paths` block or inside a
+#' `shock_paths` block (Dynare 7.2 reference manual; statement order checked
+#' against the Dynare 7.1 preprocessor, which stores one
+#' `struct('exogenize_id', 'periods', 'value', 'endogenize_id')` per period
+#' entry).  Periods are integers or ranges `a:b` (or dates, which need
+#' `first_sim`); `end` is rejected, as by Dynare's grammar.  Each value
+#' applies to every period of its entry.
+#'
+#' @param stmts Statements of the block (split at `;`, trimmed).
+#' @param i     Index of the `exogenize` statement.
+#' @param bad   Abort function of the caller (prefixes the message).
+#' @return list(rows = data.frame(exogenize, endogenize, period, expr), one
+#'   row per period; i = index of the statement after `endogenize`).
+#' @noRd
+.dynhr_parse_controlled_stanza <- function(stmts, i, endo_names, exo_names,
+                                           first_sim, bad) {
+  mx <- regmatches(stmts[i], regexec(
+    "^exogenize\\s+([A-Za-z_][A-Za-z0-9_]*)$", stmts[i], perl = TRUE))[[1]]
+  if (length(mx) != 2L)
+    bad("malformed statement `", stmts[i], "` (expected `exogenize VAR;`, ",
+        "one endogenous variable).")
+  vname <- mx[2L]
+  if (!(vname %in% endo_names))
+    bad("`exogenize ", vname, "`: not a declared endogenous variable.")
+  if (i + 3L > length(stmts) ||
+      !grepl("^periods\\s", stmts[i + 1L]) ||
+      !grepl("^values\\s", stmts[i + 2L]))
+    bad("`exogenize ", vname, ";` must be followed by `periods ...;`, ",
+        "`values ...;` and `endogenize SHOCK;`.")
+  me <- regmatches(stmts[i + 3L], regexec(
+    "^endogenize\\s+([A-Za-z_][A-Za-z0-9_]*)$", stmts[i + 3L], perl = TRUE))[[1]]
+  if (length(me) != 2L)
+    bad("`exogenize ", vname, "`: expected `endogenize SHOCK;` after its ",
+        "values, got `", stmts[i + 3L], "`.")
+  ename <- me[2L]
+  if (!(ename %in% exo_names))
+    bad("`endogenize ", ename, "`: not a declared exogenous variable.")
+  split_list <- function(s) {
+    out <- trimws(.split_top_level(s, sep = ",", open = "(", close = ")"))
+    out[nzchar(out)]
+  }
+  ptoks <- split_list(sub("^periods\\s+", "", stmts[i + 1L]))
+  vtoks <- split_list(sub("^values\\s+", "", stmts[i + 2L]))
+  if (length(ptoks) == 0L || length(ptoks) != length(vtoks))
+    bad("exogenize ", vname, " has ", length(ptoks), " period entries but ",
+        length(vtoks), " values (they must match one to one).")
+  one <- function(s) {
+    if (grepl("^[0-9]+$", s)) return(as.integer(s))
+    if (tolower(s) == "end")
+      bad("`end` is not a valid period for exogenize ", vname, " (Dynare ",
+          "accepts only integers, ranges and dates here).")
+    if (is.null(.parse_dynare_date(s)))
+      bad("period '", s, "' for exogenize ", vname, " is neither an integer ",
+          "nor a date.")
+    if (is.null(first_sim))
+      .dynhr_abort(
+        "parse_mod: controlled paths: the date '", s, "' (exogenize ", vname,
+        ") needs perfect_foresight_setup(first_simulation_period = DATE), ",
+        "which gives the date of simulation period 1.",
+        class = c("dynhr_error_mod_date_unresolved", "dynhr_error_mod_syntax"))
+    as.integer(.date_to_period(s, first_sim, context = "controlled paths"))
+  }
+  per <- integer(0); ex <- character(0)
+  for (k in seq_along(ptoks)) {
+    parts <- trimws(strsplit(ptoks[k], ":", fixed = TRUE)[[1]])
+    if (length(parts) == 1L) parts <- c(parts, parts)
+    if (length(parts) != 2L || !all(nzchar(parts)))
+      bad("malformed period '", ptoks[k], "' for exogenize ", vname, ".")
+    lo <- one(parts[1L]); hi <- one(parts[2L])
+    if (lo < 1L)
+      bad("period '", ptoks[k], "' for exogenize ", vname, " is before period 1.")
+    if (hi < lo)
+      bad("empty period range '", ptoks[k], "' for exogenize ", vname, ".")
+    per <- c(per, seq.int(lo, hi))
+    ex  <- c(ex, rep(vtoks[k], hi - lo + 1L))
+  }
+  list(rows = data.frame(exogenize = rep(vname, length(per)),
+                         endogenize = rep(ename, length(per)),
+                         period = per, expr = ex, stringsAsFactors = FALSE),
+       i = i + 4L)
+}
+
+#' Parse Dynare 7 `perfect_foresight_controlled_paths` blocks
+#'
+#' Dynare 7.2 reference manual, `perfect_foresight_controlled_paths`: a run of
+#' `exogenize` / `periods` / `values` / `endogenize` stanzas (see
+#' `.dynhr_parse_controlled_stanza()`); values are numbers or expressions in
+#' the parameters.  Only `learnt_in = 1` (no expectation errors) is
+#' implemented.
+#'
+#' @param blocks List(options_str, body) from `extract_paired_block`-style
+#'   extraction (`.extract_controlled_paths_blocks()`).
+#' @return data.frame(exogenize, endogenize, period, value).
+#' @noRd
+parse_controlled_paths_blocks <- function(blocks, endo_names, exo_names,
+                                          param_values, first_sim = NULL) {
+  bad <- function(...) .dynhr_abort("parse_mod: perfect_foresight_controlled_paths: ",
+                                    ..., class = "dynhr_error_mod_syntax")
+  env <- .dynhr_sandbox_env(param_values, .dynhr_safe_fn_names)
+  out <- .dynhr_empty_controlled()
+  for (b in blocks) {
+    opts <- parse_command_options(b$options_str)
+    li <- opts$learnt_in
+    if (!is.null(li) && !identical(as.character(li), "1"))
+      bad("learnt_in = ", li, " (a simulation with expectation errors) is ",
+          "not implemented.")
+    stmts <- trimws(strsplit(b$body, ";", fixed = TRUE)[[1]])
+    stmts <- stmts[nzchar(stmts)]
+    i <- 1L
+    while (i <= length(stmts)) {
+      if (!grepl("^exogenize\\s", stmts[i]))
+        bad("unrecognised statement `", stmts[i], "` (expected `exogenize`).")
+      cs <- .dynhr_parse_controlled_stanza(stmts, i, endo_names, exo_names,
+                                           first_sim, bad)
+      rows <- cs$rows
+      vals <- vapply(rows$expr, function(e) {
+        v <- .dynhr_sandbox_eval(e, env, .dynhr_safe_fn_names,
+                                 context = "the perfect_foresight_controlled_paths value")
+        if (!is.numeric(v) || length(v) != 1L || !is.finite(v))
+          bad("value `", e, "` for exogenize ", rows$exogenize[1L], " does not ",
+              "evaluate to a finite number (unknown name?).")
+        as.numeric(v)
+      }, numeric(1), USE.NAMES = FALSE)
+      out <- rbind(out, data.frame(exogenize = rows$exogenize,
+                                   endogenize = rows$endogenize,
+                                   period = rows$period, value = vals,
+                                   stringsAsFactors = FALSE))
+      i <- cs$i
+    }
+  }
+  out
+}
+
+#' Every `perfect_foresight_controlled_paths[(options)]; ... end;` block
+#'
+#' Closes at the first statement that is exactly `end` (as for shock_paths),
+#' so a stray `periods 2:end;` reaches the stanza parser's own error.
+#' @noRd
+.extract_controlled_paths_blocks <- function(txt) {
+  pat <- paste0("(?si)\\bperfect_foresight_controlled_paths\\b\\s*",
+                .dynhr_opts_re, "\\s*;((?:[^;]*;)*?)\\s*\\bend\\s*;")
+  ms  <- gregexpr(pat, txt, perl = TRUE)[[1]]
+  if (ms[1L] == -1L) return(list())
+  lens <- attr(ms, "match.length")
+  lapply(seq_along(ms), function(k) {
+    chunk <- substr(txt, ms[k], ms[k] + lens[k] - 1L)
+    parts <- regmatches(chunk, regexec(pat, chunk, perl = TRUE))[[1]]
+    list(options_str = trimws(parts[2L]), body = trimws(parts[3L]))
+  })
+}
+
+#' Canonicalise and check the combined controlled-paths table
+#'
+#' Dynare 7.1 `controlled_paths_by_period.m`: a variable exogenized twice, or
+#' a shock endogenized twice, in one period is an error, as is a shock that is
+#' both endogenized and given a deterministic value in the same period.
+#' Rows are sorted by (period, exogenize, endogenize) so the table does not
+#' depend on stanza order (which Dynare ignores) and write_mod round-trips.
+#'
+#' @param cp data.frame(exogenize, endogenize, period, value).
+#' @param n_periods Simulation length or NA.
+#' @param det det_shocks data.frame(name, period, value).
+#' @return The sorted data.frame (row names reset).
+#' @noRd
+.dynhr_check_controlled <- function(cp, n_periods, det) {
+  bad <- function(...) .dynhr_abort("parse_mod: controlled paths: ", ...,
+                                    class = "dynhr_error_mod_syntax")
+  cp <- cp[order(cp$period, cp$exogenize, cp$endogenize), , drop = FALSE]
+  rownames(cp) <- NULL
+  if (!is.na(n_periods) && any(cp$period > n_periods))
+    bad("period ", max(cp$period), " is beyond the simulation length T = ",
+        n_periods, ".")
+  d <- duplicated(cp[, c("period", "exogenize")])
+  if (any(d))
+    bad("variable ", cp$exogenize[d][1L], " is exogenized two times in ",
+        "period ", cp$period[d][1L], ".")
+  d <- duplicated(cp[, c("period", "endogenize")])
+  if (any(d))
+    bad("shock ", cp$endogenize[d][1L], " is endogenized two times in ",
+        "period ", cp$period[d][1L], ".")
+  if (is.data.frame(det) && nrow(det) > 0L) {
+    hit <- paste(cp$endogenize, cp$period) %in% paste(det$name, det$period)
+    if (any(hit))
+      bad("shock ", cp$endogenize[hit][1L], " is both given a deterministic ",
+          "value and endogenized in period ", cp$period[hit][1L], ".")
+  }
+  cp
+}
+
+## gsub() with a function of the match's capture groups (m[1] = whole match).
+.dynhr_gsub_fn <- function(txt, pattern, fn) {
+  mm <- gregexpr(pattern, txt, perl = TRUE)[[1]]
+  if (mm[1L] == -1L) return(txt)
+  starts <- as.integer(mm)
+  lens   <- attr(mm, "match.length")
+  out <- character(0)
+  cursor <- 1L
+  for (j in seq_along(starts)) {
+    whole <- substr(txt, starts[j], starts[j] + lens[j] - 1L)
+    m <- regmatches(whole, regexec(pattern, whole, perl = TRUE))[[1]]
+    out <- c(out, substr(txt, cursor, starts[j] - 1L), fn(m))
+    cursor <- starts[j] + lens[j]
+  }
+  paste(c(out, substr(txt, cursor, nchar(txt))), collapse = "")
+}
+
+#' Every `shock_paths[(options)]; ... end;` block, in file order
+#'
+#' The block closes at the first statement that is exactly `end` (a period
+#' list may say `6:end` or `end`); see `.dynhr_paired_block_re()`.
+#' @noRd
+.extract_shock_paths_blocks <- function(txt) {
+  pat <- .dynhr_paired_block_re("shock_paths")
+  ms  <- gregexpr(pat, txt, perl = TRUE)[[1]]
+  if (ms[1L] == -1L) return(list())
+  lens <- attr(ms, "match.length")
+  lapply(seq_along(ms), function(k) {
+    chunk <- substr(txt, ms[k], ms[k] + lens[k] - 1L)
+    parts <- regmatches(chunk, regexec(pat, chunk, perl = TRUE))[[1]]
+    list(options_str = trimws(parts[2L]), body = trimws(parts[3L]))
+  })
+}
+
+
 #' Parse the estimated_params block
 #'
 #' Dynare allows several syntaxes per line. The general form is
@@ -1161,7 +2142,7 @@ parse_occbin_constraints_block <- function(body) {
     ))[[1]]
 
     if (length(bind_m) < 4) {
-      warning(sprintf(
+      .dynhr_warn(sprintf(
         "parse_occbin_constraints_block: constraint '%s' has no valid bind clause; skipping.",
         constraint_name))
       next
@@ -1240,6 +2221,25 @@ parse_occbin_constraints_block <- function(body) {
 
 #' Parse a command option string like "order=1, irf=40, nograph"
 #'
+#' Options are separated by TOP-LEVEL commas only: a comma nested in
+#' \code{()}, \code{[]}, \code{\{\}} or inside a quoted string belongs to the
+#' option value (review 2026-09-25: `discretionary_policy(instruments=(i,tau))`
+#' used to split into `instruments=(i` and a bogus flag `tau)`).
+#'
+#' Values:
+#' \itemize{
+#'   \item a number -> numeric; \code{true}/\code{false} -> logical;
+#'   \item a list \code{(a, b)} / \code{(a b)} / \code{[1 2 3]} (commas or
+#'     blanks) -> a numeric vector when every element is a number or an
+#'     integer range \code{m:n} (expanded), otherwise a character vector of
+#'     the names.  The vector carries attribute \code{"dynare_list"} (the
+#'     opening bracket) so write_mod() re-emits the list form even for one
+#'     element (\code{instruments=(i)});
+#'   \item a list containing a quoted string (\code{optim=('MaxIter',200)},
+#'     a MATLAB cell of name/value pairs) and anything else -> the value text,
+#'     verbatim.
+#' }
+#'
 #' @param options_str The text inside the parentheses.
 #' @return Named list. Bare flags have value TRUE; key=value pairs are parsed.
 #' @noRd
@@ -1248,26 +2248,121 @@ parse_command_options <- function(options_str) {
     return(list())
 
   opts <- list()
-  parts <- trimws(strsplit(options_str, ",")[[1]])
+  parts <- trimws(.split_options_top_level(options_str, ","))
 
   for (p in parts) {
     if (nchar(p) == 0) next
-    if (grepl("=", p)) {
-      kv <- strsplit(p, "\\s*=\\s*", perl = TRUE)[[1]]
-      key <- trimws(kv[1])
-      val_str <- trimws(kv[2])
-      val <- suppressWarnings(as.numeric(val_str))
-      if (is.na(val)) {
-        if (tolower(val_str) == "true")  val <- TRUE
-        else if (tolower(val_str) == "false") val <- FALSE
-        else val <- val_str
-      }
-      opts[[key]] <- val
+    eq <- .options_top_level_eq(p)
+    if (eq > 0L) {
+      key <- trimws(substr(p, 1L, eq - 1L))
+      val_str <- trimws(substr(p, eq + 1L, nchar(p)))
+      opts[[key]] <- .parse_option_value(val_str)
     } else {
       opts[[p]] <- TRUE
     }
   }
   opts
+}
+
+#' Split on a separator outside (), [], {} and quotes
+#' @noRd
+.split_options_top_level <- function(s, sep = ",") {
+  chars <- strsplit(s, "", fixed = TRUE)[[1]]
+  out <- character(0)
+  cur <- character(0)
+  depth <- 0L
+  quote <- ""
+  for (ch in chars) {
+    if (nzchar(quote)) {
+      if (ch == quote) quote <- ""
+    } else if (ch == "'" || ch == "\"") {
+      quote <- ch
+    } else if (ch %in% c("(", "[", "{")) {
+      depth <- depth + 1L
+    } else if (ch %in% c(")", "]", "}")) {
+      depth <- max(0L, depth - 1L)
+    } else if (ch == sep && depth == 0L) {
+      out <- c(out, paste(cur, collapse = ""))
+      cur <- character(0)
+      next
+    }
+    cur <- c(cur, ch)
+  }
+  c(out, paste(cur, collapse = ""))
+}
+
+#' Position of the first top-level `=` of one option (0 when none)
+#' @noRd
+.options_top_level_eq <- function(p) {
+  chars <- strsplit(p, "", fixed = TRUE)[[1]]
+  depth <- 0L
+  quote <- ""
+  for (k in seq_along(chars)) {
+    ch <- chars[k]
+    if (nzchar(quote)) {
+      if (ch == quote) quote <- ""
+    } else if (ch == "'" || ch == "\"") {
+      quote <- ch
+    } else if (ch %in% c("(", "[", "{")) {
+      depth <- depth + 1L
+    } else if (ch %in% c(")", "]", "}")) {
+      depth <- max(0L, depth - 1L)
+    } else if (ch == "=" && depth == 0L) {
+      return(k)
+    }
+  }
+  0L
+}
+
+#' Convert one option value text to its R value (see parse_command_options)
+#' @noRd
+.parse_option_value <- function(val_str) {
+  num <- suppressWarnings(as.numeric(val_str))
+  if (!is.na(num)) return(num)
+  if (tolower(val_str) == "true")  return(TRUE)
+  if (tolower(val_str) == "false") return(FALSE)
+
+  n <- nchar(val_str)
+  open <- substr(val_str, 1L, 1L)
+  close <- substr(val_str, n, n)
+  is_list <- n >= 2L && ((open == "(" && close == ")") ||
+                         (open == "[" && close == "]"))
+  ## A list whose brackets close before the end, e.g. `(a)*(b)`, is an
+  ## expression, not a list.
+  if (is_list) {
+    ch <- strsplit(substr(val_str, 2L, n - 1L), "", fixed = TRUE)[[1]]
+    step <- (ch %in% c("(", "[", "{")) - (ch %in% c(")", "]", "}"))
+    if (any(cumsum(step) < 0L)) is_list <- FALSE
+  }
+  if (!is_list || grepl("['\"]", val_str)) return(val_str)
+
+  inner <- trimws(substr(val_str, 2L, n - 1L))
+  toks <- unlist(lapply(.split_options_top_level(inner, ","), function(piece) {
+    piece <- trimws(piece)
+    ## blanks separate elements too (`(a b)`, `[6 32]`), except inside
+    ## nested brackets
+    if (!nzchar(piece)) return(character(0))
+    if (grepl("[([{]", piece)) return(piece)
+    strsplit(piece, "\\s+", perl = TRUE)[[1]]
+  }))
+  toks <- toks[nzchar(toks)]
+  if (length(toks) == 0L) {
+    out <- character(0)
+  } else {
+    rng <- regmatches(toks, regexec("^([+-]?[0-9]+):([+-]?[0-9]+)$", toks))
+    is_rng <- lengths(rng) == 3L
+    nums <- suppressWarnings(as.numeric(toks))
+    if (all(!is.na(nums) | is_rng)) {
+      out <- as.numeric(unlist(lapply(seq_along(toks), function(k) {
+        if (is_rng[k]) seq(as.numeric(rng[[k]][2]), as.numeric(rng[[k]][3]))
+        else nums[k]
+      })))
+    } else {
+      out <- toks
+    }
+  }
+  attr(out, "dynare_list") <- open
+  out
 }
 
 
@@ -1555,8 +2650,7 @@ parse_command_options <- function(options_str) {
 }
 
 eval_verbatim_blocks <- function(txt, param_values = numeric(0)) {
-  env <- list2env(as.list(param_values), parent = baseenv())
-  assign(".mtimes", .mtimes, envir = env)
+  env <- .dynhr_sandbox_env(param_values, .dynhr_safe_matrix_fn_names)
   blocks <- extract_all_paired_blocks(txt, "verbatim")
   if (length(blocks) == 0) return(env)
 
@@ -1578,8 +2672,16 @@ eval_verbatim_blocks <- function(txt, param_values = numeric(0)) {
       if (!grepl("^[A-Za-z_][A-Za-z0-9_]*$", lhs)) next   # scalar LHS name only
       r_rhs <- .matlab_stmt_to_r(rhs)
       if (is.null(r_rhs)) next
-      val <- tryCatch(eval(parse(text = r_rhs), envir = env),
-                      error = function(e) NULL)
+      ## Matrix algebra CAN fail at eval time on legitimate input (singular
+      ## solve(), non-conformable %*%), and the documented contract of this
+      ## function is that it never throws, so the handler here is a genuine
+      ## need rather than a swallowed parse error. The SECURITY check happened
+      ## before eval, inside .dynhr_sandbox_eval().
+      val <- tryCatch(.dynhr_sandbox_eval(r_rhs, env,
+                                          .dynhr_safe_matrix_fn_names,
+                                          context = "the verbatim statement"),
+                      error = function(e) if (inherits(
+                        e, "dynhr_error_unsafe_mod_expression")) stop(e) else NULL)
       if (!is.null(val) && is.numeric(val))
         assign(lhs, val, envir = env)
     }

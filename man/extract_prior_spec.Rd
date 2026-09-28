@@ -13,14 +13,55 @@ extract_prior_spec(model, verbose = TRUE)
 }
 \value{
 data.frame with columns: name, distribution, p1, p2, lower, upper,
-        mean, std
+        mean, std, p3, p4, init
 }
 \description{
-Reads the `estimated_params` block from the parsed model and returns a
-data.frame suitable for `make_log_posterior()`.
+Reads the \code{estimated_params} block from the parsed model and returns a
+data.frame suitable for \code{make_log_posterior()}, following Dynare's
+\code{estimated_params} semantics (Dynare 7.1 reference manual, "Estimation
+based on likelihood"; \code{estimation/set_prior.m}, \code{estimation/prior_bounds.m},
+\code{estimation/dynare_estimation_init.m}):
 }
 \details{
-Applies the eps_* -> sig_* rename for `stderr` priors (the model's shock
-standard deviation parameters use the sig_ prefix, while the estimated_params
-block uses the shock name eps_*).
+* Long form \code{NAME, INITVAL, LB, UB, PRIOR_SHAPE, P1, P2 [, P3, P4, JSCALE]}
+  and short form \code{NAME, PRIOR_SHAPE, P1, P2 [, P3, P4, JSCALE]} (no
+  INITVAL/LB/UB).
+* \code{lower}/\code{upper} are the prior's support (after any P3/P4
+  generalisation) INTERSECTED with \code{[LB, UB]} -- \code{dynare_estimation_init.m}:
+  \code{bounds = prior_bounds(...); bounds.lb = max(bounds.lb, lb);
+  bounds.ub = min(bounds.ub, ub)}. A \code{corr} row's \code{[LB, UB]} is clamped to
+  \code{[-1, 1]} as in \code{set_prior.m}. An \code{estimated_params_bounds} block
+  (\code{model$estimated_params_bounds}) replaces LB/UB before the intersection,
+  as in Dynare.
+* P3/P4 by shape: BETA -> generalised beta on \code{[P3, P4]} (P1/P2 are the
+  mean/sd on that interval); GAMMA, INV_GAMMA (1 and 2) -> P3 is a shift
+  (lower end of the support) and P4 is ignored with a warning (as
+  in Dynare); NORMAL -> P3/P4 are truncation bounds.
+* UNIFORM follows Dynare's \code{uniform_specification()}: **P1 is the MEAN and
+  P2 the STANDARD DEVIATION**, so the support is
+  \code{[P1 - sqrt(3) P2, P1 + sqrt(3) P2]}. To give the BOUNDS instead, leave
+  P1/P2 empty and put them in P3/P4:
+  \code{NAME, INITVAL, LB, UB, uniform_pdf, , , lb, ub;} (or the short form
+  \code{NAME, uniform_pdf, , , lb, ub;}). P1/P2 together with P3/P4 is an error,
+  as in Dynare. \code{uniform_pdf, 0, 1} is therefore NOT the unit interval but
+  \code{[-1.732, 1.732]}; rows that look like a bounds-style spec read as
+  mean/sd raise a \code{dynhr_warning_uniform_parameterisation} warning (the
+  calibrated / INITVAL value lies in \code{[P1, P2]} but outside the implied
+  support; P2 > P1 >= 0; or the support crosses the hard boundary of a
+  \code{stderr} (below 0) or \code{corr} (outside -1 to 1) parameter). Rows written
+  with P3/P4 never warn.
+* The returned \code{p1}/\code{p2} are the MEAN/SD for every shape (for a uniform
+  given by P3/P4: \code{(P3 + P4)/2} and \code{(P4 - P3)/sqrt(12)}), and the \code{p3}/\code{p4}
+  columns carry the beta support / shift (NA = the default 0/1 resp. 0) or
+  the uniform's support \code{[a, b]} -- Dynare's \code{bayestopt_} layout; see
+  R/prior-density.R.
+* \code{init} is INITVAL, overridden by an \code{estimated_params_init} block
+  (\code{model$estimated_params_init}); NA when neither gives one.
+  \code{run_mode_finding()} starts from it (see \code{.rmf_default_theta_init()}).
+
+A \code{stderr eps_X} prior is renamed to the model parameter \code{sig_X} only when
+the shocks block's stderr / variance expression for \code{eps_X} references
+\code{sig_X} (e.g. \code{var eps_X; stderr sig_X;}), so the draw reaches the
+likelihood through that expression. Otherwise the prior keeps the shock name
+and the draw is injected as the shock's own standard deviation.
 }

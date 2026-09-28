@@ -21,7 +21,7 @@ estimation_context(
   sample_start = NULL,
   ms_spec = NULL,
   ms_struct_spec = NULL,
-  ms_collapse = c("gpb2", "gpb3"),
+  ms_collapse = c("gpb2", "gpb3", "imm"),
   student_df = NULL,
   pruned_order = 2L
 )
@@ -119,14 +119,19 @@ regime-specific decision rules, then evaluates the likelihood via
 \item{ms_collapse}{Character; GPB collapse depth for the Markov-switching
 likelihood, forwarded to \code{\link{ms_kim_filter}} /
 \code{\link{ms_kim_filter_struct}}: \code{"gpb2"} (default, Kim's
-filter) or \code{"gpb3"} (collapse on the last TWO regimes; about
+filter), \code{"gpb3"} (collapse on the last TWO regimes; about
 \code{n_regimes} times the cost per period, and exact wherever GPB(2)'s
-error is entirely the one-period collapse).  Meaningful only when
-\code{ms_spec} or \code{ms_struct_spec} is supplied; supplying
-\code{"gpb3"} without either is an error.  Diagnose the need for it with
+error is entirely the one-period collapse) or \code{"imm"} (the
+interacting-multiple-model filter: \code{n_regimes} Kalman steps per
+period instead of \code{n_regimes^2}; it can be markedly less accurate
+than \code{"gpb2"} when the regimes' state dynamics differ a lot --- see
+the \emph{IMM} section of \code{\link{ms_kim_filter_struct}}).  Meaningful only when
+\code{ms_spec} or \code{ms_struct_spec} is supplied; supplying a
+non-default value without either is an error.
+Diagnose the need for \code{"gpb3"} with
 \code{ms_kim_filter(..., return_collapse_diag = TRUE)$collapse_max}.}
 
-\item{student_df}{Positive finite scalar; degrees of freedom for the
+\item{student_df}{Finite scalar > 2; degrees of freedom for the
 multivariate Student-t per-period log-likelihood.  Required when
 \code{likelihood = "student_t"}, ignored otherwise.}
 

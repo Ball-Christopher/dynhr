@@ -2,46 +2,10 @@
 ## --------------------------------------------------------------------------
 ## Phase-3 split from diagnostics-monolith.R.
 ##
-## Shared statistical helpers: .effective_sample_size(),
-## .ljung_box(), .svd_rank(), .safe_sym_inv(),
+## Shared statistical helpers: the package's ONLY ESS / split-R-hat
+## estimators (.d5_*), .ljung_box(), .safe_sym_inv(),
 ## .nz_events(), .add_nz_event_markers(), .numerical_jacobian()
 ## --------------------------------------------------------------------------
-
-#' Effective sample size (ESS) from a univariate MCMC chain
-#'
-#' Uses the initial positive-sequence estimator (Geyer 1992): sum
-#' autocorrelation pairs until the first negative pair, then apply
-#' the standard ESS formula.
-#'
-#' @param x Numeric vector -- a single MCMC chain for one parameter.
-#' @return Numeric scalar -- the effective sample size.
-#' @noRd
-.effective_sample_size <- function(x) {
-  n <- length(x)
-  if (n < 4) return(n)
-
-  # Cap lags at 5000: Geyer estimator exits in <200 lags for typical DSGE chains;
-  # computing floor(n/2) lags on 400K pooled draws takes minutes for no benefit.
-  max_lag <- min(n - 1, floor(n / 2), 5000L)
-  acf_vals <- acf(x, lag.max = max_lag, plot = FALSE)$acf[, , 1]
-
-  # Initial positive-sequence estimator: sum pairs (rho_{2k}, rho_{2k+1})
-  # until the sum is negative
-  sum_rho <- 0
-  k <- 1
-  while (k + 1 <= length(acf_vals)) {
-    pair_sum <- acf_vals[k] + acf_vals[k + 1]
-    if (pair_sum < 0) break
-    sum_rho <- sum_rho + pair_sum
-    k <- k + 2
-  }
-
-  # ESS = n / (1 + 2 * sum of autocorrelations)
-  # acf_vals[1] is lag-0 = 1.0; we start summing from lag-1
-  ess <- n / (1 + 2 * sum_rho)
-  return(max(1, ess))
-}
-
 
 #' Ljung-Box test for serial correlation
 #'
@@ -72,17 +36,6 @@
 }
 
 
-#' Numerical rank of a matrix from its singular values
-#'
-#' Applies the standard LAPACK-style tolerance
-#' \code{max(dim) * max(sv) * .Machine$double.eps} and counts the singular
-#' values above it.  Extracted from the (previously duplicated) identical
-#' rank-check used by D1/D25/D27/D28/D30/D37.
-#'
-#' @param d    Numeric vector of singular values (e.g. \code{svd(M)$d}).
-#' @param dims Integer vector of matrix dimensions (e.g. \code{dim(M)}).
-#' @return Integer scalar -- the numerical rank.
-#' @noRd
 #' Overlay an estimated-parameter vector onto a full calibration
 #'
 #' Returns \code{params} with the entries named in \code{theta} overwritten by
@@ -98,13 +51,6 @@
   for (nm in names(theta))
     if (nm %in% names(params)) params[[nm]] <- theta[[nm]]
   params
-}
-
-
-.svd_rank <- function(d, dims) {
-  if (length(d) == 0L) return(0L)
-  tol <- max(dims) * max(d) * .Machine$double.eps
-  sum(d > tol)
 }
 
 
@@ -221,142 +167,148 @@
 # Rank-normalised R-hat and Bulk/Tail-ESS  (Vehtari et al. 2021)
 # ---------------------------------------------------------------------------
 
-#' Rank-normalise a set of draws across chains
-#'
-#' Combines all chains, ranks all draws, then applies the normal-scores
-#' transformation z = qnorm((r - 3/8) / (N + 1/4)).
-#' Returns a list of per-chain normalised vectors (same structure as input).
-#'
-#' @param chains_list List of numeric vectors (one per chain), equal length.
-#' @return List of same structure with rank-normalised values.
+# ---------------------------------------------------------------------------
+# CONVERGENCE ESTIMATORS: split-R-hat and ESS (Vehtari et al. 2021)
+# ---------------------------------------------------------------------------
+# THE package's ESS / R-hat implementation -- there is exactly one, and this is
+# it. It follows the paper (and the reference implementation in the `posterior`
+# package, verified against posterior 1.7.0): split chains, rank-normalise with
+# the Blom offset 3/8, R-hat = max(bulk, folded) split-R-hat, and multi-chain
+# ESS with Geyer's initial positive + monotone sequence using the
+# between-chain-aware autocorrelation 1 - (W - mean acov_t) / var_plus.
+#
+# 0.9.4 (ledger A5): these replace a SECOND, WRONG set of shared helpers that
+# used to live here -- `.effective_sample_size()`, `.rank_normalise()`,
+# `.rhat_rank_norm()`, `.rhat_classic_multi()`, `.ess_bulk_multi()`,
+# `.ess_tail_multi()`, `.convergence_summary()`. Three defects, all silent:
+#
+#   1. the Geyer sum started at `acf_vals[1]`, which is LAG 0 (= 1), so the
+#      first pair was 1 + rho_1 instead of rho_1 + rho_2. For iid draws that
+#      gives ESS = n / (1 + 2*1) = n/3 -- every ESS the package reported was
+#      about 3x too low, and "bulk ESS >= 1000" was really "ESS >= ~3000";
+#   2. multi-chain ESS CONCATENATED the chains (`unlist`) instead of using the
+#      between-chain variance, so between-chain drift inflated it;
+#   3. R-hat omitted the FOLDED (scale) component, so chains agreeing in mean
+#      but differing in variance passed with R-hat ~ 1.
+#
+# The `.d5_` prefix is historical (the correct estimators were first written
+# for D5); it is kept so that there is one name per function and no aliases.
+
+#' Split every chain of an n x m matrix in half (odd n drops the middle draw)
 #' @noRd
-.rank_normalise <- function(chains_list) {
-  n_chains <- length(chains_list)
-  n        <- length(chains_list[[1]])
-  all_x    <- unlist(chains_list)
-  N        <- length(all_x)
-  r        <- rank(all_x, ties.method = "average")
-  z        <- qnorm((r - 3/8) / (N + 1/4))
-  split(z, rep(seq_len(n_chains), each = n))
+.d5_split <- function(x) {
+  n <- nrow(x)
+  half <- floor(n / 2)
+  cbind(x[seq_len(half), , drop = FALSE],
+        x[(n - half + 1L):n, , drop = FALSE])
 }
 
-
-#' Rank-normalised R-hat (Vehtari et al. 2021, split version)
-#'
-#' More robust than the classic R-hat for heavy-tailed posteriors.  Each
-#' chain is also split in half so that the test is sensitive to within-chain
-#' non-stationarity.
-#'
-#' @param chains_list List of numeric vectors (one per chain).
-#' @return Named list: $rhat (scalar), $pass (rhat < 1.01), $pass_loose (< 1.05)
+#' Rank-normalised z-scores over all draws (ties averaged)
 #' @noRd
-.rhat_rank_norm <- function(chains_list) {
-  m <- length(chains_list)
-  if (m < 1) return(list(rhat = NA_real_, pass = NA, pass_loose = NA))
-  n <- length(chains_list[[1]])
-  if (n < 4) return(list(rhat = NA_real_, pass = NA, pass_loose = NA))
-
-  # Split each chain in half -> 2m chains of length floor(n/2)
-  half <- floor(n / 2L)
-  split_chains <- unlist(lapply(chains_list, function(ch) {
-    list(ch[1:half], ch[(half + 1):(2 * half)])
-  }), recursive = FALSE)
-
-  # Rank-normalise across all 2m split chains
-  z_chains <- .rank_normalise(split_chains)
-
-  # Classic R-hat on normalised draws
-  rhat_val <- .rhat_classic_multi(z_chains)
-
-  list(
-    rhat       = rhat_val,
-    pass       = !is.na(rhat_val) && rhat_val < 1.01,
-    pass_loose = !is.na(rhat_val) && rhat_val < 1.05
-  )
+.d5_zscale <- function(x) {
+  r <- rank(as.vector(x), ties.method = "average")
+  z <- stats::qnorm((r - 3 / 8) / (length(r) + 1 / 4))
+  matrix(z, nrow = nrow(x), ncol = ncol(x))
 }
 
-
-#' Classic multi-chain R-hat (internal, called after rank normalisation)
+#' TRUE if the n x m draws cannot carry an R-hat / ESS
 #' @noRd
-.rhat_classic_multi <- function(chains_list) {
-  m <- length(chains_list)
-  n <- length(chains_list[[1]])
-  if (m < 2 || n < 2) return(NA_real_)
-
-  chain_means <- vapply(chains_list, mean, numeric(1))
-  grand_mean  <- mean(chain_means)
-  B           <- n / (m - 1) * sum((chain_means - grand_mean)^2)
-  W           <- mean(vapply(chains_list, var, numeric(1)))
-  if (W < .Machine$double.eps) return(1.0)   # constant chain
-
-  V_hat <- (n - 1) / n * W + B / n
-  sqrt(max(V_hat / W, 0))
+.d5_degenerate <- function(x) {
+  nrow(x) < 4L || any(!is.finite(x)) ||
+    abs(max(x) - min(x)) < .Machine$double.eps
 }
 
-
-#' Bulk-ESS for a single parameter across multiple chains
-#'
-#' ESS computed on rank-normalised draws; sensitive to location and spread.
-#'
-#' @param chains_list List of numeric vectors (one per chain).
-#' @return Numeric scalar.
+#' Basic split-free R-hat of an n x m matrix
 #' @noRd
-.ess_bulk_multi <- function(chains_list) {
-  z_chains <- .rank_normalise(chains_list)
-  n_chains <- length(z_chains)
-  n        <- length(z_chains[[1]])
-
-  # Pool all chains then use the Geyer estimator
-  .effective_sample_size(unlist(z_chains)) * min(1, n_chains)
+.d5_rhat_basic <- function(x) {
+  if (.d5_degenerate(x) || ncol(x) < 2L) return(NA_real_)
+  n  <- nrow(x)
+  B  <- n * stats::var(colMeans(x))
+  W  <- mean(apply(x, 2, stats::var))
+  sqrt((B / W + n - 1) / n)
 }
 
-
-#' Tail-ESS for a single parameter across multiple chains
-#'
-#' ESS computed on indicators I(x <= q0.05) and I(x <= q0.95);
-#' sensitive to tail behaviour.
-#'
-#' @param chains_list List of numeric vectors.
-#' @return Numeric scalar (min of lower- and upper-tail ESS).
+#' Autocovariance (denominator n) via FFT, lags 0..n-1
 #' @noRd
-.ess_tail_multi <- function(chains_list) {
-  all_x <- unlist(chains_list)
-  q05   <- quantile(all_x, 0.05)
-  q95   <- quantile(all_x, 0.95)
-
-  ind_lo <- lapply(chains_list, function(ch) as.numeric(ch <= q05))
-  ind_hi <- lapply(chains_list, function(ch) as.numeric(ch <= q95))
-
-  ess_lo <- .effective_sample_size(unlist(ind_lo))
-  ess_hi <- .effective_sample_size(unlist(ind_hi))
-  min(ess_lo, ess_hi)
+.d5_autocov <- function(y) {
+  n  <- length(y)
+  # A constant (split) chain -- common for tail indicators -- has zero
+  # autocovariance at every lag, not 0/0.
+  if (stats::var(y) == 0) return(numeric(n))
+  M  <- stats::nextn(n)
+  yc <- c(y - mean(y), rep.int(0, 2L * M - n))
+  f  <- stats::fft(yc)
+  ac <- Re(stats::fft(Conj(f) * f, inverse = TRUE))[seq_len(n)]
+  ac / ac[1] * (sum((y - mean(y))^2) / n)
 }
 
-
-#' Per-parameter multi-chain convergence summary
-#'
-#' Computes rank-normalised R-hat, Bulk-ESS, and Tail-ESS for every
-#' parameter given a list of draw matrices (one per chain).
-#'
-#' @param chains_list List of matrices (n_draws x n_params), same dims.
-#' @return data.frame with columns: param, rhat, ess_bulk, ess_tail
+#' Basic multi-chain ESS of an n x m matrix (Vehtari et al. 2021, eqs 10-11)
 #' @noRd
-.convergence_summary <- function(chains_list) {
-  if (length(chains_list) < 1) return(NULL)
-  p_names <- colnames(chains_list[[1]])
-  n_par   <- ncol(chains_list[[1]])
-  if (is.null(p_names)) p_names <- paste0("theta_", seq_len(n_par))
+.d5_ess_basic <- function(x) {
+  if (.d5_degenerate(x)) return(NA_real_)
+  n <- nrow(x); m <- ncol(x)
+  acov <- vapply(seq_len(m), function(j) .d5_autocov(x[, j]), numeric(n))
+  acov <- matrix(acov, nrow = n)
+  mean_var <- mean(acov[1, ]) * n / (n - 1)
+  var_plus <- mean_var * (n - 1) / n
+  if (m > 1L) var_plus <- var_plus + stats::var(colMeans(x))
+  rho <- function(t) 1 - (mean_var - mean(acov[t + 1L, ])) / var_plus
+  rho_t <- numeric(n)
+  t <- 0L
+  r_even <- 1
+  r_odd  <- rho(1L)
+  rho_t[1:2] <- c(r_even, r_odd)
+  while (t < n - 5L && is.finite(r_even + r_odd) && r_even + r_odd > 0) {
+    t <- t + 2L
+    r_even <- rho(t)
+    r_odd  <- rho(t + 1L)
+    if (r_even + r_odd >= 0) {
+      rho_t[t + 1L] <- r_even
+      rho_t[t + 2L] <- r_odd
+    }
+  }
+  max_t <- t
+  if (r_even > 0) rho_t[max_t + 1L] <- r_even
+  # Geyer initial monotone sequence
+  t <- 0L
+  while (t <= max_t - 4L) {
+    t <- t + 2L
+    if (rho_t[t + 1L] + rho_t[t + 2L] > rho_t[t - 1L] + rho_t[t]) {
+      rho_t[t + 1L] <- (rho_t[t - 1L] + rho_t[t]) / 2
+      rho_t[t + 2L] <- rho_t[t + 1L]
+    }
+  }
+  S   <- n * m
+  tau <- -1 + 2 * sum(rho_t[seq_len(max_t)]) + rho_t[max_t + 1L]
+  tau <- max(tau, 1 / log10(S))
+  S / tau
+}
 
-  do.call(rbind, lapply(seq_len(n_par), function(j) {
-    per_chain <- lapply(chains_list, function(m) m[, j])
-    rh  <- .rhat_rank_norm(per_chain)
-    eb  <- .ess_bulk_multi(per_chain)
-    et  <- .ess_tail_multi(per_chain)
-    data.frame(param    = p_names[j],
-               rhat     = rh$rhat,
-               ess_bulk = eb,
-               ess_tail = et,
-               stringsAsFactors = FALSE)
+#' Per-parameter rank-normalised split R-hat, Bulk-ESS and Tail-ESS
+#'
+#' @param chains_list List of equal-shape n x p draw matrices (one per chain;
+#'   a single chain is allowed and is split in two for R-hat).
+#' @return data.frame(param, rhat, ess_bulk, ess_tail).
+#' @noRd
+.d5_convergence <- function(chains_list, param_names) {
+  do.call(rbind, lapply(seq_along(param_names), function(j) {
+    x  <- vapply(chains_list, function(mm) as.numeric(mm[, j]),
+                 numeric(nrow(chains_list[[1]])))
+    x  <- matrix(x, nrow = nrow(chains_list[[1]]))
+    xs <- .d5_split(x)
+    if (.d5_degenerate(xs)) {
+      rhat <- eb <- et <- NA_real_
+    } else {
+      rhat <- max(.d5_rhat_basic(.d5_zscale(xs)),
+                  .d5_rhat_basic(.d5_zscale(.d5_split(abs(x - stats::median(x))))))
+      eb   <- .d5_ess_basic(.d5_zscale(xs))
+      et   <- min(vapply(c(0.05, 0.95), function(p) {
+        q <- stats::quantile(x, p, names = FALSE)
+        .d5_ess_basic(.d5_split(x <= q) + 0)
+      }, numeric(1)))
+    }
+    data.frame(param = param_names[j], rhat = rhat, ess_bulk = eb,
+               ess_tail = et, stringsAsFactors = FALSE)
   }))
 }
 
