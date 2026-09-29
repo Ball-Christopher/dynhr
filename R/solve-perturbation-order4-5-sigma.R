@@ -227,8 +227,7 @@ solve_sigma_order4 <- function(dr4, compiled, ss, params,
   if (is.null(Sigma_e)) {
     Sigma_e <- dr4$Sigma_e
     if (is.null(Sigma_e)) {
-      stderr  <- .get_shock_stderr(compiled$model, exo_names, params)
-      Sigma_e <- diag(stderr^2, n_u, n_u)
+      Sigma_e <- .get_shock_cov(compiled$model, exo_names, params)
     }
   }
   if (!is.matrix(Sigma_e) || nrow(Sigma_e) != n_u || ncol(Sigma_e) != n_u) {
@@ -334,8 +333,7 @@ solve_sigma_order5 <- function(dr5, compiled, ss, params,
   if (is.null(Sigma_e)) {
     Sigma_e <- dr5$Sigma_e
     if (is.null(Sigma_e)) {
-      stderr  <- .get_shock_stderr(compiled$model, exo_names, params)
-      Sigma_e <- diag(stderr^2, n_u, n_u)
+      Sigma_e <- .get_shock_cov(compiled$model, exo_names, params)
     }
   }
   SIGMA2 <- as.numeric(Sigma_e)

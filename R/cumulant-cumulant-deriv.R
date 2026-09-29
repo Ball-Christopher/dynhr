@@ -560,8 +560,7 @@ cumulant_moment_derivs_3_4 <- function(dr2, model, params, o2d, obs_idx,
   ghx  <- dr$ghx;   ghu  <- dr$ghu
   ghxx <- dr$ghxx;  ghuu <- dr$ghuu;  ghxu <- dr$ghxu
 
-  shock_stderr <- .get_shock_stderr(model, exo, params)
-  Sigma_e <- diag(shock_stderr^2, n_exo)
+  Sigma_e <- .get_shock_cov(model, exo, params)
 
   hx  <- ghx[state_idx, , drop = FALSE]
   hu  <- ghu[state_idx, , drop = FALSE]

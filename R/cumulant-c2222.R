@@ -146,8 +146,7 @@
   ghxu <- dr2$ghxu %||% NULL
   ghuu <- dr2$ghuu %||% NULL
 
-  shock_stderr <- .get_shock_stderr(model, exo, params)
-  Sigma_e <- diag(shock_stderr^2, n_exo)
+  Sigma_e <- .get_shock_cov(model, exo, params)
 
   hx  <- ghx [state_idx, , drop = FALSE]
   hu  <- ghu [state_idx, , drop = FALSE]

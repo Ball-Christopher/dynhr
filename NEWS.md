@@ -1,3 +1,25 @@
+# dynhr 0.9.4.15
+
+Hotfix release: 0.9.4.8 plus two silent-wrong-target fixes.
+
+- **Cumulant likelihood with correlated shocks fixed (changes results).** The
+  model's third and fourth cumulants (`compute_third_cumulant`,
+  `compute_fourth_cumulant`, the closed-form fourth cumulant) and the
+  cumulant adjoint gradient built a diagonal shock covariance, dropping
+  `corr` entries. Cumulant, GMM and method-of-moments fits of models with
+  shock correlations used the wrong higher-order moments (Monte-Carlo
+  z-scores up to 50 before, below 2 after), and the default exact gradient
+  for `cumulant_orders` containing 3 but not 4 was about 3% off. **Re-run
+  such fits.** Models without shock correlation are unchanged.
+- **Heteroskedastic shocks and filter tunes are no longer dropped silently.**
+  `likelihood = "whittle"`, `"cumulant"`, `"pruned"` and `"pskf"` never
+  implemented `shock_scale` (`heteroskedastic_shocks`) or `me_extra`
+  (`filter_tunes`), and `"tpf"` never implemented `me_extra`; they evaluated
+  the homoskedastic, tune-free posterior without a word, including when the
+  estimation runners applied a `.mod` block automatically. They now stop with
+  class `dynhr_error_inapplicable_argument`. Use `likelihood = "gaussian"`
+  for these features.
+
 # dynhr 0.9.4.8
 
 Hotfix release: 0.9.4 plus one PSKF correctness fix. **PSKF likelihoods

@@ -512,8 +512,7 @@ solve_sigma_cross <- function(dr3, compiled, ss, params, Sigma_e = NULL) {
   if (is.null(Sigma_e)) {
     Sigma_e <- dr3$Sigma_e
     if (is.null(Sigma_e)) {
-      stderr  <- .get_shock_stderr(compiled$model, exo_names, params)
-      Sigma_e <- diag(stderr^2, n_u, n_u)
+      Sigma_e <- .get_shock_cov(compiled$model, exo_names, params)
     }
   } else if (!is.null(dr3$Sigma_e) &&
              !isTRUE(all.equal(unname(as.matrix(Sigma_e)),

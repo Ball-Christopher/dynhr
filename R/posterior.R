@@ -1119,6 +1119,27 @@ make_log_posterior <- function(model, data, prior_spec, obs_vars = NULL,
   ## honours it. Every other likelihood -- and the Markov-switching Kim filter
   ## on the Gaussian branch -- builds its own observation equation and would
   ## SILENTLY score the aggregate as if it were a contemporaneous observable.
+  ## Per-period scalings that only the Kalman-filter likelihoods implement:
+  ## the whittle / cumulant / pruned / pskf branches never read either, and
+  ## tpf never reads me_extra, so a heteroskedastic_shocks or filter_tunes
+  ## block (applied automatically by the estimation runners) used to be
+  ## dropped without a word -- a homoskedastic, tune-free posterior reported
+  ## as the requested one. (tpf / sv_rbpf / global_pf / ppf / copf /
+  ## student_t refuse shock_scale in their own branches.)
+  no_tunes <- c("whittle", "cumulant", "pruned", "pskf")
+  if (likelihood %in% c(no_tunes, "tpf")) {
+    bad <- c(if (!is.null(shock_scale) && likelihood %in% no_tunes)
+               "shock_scale (heteroskedastic_shocks)",
+             if (!is.null(me_extra)) "me_extra (filter_tunes)")
+    if (length(bad))
+      .dynhr_abort(
+        "make_log_posterior: likelihood = \"", likelihood, "\" does not ",
+        "implement ", paste(bad, collapse = " or "), "; it would evaluate ",
+        "the posterior without ", if (length(bad) > 1L) "them" else "it", ". ",
+        "Use likelihood = \"gaussian\", or drop the block / argument.",
+        class = "dynhr_error_inapplicable_argument")
+  }
+
   ## Fail loudly instead of returning a quietly-wrong posterior.
   ## observation_trends: same contract as obs_aggregation below.
   if (!identical(likelihood, "gaussian"))

@@ -409,7 +409,7 @@ cumulant_loglik_grad <- function(model, compiled, dr, params, param_names,
 
   ## ---- 2. Split bar_m into per-order blocks -------------------------------
   ghx <- dr$ghx; ghu <- dr$ghu; ghss <- dr$ghss
-  Sigma_e <- diag(.get_shock_stderr(model, exo, params)^2, n_exo)
+  Sigma_e <- .get_shock_cov(model, exo, params)
   hx <- ghx[state_idx, , drop = FALSE]
   hu <- ghu[state_idx, , drop = FALSE]
   Sigma_state <- .state_covariance(hx, hu, Sigma_e)   # n_s x n_s

@@ -434,8 +434,7 @@ compute_third_cumulant <- function(dr, model, params = NULL) {
   ghss <- dr$ghss %||% rep(0, n_endo)
 
   # Shock covariance
-  shock_stderr <- .get_shock_stderr(model, exo, params)
-  Sigma_e <- diag(shock_stderr^2, n_exo)
+  Sigma_e <- .get_shock_cov(model, exo, params)
   dimnames(Sigma_e) <- list(exo, exo)
 
   # ---- State-row submatrices ----
@@ -1131,8 +1130,7 @@ compute_fourth_cumulant <- function(dr, model, params = NULL,
   ghxu <- dr$ghxu %||% NULL
   ghuu <- dr$ghuu %||% NULL
 
-  shock_stderr <- .get_shock_stderr(model, exo, params)
-  Sigma_e <- diag(shock_stderr^2, n_exo)
+  Sigma_e <- .get_shock_cov(model, exo, params)
 
   hx  <- ghx [state_idx, , drop = FALSE]
   hu  <- ghu [state_idx, , drop = FALSE]
