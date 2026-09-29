@@ -214,9 +214,11 @@
 #'     max(1e-5, 1e-7 |log p|); 2-dimensional CDFs are computed on the log
 #'     scale. \code{"fast"} is the evaluation before dynhr 0.9.4
 #'     (Mendell-Elston for the compensation, plain Miwa): about 3 to 4 times cheaper under
-#'     multi-shock skew, but measured 0.14 nat off an exact likelihood with one
-#'     skewed shock (T = 20) and 12 to 18 nats off with two or three skewed
-#'     shocks (T = 60 to 100). Resolved once when the log-posterior is built.}
+#'     multi-shock skew and approximate: measured 3e-4 nat off an exact
+#'     likelihood with one skewed shock (T = 20), 0.002 nat with two skewed
+#'     shocks (T = 100) and 0.3 nat with three (T = 60). (Before dynhr 0.9.4.8
+#'     a Mendell-Elston sign error put it 0.14 to 18 nats off.) Resolved once
+#'     when the log-posterior is built.}
 #'   \item{\code{allow_monge_metric}}{\code{FALSE} (default); the experimental
 #'     \code{metric = "monge"} MALA option in \code{run_posterior_estimation()}
 #'     errors unless this is \code{TRUE}, because the Monge metric collapses the

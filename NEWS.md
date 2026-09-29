@@ -1,3 +1,25 @@
+# dynhr 0.9.4.8
+
+Hotfix release: 0.9.4 plus one PSKF correctness fix. **PSKF likelihoods
+estimated with 0.9.4 or earlier should be re-run** if they use
+`pskf_cdf = "fast"`, several skewed shocks, or `max_q` above the default.
+
+- **PSKF: Mendell-Elston normal CDF fixed (changes results).** The
+  Mendell-Elston approximation to the multivariate normal log-CDF shifted the
+  conditional mean the wrong way and shrank each conditional covariance entry
+  twice. Per-call errors of several nats (median 1.1, max 6.5 against
+  `mvtnorm`) drop to a median of 0.016. The evaluator is used for coupled
+  blocks wider than `miwa_qmax`, when the lattice / Miwa evaluators decline a
+  block, and for the pruning compensation under `pskf_cdf = "fast"`. With
+  default settings it was reached in about 12% of random 1-3 shock test
+  systems, several of them off by more than 1 nat. `pskf_cdf = "fast"` now
+  tracks the exact likelihood closely (18.4 -> 0.002 nat off a particle-filter
+  oracle on one test model). Problems that never reach it are unchanged.
+- **PSKF: round-off couplings no longer merge CDF blocks.** Correlations below
+  1e-8 inside a block of four or more are zeroed before the evaluator is
+  chosen, so round-off cannot join independent blocks into one
+  Mendell-Elston block.
+
 # dynhr 0.9.4
 
 This is a large correctness, performance and API release, following a full

@@ -166,6 +166,20 @@ logcdf_ME_r <- function(x, S, miwa_qmax = 5L, check = TRUE, use_cpp = TRUE) {
     return(out)
   }
 
+  ## Round-off couplings: Delta + Gamma Sigma Gamma' can leave correlations of
+  ## 1e-12..1e-10 where the exact value is 0, which would join independent
+  ## blocks into one block wider than the exact evaluators handle. Inside a
+  ## block of 4 or more (lattice / Miwa / Mendell-Elston territory, whose
+  ## errors dwarf 1e-8 |b_i b_j|) couplings below 1e-8 are zeroed and the
+  ## block split again.
+  if (check && q >= 4L) {
+    weak <- off & S != 0 & abs(S) < 1e-8
+    if (any(weak)) {
+      S[weak] <- 0
+      return(logcdf_ME_r(x, S, miwa_qmax, check = check, use_cpp = use_cpp))
+    }
+  }
+
   ## q = 2
   if (q == 2L) {
     if (check) return(.mvn_logcdf2(x[1], x[2], S[1, 2], use_cpp = use_cpp))
@@ -220,22 +234,23 @@ logcdf_ME_r <- function(x, S, miwa_qmax = 5L, check = TRUE, use_cpp = TRUE) {
   ##   - High correlations (max |rho_ij| > 0.8): absolute error ~0.03-0.05.
   ##   These translate to per-period loglik errors of O(abs_err/Phi_q) in the
   ##   CSN loglik correction terms.
-  ## MEASURED (2026-07-03, scratchpad/step3-evaluators.R): under strong
-  ## multi-shock skew (2 shocks, |alpha| = 2-3) the CSN correction arguments
-  ## sit deep in the orthant tails and the ME error per call reaches SEVERAL
-  ## NATS at q = 6-16, accumulating to -7.3 nats by T=12 for alpha=(+2,-2)
-  ## (sign follows the sign of the off-diagonal correlations of S).
-  ## The filter therefore rank-caps q at max_q = 5 (dim_red4_r), so this
-  ## branch is only reached when the caller explicitly raises max_q (or
-  ## mvtnorm is unavailable); the loglik is then approximate and biased
-  ## under strong skew -- see memory note pskf-multishock-pruning-bias.
+  ## MEASURED against mvtnorm (40 random 3-7 dimensional cases): median
+  ## absolute log-CDF error 0.016, max 0.86 in the tails. Before 0.9.4.8 the
+  ## conditional-mean shift had the wrong sign and each conditional
+  ## covariance entry was shrunk twice, which produced errors of several nats
+  ## (median 1.1, max 6.5 on the same cases). The branch is reached with the
+  ## default max_q = 5 too: the pre-pruning stack of max_q + n_exo rows can
+  ## form a coupled block wider than miwa_qmax, and the lattice / Miwa
+  ## evaluators can decline a near-singular block.
   ##
   ## Algorithm (Mendell & Elston 1974, corrected for covariance -- not correlation -- form):
   ## For j = 1 .. q-1:
   ##   standardised bound: bj = b[j] / sqrt(S[j,j])
   ##   P_j = Phi(bj)  (marginal probability for dim j)
   ##   Mills ratio lambda = phi(bj)/Phi(bj)
-  ##   mean shift for k > j:  b[k] -= S[j,k]/sqrt(S[j,j]) * lambda
+  ##   mean shift for k > j:  b[k] += S[j,k]/sqrt(S[j,j]) * lambda
+  ##     (E[X_k | X_j <= b_j] = -S[j,k]/sqrt(S[j,j]) * lambda, so the bound
+  ##     for X_k rises; the sign was flipped before 0.9.4.8)
   ##   variance shrinkage for k,l > j:
   ##     S[k,l] -= S[j,k]*S[j,l]/S[j,j] * lambda*(bj + lambda)
   ## Final: P_q = Phi(b[q]/sqrt(S[q,q]))
@@ -259,9 +274,10 @@ logcdf_ME_r <- function(x, S, miwa_qmax = 5L, check = TRUE, use_cpp = TRUE) {
     idx <- (j + 1L):q
     for (k in idx) {
       ## Mean shift
-      b[k] <- b[k] - CS[j, k] / sj * lambda
-      ## Covariance shrinkage
-      for (l in idx) {
+      b[k] <- b[k] + CS[j, k] / sj * lambda
+      ## Covariance shrinkage: the upper triangle once, then mirrored (looping
+      ## l over all of idx shrank every off-diagonal twice before 0.9.4.8)
+      for (l in idx[idx >= k]) {
         CS[k, l] <- CS[k, l] - CS[j, k] * CS[j, l] / sjj * delta_factor
         CS[l, k] <- CS[k, l]
       }

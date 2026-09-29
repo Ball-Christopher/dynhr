@@ -871,6 +871,19 @@ bool logcdf_dispatch(const std::vector<double>& x, const std::vector<double>& S,
       return true;
     }
   }
+  if (q >= 4) {
+    // weak couplings inside a block that needs the lattice or
+    // Mendell-Elston: zero them and split again (logcdf_ME_r, same rule)
+    bool weak = false;
+    std::vector<double> C2(Cm);
+    for (int j = 0; j < q; ++j)
+      for (int i = 0; i < q; ++i)
+        if (i != j && Cm[i + j * q] != 0.0 && std::fabs(Cm[i + j * q]) < 1e-8) {
+          C2[i + j * q] = 0.0;
+          weak = true;
+        }
+    if (weak) return logcdf_dispatch(xs, C2, q, miwa_qmax, out);
+  }
   if (q == 2) {
     // .mvn_logcdf2(x[1], x[2], S[1, 2])
     double h1 = xs[0], h2 = xs[1];
