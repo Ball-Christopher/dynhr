@@ -397,7 +397,7 @@ cumulant_moment_derivs_3_4 <- function(dr2, model, params, o2d, obs_idx,
   ## A numerically singular eigenvector basis (repeated exact eigenvalue, see
   ## .tensor_lyap_eigenbasis) switches to the doubling solve with hx' instead.
   eigT <- .tensor_lyap_eigenbasis(t(hx))
-  if (is.null(eigT)) {
+  if (is.null(eigT) || is.complex(eigT$V)) {
     M <- .tensor_lyap_doubling(t(hx), bar_c3, .tensor_lyap_op3)
   } else {
     V   <- eigT$V
@@ -536,7 +536,8 @@ cumulant_moment_derivs_3_4 <- function(dr2, model, params, o2d, obs_idx,
 #'
 #' Mirrors compute_third_cumulant() EXACTLY (B/C/D/E terms, all permutations),
 #' reversing each explicit projection and the .solve_third_cross_cumulant
-#' tensor-Lyapunov (via .solve_third_cross_cumulant_adjoint).
+#' tensor-Lyapunov (via .solve_third_cross_cumulant_adjoint), plus the exact
+#' reverse of the second-chaos term (.third_cumulant_second_chaos_adjoint).
 #'
 #' @param dr        DecisionRules2 at the base point.
 #' @param model,params  as compute_third_cumulant.
@@ -759,6 +760,19 @@ cumulant_moment_derivs_3_4 <- function(dr2, model, params, o2d, obs_idx,
     bar_ghxu[state_idx, ] <- bar_ghxu[state_idx, , drop = FALSE] + bar_hxu
   if (!is.null(bar_ghuu) && !is.null(bar_huu))
     bar_ghuu[state_idx, ] <- bar_ghuu[state_idx, , drop = FALSE] + bar_huu
+
+  ## ---- second-chaos term (products of three second-order terms) ----------
+  ## compute_third_cumulant() adds this term after the B-E terms reversed
+  ## above; its exact reverse mode is a separate tape (rows/columns with a
+  ## zero cotangent are skipped, so an observable subset stays cheap).
+  sc <- .third_cumulant_second_chaos_adjoint(dr, model, params, bar_c3_obs)
+  bar_ghx  <- bar_ghx  + sc$bar_ghx
+  bar_ghu  <- bar_ghu  + sc$bar_ghu
+  bar_ghxx <- bar_ghxx + sc$bar_ghxx
+  if (!is.null(bar_ghxu) && !is.null(sc$bar_ghxu)) bar_ghxu <- bar_ghxu + sc$bar_ghxu
+  if (!is.null(bar_ghuu) && !is.null(sc$bar_ghuu)) bar_ghuu <- bar_ghuu + sc$bar_ghuu
+  bar_Sigma_x <- bar_Sigma_x + sc$bar_Sigma_x
+  bar_Sigma_e <- bar_Sigma_e + sc$bar_Sigma_e
 
   list(bar_ghx = bar_ghx, bar_ghu = bar_ghu,
        bar_ghxx = bar_ghxx, bar_ghxu = bar_ghxu, bar_ghuu = bar_ghuu,

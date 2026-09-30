@@ -354,7 +354,9 @@
     list("0.9.4.20", "cond_forecast",
          "soft conditional forecasts are the exact Gaussian conditional of the shock path (anticipated: joint posterior; unanticipated: new period-by-period variant), include the contemporaneous shock in paths (was omitted), draw coherent model trajectories (were independent per-period perturbations), honour free_shocks and no longer use P0; hard conditions through zero-variance shocks error (dynhr_error_cf_infeasible) instead of silently missing; malformed value / horizon / stderr error (dynhr_error_bad_argument)"),
     list("0.9.4.20", c("likelihood:pskf", "likelihood:tpf"),
-         "PSKF (order 1 and 2) square data (T == n_obs) is oriented by dimnames: a documented n_obs x T square matrix was transposed (wrong loglik); unnamed square is an error. tpf_loglik_sd_preflight() restores the caller's RNG stream (downstream random draws after a preflight change)"))
+         "PSKF (order 1 and 2) square data (T == n_obs) is oriented by dimnames: a documented n_obs x T square matrix was transposed (wrong loglik); unnamed square is an error. tpf_loglik_sd_preflight() restores the caller's RNG stream (downstream random draws after a preflight change)"),
+    list("0.9.4.23", c("likelihood:cumulant", "grad_eqmap"),
+         "compute_third_cumulant adds the omitted order-sigma^6 product-of-three-second-order-terms contribution (exact; grows with shock scale: analytic/MC 0.95 / 0.81 / 0.51 at 1x / 2x / 4x on rbc2shock) and fixes the third cross-cumulant for hx with complex-conjugate roots (imaginary parts were discarded); cumulant / GMM / MoM objectives and gradients with order 3 change"))
   data.frame(
     version     = vapply(rows, `[[`, "", 1L),
     components  = I(lapply(rows, `[[`, 2L)),

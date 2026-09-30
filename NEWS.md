@@ -1,3 +1,25 @@
+# dynhr 0.9.4.23
+
+Hotfix release: 0.9.4.20 plus two third-cumulant fixes. **Cumulant, GMM and
+method-of-moments fits with `cumulant_orders` containing 3, and third
+cumulants / skewness of order-2 models, should be re-run.**
+
+**Third cumulants of pruned order-2 systems (changes results).**
+- `compute_third_cumulant()` omitted the order-sigma^6 contribution of
+  products of three second-order terms. It agreed with simulation at small
+  shock scale and fell short as the scale grew (analytic / Monte Carlo for a
+  capital third cumulant: 0.95, 0.81, 0.51 at 1x, 2x, 4x the test model's
+  shock scale). Now exact (Gauss-Hermite and Monte-Carlo verified), computed
+  with structured Kronecker contractions (sw2007: ~0.1-0.2 s) and an exact
+  reverse-mode gradient.
+- Models whose state transition has complex-conjugate roots got a wrong
+  third cross-cumulant: the eigenbasis route discarded imaginary parts (with
+  only a warning). A two-state oscillatory model was 7-9 Monte-Carlo
+  standard errors off; now within 1.
+- Affected: third cumulants / skewness of order-2 models and every cumulant,
+  GMM and method-of-moments objective and gradient with `cumulant_orders`
+  containing 3.
+
 # dynhr 0.9.4.20
 
 Hotfix release: 0.9.4.15 plus conditional-forecast, PSKF data orientation,

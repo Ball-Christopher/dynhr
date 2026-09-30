@@ -57,6 +57,14 @@ families of contributions (all three permutations included):
     Evaluates to \eqn{(D_j \Sigma_e) Uu_i (D_k \Sigma_e)^T}
     where \eqn{Uu_i = \mathrm{mat}(ghuu_i, n_u, n_u)}.
   }
+  \item{F-term (products of three second-order terms)}{
+    \eqn{\kappa_3(P_i, P_j, P_l)} with \eqn{P} the centred second-order part
+    (the x2 state and the three quadratics). It is order \eqn{\sigma^6}
+    against \eqn{\sigma^4} for the terms above, so it matters as the shock
+    scale grows. Computed exactly from cyclic traces of the Gaussian
+    quadratic forms and tensors of size at most \eqn{n_s^4}
+    (\code{.third_cumulant_second_chaos_core}).
+  }
 }
 }
 \references{

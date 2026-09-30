@@ -202,8 +202,11 @@
   # via eigen-decomposition of hx for efficiency (like the compact Sylvester),
   # or by doubling when the eigenvector matrix is numerically singular (see
   # .tensor_lyap_eigenbasis: a repeated EXACT-zero eigenvalue, e.g. fs2000).
+  ## A COMPLEX eigenbasis (a conjugate pair of state roots) is also routed to
+  ## doubling: the mode products below assign into real matrices, which silently
+  ## discarded the imaginary parts and returned a wrong tensor.
   eb <- .tensor_lyap_eigenbasis(hx)
-  if (is.null(eb))
+  if (is.null(eb) || is.complex(eb$V))
     return(.symmetrize_jk(.tensor_lyap_doubling(hx, 0.5 * rhs,
                                                 .tensor_lyap_op3)))
   V     <- eb$V
@@ -360,6 +363,388 @@
 }
 
 
+## ---------------------------------------------------------------------------
+## Minimal reverse-mode tape used by the third-cumulant second-chaos term.
+##
+## Nodes wrap an array value; every operation returns a plain array when none
+## of its inputs is a node, so the same code is the forward evaluation and the
+## taped evaluation. Contractions go through one pairwise einsum whose reverse
+## is again an einsum; the stationary tensor-Lyapunov sum is one primitive
+## whose reverse is the transposed solve.
+## ---------------------------------------------------------------------------
+
+.ad_new_tape <- function() {
+  tp <- new.env(parent = emptyenv())
+  tp$n <- 0L
+  tp$bw <- list()
+  tp$parents <- list()
+  tp
+}
+
+.ad_val <- function(x) if (inherits(x, "adnode")) x$v else x
+
+.ad_node <- function(tp, v, parents, bw) {
+  n <- tp$n + 1L
+  tp$n <- n
+  tp$parents[[n]] <- parents
+  tp$bw[n] <- list(bw)
+  structure(list(v = v, id = n, tp = tp), class = "adnode")
+}
+
+.ad_leaf <- function(tp, v) .ad_node(tp, v, NA_integer_, NULL)
+
+## args: list of inputs; bw(bar, need) returns a list of cotangents, one per arg.
+.ad_op <- function(args, v, bw) {
+  tp <- NULL
+  for (a in args) if (inherits(a, "adnode")) { tp <- a$tp; break }
+  if (is.null(tp)) return(v)
+  ids <- vapply(args, function(a) if (inherits(a, "adnode")) a$id else NA_integer_, 1L)
+  .ad_node(tp, v, ids, bw)
+}
+
+.ad_backward <- function(out) {
+  tp <- out$tp
+  grads <- vector("list", tp$n)
+  grads[[out$id]] <- array(1, 1L)
+  for (id in seq.int(out$id, 1L)) {
+    g <- grads[[id]]
+    bw <- tp$bw[[id]]
+    if (is.null(g) || is.null(bw)) next
+    pids <- tp$parents[[id]]
+    need <- !is.na(pids)
+    bars <- bw(g, need)
+    for (k in which(need)) {
+      b <- bars[[k]]
+      if (is.null(b)) next
+      pid <- pids[k]
+      grads[[pid]] <- if (is.null(grads[[pid]])) b else grads[[pid]] + b
+    }
+  }
+  grads
+}
+
+.ad_add <- function(a, b)
+  .ad_op(list(a, b), .ad_val(a) + .ad_val(b),
+         function(bar, need) list(bar, bar))
+
+.ad_scale <- function(k, a)
+  .ad_op(list(a), k * .ad_val(a), function(bar, need) list(k * bar))
+
+.ad_perm <- function(a, perm)
+  .ad_op(list(a), aperm(.ad_val(a), perm),
+         function(bar, need) list(aperm(bar, order(perm))))
+
+.ad_reshape <- function(a, dims) {
+  v  <- .ad_val(a)
+  d0 <- dim(v)
+  .ad_op(list(a), array(v, dims), function(bar, need) list(array(bar, d0)))
+}
+
+## Row gather of a matrix (unique row indices).
+.ad_rows <- function(a, idx) {
+  v <- .ad_val(a)
+  d0 <- dim(v)
+  .ad_op(list(a), v[idx, , drop = FALSE], function(bar, need) {
+    z <- matrix(0, d0[1L], d0[2L])
+    z[idx, ] <- bar
+    list(z)
+  })
+}
+
+## Scalar sum(a * w) with a constant weight array w.
+.ad_dot <- function(a, w)
+  .ad_op(list(a), sum(.ad_val(a) * w),
+         function(bar, need) list(bar[1L] * w))
+
+.ein_cache <- new.env(parent = emptyenv())
+
+.ein_parse <- function(spec) {
+  p <- .ein_cache[[spec]]
+  if (is.null(p)) {
+    io <- strsplit(spec, "->", fixed = TRUE)[[1L]]
+    ab <- strsplit(io[1L], ",", fixed = TRUE)[[1L]]
+    p  <- list(la = strsplit(ab[1L], "")[[1L]], lb = strsplit(ab[2L], "")[[1L]],
+               lo = strsplit(io[2L], "")[[1L]])
+    .ein_cache[[spec]] <- p
+  }
+  p
+}
+
+## out[lo] = sum over the labels shared by a[la] and b[lb] of a * b. Labels in
+## exactly one operand must appear in lo; shared labels are always summed.
+.ein_raw <- function(la, a, lb, b, lo) {
+  da <- dim(a); db <- dim(b)
+  contr <- intersect(la, lb)
+  fa <- setdiff(la, contr)
+  fb <- setdiff(lb, contr)
+  ia <- match(fa, la); ic <- match(contr, la)
+  A2 <- matrix(aperm(a, c(ia, ic)), prod(da[ia]), prod(da[ic]))
+  jb <- match(contr, lb); jf <- match(fb, lb)
+  B2 <- matrix(aperm(b, c(jb, jf)), prod(db[jb]), prod(db[jf]))
+  C  <- array(A2 %*% B2, c(da[ia], db[jf]))
+  aperm(C, match(lo, c(fa, fb)))
+}
+
+.ad_ein <- function(spec, a, b) {
+  p  <- .ein_parse(spec)
+  av <- .ad_val(a); bv <- .ad_val(b)
+  v  <- .ein_raw(p$la, av, p$lb, bv, p$lo)
+  .ad_op(list(a, b), v, function(bar, need) {
+    list(if (need[1L]) .ein_raw(p$lo, bar, p$lb, bv, p$la),
+         if (need[2L]) .ein_raw(p$la, av, p$lo, bar, p$lb))
+  })
+}
+
+## Apply A along every mode of X except `skip`.
+.lyap_apply_modes <- function(A, X, skip = 0L) {
+  d <- dim(X)
+  for (m in setdiff(seq_along(d), skip)) {
+    perm <- c(m, setdiff(seq_along(d), m))
+    Y <- A %*% matrix(aperm(X, perm), d[m])
+    X <- aperm(array(Y, d[perm]), order(perm))
+  }
+  X
+}
+
+.lyap_all_modes_sum <- function(hx, S)
+  .tensor_lyap_doubling(hx, S, function(A, X) .lyap_apply_modes(A, X))
+
+## X = sum_{k >= 0} (hx^k on every mode) S, i.e. X = hx-on-all-modes(X) + S.
+## Reverse: M = transposed solve with the cotangent; bar_hx is the sum over
+## modes of the mode-k unfolding of M against the unfolding of X with hx applied
+## to the other modes.
+.ad_lyap <- function(hx, S) {
+  hv <- .ad_val(hx); sv <- .ad_val(S)
+  x  <- .lyap_all_modes_sum(hv, sv)
+  .ad_op(list(hx, S), x, function(bar, need) {
+    M <- .lyap_all_modes_sum(t(hv), bar)
+    bh <- NULL
+    if (need[1L]) {
+      d  <- dim(x)
+      bh <- matrix(0, d[1L], d[1L])
+      for (k in seq_along(d)) {
+        perm <- c(k, setdiff(seq_along(d), k))
+        Xk <- .lyap_apply_modes(hv, x, skip = k)
+        bh <- bh + matrix(aperm(M, perm), d[k]) %*%
+                   t(matrix(aperm(Xk, perm), d[k]))
+      }
+    }
+    list(bh, M)
+  })
+}
+
+## c211 = cum(x2, x1, x1) as an n x n x n array [a, j, k] (symmetric in j, k),
+## from .third_cumulant_rhs + .solve_third_cross_cumulant; the reverse chains
+## the existing adjoints of those two steps.
+.ad_c211 <- function(hx, hxx, hxu, huu, hu, Sx, Se) {
+  hv <- .ad_val(hx); hxxv <- .ad_val(hxx); hxuv <- .ad_val(hxu)
+  huuv <- .ad_val(huu); huv <- .ad_val(hu)
+  sxv <- .ad_val(Sx); sev <- .ad_val(Se)
+  n <- nrow(hv)
+  rhs <- .third_cumulant_rhs(hxxv, sxv, hxu = hxuv, huu = huuv, hu = huv,
+                             hx = hv, Sigma_e = sev)
+  c3 <- .solve_third_cross_cumulant(hv, rhs)
+  .ad_op(list(hx, hxx, hxu, huu, hu, Sx, Se), array(c3, c(n, n, n)),
+         function(bar, need) {
+    a1 <- .solve_third_cross_cumulant_adjoint(hv, c3, matrix(bar, n, n * n))
+    a2 <- .third_cumulant_rhs_adjoint(hxxv, sxv, hxuv, huuv, huv, hv, sev,
+                                      a1$bar_rhs)
+    list(a1$bar_hx + a2$bar_hx, a2$bar_hxx, a2$bar_hxu, a2$bar_huu,
+         a2$bar_hu, a2$bar_Sigma_x, a2$bar_Sigma_e)
+  })
+}
+
+
+#' Third-cumulant contribution of the products of second-chaos terms
+#'
+#' The pruned observable deviation is \eqn{dy = L + P}: \eqn{L = Z x_1 + D e}
+#' Gaussian-linear, \eqn{P_i = Z_i x_2 + Y_i} with \eqn{x_2} the centred
+#' second-order state and \eqn{Y_i = \tfrac12 \omega' B_i \omega - E[\cdot]}
+#' the centred quadratic of the Gaussian vector \eqn{\omega = (x_{1,t-1}, e_t)}.
+#' \eqn{E[L L L]} and \eqn{E[L P P]} vanish (odd degree in the Gaussian
+#' shocks); \code{compute_third_cumulant()} carries \eqn{E[L L P]}. What is left
+#' is the degree-six part \eqn{\kappa_3(P_i, P_j, P_l)}, of order
+#' \eqn{\sigma^6} against \eqn{\sigma^4} for \eqn{E[L L P]}, so its relative
+#' size grows with the shock scale.
+#'
+#' Exact evaluation, using only tensors up to \eqn{n_s^4}. Each \eqn{P} is a
+#' sum of centred Gaussian quadratic forms, and the third cumulant of three
+#' quadratic forms of jointly Gaussian variables is a cyclic trace
+#' \eqn{\mathrm{tr}(A \Sigma B \Sigma C \Sigma)}, so
+#' \deqn{\kappa(Y,Y,Y) = \mathrm{tr}(B_i \Sigma_\omega B_j \Sigma_\omega B_l
+#'   \Sigma_\omega),}
+#' \deqn{\kappa(x_{2,a}, Y_j, Y_l) = \sum c_{211}[a, m, n]
+#'   [B_j \Sigma_\omega B_l]_{xx}[n, m],}
+#' \deqn{\kappa(x_{2,a}, x_{2,b}, Y_l) = \tfrac12 \sum C_{2211}[a,b,m,n]
+#'   \hat G_l[m,n],}
+#' and \eqn{\kappa(x_2, x_2, x_2)} solves the tensor-Lyapunov
+#' \eqn{T = h_x^{\otimes 3} T + D} with a driver assembled from the same
+#' pieces. \eqn{C_{2211} = \mathrm{cum}(x_2, x_2, x_1, x_1)} solves the
+#' \eqn{n_s^4} tensor-Lyapunov with a Gaussian-chaos driver. The x2 state is
+#' never augmented with x1 (x) x1, so no \eqn{(n_s + n_s^2)^3} tensor forms.
+#'
+#' All operations go through the small reverse-mode tape above, so the same
+#' code gives the value (plain arrays) and its exact adjoint (nodes).
+#'
+#' @param ghx,ghu,ghxx,ghxu,ghuu Decision-rule blocks (arrays or tape nodes;
+#'   \code{ghxu} / \code{ghuu} may be NULL, meaning zero).
+#' @param state_idx Indices of the state variables among the endogenous ones.
+#' @param Sx,Se State and shock covariances (arrays or tape nodes).
+#' @param out_rows Endogenous rows the result is computed for.
+#' @return r x r x r array of kappa_3 contributions over \code{out_rows}.
+#' @noRd
+.third_cumulant_second_chaos_core <- function(ghx, ghu, ghxx, ghxu, ghuu,
+                                              state_idx, Sx, Se, out_rows) {
+  E <- .ad_ein
+  n <- length(state_idx)
+  m <- ncol(.ad_val(ghu))
+  N <- n + m
+  E1 <- rbind(diag(n), matrix(0, m, n))          # x-part embedding
+  E2 <- rbind(matrix(0, n, m), diag(m))          # e-part embedding
+  sym2 <- function(H) .ad_scale(0.5, .ad_add(H, .ad_perm(H, c(1L, 3L, 2L))))
+
+  ## Symmetrised quadratic blocks (G, xx), (Xu, e-x), (Uu, ee) and the full
+  ## (N x N) matrix B of  (1/2) omega' B omega  for a row subset.
+  quad_blocks <- function(idx) {
+    k <- length(idx)
+    G <- sym2(.ad_reshape(.ad_rows(ghxx, idx), c(k, n, n)))
+    Xu <- if (is.null(ghxu)) array(0, c(k, m, n)) else
+      .ad_perm(.ad_reshape(.ad_rows(ghxu, idx), c(k, n, m)), c(1L, 3L, 2L))
+    Uu <- if (is.null(ghuu)) array(0, c(k, m, m)) else
+      sym2(.ad_reshape(.ad_rows(ghuu, idx), c(k, m, m)))
+    Bxx <- E("kxq,yq->kxy", E("xp,kpq->kxq", E1, G), E1)
+    Bex <- E("kxp,yp->kxy", E("xu,kup->kxp", E2, Xu), E1)
+    Buu <- E("kxv,yv->kxy", E("xu,kuv->kxv", E2, Uu), E2)
+    B <- .ad_add(.ad_add(Bxx, Buu), .ad_add(Bex, .ad_perm(Bex, c(1L, 3L, 2L))))
+    list(G = G, B = B)
+  }
+
+  hx  <- .ad_rows(ghx, state_idx)
+  hu  <- .ad_rows(ghu, state_idx)
+  st  <- quad_blocks(state_idx)
+  Gs  <- st$G; A <- st$B
+  ou  <- quad_blocks(out_rows)
+  Go  <- ou$G; B <- ou$B
+  Z   <- .ad_rows(ghx, out_rows)
+
+  hxu_s <- if (is.null(ghxu)) matrix(0, n, m * n) else .ad_rows(ghxu, state_idx)
+  huu_s <- if (is.null(ghuu)) matrix(0, n, m * m) else .ad_rows(ghuu, state_idx)
+  c211 <- .ad_c211(hx, .ad_rows(ghxx, state_idx), hxu_s, huu_s, hu, Sx, Se)
+
+  Sw <- .ad_add(E("xq,yq->xy", E("xp,pq->xq", E1, Sx), E1),
+                E("xq,yq->xy", E("xu,uq->xq", E2, Se), E2))
+  R  <- .ad_add(E("xp,mp->xm", E1, hx), E("xu,mu->xm", E2, hu))
+  SR <- E("xz,zm->xm", Sw, R)
+
+  ## ---- C2211 = cum(x2_a, x2_b, x1_m, x1_n) --------------------------------
+  Q1  <- E("bzy,yn->bzn", A, SR)
+  Q2  <- E("xy,byn->bxn", Sw, Q1)
+  T1  <- E("xm,axy->amy", SR, A)
+  Z4a <- E("amy,byn->abmn", T1, Q2)
+  Z4  <- .ad_add(Z4a, .ad_perm(Z4a, c(2L, 1L, 3L, 4L)))
+  uN  <- E("zx,bmx->bmz", E1, E("mp,bpx->bmx", hx, c211))
+  G1  <- E("bmz,azn->abmn", uN, Q1)
+  Gd  <- .ad_add(G1, .ad_perm(G1, c(1L, 2L, 4L, 3L)))
+  Dr  <- .ad_add(Z4, .ad_add(E("bB,aBmn->abmn", hx, Gd),
+                             E("aA,bAmn->abmn", hx, Gd)))
+  C4  <- .ad_lyap(hx, Dr)
+
+  ## ---- x2 third moment ------------------------------------------------------
+  E1t <- .ad_scale(0.5, E("abmn,cmn->abc", C4, Gs))
+  Arow <- E("xp,bxz->bpz", E1, A)
+  NAm <- E("bpw,cqw->bcpq", E("bpz,zw->bpw", Arow, Sw), Arow)
+  E2t <- E("apq,bcqp->abc", c211, NAm)
+  TA  <- E("axz,zy->axy", A, Sw)
+  E3t <- E("abxy,cyx->abc", E("axz,bzy->abxy", TA, TA), TA)
+  hh  <- E("bB,aBc->abc", hx, E("aA,ABc->aBc", hx, E1t))
+  h1  <- E("aA,Abc->abc", hx, E2t)
+  Dt  <- Reduce(.ad_add, list(hh, .ad_perm(hh, c(1L, 3L, 2L)),
+                              .ad_perm(hh, c(3L, 1L, 2L)), h1,
+                              .ad_perm(h1, c(2L, 1L, 3L)),
+                              .ad_perm(h1, c(2L, 3L, 1L)), E3t))
+  Tx  <- .ad_lyap(hx, Dt)
+
+  ## ---- projection onto the requested rows -----------------------------------
+  XXX <- E("lc,ijc->ijl", Z, E("jb,ibc->ijc", Z, E("ia,abc->ibc", Z, Tx)))
+  W   <- E("jb,ibmn->ijmn", Z, E("ia,abmn->ibmn", Z, C4))
+  K1  <- .ad_scale(0.5, E("ijmn,lmn->ijl", W, Go))
+  XXY <- Reduce(.ad_add, list(K1, .ad_perm(K1, c(1L, 3L, 2L)),
+                              .ad_perm(K1, c(3L, 1L, 2L))))
+  Brow <- E("xp,jxz->jpz", E1, B)
+  NB   <- E("jpw,lqw->jlpq", E("jpz,zw->jpw", Brow, Sw), Brow)
+  K2   <- E("ipq,jlqp->ijl", E("ia,apq->ipq", Z, c211), NB)
+  XYY  <- Reduce(.ad_add, list(K2, .ad_perm(K2, c(2L, 1L, 3L)),
+                               .ad_perm(K2, c(2L, 3L, 1L))))
+  TB  <- E("kxz,zy->kxy", B, Sw)
+  YYY <- E("ijxy,lyx->ijl", E("ixz,jzy->ijxy", TB, TB), TB)
+  Reduce(.ad_add, list(XXX, XXY, XYY, YYY))
+}
+
+#' Value of the second-chaos third-cumulant term in the \code{c3_obs} layout
+#'
+#' @return n_endo x n_endo^2 matrix (column \eqn{(j-1) n_{endo} + l}).
+#' @noRd
+.third_cumulant_second_chaos <- function(ghx, ghu, ghxx, ghxu, ghuu, state_idx,
+                                         Sigma_x, Sigma_e) {
+  o <- nrow(ghx)
+  F <- .third_cumulant_second_chaos_core(ghx, ghu, ghxx, ghxu, ghuu, state_idx,
+                                         Sigma_x, Sigma_e, seq_len(o))
+  matrix(aperm(F, c(1L, 3L, 2L)), o, o * o)
+}
+
+#' Cotangents of the second-chaos third-cumulant term
+#'
+#' Exact reverse mode of \code{.third_cumulant_second_chaos()} for a cotangent
+#' \code{bar_c3_obs} on \code{c3_obs}: returns the partial derivatives of
+#' \eqn{\langle \bar{c}_3, F \rangle} with respect to ghx, ghu, ghxx, ghxu,
+#' ghuu, Sigma_x and Sigma_e, each entry an independent input (the caller folds
+#' \code{bar_Sigma_x} through the Lyapunov solve, exactly as for the other
+#' third-cumulant terms). Only the rows/columns with a non-zero cotangent are
+#' evaluated, so observable subsets are cheap.
+#'
+#' @param dr DecisionRules2 (or higher) at the base point.
+#' @param model,params as \code{compute_third_cumulant()}.
+#' @param bar_c3_obs n_endo x n_endo^2 cotangent on \code{c3_obs}.
+#' @return list(bar_ghx, bar_ghu, bar_ghxx, bar_ghxu, bar_ghuu, bar_Sigma_x,
+#'   bar_Sigma_e), NULL where the block is absent.
+#' @noRd
+.third_cumulant_second_chaos_adjoint <- function(dr, model, params,
+                                                 bar_c3_obs) {
+  state_idx <- dr$state_idx
+  o <- nrow(dr$ghx)
+  Sigma_e <- .get_shock_cov(model, dr$exo_names, params)
+  Sigma_x <- .state_covariance(dr$ghx[state_idx, , drop = FALSE],
+                               dr$ghu[state_idx, , drop = FALSE], Sigma_e)
+  blocks <- list(ghx = dr$ghx, ghu = dr$ghu, ghxx = dr$ghxx,
+                 ghxu = dr$ghxu, ghuu = dr$ghuu,
+                 Sigma_x = Sigma_x, Sigma_e = Sigma_e)
+  out <- lapply(blocks, function(b) if (is.null(b)) NULL else 0 * b)
+  names(out) <- paste0("bar_", names(blocks))
+  nzi <- which(bar_c3_obs != 0, arr.ind = TRUE)
+  if (nrow(nzi) == 0L) return(out)
+  jj  <- (nzi[, 2L] - 1L) %/% o + 1L
+  ll  <- (nzi[, 2L] - 1L) %% o + 1L
+  rows <- sort(unique(c(nzi[, 1L], jj, ll)))
+  r <- length(rows)
+  Wt <- array(0, c(r, r, r))
+  Wt[cbind(match(nzi[, 1L], rows), match(jj, rows), match(ll, rows))] <-
+    bar_c3_obs[nzi]
+
+  tp <- .ad_new_tape()
+  leaves <- lapply(blocks, function(b) if (is.null(b)) NULL else .ad_leaf(tp, b))
+  F <- .third_cumulant_second_chaos_core(
+    leaves$ghx, leaves$ghu, leaves$ghxx, leaves$ghxu, leaves$ghuu, state_idx,
+    leaves$Sigma_x, leaves$Sigma_e, rows)
+  g <- .ad_backward(.ad_dot(F, Wt))
+  for (nm in names(blocks)) {
+    if (is.null(leaves[[nm]])) next
+    gi <- g[[leaves[[nm]]$id]]
+    if (!is.null(gi)) out[[paste0("bar_", nm)]] <- matrix(gi, nrow(blocks[[nm]]), ncol(blocks[[nm]]))
+  }
+  out
+}
+
+
 #' Compute the unconditional third cumulant of observables
 #'
 #' Full analytic third cumulant of the pruned order-2 state-space under
@@ -396,6 +781,14 @@
 #'     where \eqn{Eu_i = (1/2)\, ghuu_i (e \otimes e - \Sigma_e)}.
 #'     Evaluates to \eqn{(D_j \Sigma_e) Uu_i (D_k \Sigma_e)^T}
 #'     where \eqn{Uu_i = \mathrm{mat}(ghuu_i, n_u, n_u)}.
+#'   }
+#'   \item{F-term (products of three second-order terms)}{
+#'     \eqn{\kappa_3(P_i, P_j, P_l)} with \eqn{P} the centred second-order part
+#'     (the x2 state and the three quadratics). It is order \eqn{\sigma^6}
+#'     against \eqn{\sigma^4} for the terms above, so it matters as the shock
+#'     scale grows. Computed exactly from cyclic traces of the Gaussian
+#'     quadratic forms and tensors of size at most \eqn{n_s^4}
+#'     (\code{.third_cumulant_second_chaos_core}).
 #'   }
 #' }
 #'
@@ -691,6 +1084,16 @@ compute_third_cumulant <- function(dr, model, params = NULL) {
         c3_obs[i, ] <- c3_obs[i, ] + as.numeric(E2) + as.numeric(E3)
       }
     }
+
+    # --- F-term: products of three second-chaos terms (order sigma^6) ---
+    # The B-E terms above are E[L L P] with L the Gaussian-linear part and P a
+    # second-chaos term. The remaining exact contribution is E[P_i P_j P_k]:
+    # chi-square-type skewness of the quadratic terms and of the x2 state.
+    # It is O(sigma^6) against O(sigma^4) for B-E, so omitting it makes the
+    # analytic third cumulant fall increasingly short of the pruned system's
+    # true one as the shock scale grows.
+    c3_obs <- c3_obs + .third_cumulant_second_chaos(
+      ghx, ghu, ghxx, ghxu, ghuu, state_idx, Sigma_x, Sigma_e)
   }
 
   # ---- Marginal skewness ----
