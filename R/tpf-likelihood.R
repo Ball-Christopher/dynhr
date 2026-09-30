@@ -1246,6 +1246,20 @@ tpf_run_period3 <- function(particles, y_t, dr3, Sigma_e, L_e,
 
   if (verbose) .dynhr_inform(sprintf("  [TPF preflight] evaluating loglik SD (K = %d)...", K))
 
+  ## The K evaluations below call set.seed(k); put the caller's global RNG
+  ## stream back on exit (or remove it if none existed yet) so a subsequent
+  ## sampler or simulation is not silently replayed from seed K.
+  ge  <- globalenv()
+  had <- exists(".Random.seed", envir = ge, inherits = FALSE)
+  old <- if (had) get(".Random.seed", envir = ge, inherits = FALSE) else NULL
+  on.exit({
+    if (had) {
+      assign(".Random.seed", old, envir = ge)
+    } else if (exists(".Random.seed", envir = ge, inherits = FALSE)) {
+      rm(list = ".Random.seed", envir = ge)
+    }
+  }, add = TRUE)
+
   logliks <- vapply(seq_len(K), function(k) {
     ## Vary the RNG stream externally; the closure MUST have seed = NULL for
     ## this to bite (enforced by the exactly-equal check below).
@@ -1318,7 +1332,8 @@ tpf_run_period3 <- function(particles, y_t, dr3, Sigma_e, L_e,
 #'   message; does not affect computation).
 #' @param verbose      Print status and recommendation (default TRUE).
 #' @return A named list with fields \code{sd}, \code{mean}, \code{logliks},
-#'   \code{n_needed}, \code{accept_noise_factor}.
+#'   \code{n_needed}, \code{accept_noise_factor}. The caller's global random
+#'   number stream is restored on exit.
 #' @export
 tpf_loglik_sd_preflight <- function(log_post_fn, theta, K = 30L,
                                      n_particles = NA_integer_,

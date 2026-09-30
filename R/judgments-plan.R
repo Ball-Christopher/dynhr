@@ -67,13 +67,21 @@ plan_tune <- function(var, periods, values, stderr = NULL) {
   ## Accept date literals (character) or integers
   date_literals <- is.character(periods) && !all(grepl("^-?[0-9]+$", periods))
   if (!date_literals) {
-    periods <- as.integer(periods)
-    if (any(!is.finite(periods)))
-      stop(sprintf("plan_tune: var '%s' has non-finite periods.", var),
-           call. = FALSE)
+    ## integer-valued and finite: as.integer() used to truncate 2.5 to
+    ## period 2 silently
+    pn <- suppressWarnings(as.numeric(periods))
+    if (any(!is.finite(pn)) || any(pn != round(pn)))
+      .dynhr_abort(sprintf("plan_tune: var '%s' periods must be finite whole numbers.", var),
+                   class = "dynhr_error_bad_argument")
+    periods <- as.integer(pn)
   }
 
   values <- as.numeric(values)
+  ## a missing value became a missing data point at the tuned period, i.e.
+  ## the tune was silently dropped
+  if (!length(values) || any(!is.finite(values)))
+    .dynhr_abort(sprintf("plan_tune: var '%s' values must be finite numbers.", var),
+                 class = "dynhr_error_bad_argument")
   if (length(values) == 1L && length(periods) > 1L)
     values <- rep(values, length(periods))
   if (length(values) != length(periods))
@@ -119,10 +127,14 @@ plan_tune <- function(var, periods, values, stderr = NULL) {
 #' (period-by-period) produce materially different shock paths even for
 #' identical conditions.  Supply separate plans if you need both.
 #'
-#' \strong{Soft conditions}: when \code{method = "soft"}, the \code{type}
-#' argument is ignored by the underlying \code{.soft_forecast()} engine
-#' (forward-KF unanticipated path).  A warning is issued if
-#' \code{type = "anticipated"} is combined with \code{method = "soft"}.
+#' \strong{Soft conditions}: \code{method = "soft"} treats the values as noisy
+#' pseudo-observations and honours \code{type}. With \code{type =
+#' "anticipated"} the whole shock sequence is drawn jointly given all
+#' conditions (stacked Gaussian posterior); with \code{type =
+#' "unanticipated"} (this function's default) each period's shock is drawn
+#' from its exact conditional law given only that period's conditions and the
+#' realised path so far. Each variant reproduces the corresponding hard
+#' solution as \code{stderr} tends to 0.
 #'
 #' @param var      Name of the observable variable to condition on (character
 #'   scalar).  Must be in \code{obs_names} at forecast time.
@@ -131,12 +143,14 @@ plan_tune <- function(var, periods, values, stderr = NULL) {
 #' @param values   Numeric vector of conditioned values, one per horizon.  A
 #'   scalar is recycled.
 #' @param type     Character; one of \code{"unanticipated"} (default) or
-#'   \code{"anticipated"}.  Ignored when \code{method = "soft"}.
+#'   \code{"anticipated"}.  Selects the corresponding variant of both the hard
+#'   and the soft solver.
 #' @param method   Character; one of \code{"hard"} (default) or
 #'   \code{"soft"}.
 #' @param stderr   Numeric scalar giving the pseudo-observation noise standard
 #'   deviation for soft conditions.  Ignored when \code{method = "hard"}.
-#'   \code{NULL} = use the default in \code{.soft_forecast()}.
+#'   \code{NULL} leaves it \code{NA}, which is treated as a hard-strength
+#'   condition.
 #'
 #' @return A \code{"plan_condition_entry"} object for use in
 #'   \code{\link{dynhr_plan}()}.
@@ -153,15 +167,6 @@ plan_condition <- function(var, horizons, values,
 
   type   <- match.arg(type)
   method <- match.arg(method)
-
-  ## Warn when type = "anticipated" is combined with method = "soft"
-  ## (type is ignored by .soft_forecast; L5 landmine)
-  if (method == "soft" && type == "anticipated")
-    .dynhr_warn(
-      "plan_condition: type = \"anticipated\" is ignored when method = \"soft\". ",
-      "The soft-conditioning engine (.soft_forecast) always uses a forward-KF ",
-      "unanticipated path regardless of type.",
-      call. = FALSE)
 
   horizons <- as.integer(horizons)
   if (length(horizons) == 0L)
@@ -395,20 +400,18 @@ dynhr_plan <- function(...) {
     }
   }
 
-  ## Mixed anticipated/unanticipated hard conditions (L3 landmine)
+  ## Mixed anticipated/unanticipated conditions: the type selects the solver
+  ## for hard and soft conditions alike, so one plan cannot carry both.
   if (length(conditions) >= 2L) {
-    hard_conds <- Filter(function(e) e$method == "hard", conditions)
-    if (length(hard_conds) >= 2L) {
-      types <- vapply(hard_conds, function(e) e$type, character(1L))
-      if (length(unique(types)) > 1L)
-        stop(
-          "dynhr_plan: cannot mix anticipated and unanticipated hard conditions in one plan. ",
-          "The Waggoner-Zha anticipated path (stacked QR, R/conditional-forecast.R:675-698) ",
-          "and the unanticipated path (period-by-period, R/conditional-forecast.R:699-703) ",
-          "produce materially different shock paths even for identical conditions. ",
-          "Supply separate plans.",
-          call. = FALSE)
-    }
+    types <- vapply(conditions, function(e) e$type, character(1L))
+    if (length(unique(types)) > 1L)
+      stop(
+        "dynhr_plan: cannot mix anticipated and unanticipated conditions in one plan. ",
+        "The anticipated solution (stacked over the whole horizon) and the ",
+        "unanticipated one (period-by-period) produce materially different shock ",
+        "paths even for identical conditions. ",
+        "Supply separate plans.",
+        call. = FALSE)
   }
 
   plan <- list(tunes = tunes, conditions = conditions, shock_scales = shock_scales)

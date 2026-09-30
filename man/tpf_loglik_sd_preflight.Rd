@@ -27,7 +27,8 @@ message; does not affect computation).}
 }
 \value{
 A named list with fields \code{sd}, \code{mean}, \code{logliks},
-  \code{n_needed}, \code{accept_noise_factor}.
+  \code{n_needed}, \code{accept_noise_factor}. The caller's global random
+  number stream is restored on exit.
 }
 \description{
 Evaluates the TPF log-likelihood K times with different RNG seeds at

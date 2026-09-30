@@ -24,14 +24,16 @@ the forecast origin).}
 scalar is recycled.}
 
 \item{type}{Character; one of \code{"unanticipated"} (default) or
-\code{"anticipated"}.  Ignored when \code{method = "soft"}.}
+\code{"anticipated"}.  Selects the corresponding variant of both the hard
+and the soft solver.}
 
 \item{method}{Character; one of \code{"hard"} (default) or
 \code{"soft"}.}
 
 \item{stderr}{Numeric scalar giving the pseudo-observation noise standard
 deviation for soft conditions.  Ignored when \code{method = "hard"}.
-\code{NULL} = use the default in \code{.soft_forecast()}.}
+\code{NULL} leaves it \code{NA}, which is treated as a hard-strength
+condition.}
 }
 \value{
 A \code{"plan_condition_entry"} object for use in
@@ -55,10 +57,14 @@ Waggoner-Zha anticipated path (stacked QR) and the unanticipated path
 (period-by-period) produce materially different shock paths even for
 identical conditions.  Supply separate plans if you need both.
 
-\strong{Soft conditions}: when \code{method = "soft"}, the \code{type}
-argument is ignored by the underlying \code{.soft_forecast()} engine
-(forward-KF unanticipated path).  A warning is issued if
-\code{type = "anticipated"} is combined with \code{method = "soft"}.
+\strong{Soft conditions}: \code{method = "soft"} treats the values as noisy
+pseudo-observations and honours \code{type}. With \code{type =
+"anticipated"} the whole shock sequence is drawn jointly given all
+conditions (stacked Gaussian posterior); with \code{type =
+"unanticipated"} (this function's default) each period's shock is drawn
+from its exact conditional law given only that period's conditions and the
+realised path so far. Each variant reproduces the corresponding hard
+solution as \code{stderr} tends to 0.
 }
 \seealso{
 \code{\link{dynhr_plan}}, \code{\link{plan_tune}},

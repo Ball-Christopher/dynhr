@@ -1,3 +1,49 @@
+# dynhr 0.9.4.20
+
+Hotfix release: 0.9.4.15 plus conditional-forecast, PSKF data orientation,
+TPF preflight RNG and tune-validation fixes. **Conditional forecasts made with
+`method = "soft"`, or with hard conditions reachable only through
+zero-variance shocks, should be re-run.**
+
+**Conditional forecasts (changes results).**
+- `method = "soft"` takes the exact Gaussian conditional of the shock path:
+  `type = "anticipated"` is the joint posterior of the stacked shock path,
+  `type = "unanticipated"` (new) draws each period's shock from its exact
+  conditional given only that period's conditions and the realised path, the
+  soft counterpart of the hard unanticipated solver. Both start from the
+  known terminal state, as the hard solvers do (the old filter's P0 no longer
+  enters), generate paths through the model transition including the
+  contemporaneous shock term (the old soft point path omitted `D e_h` and
+  missed the conditioned observable, e.g. -0.017 against a target of 0.06),
+  return draws that are model-consistent trajectories (the old draws
+  perturbed each period independently), and honour `free_shocks`. As the
+  condition standard errors go to 0 each reduces to its hard counterpart.
+- Hard conditions reachable only through zero-variance shocks are an error
+  (`dynhr_error_cf_infeasible`) instead of a silent miss (feasibility is
+  checked on the covariance-whitened system).
+- Malformed conditions are errors (`dynhr_error_bad_argument`): `value` must
+  be finite, `horizon` a finite integer in range, `stderr` NA or finite >= 0
+  (NA and 0 mean hard). `value = NA` used to drop the condition silently and
+  `stderr = -1` to make it hard.
+- `type` is now meaningful for soft conditions: results report the type
+  used, `plan_condition()` no longer warns about it, and `dynhr_plan()`
+  refuses mixed anticipated / unanticipated soft entries (as it did for hard).
+
+- `make_log_posterior_pskf()` / `make_log_posterior_pskf_order2()` orient a
+  SQUARE observation matrix (T equal to the number of observables) by its
+  dimnames; a documented `n_obs x T` square input used to be transposed and
+  given the wrong likelihood. An unnamed square matrix is now an error rather
+  than a guess. Non-square input is unchanged.
+- `tpf_loglik_sd_preflight()` restores the caller's global RNG stream (it
+  called `set.seed(k)` K times and left the stream at seed K, silently
+  changing any later simulation or sampler run).
+
+- `filter_tune()` and `plan_tune()` reject non-finite `values` and
+  non-integer `periods` (class `dynhr_error_bad_argument`). A missing value
+  used to become a missing data point at the tuned period, so the tune
+  silently vanished, and a fractional period was truncated (3.7 -> 3), the
+  in-sample counterpart of the conditional-forecast validation in 0.9.4.20.
+
 # dynhr 0.9.4.15
 
 Hotfix release: 0.9.4.8 plus two silent-wrong-target fixes.

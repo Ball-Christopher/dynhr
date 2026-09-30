@@ -350,7 +350,11 @@
     list("0.9.4.15", c("likelihood:cumulant", "grad_eqmap"),
          "cumulant third / fourth model cumulants (compute_third_cumulant, compute_fourth_cumulant, .fourth_cumulant_closed_form) and the cumulant adjoint gradient used diag(stderr^2) for Sigma_e, dropping shock correlations: cumulant / GMM / method-of-moments results change for models with corr entries (MC z up to 50 -> < 2); the auto (adjoint_solution) cumulant gradient was ~3% off FD for them; diagonal-Sigma_e models bit-identical"),
     list("0.9.4.15", c("likelihood:whittle", "likelihood:cumulant", "likelihood:pruned", "likelihood:pskf", "likelihood:tpf"),
-         "shock_scale (heteroskedastic_shocks) with whittle / cumulant / pruned / pskf, and me_extra (filter_tunes) with those or tpf, is a dynhr_error_inapplicable_argument: those likelihoods never implemented them and silently evaluated the homoskedastic / tune-free posterior (also when a runner applied a .mod block automatically)"))
+         "shock_scale (heteroskedastic_shocks) with whittle / cumulant / pruned / pskf, and me_extra (filter_tunes) with those or tpf, is a dynhr_error_inapplicable_argument: those likelihoods never implemented them and silently evaluated the homoskedastic / tune-free posterior (also when a runner applied a .mod block automatically)"),
+    list("0.9.4.20", "cond_forecast",
+         "soft conditional forecasts are the exact Gaussian conditional of the shock path (anticipated: joint posterior; unanticipated: new period-by-period variant), include the contemporaneous shock in paths (was omitted), draw coherent model trajectories (were independent per-period perturbations), honour free_shocks and no longer use P0; hard conditions through zero-variance shocks error (dynhr_error_cf_infeasible) instead of silently missing; malformed value / horizon / stderr error (dynhr_error_bad_argument)"),
+    list("0.9.4.20", c("likelihood:pskf", "likelihood:tpf"),
+         "PSKF (order 1 and 2) square data (T == n_obs) is oriented by dimnames: a documented n_obs x T square matrix was transposed (wrong loglik); unnamed square is an error. tpf_loglik_sd_preflight() restores the caller's RNG stream (downstream random draws after a preflight change)"))
   data.frame(
     version     = vapply(rows, `[[`, "", 1L),
     components  = I(lapply(rows, `[[`, 2L)),

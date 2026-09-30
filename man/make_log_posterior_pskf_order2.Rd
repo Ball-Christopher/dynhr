@@ -22,7 +22,11 @@ make_log_posterior_pskf_order2(
 \arguments{
 \item{model}{dynhr_mod (from \code{parse_mod}).}
 
-\item{data}{Observation matrix (T x n_obs or n_obs x T).}
+\item{data}{Observation matrix (T x n_obs or n_obs x T). A square
+matrix (T equal to the number of observables) is oriented by its
+dimnames: column names equal to \code{obs_vars} mean T x n_obs, row
+names equal to \code{obs_vars} mean n_obs x T; an unnamed square matrix
+is an error.}
 
 \item{prior_spec}{Prior specification (from \code{extract_prior_spec}).}
 

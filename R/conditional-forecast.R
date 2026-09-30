@@ -135,6 +135,23 @@
 
 
 ## ---------------------------------------------------------------------------
+## Internal: refuse a hard condition the solved shocks do not actually meet.
+## The minimum-norm solve truncates tiny singular values, so a condition that
+## is reachable only through a numerically negligible shock would otherwise be
+## silently missed. `achieved` and `target` are the delivered and requested
+## (mean-adjusted) condition values.
+## ---------------------------------------------------------------------------
+.cf_check_exact <- function(achieved, target, label, where = "") {
+  miss <- max(abs(achieved - target))
+  if (!is.finite(miss) || miss > 1e-8 * (1 + max(abs(target))))
+    .dynhr_abort(sprintf(
+      "%s%s: the hard conditions cannot be met exactly by the free shocks under the shock covariance (largest miss %.3g) -- the restriction is infeasible.",
+      label, where, miss), class = "dynhr_error_cf_infeasible")
+  invisible(TRUE)
+}
+
+
+## ---------------------------------------------------------------------------
 ## Internal: hard anticipated conditioning (Waggoner-Zha 1999)
 ##
 ## Minimum-variance (most likely) shock path under the free-shock covariance
@@ -166,18 +183,11 @@
   ## Restrict to free shocks
   A_c <- A_full[cond_rows, free_cols, drop = FALSE]
 
-  ## Check row rank
   n_cond <- length(cond_rows)
   if (n_cond > length(free_cols)) {
-    stop(sprintf(
+    .dynhr_abort(sprintf(
       "conditional_forecast: %d conditions but only %d free shock-periods -- system is over-determined.",
-      n_cond, length(free_cols)), call. = FALSE)
-  }
-  rk <- qr(A_c)$rank
-  if (rk < n_cond) {
-    stop(sprintf(
-      "conditional_forecast: A_cond has rank %d < %d conditions -- the restriction is infeasible with the chosen free_shocks.",
-      rk, n_cond), call. = FALSE)
+      n_cond, length(free_cols)), class = "dynhr_error_cf_infeasible")
   }
 
   ## Q-weighted minimum-variance solution (Waggoner-Zha): with stacked
@@ -189,6 +199,16 @@
   n_free <- length(free_cols)
   W   <- if (!is.null(W_free)) W_free else diag(n_free)
   A_w <- A_c %*% W
+
+  ## Feasibility is a property of the WHITENED system: a shock with zero
+  ## variance cannot move, so a condition reachable only through it is
+  ## infeasible even though the raw response matrix has full row rank.
+  rk <- qr(A_w)$rank
+  if (rk < n_cond) {
+    .dynhr_abort(sprintf(
+      "conditional_forecast: the whitened condition system has rank %d < %d conditions -- the restriction is infeasible with the chosen free_shocks and shock covariance (a condition reachable only through zero-variance shocks cannot be met).",
+      rk, n_cond), class = "dynhr_error_cf_infeasible")
+  }
 
   ## eta_star = A_w' (A_w A_w')^{-1} b_cond; eps_star = W eta_star
   AtA  <- tcrossprod(A_w)          ## n_cond x n_cond
@@ -204,6 +224,7 @@
   AtA_inv <- .safe_inv(AtA, warn_label = "conditional_forecast: condition system")
 
   eps_free_star <- W %*% (t(A_w) %*% (AtA_inv %*% b_cond))   ## n_free x 1
+  .cf_check_exact(as.numeric(A_c %*% eps_free_star), b_cond, "conditional_forecast")
 
   eps_star <- numeric(ncol(A_full))
   eps_star[free_cols] <- eps_free_star
@@ -314,20 +335,23 @@
       n_c <- nrow(D_c)
       n_f <- length(free_shk_idx)
 
-      rk <- qr(D_c)$rank
-      if (rk < n_c)
-        stop(sprintf(
-          "conditional_forecast (unanticipated): at horizon %d, rank(%d) < %d conditions -- infeasible with chosen free_shocks.",
-          h, rk, n_c), call. = FALSE)
-
+      ## Whitened feasibility (see .hard_anticipated): zero-variance free
+      ## shocks cannot deliver a condition.
       D_w <- D_c %*% L_free
+      rk <- qr(D_w)$rank
+      if (rk < n_c)
+        .dynhr_abort(sprintf(
+          "conditional_forecast (unanticipated): at horizon %d, the whitened system has rank %d < %d conditions -- infeasible with the chosen free_shocks and shock covariance.",
+          h, rk, n_c), class = "dynhr_error_cf_infeasible")
       DDt <- tcrossprod(D_w)
       DDt <- (DDt + t(DDt)) * 0.5
-      ## See the note at the condition-system solve above: DDt loses rank when
-      ## a conditioning shock is switched off (zero variance) or the
-      ## conditions outnumber the free shocks. Minimum-norm, not a ridge.
+      ## DDt loses rank only when the conditions outnumber the free shocks
+      ## (refused above); the solve is minimum-norm, not a ridge.
       DDt_inv <- .safe_inv(DDt, warn_label = "conditional_forecast: shock system")
       eps_free <- as.numeric(L_free %*% (t(D_w) %*% (DDt_inv %*% b_h)))
+      .cf_check_exact(as.numeric(D_c %*% eps_free), b_h,
+                      "conditional_forecast (unanticipated)",
+                      sprintf(" at horizon %d", h))
       eps_h[free_shk_idx] <- eps_free
     }
 
@@ -400,184 +424,142 @@
 
 
 ## ---------------------------------------------------------------------------
-## Internal: soft conditioning (forward KF with pseudo-observations)
+## Internal: soft conditioning (exact Gaussian conditional laws)
 ##
-## Treats conditions as noisy observations of the forecast-period observables.
-## Runs kalman_smoother over the forecast horizon with:
-##   - Y_fcst: H x n_obs matrix, NA everywhere except conditioned (var, horizon) pairs
-##   - me_extra: n_obs x H extra measurement-error variances (stderr^2 at
-##     conditioned pairs, 0 elsewhere)
+## Each condition is a noisy pseudo-observation of a forecast-period
+## observable,
+##   value_k = y_{h_k, i_k} + u_k,   u_k ~ N(0, stderr_k^2)   (0 for hard rows).
+## s0 is taken as known, exactly as in the hard solvers. Only the FREE shocks
+## move; the others are fixed at zero, and the free shocks have the law
+## N(0, S) with S the Schur complement given the non-free shocks at zero
+## (.cf_free_shock_law()), eps_free = L eta, eta ~ N(0, I).
+## Paths are always generated THROUGH the model transition from s0 with the
+## shocks in hand, so the contemporaneous D eps_h term is in every path and
+## every draw is a model-consistent trajectory
+## (y_h = Z s_{h-1} + D eps_h along its own state path).
 ##
-## This is exactly the filter_tunes pattern applied forward.
+## type = "anticipated": all conditions are known at the origin. The stacked
+##   shock vector has Gaussian posterior
+##     eta | conds ~ N(A_w' G^+ b,  I - A_w' G^+ A_w),
+##     A_w = A_c W,  G = A_w A_w' + diag(stderr^2),  b = value - (M s0)_c,
+##   the point path is the posterior mean and each draw is a joint draw of the
+##   whole sequence. stderr -> 0 gives the hard anticipated (Waggoner-Zha)
+##   solution.
 ##
+## type = "unanticipated": period by period, agents do not foresee later
+##   conditions. eps_h is drawn from its exact conditional law given ONLY the
+##   conditions at horizon h and the realised path up to h-1:
+##     eta_h | conds_h ~ N(D_w' G_h^+ b_h,  I - D_w' G_h^+ D_w),
+##     D_w = D_c L,  G_h = D_w D_w' + diag(stderr^2),
+##     b_h = value - Z_c s_{h-1}.
+##   The state then advances with the realised shock. The point path is the
+##   same recursion with the conditional means; draws are sequential exact
+##   conditional draws. stderr -> 0 gives .hard_unanticipated().
+##
+## @param free_shk_idx Indices of the shocks allowed to move
+## @param type "anticipated" or "unanticipated"
 ## @param Q  n_shock x n_shock shock covariance (NULL = identity; correct only
 ##   when every shock has stderr 1, since ghu holds unit-shock responses)
 ## ---------------------------------------------------------------------------
-.soft_forecast <- function(ss, s0, P0, H, cond_df, n_draws, Q = NULL) {
+.soft_forecast <- function(ss, s0, H, cond_df, n_draws, Q = NULL,
+                           free_shk_idx = seq_len(ss$n_shock),
+                           type = "anticipated") {
   n_obs <- ss$n_obs
   n_shk <- ss$n_shock
-  n_s   <- ss$n_state
+  T_mat <- ss$T_mat
+  R_mat <- ss$R_mat
+  Z_mat <- ss$Z_mat
+  D_mat <- ss$D_mat
 
-  ## Build Y_fcst and me_extra
-  Y_fcst   <- matrix(NA_real_, H, n_obs)
-  me_extra <- matrix(0, n_obs, H)
+  free_shk_idx <- sort(free_shk_idx)
+  n_f   <- length(free_shk_idx)
+  L     <- .cf_free_shock_law(Q, free_shk_idx, n_shk)$L
+  se    <- cond_df$stderr
+  se[is.na(se)] <- 0
 
-  for (i in seq_len(nrow(cond_df))) {
-    h   <- cond_df$horizon[i]
-    idx <- cond_df$var_idx[i]
-    Y_fcst[h, idx]   <- cond_df$value[i]
-    se <- cond_df$stderr[i]
-    if (!is.na(se) && se > 0) {
-      me_extra[idx, h] <- se^2
+  ## Advance the model through the transition with a shock matrix
+  ## (n_shock x H), returning the observable paths.
+  path_from_shocks <- function(eps_mat) {
+    paths  <- matrix(0, H, n_obs)
+    s_prev <- s0
+    for (h in seq_len(H)) {
+      paths[h, ] <- as.numeric(Z_mat %*% s_prev) +
+        as.numeric(D_mat %*% eps_mat[, h])
+      s_prev <- as.numeric(T_mat %*% s_prev) +
+        as.numeric(R_mat %*% eps_mat[, h])
     }
-    ## Hard soft conditions: stderr = 0 -> very small variance for numerical stability
-    if (is.na(se) || se == 0) me_extra[idx, h] <- 0
+    colnames(paths) <- ss$obs_names_fcst
+    paths
   }
 
-  ## Run a forward KF over the forecast horizon with supplied initial state.
-  ## We need to replicate the KF forward pass from kalman_smoother but
-  ## starting from s0 / P0 (not from the Lyapunov steady state).
-  T_mat  <- ss$T_mat
-  R_mat  <- ss$R_mat
-  Z_mat  <- ss$Z_mat
-  D_mat  <- ss$D_mat
-  if (is.null(Q)) Q <- diag(n_shk)
+  eps_from_eta <- function(eta_vec, n_periods_eta) {
+    ## eta_vec is period-major over the free shocks
+    eta_mat <- matrix(eta_vec, nrow = n_f, ncol = n_periods_eta)
+    out <- matrix(0, n_shk, n_periods_eta)
+    out[free_shk_idx, ] <- L %*% eta_mat
+    out
+  }
 
-  RQR <- R_mat %*% Q %*% t(R_mat)
-  DQD <- D_mat %*% Q %*% t(D_mat)
-  RQD <- R_mat %*% Q %*% t(D_mat)
-
-  has_me_extra <- any(me_extra != 0)
-
-  s_filt <- matrix(0, H, n_s)
-  P_filt <- array(0, c(n_s, n_s, H))
-  s_pred <- matrix(0, H, n_s)
-  P_pred <- array(0, c(n_s, n_s, H))
-
-  s_tt <- s0
-  P_tt <- P0
-
-  for (h in seq_len(H)) {
-    ## Predict
-    s_tp <- as.numeric(T_mat %*% s_tt)
-    P_tp <- T_mat %*% P_tt %*% t(T_mat) + RQR
-    s_pred[h, ]   <- s_tp
-    P_pred[, , h] <- P_tp
-
-    ## Innovation (against s_{h-1} = s_tt, lagged-state convention)
-    y_pred_h <- as.numeric(Z_mat %*% s_tt)
-    v_h      <- Y_fcst[h, ] - y_pred_h
-
-    obs_ok <- which(!is.na(v_h))
-    n_ok   <- length(obs_ok)
-
-    if (n_ok == 0L) {
-      s_tt <- s_tp
-      P_tt <- P_tp
-    } else {
-      v_ok  <- v_h[obs_ok]
-      Zt    <- Z_mat[obs_ok, , drop = FALSE]
-      DQDt  <- tcrossprod(D_mat[obs_ok, , drop = FALSE] %*% Q,
-                          D_mat[obs_ok, , drop = FALSE])
-      RQDt  <- RQD[, obs_ok, drop = FALSE]
-
-      F_t <- Zt %*% P_tt %*% t(Zt) + DQDt
-      if (has_me_extra) diag(F_t) <- diag(F_t) + me_extra[obs_ok, h]
-      F_t <- (F_t + t(F_t)) * 0.5
-
-      ## Singular F: drop the zero-variance components, do NOT ridge them.
-      ## This used to read
-      ##     F_ch <- tryCatch(chol(F_t + 1e-10 * diag(n_ok)), ...)
-      ##     if (is.null(F_ch)) F_ch <- chol(F_t + 1e-6 * diag(n_ok))
-      ## which carried three problems. The 1e-10 ridge was added on EVERY
-      ## period, so this pass was never an unregularised Kalman filter; both
-      ## ridges were ABSOLUTE while F_t is not O(1) (a unit-root state space
-      ## with `shock_scale` puts it many orders higher); and the fallback was
-      ## UNGUARDED, so when 1e-6 was not enough it threw. Same defect as the
-      ## one fixed in kalman_smoother() -- see test-smoother-singular-F.R.
-      F_ch <- tryCatch(chol(F_t), error = function(e) NULL)
-      if (is.null(F_ch)) {
-        keep <- .smoother_informative_obs(F_t)
-        if (!any(keep)) {
-          ## No component carries information this period: predict-only.
-          s_tt <- s_tp
-          P_tt <- P_tp
-          s_filt[h, ]   <- s_tt
-          P_filt[, , h] <- P_tt
-          next
+  if (type == "anticipated") {
+    stk <- .build_forecast_stack(ss, H)
+    cond_rows <- (cond_df$horizon - 1L) * n_obs + cond_df$var_idx
+    b_cond <- cond_df$value - as.numeric(stk$M %*% s0)[cond_rows]
+    free_cols <- sort(as.integer(outer(free_shk_idx - 1L,
+                                       (0L:(H - 1L)) * n_shk, "+") + 1L))
+    A_w <- stk$A[cond_rows, free_cols, drop = FALSE] %*% kronecker(diag(H), L)
+    G   <- tcrossprod(A_w) + diag(se^2, nrow = length(se))
+    G   <- (G + t(G)) * 0.5
+    G_inv <- if (length(se)) {
+      .safe_inv(G, warn_label = "conditional_forecast: soft condition system")
+    } else G
+    eta_mean <- as.numeric(crossprod(A_w, G_inv %*% b_cond))
+    n_eta    <- length(eta_mean)
+    C_sqrt <- NULL
+    if (n_draws > 0L) {
+      Sigma_c <- diag(n_eta) - crossprod(A_w, G_inv %*% A_w)
+      C_sqrt  <- .cf_sqrt_psd(Sigma_c)
+    }
+    eps_pt <- eps_from_eta(eta_mean, H)
+    draw_eps <- function() eps_from_eta(eta_mean + as.numeric(C_sqrt %*% rnorm(n_eta)), H)
+  } else {
+    ## Sequential recursion; `draw = FALSE` gives the conditional-mean path.
+    run_seq <- function(draw) {
+      eps_mat <- matrix(0, n_shk, H)
+      s_prev  <- s0
+      for (h in seq_len(H)) {
+        k   <- which(cond_df$horizon == h)
+        eta <- if (draw) rnorm(n_f) else numeric(n_f)
+        if (length(k)) {
+          idx <- cond_df$var_idx[k]
+          b_h <- cond_df$value[k] - as.numeric(Z_mat[idx, , drop = FALSE] %*% s_prev)
+          D_w <- D_mat[idx, free_shk_idx, drop = FALSE] %*% L
+          G   <- tcrossprod(D_w) + diag(se[k]^2, nrow = length(k))
+          G   <- (G + t(G)) * 0.5
+          G_inv <- .safe_inv(G, warn_label = "conditional_forecast: soft condition system")
+          eta_mean <- as.numeric(crossprod(D_w, G_inv %*% b_h))
+          eta <- if (draw) {
+            Sigma_c <- diag(n_f) - crossprod(D_w, G_inv %*% D_w)
+            eta_mean + as.numeric(.cf_sqrt_psd(Sigma_c) %*% eta)
+          } else eta_mean
         }
-        obs_ok <- obs_ok[keep]
-        n_ok   <- length(obs_ok)
-        v_ok   <- v_ok[keep]
-        Zt     <- Z_mat[obs_ok, , drop = FALSE]
-        DQDt   <- tcrossprod(D_mat[obs_ok, , drop = FALSE] %*% Q,
-                             D_mat[obs_ok, , drop = FALSE])
-        RQDt   <- RQD[, obs_ok, drop = FALSE]
-        F_t    <- Zt %*% P_tt %*% t(Zt) + DQDt
-        if (has_me_extra) diag(F_t) <- diag(F_t) + me_extra[obs_ok, h]
-        F_t    <- (F_t + t(F_t)) * 0.5
-        F_ch   <- tryCatch(chol(F_t), error = function(e) NULL)
-        if (is.null(F_ch))
-          stop("conditional_forecast: the innovation covariance at horizon ",
-               h, " is not positive definite even after dropping every ",
-               "zero-variance observation component.", call. = FALSE)
+        eps_mat[free_shk_idx, h] <- as.numeric(L %*% eta)
+        s_prev <- as.numeric(T_mat %*% s_prev) +
+          as.numeric(R_mat %*% eps_mat[, h])
       }
-      F_inv <- chol2inv(F_ch)
-
-      K_t  <- (T_mat %*% P_tt %*% t(Zt) + RQDt) %*% F_inv
-      s_tt <- s_tp + as.numeric(K_t %*% v_ok)
-      P_tt <- P_tp - K_t %*% F_t %*% t(K_t)
-      P_tt <- 0.5 * (P_tt + t(P_tt))
+      eps_mat
     }
-
-    s_filt[h, ]   <- s_tt
-    P_filt[, , h] <- P_tt
+    eps_pt   <- run_seq(FALSE)
+    draw_eps <- function() run_seq(TRUE)
   }
 
-  ## Recover paths from filtered states: the filtered state at h gives
-  ## s_{h|conds}, and y_h = Z s_{h-1|conds}.
-  paths_point <- matrix(0, H, n_obs)
-  s_cur <- s0
-  for (h in seq_len(H)) {
-    paths_point[h, ] <- as.numeric(Z_mat %*% s_cur)
-    s_cur <- s_filt[h, ]
-  }
-  colnames(paths_point) <- ss$obs_names_fcst
-
-  ## Shock paths: recover from filtered states
-  R_pinv <- MASS::ginv(R_mat)
-  shock_paths <- matrix(0, H, n_shk)
+  paths_point <- path_from_shocks(eps_pt)
+  shock_paths <- t(eps_pt)
   colnames(shock_paths) <- ss$shock_names
-  s_cur2 <- s0
-  for (h in seq_len(H)) {
-    residual <- s_filt[h, ] - as.numeric(T_mat %*% s_cur2)
-    shock_paths[h, ] <- as.numeric(R_pinv %*% residual)
-    s_cur2 <- s_filt[h, ]
-  }
 
-  ## Draws via simulation smoother (simplified: draw from P_filt conditional)
   draws_out <- NULL
   if (n_draws > 0L) {
-    draws_list <- vector("list", n_draws)
-    for (i in seq_len(n_draws)) {
-      ## Simple: perturb the filtered mean with conditional covariance
-      paths_d <- matrix(0, H, n_obs)
-      s_d <- s0
-      s_d_prev <- s0
-      for (h in seq_len(H)) {
-        ## Draw state perturbation from P_filt[,,h]
-        P_h  <- P_filt[, , h]
-        sv_h <- svd(P_h)
-        sv_h$d <- pmax(sv_h$d, 0)
-        Prt  <- sv_h$u %*% diag(sqrt(sv_h$d), nrow = length(sv_h$d)) %*% t(sv_h$u)
-        s_draw_h <- s_filt[h, ] + as.numeric(Prt %*% rnorm(n_s))
-        paths_d[h, ] <- as.numeric(Z_mat %*% s_d_prev)
-        s_d_prev <- s_draw_h
-      }
-      colnames(paths_d) <- ss$obs_names_fcst
-      draws_list[[i]] <- paths_d
-    }
-    draws_out <- draws_list
+    draws_out <- vector("list", n_draws)
+    for (i in seq_len(n_draws)) draws_out[[i]] <- path_from_shocks(draw_eps())
   }
 
   list(paths_point = paths_point, shock_paths = shock_paths, draws = draws_out)
@@ -1065,10 +1047,11 @@
 #'   \describe{
 #'     \item{\code{var}}{Character: observable name.}
 #'     \item{\code{horizon}}{Integer: forecast horizon (1 = one period ahead).}
-#'     \item{\code{value}}{Numeric: target value (in model deviation units).}
-#'     \item{\code{stderr}}{Numeric (optional, \code{NA} or absent for hard
-#'       conditions): standard deviation of the conditioning noise for soft
-#'       conditions.}
+#'     \item{\code{value}}{Finite numeric: target value (in model deviation
+#'       units). \code{NA} is refused, not dropped.}
+#'     \item{\code{stderr}}{Numeric (optional): standard deviation of the
+#'       conditioning noise for soft conditions. \code{NA}, absent or \code{0}
+#'       means a hard condition; a negative or non-finite value is an error.}
 #'   }
 #'   Pass \code{NULL} or a zero-row data frame for an unconditional forecast.
 #' @param horizon     Integer: total forecast horizon H.
@@ -1080,7 +1063,16 @@
 #'   period-by-period.
 #' @param method      \code{"hard"} (default): conditions are imposed exactly
 #'   (zero measurement error). \code{"soft"}: conditions are treated as noisy
-#'   pseudo-observations with measurement error \code{stderr^2}.
+#'   pseudo-observations with measurement error \code{stderr^2}; the point
+#'   path uses the conditional-mean shocks and each draw's shocks are pushed
+#'   through the model transition from the terminal state (so every draw is a
+#'   model-consistent trajectory). With \code{type =
+#'   "anticipated"} the whole shock sequence is drawn jointly given all soft
+#'   conditions; with \code{type = "unanticipated"} each period's shock is
+#'   drawn from its exact conditional law given only that period's conditions
+#'   and the realised path so far. As \code{stderr} tends to 0 each variant
+#'   reproduces the corresponding hard solution. \code{free_shocks} is honoured:
+#'   the other shocks are held at zero.
 #' @param n_draws     Integer: number of draws from the conditional shock
 #'   distribution (default 0 = point forecast only).
 #' @param free_shocks Character vector (or \code{NULL}): names of shocks allowed
@@ -1115,7 +1107,7 @@
 #'       or \code{NULL} if \code{n_draws = 0}.}
 #'     \item{\code{conditions}}{The \code{conditions} data frame (copy).}
 #'     \item{\code{horizon}}{H.}
-#'     \item{\code{type}, \code{method}}{As supplied.}
+#'     \item{\code{type}, \code{method}}{As used.}
 #'     \item{\code{obs_names}, \code{shock_names}}{Character vectors.}
 #'   }
 #'
@@ -1286,10 +1278,29 @@ conditional_forecast <- function(model, dr, data, conditions = NULL,
     stop(sprintf("conditional_forecast: condition variable(s) not in obs_names: %s.",
                  paste(bad_var, collapse = ", ")), call. = FALSE)
 
-  bad_h <- which(conditions$horizon < 1L | conditions$horizon > H)
+  cond_horizon <- conditions$horizon
+  if (!is.numeric(cond_horizon) || any(!is.finite(cond_horizon)) ||
+      any(cond_horizon != round(cond_horizon)))
+    .dynhr_abort("conditional_forecast: condition horizons must be finite integer-valued numbers (no NA, no fractions).",
+                 class = "dynhr_error_bad_argument")
+  bad_h <- which(cond_horizon < 1L | cond_horizon > H)
   if (length(bad_h))
-    stop(sprintf("conditional_forecast: condition horizon(s) out of range [1, %d]: %s.",
-                 H, paste(conditions$horizon[bad_h], collapse = ", ")), call. = FALSE)
+    .dynhr_abort(sprintf("conditional_forecast: condition horizon(s) out of range [1, %d]: %s.",
+                 H, paste(cond_horizon[bad_h], collapse = ", ")),
+                 class = "dynhr_error_bad_argument")
+
+  if (!is.numeric(conditions$value) || any(!is.finite(conditions$value)))
+    .dynhr_abort("conditional_forecast: condition values must be finite numbers (an NA value would silently drop the condition; remove the row instead).",
+                 class = "dynhr_error_bad_argument")
+  if ("stderr" %in% names(conditions)) {
+    se_in <- conditions$stderr
+    if (!is.numeric(se_in) && !all(is.na(se_in)))
+      .dynhr_abort("conditional_forecast: condition stderr must be numeric (NA or 0 = hard, finite >= 0 = soft noise).",
+                   class = "dynhr_error_bad_argument")
+    if (any(!is.na(se_in) & (!is.finite(se_in) | se_in < 0)))
+      .dynhr_abort("conditional_forecast: condition stderr must be NA (hard), 0 (hard) or a finite non-negative number.",
+                   class = "dynhr_error_bad_argument")
+  }
 
   ## Add var_idx and normalise stderr
   cond_df <- conditions
@@ -1311,9 +1322,10 @@ conditional_forecast <- function(model, dr, data, conditions = NULL,
 
   ## ---- Dispatch ----
   if (method == "soft") {
-    ## Soft: use forward KF with pseudo-observations
-    ## (type distinction is implicit: unanticipated path embedded in KF)
-    res_inner <- .soft_forecast(ss_raw, s0, P0, H, cond_df, n_draws, Q = Q)
+    ## Soft: exact Gaussian conditional laws (joint posterior of the stacked
+    ## shock path for "anticipated", period-by-period for "unanticipated").
+    res_inner <- .soft_forecast(ss_raw, s0, H, cond_df, n_draws, Q = Q,
+                                free_shk_idx = free_shk_idx, type = type)
 
   } else {
     ## Hard conditioning

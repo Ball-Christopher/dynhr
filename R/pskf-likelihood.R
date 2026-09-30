@@ -1560,6 +1560,42 @@ dim_red4_r <- function(Gamma, nu, Delta, Sigma, cut_tol = 0.01, max_q = 5L,
 
 
 ## ---------------------------------------------------------------------------
+## .pskf_orient_data: resolve the T x n_obs / n_obs x T orientation
+## ---------------------------------------------------------------------------
+#' Orient an observation matrix as n_obs x T
+#'
+#' Accepts either \code{T x n_obs} (columns = observables) or
+#' \code{n_obs x T}. A non-square matrix is oriented by its shape (a matrix
+#' whose column count equals \code{length(obs_vars)} is transposed). A square
+#' matrix is ambiguous by shape, so it is oriented by its dimnames: column
+#' names equal to \code{obs_vars} mean \code{T x n_obs}, row names equal to
+#' \code{obs_vars} mean \code{n_obs x T}. A square matrix that cannot be
+#' oriented from its names (unnamed, or named both ways) is an error rather
+#' than a guess.
+#'
+#' @param data     Numeric matrix (or data frame).
+#' @param obs_vars Character vector of observed variable names.
+#' @param fn       Calling function name, for the error message.
+#' @return Numeric matrix, n_obs x T.
+#' @noRd
+.pskf_orient_data <- function(data, obs_vars, fn) {
+  n_obs <- length(obs_vars)
+  if (nrow(data) == ncol(data) && ncol(data) == n_obs) {
+    col_ok <- !is.null(colnames(data)) && identical(colnames(data), obs_vars)
+    row_ok <- !is.null(rownames(data)) && identical(rownames(data), obs_vars)
+    if (col_ok && !row_ok) return(t(data))
+    if (row_ok && !col_ok) return(as.matrix(data))
+    .dynhr_abort(sprintf(
+      paste0("%s: `data` is square (%d x %d), so its orientation cannot be ",
+             "inferred from its shape. Give it column names equal to ",
+             "`obs_vars` (T x n_obs) or row names equal to `obs_vars` ",
+             "(n_obs x T), but not both."), fn, n_obs, n_obs),
+      call. = FALSE)
+  }
+  if (ncol(data) == n_obs) t(data) else data
+}
+
+## ---------------------------------------------------------------------------
 ## make_log_posterior_pskf: factory function (mirrors make_log_posterior_tpf)
 ## ---------------------------------------------------------------------------
 #' Create a PSKF log-posterior evaluator
@@ -1606,12 +1642,8 @@ make_log_posterior_pskf <- function(model, data, prior_spec, obs_vars,
   ## per-draw tryCatch would turn a bad value into -Inf at every theta).
   me_variance <- .kf_me_variance(me_variance, obs_vars,
                                  "make_log_posterior_pskf")
-  ## Validate data orientation: need T x n_obs
-  if (ncol(data) == length(obs_vars)) {
-    Y <- t(data)   # -> n_obs x T
-  } else {
-    Y <- data       # assume already n_obs x T
-  }
+  ## Data orientation: either T x n_obs or n_obs x T -> Y is n_obs x T
+  Y <- .pskf_orient_data(data, obs_vars, "make_log_posterior_pskf")
 
   if (is.null(compiled$lead_lag_incidence) &&
       !is.null(compiled$model$lead_lag_incidence))
@@ -1836,7 +1868,11 @@ make_log_posterior_pskf <- function(model, data, prior_spec, obs_vars,
 #' to the Gaussian pruned-order-2 filter \code{\link{pruned_ss_loglik}}.
 #'
 #' @param model       dynhr_mod (from \code{parse_mod}).
-#' @param data        Observation matrix (T x n_obs or n_obs x T).
+#' @param data        Observation matrix (T x n_obs or n_obs x T). A square
+#'   matrix (T equal to the number of observables) is oriented by its
+#'   dimnames: column names equal to \code{obs_vars} mean T x n_obs, row
+#'   names equal to \code{obs_vars} mean n_obs x T; an unnamed square matrix
+#'   is an error.
 #' @param prior_spec  Prior specification (from \code{extract_prior_spec}).
 #' @param obs_vars    Character vector of observed variable names.
 #' @param compiled    dynhr_compiled (from \code{compile_model}, order >= 2).
@@ -1873,12 +1909,8 @@ make_log_posterior_pskf_order2 <- function(model, data, prior_spec, obs_vars,
   cdf   <- .pskf_cdf_settings(pskf_cdf)
   me_variance <- .kf_me_variance(me_variance, obs_vars,
                                  "make_log_posterior_pskf_order2")
-  ## Validate data orientation: need n_obs x T
-  if (ncol(data) == length(obs_vars)) {
-    Y <- t(data)   # -> n_obs x T
-  } else {
-    Y <- data       # assume already n_obs x T
-  }
+  ## Data orientation: either T x n_obs or n_obs x T -> Y is n_obs x T
+  Y <- .pskf_orient_data(data, obs_vars, "make_log_posterior_pskf_order2")
 
   if (is.null(compiled$lead_lag_incidence) &&
       !is.null(compiled$model$lead_lag_incidence))

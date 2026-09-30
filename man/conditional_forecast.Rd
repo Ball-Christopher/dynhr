@@ -41,10 +41,11 @@ only because every filtering entry point now is.}
 \describe{
   \item{\code{var}}{Character: observable name.}
   \item{\code{horizon}}{Integer: forecast horizon (1 = one period ahead).}
-  \item{\code{value}}{Numeric: target value (in model deviation units).}
-  \item{\code{stderr}}{Numeric (optional, \code{NA} or absent for hard
-    conditions): standard deviation of the conditioning noise for soft
-    conditions.}
+  \item{\code{value}}{Finite numeric: target value (in model deviation
+    units). \code{NA} is refused, not dropped.}
+  \item{\code{stderr}}{Numeric (optional): standard deviation of the
+    conditioning noise for soft conditions. \code{NA}, absent or \code{0}
+    means a hard condition; a negative or non-finite value is an error.}
 }
 Pass \code{NULL} or a zero-row data frame for an unconditional forecast.}
 
@@ -60,7 +61,16 @@ period-by-period.}
 
 \item{method}{\code{"hard"} (default): conditions are imposed exactly
 (zero measurement error). \code{"soft"}: conditions are treated as noisy
-pseudo-observations with measurement error \code{stderr^2}.}
+pseudo-observations with measurement error \code{stderr^2}; the point
+path uses the conditional-mean shocks and each draw's shocks are pushed
+through the model transition from the terminal state (so every draw is a
+model-consistent trajectory). With \code{type =
+"anticipated"} the whole shock sequence is drawn jointly given all soft
+conditions; with \code{type = "unanticipated"} each period's shock is
+drawn from its exact conditional law given only that period's conditions
+and the realised path so far. As \code{stderr} tends to 0 each variant
+reproduces the corresponding hard solution. \code{free_shocks} is honoured:
+the other shocks are held at zero.}
 
 \item{n_draws}{Integer: number of draws from the conditional shock
 distribution (default 0 = point forecast only).}
@@ -106,7 +116,7 @@ An object of class \code{"dynhr_cfcst"} with:
       or \code{NULL} if \code{n_draws = 0}.}
     \item{\code{conditions}}{The \code{conditions} data frame (copy).}
     \item{\code{horizon}}{H.}
-    \item{\code{type}, \code{method}}{As supplied.}
+    \item{\code{type}, \code{method}}{As used.}
     \item{\code{obs_names}, \code{shock_names}}{Character vectors.}
   }
 }

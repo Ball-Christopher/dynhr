@@ -148,13 +148,22 @@ filter_tune <- function(var, periods, values, stderr = NULL) {
   if (!is.character(var) || length(var) != 1L || nchar(var) == 0L)
     stop("filter_tune: 'var' must be a non-empty character scalar.", call. = FALSE)
 
-  periods <- as.integer(periods)
   if (length(periods) == 0L)
     stop(sprintf("filter_tune: var '%s' has zero periods.", var), call. = FALSE)
-  if (any(!is.finite(periods)))
-    stop(sprintf("filter_tune: var '%s' has non-finite periods.", var), call. = FALSE)
+  ## integer-valued and finite: as.integer() used to truncate 3.7 to period 3
+  ## and turn NA into a period silently dropped downstream
+  if (!is.numeric(periods) || any(!is.finite(periods)) ||
+      any(periods != round(periods)))
+    .dynhr_abort(sprintf("filter_tune: var '%s' periods must be finite whole numbers.", var),
+                 class = "dynhr_error_bad_argument")
+  periods <- as.integer(periods)
 
   values <- as.numeric(values)
+  ## a missing value became a missing data point at the tuned period, i.e.
+  ## the tune was silently dropped
+  if (!length(values) || any(!is.finite(values)))
+    .dynhr_abort(sprintf("filter_tune: var '%s' values must be finite numbers.", var),
+                 class = "dynhr_error_bad_argument")
   if (length(values) == 1L && length(periods) > 1L)
     values <- rep(values, length(periods))
   if (length(values) != length(periods))
