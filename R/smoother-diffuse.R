@@ -112,7 +112,7 @@
       Fi <- if (diffuse) sum(z * Mi) else 0
 
       ## Fi and P_inf are unit-free: tested on their own, as in the filter
-      ## (W77; see R/kalman-filter.R above .HAS_RCPP_KALMAN_UNI).
+      ## (see R/kalman-filter.R above .HAS_RCPP_KALMAN_UNI).
       if (diffuse && Fi > diffuse_tol) {
         K0 <- Mi / Fi
         K1 <- (Ms - K0 * Fs) / Fi

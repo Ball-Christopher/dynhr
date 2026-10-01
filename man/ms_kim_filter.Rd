@@ -81,7 +81,7 @@ state covariance (Kim & Nelson 1999); see \code{.ms_init_P0}.}
   the \emph{Collapse quality} section).  \code{return_state_path} is
   supported under \code{"gpb3"}, but the state path then carries the
   \eqn{h^2} pair-indexed components, which the Kim SMOOTHERS route to
-  their own PAIR-INDEXED backward pass (F4-D): an adjoint per pair
+  their own PAIR-INDEXED backward pass: an adjoint per pair
   collapsed with the \eqn{h^3} smoothed joint
   \eqn{\Pr[s_{t-2}, s_{t-1}, s_t \mid y_{1:T}]}, whose weights come from
   \code{cell_filt}.

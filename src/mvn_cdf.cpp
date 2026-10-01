@@ -4,9 +4,9 @@
 // X ~ N(0, C) (upper bounds only: the PSKF's CSN normalising constants are
 // orthant probabilities). Used by logcdf_ME_r() (R/pskf-likelihood.R, via
 // .mvn_logcdf_sov) for 3 <= q <= miwa_qmax when pskf_cdf = "accurate".
-// Also here (A3, 2026-09-29; at the end of the file): mvn_logcdf2_cpp, Genz's
+// Also here (at the end of the file): mvn_logcdf2_cpp, Genz's
 // bivariate BVND for p >= 1e-3, mvn_logcdf3_cpp, Genz's exact trivariate
-// TVN for p >= 1e-3 (A3b; the q = 3 blocks no longer reach the lattice
+// TVN for p >= 1e-3 (the q = 3 blocks no longer reach the lattice
 // there), and mvn_logcdf_dispatch_cpp, a bit-identical C++ replay of
 // logcdf_ME_r's accurate-mode dispatch.
 //
@@ -21,7 +21,7 @@
 //      solving the saddle-point equations grad psi(x, mu) = 0 (damped
 //      Newton), which makes the SOV integrand nearly constant even in deep
 //      tails (without it: errors up to 4.4 nats with 8000 lattice points
-//      on the W75 development set). mu is a smooth function of (b, C).
+//      on the development set). mu is a smooth function of (b, C).
 //   3. Rank-1 lattice rules (prime N; generating vectors by a CBC
 //      construction for the Korobov alpha = 4 criterion with weights 1/j,
 //      computed once offline), Sidi's sin^2 periodising transform
@@ -39,14 +39,14 @@
 //      e_l and v_l are continuous, so no jump appears when a nearby theta
 //      needs one more level. The variable reordering (step 1) is a discrete
 //      choice: where it switches, the value jumps by the difference of two
-//      accepted rules' errors (each <= ~kRhi tau; measured in the W75
+//      accepted rules' errors (each <= ~kRhi tau; measured in the
 //      tests).
 //
 //   5. A memo of the last kMemo calls keyed by the exact input bits (the
 //      PSKF repeats ~40% of its calls within a period); a hit returns
 //      exactly what recomputing would.
 //
-// Accuracy (W75 tests, independent oracles): |log p error| <
+// Accuracy (tests against independent oracles): |log p error| <
 // max(1e-5, 1e-7 |log p|) on 200 random problems, q = 3..7, log p down to
 // -300 (worst 0.39 of the tolerance). Cost on recorded PSKF calls (-O2):
 // ~0.1 ms at q = 3, ~0.3 ms at q = 4, ~1.4 ms at q = 5, ~3 ms at q = 6,
@@ -65,6 +65,7 @@
 #include <algorithm>
 #include <cstring>
 #include <cfloat>
+#include "mvn_cdf.h"
 
 namespace {
 
@@ -91,7 +92,7 @@ const int kLatZ[kLevels][kMaxDim] = {
 // (R's Mersenne-Twister), hard-coded so the rule is the same everywhere.
 // Unstructured on purpose: Richtmyer shifts frac(s * sqrt(p_k)) share the
 // lattice's error pattern -- their spread under-estimated the error 65x on
-// a W75 test problem (q = 4, 1.5e-5 nat error reported as 2.3e-7).
+// a test problem (q = 4, 1.5e-5 nat error reported as 2.3e-7).
 const double kShift[kShifts][kMaxDim] = {
   {0.84941126219928265, 0.19242514367215335, 0.26801304169930518,
    0.98639770364388824, 0.84860375942662358, 0.78368994500488043,
@@ -115,7 +116,7 @@ const double kShift[kShifts][kMaxDim] = {
 // climbs from there as needed).
 const int kStartLevel[5] = {0, 2, 3, 5, 6};
 // Acceptance band for the error estimate, as a fraction of the tolerance.
-// W75 development set (200 problems, q = 3..7): max |error| / tolerance
+// Development set (200 problems, q = 3..7): max |error| / tolerance
 // 0.46 with (0.1, 0.2).
 const double kRlo = 0.1, kRhi = 0.2;
 
@@ -495,7 +496,7 @@ Rcpp::NumericVector mvn_logcdf_impl(Rcpp::NumericVector b_in,
 // bounds by Genz's (2004, Statistics and Computing 14:251-260) BVND -- the
 // Drezner-Wesolowsky (1990) Gauss-Legendre rule with Genz's |rho| >= 0.925
 // expansion, the algorithm mvtnorm uses for q = 2. Its ABSOLUTE error in p
-// is ~1e-16 (A3, 2026-09-29: max |p - mvtnorm::pmvnorm| 5.6e-17 on 200
+// is ~1e-16 (max |p - mvtnorm::pmvnorm| 5.6e-17 on 200
 // random problems), so log p is accurate to ~1e-16 / p RELATIVE. The value
 // is therefore returned only when p >= kBvnMinP = 1e-3 (log p error
 // <= ~1e-13) and NA otherwise; the R caller (.mvn_logcdf2) then runs its
@@ -639,7 +640,7 @@ double mvn_logcdf2_cpp(double h1, double h2, double rho) {
 //       ~1e-15 in p is <= ~1e-12 in log p there; deeper tails need the
 //       lattice evaluator's log-scale RELATIVE accuracy).
 // Otherwise NA, and the caller runs the lattice evaluator mvn_logcdf_cpp.
-// A3b (2026-09-29): replaces the lattice's ~3.6e-7-per-call error (its
+// Replaces the lattice's ~3.6e-7-per-call error (its
 // max(1e-5, 1e-7 |log p|) tolerance) on the ~600 q = 3 calls of a T = 200
 // Reiter-HANK PSKF likelihood.
 namespace {
@@ -804,10 +805,10 @@ double mvn_logcdf3_cpp(Rcpp::NumericVector b, Rcpp::NumericMatrix C) {
 // whenever that path would leave these evaluators: a non-finite input, a
 // bivariate term below mvn_logcdf2_cpp's p >= 1e-3 range (quadrature), a
 // numerically singular lattice call (Miwa / Mendell-Elston), or a block
-// larger than miwa_qmax (Mendell-Elston). A3 (2026-09-29): the R-level
+// larger than miwa_qmax (Mendell-Elston). The R-level
 // dispatch cost ~30 us per call, ~60 ms of a 200-period Reiter-HANK PSKF
 // likelihood (~2200 calls).
-namespace {
+// logcdf_dispatch is declared in mvn_cdf.h (the C++ PSKF filter calls it).
 
 bool logcdf_dispatch(const std::vector<double>& x, const std::vector<double>& S,
                      int q, double miwa_qmax, double& out) {
@@ -910,8 +911,6 @@ bool logcdf_dispatch(const std::vector<double>& x, const std::vector<double>& S,
   out = res[0];
   return true;
 }
-
-}  // namespace
 
 // [[Rcpp::export(rng = false)]]
 double mvn_logcdf_dispatch_cpp(Rcpp::NumericVector x, Rcpp::NumericMatrix S,

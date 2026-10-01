@@ -40,7 +40,28 @@ Checks (E = error, W = warning):
   \item W: mode finding on a noisy particle likelihood (\code{"tpf"},
     \code{"ppf"}, \code{"copf"}, \code{"global_pf"}) -- when the mode stage
     runs (it is skipped for prior-initialised samplers, see
-    \code{\link{run_estimation}}).
+    \code{\link{run_estimation}}). The spec runner does run it (the
+    optimiser then works on a noisy objective); the flat
+    \code{\link{run_mode_finding}} does not accept these likelihoods.
+  \item E: arguments that would only fail after an expensive stage:
+    \code{mode$method} not a mode-finding optimiser; unknown
+    \code{mode$options} keys; \code{likelihood$extra} / \code{mode$extra}
+    names the log-posterior constructor (and, for \code{mode$extra}, the
+    optimiser) does not take; a whittle \code{freq_band} outside
+    \eqn{[0, \pi]}; a \code{me_variance} vector of the wrong length (or a
+    per-observable vector the likelihood cannot use);
+    \code{pruned_order = 3} on a model compiled below \code{max_order = 2};
+    \code{mode$theta_init} names or bounds the mode stage would refuse;
+    \code{likelihood$dates} not one per sample row; \code{outputs$ramsey}
+    on a model without a planner objective (or a free-instrument system, or
+    \code{ramsey_order = 2} below \code{max_order = 2}); \code{outputs$save}
+    with a \code{dir} that is (or sits under) a file, or a \code{prefix}
+    with a path separator. W: \code{outputs$ramsey} without a discount
+    factor (\code{beta} / \code{betta} or \code{ramsey_discount}), and
+    \code{likelihood$dates} when diagnostics are off (it only labels them).
+  \item E (class \code{dynhr_error_spec_unsupported}): a sampler the spec
+    runner does not run (\code{"smc2"}; call \code{\link{dynhr_smc2}}
+    directly).
   \item E (class \code{dynhr_error_spec_mode_needed}):
     \code{mode$run = "never"} while something uses the mode: no sampler,
     \code{outputs$form = "mode"}, a sampler other than the
@@ -57,6 +78,31 @@ Checks (E = error, W = warning):
     \code{metric = "warmup_dense"} or a checkpoint.
   \item E: \code{checkpoint_dir} with a sampler (or parallel path) that
     cannot stream to it; \code{resume = TRUE} without \code{checkpoint_dir}.
+    (\code{resume = TRUE} on a directory that holds no checkpoint is a
+    property of the machine, not the spec: \code{\link{run_estimation}}
+    refuses it before any stage runs.)
+  \item E: a sampler argument the sampler itself would refuse (or that
+    would run a frozen chain, a collapsed particle cloud or a
+    non-monotone tempering ladder): each sampler has one argument checker,
+    applied here to the arguments the runner would pass it (the typed
+    fields under the sampler function's own names, then
+    \code{sampler$extra}) and listing every problem -- e.g. NUTS
+    \code{max_treedepth = 0}, SMC \code{n_mh_steps} / \code{ess_target} /
+    a \code{lambda_schedule} that is not increasing in (0, 1], RWMH
+    \code{scale}, \code{target_rate} or a \code{Sigma_prop} that is not
+    positive definite or not of the estimated parameters' order, fewer DIME
+    walkers than parameters plus one, an unknown \code{sampler$extra} name.
+    Condition classes: \code{dynhr_error_invalid_argument} (the MCMC
+    samplers), \code{dynhr_error_smc_args},
+    \code{dynhr_error_unknown_argument} (an unknown name). One rule stays
+    at run time: a \code{"dsmh"} sampler needs \code{n_obs},
+    \code{lambda1} or \code{lambda_schedule}, which the runner takes from
+    the data.
+  \item E (class \code{dynhr_error_dsmh_args}): a \code{"dsmh"} sampler
+    whose \code{n_particles} is not a multiple of \code{n_groups} or
+    \code{n_strata} (set through \code{sampler$extra}; defaults 10 and 20),
+    or another \code{dynhr_dsmh()} argument rule -- caught when the spec is
+    built, not after the mode stage.
   \item W: \code{"pmmh"} on a likelihood that is not an unbiased particle
     likelihood; E: \code{"smc2"} on a likelihood other than \code{"tpf"} /
     \code{"sv_rbpf"}.

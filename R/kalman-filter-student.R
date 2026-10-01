@@ -57,9 +57,9 @@
 ## t-observation model, commonly used in the DSGE literature.
 ##
 ## The per-period covariance update is the shared .kf_step_core() of
-## R/kf-step.R (brief 23 D1): me_variance is TRUE i.i.d. measurement error, so
+## R/kf-step.R: me_variance is TRUE i.i.d. measurement error, so
 ## it enters F_t AND the Joseph term K me K' -- matching kalman_filter()
-## (brief 23 A2: the former hand-rolled update dropped K me K').
+## (the former hand-rolled update dropped K me K').
 ##
 ## Missing observations: the same NA-reduction as kalman_filter() is used.
 ## --------------------------------------------------------------------------
@@ -190,10 +190,9 @@ kalman_filter_student_t <- function(Y, dr, model, params, obs_vars,
 
   ## -- Initialization -------------------------------------------------------
   if (lik_init == "auto") {
-    tt_evals <- eigen(TT, only.values = TRUE)$values
-    if (any(Mod(tt_evals) > 1 - 1e-6)) {
+    if (.state_radius(TT, dr) > 1 - 1e-6) {
       P0_try <- tryCatch(solve_lyapunov(TT, QQ), error = function(e) NULL)
-      ok_stat <- .kf_stationary_P0_ok(P0_try)   # relative rule (W77)
+      ok_stat <- .kf_stationary_P0_ok(P0_try)   # relative rule
       lik_init <- if (ok_stat) "stationary" else "kappa"
       P0 <- if (ok_stat) P0_try else .build_P0(TT, QQ)
     } else {

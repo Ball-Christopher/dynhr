@@ -43,24 +43,24 @@
 ## GROUND TRUTH FOR THE STATE/OBSERVATION RECURSIONS: simulate_model_order3()
 ## in R/solve-perturbation-order3.R (lines ~1279-1370).  That function is
 ## treated as the authoritative implementation of AFVRR eq (5),(7),(12),(14)
-## -- where the brief's transcription of the *paper's* eq (14) differs from
+## -- where the reference derivation's transcription of the *paper's* eq (14) differs from
 ## the already-tested simulator code, THE CODE WINS.  Concretely:
 ##   * State eq x3_new gets `hxx %*% (x1 (x) x2)` with coefficient 1 (both
-##     brief and code agree on this).
+##     the derivation and code agree on this).
 ##   * Observation eq y3 gets `ghxx %*% (x1 (x) x2)` -- reading the ACTUAL
 ##     simulate_model_order3() body, this term ALSO carries coefficient 1
-##     (`ghxx %*% (x1_prev %x% x2_prev)`, no factor of 2).  The scope brief
+##     (`ghxx %*% (x1_prev %x% x2_prev)`, no factor of 2).  The reference derivation
 ##     (citing a literal transcription of AFVRR eq 14, "2(x_t^f (x) x_t^s)")
 ##     asserts a coefficient of 2 here.  This implementation follows the
 ##     TESTED, EXISTING simulator code (coefficient 1 in both state and
-##     observation equations) rather than the brief's paper paraphrase,
+##     observation equations) rather than the reference derivation's paper paraphrase,
 ##     because (a) simulate_model_order3 is the codebase's designated
 ##     order-3 oracle (already Gate A/B/C tested) and (b) the MC oracle in
 ##     the P1 test file validates the ASSEMBLED system directly against
 ##     simulate_model_order3, so matching the paper's eq (14) literally
 ##     would FAIL that oracle.  This coefficient choice is flagged loudly
 ##     here and in the P1 completion report: it is a documented departure
-##     from the brief's transcription, resolved in favor of the tested code
+##     from the reference derivation's transcription, resolved in favor of the tested code
 ##     oracle.
 ## ----------------------------------------------------------------------
 ##
@@ -79,8 +79,7 @@
 ##   j11 = x1 (x) eps (x) eps       (n_s*n_u^2)            NEW
 ##   j12 = eps (x) x1 (x) eps       (n_u*n_s*n_u)          NEW
 ##
-## CORRELATED z_t / xi_{t+1} AT ORDER 3 (AFVRR p.11, brief section 2.2 /
-## section 6 risk item 1): at order 3 the compact state xi3_t is CORRELATED
+## CORRELATED z_t / xi_{t+1} AT ORDER 3 (AFVRR p.11): at order 3 the compact state xi3_t is CORRELATED
 ## with its own innovation r_t (e.g. Cov(x1_t (x) x1_t,  eps_t (x) x1_t (x) x1_t)
 ## != 0, because the SAME x1_t appears in both the state block ik2 and in
 ## innovation categories like j6/j9/j10/j11 that also multiply e_{t+1}).
@@ -112,7 +111,7 @@
 ## WHY THIS IS VALID (not a silently-dropped correlation term): the
 ## AFVRR "correlated z_t/xi_{t+1}" issue specifically concerns
 ## Cov(xi_t, r_t) entering the Lyapunov recursion as an EXTRA cross term
-## (see brief eq in section 2.2). That cross term arises because part of
+## (see the derivation). That cross term arises because part of
 ## r_t (e.g. j9 = x1(x)x1(x)eps) is a function of xi_t's OWN block ik2
 ## (=x1(x)x1) times the NEW innovation eps_{t+1}.  Because eps_{t+1} is
 ## independent of xi_t (it is the period-(t+1) shock), and the state-borne
@@ -468,8 +467,7 @@
 
 
 # ============================================================================
-# Cov(xi_t, r_t): the order-3 CORRELATED-INNOVATION term (AFVRR p.11 / brief
-# section 2.2) -- the single most important departure from the order-2 code
+# Cov(xi_t, r_t): the order-3 CORRELATED-INNOVATION term (AFVRR p.11) -- the single most important departure from the order-2 code
 # path.  See the "CORRELATED z_t / xi_{t+1}" file-header note above: unlike
 # order 2 (where z_t^(2) is provably uncorrelated with xi_{t+1}^(2)'s
 # innovation), at order 3 several raw-innovation categories (those with an
@@ -791,7 +789,7 @@
   ## a hard iteration cap with a diagnostic warning guards against a
   ## non-converging edge case rather than looping silently.
   ## Both the Lyapunov solves and the fixed point's convergence test run in
-  ## the BLOCK-BALANCED basis (W77; see .pruned_lyap_balanced in
+  ## the BLOCK-BALANCED basis (see .pruned_lyap_balanced in
   ## R/pruned-state-space.R): the blocks of Sxi scale as sigma^2 ... sigma^6,
   ## so a test relative to max|Sxi| left the x1 block 1.4e-6 relative off once
   ## every shock std was x 100. (The fixed-point test also had a max(1, .)
@@ -887,7 +885,7 @@ pruned_state_space3 <- function(dr3, model, params = NULL) {
       dr = dr3, model = model
     ),
     class = "pruned_ss3",
-    ## The former ~25% control-variance bias is FIXED (2026-07-02): it was
+    ## The former ~25% control-variance bias is FIXED: it was
     ## NOT a Cov(x1_t,x2_t) approximation (that covariance is exactly 0 --
     ## x1 degree-1, x2 degree-2 in the Gaussian shocks).  The real cause was
     ## the j5 (=eps(x)x2) cross-category blocks of Cr0: the zero-mean Wick
@@ -903,7 +901,7 @@ pruned_state_space3 <- function(dr3, model, params = NULL) {
 
 ## EXACT lag-tau autocovariances of the AFVRR order-3 pruned state space.
 ##
-## 0.9.4 (WS4, follow-up to WS2's A13a).  WS2 found that the ORDER-2 lag
+## 0.9.4: it was found that the ORDER-2 lag
 ## autocovariances used a wrong seed and an order-1 recursion, and replaced them
 ## with the exact augmented-system formula `.order2_autocov()`.  Order 3 had no
 ## autocovariance code AT ALL (so it could not carry the same bug), and
@@ -1126,7 +1124,7 @@ pruned_ss_loglik3 <- function(pss3, Y, obs_vars, me_variance = 0,
 
 #' Build the nine order-3 pruned-SS Kalman-filter inputs
 #'
-#' Pure extract-function refactor (D1, zero behaviour change): factors the
+#' Pure extract-function refactor (zero behaviour change): factors the
 #' assembly block that used to live inline in \code{pruned_ss_loglik3} (fold
 #' of the linear state-innovation correlation into effective matrices, plus
 #' the observation-side subsetting) into a single internal builder, so it can

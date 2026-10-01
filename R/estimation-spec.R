@@ -34,8 +34,16 @@
                             "sv_rbpf", "global_pf")
 ## Unbiased-but-noisy particle likelihoods: PMMH targets (pmmh()'s own list).
 .spec_pmmh_likelihoods <- c("tpf", "ppf", "copf", "sv_rbpf")
-## Noisy likelihoods run_mode_finding() refuses for deterministic optimisers.
+## Noisy likelihoods: the flat run_mode_finding() does not accept them (its
+## `likelihood` choices exclude them); an estimation spec does -- its mode
+## stage runs the deterministic optimiser on one noisy evaluation per point --
+## and validate_spec() warns about it.
 .spec_noisy_mode_likelihoods <- c("tpf", "ppf", "copf", "global_pf")
+## Samplers the spec runner does not run, with the message it refuses with.
+.spec_unsupported_samplers <- "smc2"
+.spec_unsupported_sampler_msg <- function(method)
+  paste0("sampler \"", method, "\" is not run by the spec runner yet; call ",
+         method, "() directly.")
 ## Likelihood types that exist only as OBC filters.
 .spec_obc_likelihoods <- c("pkf", "ppf", "copf")
 
@@ -60,6 +68,13 @@
   if (any(!is.finite(x)) || any(x < 0)) "must be finite and >= 0"
 .spec_chk_pos <- function(x)
   if (any(!is.finite(x)) || any(x <= 0)) "must be finite and > 0"
+## The NUTS runner raises any serial time limit below this to it
+## (max(30L, timeout)), so a smaller value would be silently replaced.
+.spec_nuts_min_timeout <- 30L
+.spec_chk_timeout <- function(x)
+  if (any(!is.finite(x)) || any(x < .spec_nuts_min_timeout))
+    paste0("must be >= ", .spec_nuts_min_timeout, " (seconds): the NUTS ",
+           "runner never uses a shorter limit and would silently raise it")
 .spec_chk_finite <- function(x)
   if (any(!is.finite(x))) "must be finite"
 .spec_chk_band <- function(x)
@@ -106,9 +121,9 @@
       doc = "Kalman filter P0 initialisation"),
     freq_band = .spec_f("num", c(0, pi), check = .spec_chk_band,
       doc = "Whittle frequency band c(lo, hi) in radians (whittle only)"),
-    pskf_cdf = .spec_f("chr1", "accurate", choices = c("accurate", "fast"),
+    pskf_cdf = .spec_f("chr1", "accurate", check = function(x) .pskf_cdf_check(x),
       option = "pskf_cdf",
-      doc = "PSKF CDF evaluation: accurate (default) or fast (the pre-0.9.3.118 Mendell-Elston / plain-Miwa evaluation; pskf only)"),
+      doc = "PSKF CDF evaluation: accurate (default and only value; pskf only)"),
     power_posterior = .spec_f("num1", 1, option = "power_posterior",
       check = .spec_chk_pos,
       doc = "Power-posterior tempering exponent in (0, 1] applied to the log-likelihood"),
@@ -197,8 +212,8 @@
   sampler = list(
     method = .spec_f("chr1", "rwmh", choices = .spec_samplers,
       doc = "Sampler: rwmh, pmmh, nuts, hmc, mala, chees, smc, dsmh, dime or smc2"),
-    n_draws = .spec_f("int1", 10000L, check = .spec_chk_nonneg,
-      doc = "Post-warmup draws to keep"),
+    n_draws = .spec_f("int1", 10000L, check = .spec_chk_pos,
+      doc = "Post-warmup draws to keep (>= 1; for dime: post-warmup iterations per walker, so the draws kept are n_draws x n_walkers)"),
     n_warmup = .spec_f("int1", 5000L, check = .spec_chk_nonneg,
       doc = "Warmup / burn-in draws, discarded"),
     n_chains = .spec_f("int1", 4L, check = .spec_chk_pos,
@@ -227,8 +242,8 @@
     monge_alpha = .spec_f("num1", 1, option = "monge_alpha",
       check = .spec_chk_nonneg,
       doc = "Monge-metric softness alpha (metric = monge)"),
-    timeout = .spec_f("int1", 300L, check = .spec_chk_pos,
-      doc = "Serial NUTS wall-clock limit in seconds"),
+    timeout = .spec_f("int1", 300L, check = .spec_chk_timeout,
+      doc = "Serial NUTS wall-clock limit in seconds (>= 30: the runner never uses a shorter limit)"),
     Sigma_prop = .spec_f("any", NULL, nullable = TRUE, check = .spec_chk_matrix,
       doc = "Proposal covariance; NULL = the mode stage's"),
     extra = .spec_f("list", list(),
@@ -1266,6 +1281,21 @@ update.dynhr_estimation_spec <- function(object, model = NULL, data = NULL,
 }
 
 # ---------------------------------------------------------------------------
+# .spec_resume_problem(): compute$resume = TRUE with a checkpoint_dir that
+# holds no checkpoint. A property of the machine, not of the spec, so it is
+# checked when run_estimation() starts (before the mode stage), not in
+# validate_spec(): a spec written with resume = TRUE must still load
+# elsewhere.
+.spec_resume_problem <- function(cmp) {
+  if (!isTRUE(cmp$resume) || is.null(cmp$checkpoint_dir)) return(NULL)
+  meta <- .ckpt_paths(cmp$checkpoint_dir)$meta
+  if (file.exists(meta)) return(NULL)
+  paste0("compute$resume = TRUE, but compute$checkpoint_dir \"",
+         cmp$checkpoint_dir, "\" holds no checkpoint (no ", basename(meta),
+         "): there is no run to resume. Run once with resume = FALSE first, ",
+         "or point checkpoint_dir at an existing checkpoint.")
+}
+
 # validate_spec(): the single home of cross-field checks
 # ---------------------------------------------------------------------------
 
@@ -1298,7 +1328,7 @@ update.dynhr_estimation_spec <- function(object, model = NULL, data = NULL,
 }
 
 # ---------------------------------------------------------------------------
-# `extra` keys that shadow a typed field (brief 28 S1)
+# `extra` keys that shadow a typed field
 # ---------------------------------------------------------------------------
 ## The `extra` lists are forwarded as `...`: likelihood$extra and mode$extra
 ## to the log-posterior constructor, sampler$extra to the sampler. A key that
@@ -1479,6 +1509,171 @@ update.dynhr_estimation_spec <- function(object, model = NULL, data = NULL,
     if (isTRUE(out$smoother) && .spec_obc_active(spec)) "outputs$smoother")
 }
 
+## Run a runtime rule that signals its own error and re-signal that error as a
+## spec error (same message), so validate_spec()'s errors keep one class.
+.spec_reclass <- function(expr, class = NULL)
+  withCallingHandlers(expr, error = function(e)
+    .dynhr_abort("validate_spec: ", conditionMessage(e),
+                 class = c(class, "dynhr_error_spec_invalid")))
+
+## Can filter_tunes add observables to this spec's run? (They enlarge the
+## observable set the likelihood sees, so a per-observable length cannot be
+## checked against spec$obs_vars then.)
+.spec_tunes_possible <- function(spec) {
+  lik <- spec$likelihood
+  if (!is.null(lik$plan)) return(TRUE)
+  ft <- lik$filter_tunes
+  if (isFALSE(ft)) return(FALSE)
+  if (!is.null(ft)) return(TRUE)
+  tn <- spec$model$mod$filter_tunes
+  df <- if (is.data.frame(tn)) tn else if (is.list(tn)) tn$tunes
+  is.data.frame(df) && nrow(df) > 0L
+}
+
+## The planner objective text the Ramsey workflow works from: the parsed
+## `planner_objective(...)` of the model ("" when it has none).
+.spec_planner_objective <- function(mod)
+  mod$planner_objective$text %||% ""
+
+## The prior spec the mode stage uses (the spec's own, else the model's);
+## NULL when the model estimates nothing.
+.spec_prior_spec <- function(spec) {
+  if (!is.null(spec$model$prior_spec)) return(spec$model$prior_spec)
+  ep <- spec$model$mod$estimated_params
+  if (is.null(ep) || NROW(ep) == 0L) return(NULL)
+  extract_prior_spec(spec$model$mod, verbose = FALSE)
+}
+
+## ---- sampler arguments, as the runner passes them -----------------------
+## The sampler function a spec method calls, so its arguments can be judged
+## by the sampler's own checker (and the names it gets are checked against the
+## function's formals). pmmh is RWMH over a particle likelihood; smc runs on a
+## mirai pool when compute$parallel is set.
+.spec_sampler_fn <- function(method, parallel = FALSE)
+  switch(method,
+         rwmh = , pmmh = rwmh,
+         nuts = dynhr_nuts, hmc = dynhr_hmc, mala = dynhr_mala,
+         chees = dynhr_chees, dime = run_dime,
+         smc = if (isTRUE(parallel)) run_smc_mirai else dynhr_smc,
+         dsmh = dynhr_dsmh, smc2 = dynhr_smc2)
+
+## The function a sampler's PARALLEL (mirai) path calls when that path is
+## not the serial sampler with more cores: multi-chain NUTS and DIME. NULL
+## for the others (their parallel paths take the same arguments, or are
+## covered by .spec_sampler_fn).
+.spec_parallel_sampler_fn <- function(method)
+  switch(method, nuts = run_nuts_mirai, dime = run_dime_mirai, NULL)
+
+## sampler$extra names the parallel function cannot take. The runner forwards
+## the others and refuses these (so they are never silently dropped);
+## validate_spec() refuses them when the spec is built.
+.spec_parallel_extra_unsupported <- function(method, extra) {
+  fn <- .spec_parallel_sampler_fn(method)
+  if (is.null(fn) || !length(extra) || is.null(names(extra))) return(character(0))
+  setdiff(names(extra), names(formals(fn)))
+}
+
+## Does the runner take the parallel path for this sampler spec?
+.spec_takes_parallel_path <- function(spec, samp)
+  isTRUE(spec$compute$parallel) &&
+    (identical(samp$method, "dime") ||
+       (identical(samp$method, "nuts") && isTRUE(samp$n_chains > 1L)))
+
+## NUTS takes these metrics by name (a fixed dense one arrives as a matrix).
+.spec_nuts_adapted_metrics <- c("diagonal", "warmup_dense", "lowrank",
+                                "fisher_diag")
+
+## The named list of arguments the spec runner hands the sampler function of
+## `samp` (a sampler_spec): the typed fields under the function's own argument
+## names, then sampler$extra (which wins, as in the runner's do.call). Only
+## what a spec states is listed; the runner's own additions (starting point,
+## gradient, metric matrices, checkpoint, ...) are not judged here. rwmh's
+## n_draws counts burn-in (the runner passes n_draws + n_warmup), DIME's
+## walkers / iterations are run_dime's n_chain / n_iter, and NUTS takes only
+## the adapted metrics by name.
+.spec_sampler_call_args <- function(spec, samp) {
+  m  <- samp$method
+  nd <- samp$n_draws
+  nb <- samp$n_warmup
+  base <- switch(m,
+    rwmh = , pmmh = list(n_draws = nd + nb, n_burn = nb,
+                         adapt_cov = samp$adapt_cov, n_blocks = samp$n_blocks,
+                         Sigma_prop = samp$Sigma_prop),
+    nuts  = list(n_draws = nd, n_warmup = nb,
+                 metric = if (samp$metric %in% .spec_nuts_adapted_metrics)
+                            samp$metric),
+    hmc   = list(n_draws = nd, n_warmup = nb, metric = samp$metric),
+    mala  = , chees = list(n_draws = nd, n_warmup = nb),
+    dime  = list(n_chain = samp$n_walkers, n_iter = nd, n_burn = nb),
+    smc   = , dsmh = , smc2 = list(n_particles = samp$n_particles))
+  base <- Filter(Negate(is.null), base)
+  ex <- samp$extra
+  if (!length(ex)) return(base)
+  if (is.null(names(ex)) || any(!nzchar(names(ex)))) return(c(base, ex))
+  base[names(ex)] <- ex
+  base
+}
+
+## Every problem the sampler's own argument checker finds in the spec's
+## sampler (character(0) if none); the condition classes to abort with are
+## kept in the result's "class_names" attribute. `n_par` is the number of
+## estimated parameters, NULL when unknown.
+.spec_sampler_problems <- function(spec, samp, n_par = NULL) {
+  m    <- samp$method
+  args <- .spec_sampler_call_args(spec, samp)
+  par  <- isTRUE(spec$compute$parallel)
+  fn   <- .spec_sampler_fn(m, par)
+  fn_name <- switch(m, rwmh = , pmmh = "rwmh", nuts = "dynhr_nuts",
+                    hmc = "dynhr_hmc", mala = "dynhr_mala",
+                    chees = "dynhr_chees", dime = "run_dime",
+                    smc = if (par) "run_smc_mirai" else "dynhr_smc",
+                    dsmh = "dynhr_dsmh", smc2 = "dynhr_smc2")
+  ## names that are not arguments of the sampler function (the checkers of
+  ## the SMC family do not look at names)
+  unknown <- function() .mcmc_check_args(args, fn, fn_name, list(), n_par)
+  p <- switch(m,
+    rwmh  = .rwmh_args_problem(args, n_par),
+    pmmh  = c(.rwmh_args_problem(args, n_par),
+              .pmmh_args_problem(c(list(n_particles = samp$n_particles),
+                                   args[intersect("methods", names(args))]))),
+    nuts  = .nuts_args_problem(args, n_par),
+    hmc   = .hmc_args_problem(args, n_par),
+    mala  = .mala_args_problem(args, n_par),
+    chees = .chees_args_problem(args, n_par),
+    dime  = .dime_args_problem(args, n_par),
+    smc   = c(unknown(), .smc_args_problem(args, n_par)),
+    dsmh  = c(unknown(), .dsmh_args_problem(args, n_par)),
+    smc2  = c(unknown(), .smc2_args_problem(args, n_par)))
+  if (.spec_takes_parallel_path(spec, samp)) {
+    uns <- .spec_parallel_extra_unsupported(m, samp$extra)
+    if (length(uns))
+      p <- c(p, stats::setNames(sprintf(paste0(
+        "`%s` is not supported on the parallel (mirai) %s path, which would ",
+        "ignore it; set compute$parallel = FALSE or drop it."),
+        uns, toupper(m)), rep("dynhr_error_inapplicable_argument", length(uns))))
+  }
+  nm <- names(p)
+  cls <- c(if (!is.null(nm)) nm[nzchar(nm)],
+           switch(m, dsmh = "dynhr_error_dsmh_args",
+                  smc = , smc2 = "dynhr_error_smc_args",
+                  pmmh = NULL, "dynhr_error_invalid_argument"),
+           if (any(grepl("^unknown argument", p))) "dynhr_error_unknown_argument")
+  p <- unique(unname(p))
+  attr(p, "class_names") <- unique(cls)
+  p
+}
+
+## The nearest existing ancestor of `path` (path itself when it exists).
+.spec_existing_ancestor <- function(path) {
+  p <- path
+  while (!file.exists(p)) {
+    up <- dirname(p)
+    if (identical(up, p)) return(p)
+    p <- up
+  }
+  p
+}
+
 #' Validate an estimation spec
 #'
 #' The single place where an estimation spec's fields are checked against each
@@ -1507,7 +1702,28 @@ update.dynhr_estimation_spec <- function(object, model = NULL, data = NULL,
 #'   \item W: mode finding on a noisy particle likelihood (\code{"tpf"},
 #'     \code{"ppf"}, \code{"copf"}, \code{"global_pf"}) -- when the mode stage
 #'     runs (it is skipped for prior-initialised samplers, see
-#'     \code{\link{run_estimation}}).
+#'     \code{\link{run_estimation}}). The spec runner does run it (the
+#'     optimiser then works on a noisy objective); the flat
+#'     \code{\link{run_mode_finding}} does not accept these likelihoods.
+#'   \item E: arguments that would only fail after an expensive stage:
+#'     \code{mode$method} not a mode-finding optimiser; unknown
+#'     \code{mode$options} keys; \code{likelihood$extra} / \code{mode$extra}
+#'     names the log-posterior constructor (and, for \code{mode$extra}, the
+#'     optimiser) does not take; a whittle \code{freq_band} outside
+#'     \eqn{[0, \pi]}; a \code{me_variance} vector of the wrong length (or a
+#'     per-observable vector the likelihood cannot use);
+#'     \code{pruned_order = 3} on a model compiled below \code{max_order = 2};
+#'     \code{mode$theta_init} names or bounds the mode stage would refuse;
+#'     \code{likelihood$dates} not one per sample row; \code{outputs$ramsey}
+#'     on a model without a planner objective (or a free-instrument system, or
+#'     \code{ramsey_order = 2} below \code{max_order = 2}); \code{outputs$save}
+#'     with a \code{dir} that is (or sits under) a file, or a \code{prefix}
+#'     with a path separator. W: \code{outputs$ramsey} without a discount
+#'     factor (\code{beta} / \code{betta} or \code{ramsey_discount}), and
+#'     \code{likelihood$dates} when diagnostics are off (it only labels them).
+#'   \item E (class \code{dynhr_error_spec_unsupported}): a sampler the spec
+#'     runner does not run (\code{"smc2"}; call \code{\link{dynhr_smc2}}
+#'     directly).
 #'   \item E (class \code{dynhr_error_spec_mode_needed}):
 #'     \code{mode$run = "never"} while something uses the mode: no sampler,
 #'     \code{outputs$form = "mode"}, a sampler other than the
@@ -1524,6 +1740,31 @@ update.dynhr_estimation_spec <- function(object, model = NULL, data = NULL,
 #'     \code{metric = "warmup_dense"} or a checkpoint.
 #'   \item E: \code{checkpoint_dir} with a sampler (or parallel path) that
 #'     cannot stream to it; \code{resume = TRUE} without \code{checkpoint_dir}.
+#'     (\code{resume = TRUE} on a directory that holds no checkpoint is a
+#'     property of the machine, not the spec: \code{\link{run_estimation}}
+#'     refuses it before any stage runs.)
+#'   \item E: a sampler argument the sampler itself would refuse (or that
+#'     would run a frozen chain, a collapsed particle cloud or a
+#'     non-monotone tempering ladder): each sampler has one argument checker,
+#'     applied here to the arguments the runner would pass it (the typed
+#'     fields under the sampler function's own names, then
+#'     \code{sampler$extra}) and listing every problem -- e.g. NUTS
+#'     \code{max_treedepth = 0}, SMC \code{n_mh_steps} / \code{ess_target} /
+#'     a \code{lambda_schedule} that is not increasing in (0, 1], RWMH
+#'     \code{scale}, \code{target_rate} or a \code{Sigma_prop} that is not
+#'     positive definite or not of the estimated parameters' order, fewer DIME
+#'     walkers than parameters plus one, an unknown \code{sampler$extra} name.
+#'     Condition classes: \code{dynhr_error_invalid_argument} (the MCMC
+#'     samplers), \code{dynhr_error_smc_args},
+#'     \code{dynhr_error_unknown_argument} (an unknown name). One rule stays
+#'     at run time: a \code{"dsmh"} sampler needs \code{n_obs},
+#'     \code{lambda1} or \code{lambda_schedule}, which the runner takes from
+#'     the data.
+#'   \item E (class \code{dynhr_error_dsmh_args}): a \code{"dsmh"} sampler
+#'     whose \code{n_particles} is not a multiple of \code{n_groups} or
+#'     \code{n_strata} (set through \code{sampler$extra}; defaults 10 and 20),
+#'     or another \code{dynhr_dsmh()} argument rule -- caught when the spec is
+#'     built, not after the mode stage.
 #'   \item W: \code{"pmmh"} on a likelihood that is not an unbiased particle
 #'     likelihood; E: \code{"smc2"} on a likelihood other than \code{"tpf"} /
 #'     \code{"sv_rbpf"}.
@@ -1594,7 +1835,7 @@ validate_spec <- function(spec) {
     bad("likelihood$obc_filter = \"", lik$obc_filter, "\" needs an OBC model.")
   eff_type <- if (obc_on) lik$obc_filter else lik$type
 
-  ## ---- `extra` keys that shadow a typed field (brief 28 S1) --------------
+  ## ---- `extra` keys that shadow a typed field --------------
   sh <- .spec_extra_shadows(spec)
   if (nrow(sh)) {
     what <- ifelse(nzchar(sh$target),
@@ -1628,9 +1869,12 @@ validate_spec <- function(spec) {
   if (is.null(spec$mode$result) && eff_type %in% .spec_noisy_mode_likelihoods &&
       .spec_mode_stage_needed(spec))
     .dynhr_warn("validate_spec: mode finding on the noisy particle likelihood \"",
-                eff_type, "\": deterministic optimisers assume a fixed objective ",
-                "(run_mode_finding() refuses it). Prefer a deterministic ",
-                "likelihood for the mode, or an SMC sampler.",
+                eff_type, "\": the deterministic optimisers assume a fixed ",
+                "objective, but each evaluation here is a fresh noisy estimate, ",
+                "so the mode and its curvature are noisy too (the flat ",
+                "run_mode_finding() does not accept this likelihood). Prefer a ",
+                "deterministic likelihood for the mode, or a prior-initialised ",
+                "sampler (SMC, DSMH, DIME) with mode$run = \"never\".",
                 class = "dynhr_warning_spec_noisy_mode")
 
   ## ---- per sampler -------------------------------------------------------
@@ -1641,6 +1885,11 @@ validate_spec <- function(spec) {
   ## TRUE cannot be told from the default -- and its verbose output names the
   ## gradient each stage used.
   par <- isTRUE(cmp$parallel)
+  ## the number of estimated parameters, for the rules that need it
+  n_par_est <- if (length(samplers)) {
+    pr <- .spec_prior_spec(spec)
+    if (!is.null(pr)) length(pr$name)
+  }
   for (s in samplers) {
     m <- s$method
     if (identical(s$metric, "monge")) {
@@ -1686,12 +1935,156 @@ validate_spec <- function(spec) {
                   paste(.spec_pmmh_likelihoods, collapse = ", "), "); this is ",
                   "plain random-walk Metropolis-Hastings.",
                   class = "dynhr_warning_spec_pmmh_likelihood")
+    ## the sampler's own argument rules (one checker per sampler, shared with
+    ## the sampler's entry), applied to the arguments the runner would pass
+    sp <- .spec_sampler_problems(spec, s, n_par_est)
+    if (length(sp))
+      .dynhr_abort("validate_spec: sampler \"", m, "\": ",
+                   paste(sp, collapse = " "),
+                   if (identical(m, "dsmh"))
+                     " (n_groups / n_strata are set through sampler$extra.)",
+                   class = c(attr(sp, "class_names"),
+                             "dynhr_error_spec_invalid"))
     if (identical(m, "smc2") && !lik$type %in% c("tpf", "sv_rbpf"))
       bad("sampler \"smc2\" needs likelihood$type \"tpf\" or \"sv_rbpf\" ",
           "(got \"", lik$type, "\").")
+    if (m %in% .spec_unsupported_samplers)
+      .dynhr_abort("validate_spec: ", .spec_unsupported_sampler_msg(m),
+                   class = c("dynhr_error_spec_unsupported",
+                             "dynhr_error_spec_invalid"))
   }
   if (isTRUE(cmp$resume) && is.null(cmp$checkpoint_dir))
     bad("compute$resume = TRUE needs compute$checkpoint_dir.")
+
+  ## ---- fields whose rule needs the model, the data or the file system ----
+  mode_runs <- is.null(spec$mode$result) && .spec_mode_stage_needed(spec)
+  n_rows <- if (!is.null(spec$data$value)) {
+    nr <- nrow(spec$data$value)
+    last <- if (is.null(lik$nobs)) nr else lik$first_obs + lik$nobs - 1L
+    last - lik$first_obs + 1L
+  }
+
+  ## mode$method: one of the optimisers the dispatcher implements
+  if (!spec$mode$method %in% .mode_finding_methods)
+    bad("mode$method = \"", spec$mode$method, "\" is not a mode-finding ",
+        "optimiser. Valid: ", paste(.mode_finding_methods, collapse = ", "), ".")
+
+  ## mode$options: the mode stage reads a fixed set of keys, so another is a typo
+  bad_opt <- setdiff(names(spec$mode$options), .mode_option_keys)
+  if (length(bad_opt))
+    bad("mode$options has key(s) the mode stage does not read: ",
+        paste0("`", bad_opt, "`", collapse = ", "), ". Valid: ",
+        paste(.mode_option_keys, collapse = ", "), ".")
+
+  ## likelihood$extra / mode$extra: the log-posterior constructor's `...` takes
+  ## the names of some likelihood; mode$extra also takes the optimiser's
+  ## arguments. (OBC models build another constructor and ignore both.)
+  if (!obc_on) {
+    known <- unique(unlist(.mlp_dots_by_likelihood(), use.names = FALSE))
+    ## (the constructor's own error class is kept, so a caller that handles
+    ## dynhr_error_unknown_argument sees the same condition earlier)
+    bad_arg <- function(...)
+      .dynhr_abort("validate_spec: ", ...,
+                   class = c("dynhr_error_unknown_argument",
+                             "dynhr_error_spec_invalid"))
+    lik_bad <- setdiff(names(lik$extra), c(known, "verbose"))
+    if (length(lik_bad))
+      bad_arg("likelihood$extra has argument(s) the log-posterior constructor ",
+          "does not take: ", paste0("`", lik_bad, "`", collapse = ", "),
+          ". It takes (by likelihood): ",
+          paste(sort(known), collapse = ", "), ".")
+    mode_bad <- setdiff(names(spec$mode$extra),
+                        c(known, .rmf_optimiser_arg_names(), "verbose"))
+    if (length(mode_bad))
+      bad_arg("mode$extra has argument(s) neither the log-posterior ",
+          "constructor nor the optimiser takes: ",
+          paste0("`", mode_bad, "`", collapse = ", "), ".")
+  }
+
+  ## whittle freq_band: 0 <= lo < hi <= pi (make_log_posterior_whittle's rule)
+  if (identical(eff_type, "whittle")) {
+    fb <- lik$freq_band
+    if (!.whittle_freq_band_ok(fb))
+      bad("likelihood$freq_band must be c(lo, hi) with 0 <= lo < hi <= pi ",
+          "(radians); got c(", paste(format(fb), collapse = ", "), ").")
+  }
+
+  ## me_variance: a scalar, or one per observable (the constructor's rule)
+  if (!obc_on && length(lik$me_variance) > 1L && !.spec_tunes_possible(spec))
+    .spec_reclass(.kf_me_variance(
+      lik$me_variance, spec$obs_vars,
+      sprintf("likelihood$me_variance (likelihood = \"%s\")", lik$type),
+      allow_vector = lik$type %in% c("gaussian", "pskf") &&
+        is.null(lik$ms_spec) && is.null(lik$ms_struct_spec)),
+      class = "dynhr_error_me_variance")
+
+  ## pruned_order = 3 needs derivatives of order 3 (solve_perturbation's rule:
+  ## orders 2 and 3 need a model compiled to max_order >= 2)
+  if (is.null(spec$mode$result) && eff_type %in% c("pruned", "tpf") &&
+      identical(lik$pruned_order, 3L) && spec$model$max_order < 2L)
+    bad("likelihood$pruned_order = 3 needs a model compiled to max_order >= ",
+        "2 (this spec's model$max_order is ", spec$model$max_order, "): the ",
+        "order-3 solve would fail at every draw and the mode stage would ",
+        "'converge' at -Inf. Build the spec with max_order = 2 (or a ",
+        "compiled model of that order).")
+
+  ## mode$theta_init: exactly the estimated parameters, inside their bounds
+  ## (run_mode_finding's rule)
+  if (!is.null(spec$mode$theta_init) && mode_runs) {
+    pr <- .spec_prior_spec(spec)
+    if (!is.null(pr))
+      .spec_reclass(.rmf_check_theta_init(spec$mode$theta_init, pr))
+  }
+
+  ## likelihood$dates: used by the diagnostics only, one per sample row
+  if (!is.null(lik$dates)) {
+    if (!is.null(n_rows) && length(lik$dates) != n_rows)
+      bad("likelihood$dates has ", length(lik$dates), " entries but the ",
+          "likelihood sample has ", n_rows, " data rows: give one date per ",
+          "row of the sample (first_obs / nobs window).")
+    if (!isTRUE(out$diagnostics))
+      .dynhr_warn("validate_spec: likelihood$dates labels the diagnostics' ",
+                  "time axis only and outputs$diagnostics is FALSE, so it has ",
+                  "no effect.", class = "dynhr_warning_spec_output_ignored")
+  }
+
+  ## outputs$ramsey: the Ramsey workflow needs a planner objective in the
+  ## model, a square system, derivatives of its order and a discount factor
+  if (isTRUE(out$ramsey)) {
+    mod <- spec$model$mod
+    if (!nzchar(trimws(.spec_planner_objective(mod))))
+      bad("outputs$ramsey = TRUE, but the model has no planner objective ",
+          "(add `planner_objective(...);` to the .mod file): the sampler ",
+          "would run to the end and the Ramsey step then fail with \"No ",
+          "planner objective provided\".")
+    if (length(mod$equations) < length(mod$var_names))
+      bad("outputs$ramsey = TRUE, but the model is a free-instrument system (",
+          length(mod$equations), " equations, ", length(mod$var_names),
+          " endogenous variables): ramsey_policy() needs a square system.")
+    if (out$ramsey_order >= 2L && spec$model$max_order < 2L)
+      bad("outputs$ramsey_order = ", out$ramsey_order, " needs a model ",
+          "compiled to max_order >= 2 (this spec's model$max_order is ",
+          spec$model$max_order, ").")
+    if (is.null(out$ramsey_discount) &&
+        is.null(.get_discount(mod$param_values)))
+      .dynhr_warn("validate_spec: outputs$ramsey = TRUE, but the model has no ",
+                  "`beta` / `betta` parameter and outputs$ramsey_discount is ",
+                  "NULL: the Ramsey step will be skipped after estimation. ",
+                  "Set outputs$ramsey_discount.",
+                  class = "dynhr_warning_spec_ramsey_discount")
+  }
+
+  ## outputs$save: dir must be (or be creatable as) a directory; prefix is a
+  ## file-name prefix, not a path
+  if (isTRUE(out$save)) {
+    anc <- .spec_existing_ancestor(out$dir)
+    if (!dir.exists(anc))
+      bad("outputs$save = TRUE, but outputs$dir \"", out$dir, "\" is, or sits ",
+          "under, an existing file (\"", anc, "\"), not a directory.")
+    if (grepl("[/\\\\]", out$prefix))
+      bad("outputs$prefix \"", out$prefix, "\" contains a path separator; ",
+          "it is a file-name prefix (put the directory in outputs$dir).")
+  }
 
   ## ---- result form (run_estimation()) ------------------------------------
   form <- out$form

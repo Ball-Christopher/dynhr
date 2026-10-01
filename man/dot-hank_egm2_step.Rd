@@ -51,7 +51,7 @@ liquid-constrained branch (see the file header, F1).}
 pass it once.}
 
 \item{theta_coll}{Scalar LTV in \eqn{[0, 1)} on end-of-period illiquid
-collateral (D1, brief 19 section 9.12).  When positive, the liquid AXIS of
+collateral.  When positive, the liquid AXIS of
 every array is reinterpreted as the GAP COORDINATE \eqn{x = b + \theta a}
 (liquid wealth plus collateral capacity), in which the collateral
 constraint \eqn{b' \ge b_{grid}[1] - \theta a'} is the CONSTANT floor
@@ -81,7 +81,7 @@ List with \code{Vb}, \code{Va}, \code{b}, \code{a}, \code{c} and
 }
 \description{
 The two-stage EGM of SSJ's \code{hh_twoasset.hh} (steps 2-7; see the file
-header and brief 19 section 3.2).  Given next-period marginal values, returns
+header).  Given next-period marginal values, returns
 updated marginal values and this period's liquid/illiquid/consumption
 policies.
 }

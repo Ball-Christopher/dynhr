@@ -52,10 +52,10 @@ option flipped mid-chain can no longer silently change the target
 distribution between draws.}
 
 \item{pskf_cdf}{Evaluation of the multivariate-normal CDFs of the filter:
-\code{"accurate"} or \code{"fast"} (the pre-0.9.4 evaluation: cheaper, but
-measured up to 12-18 nats off an exact likelihood under multi-shock skew;
-see \code{\link{dynhr_set_options}}). \code{NULL} (default) resolves the
-\code{pskf_cdf} package option once, at factory time.}
+only \code{"accurate"} is accepted (\code{"fast"} was removed in 0.9.4.24;
+see \code{\link{dynhr_set_options}}).
+\code{NULL} (default) resolves the \code{pskf_cdf} package option once,
+at factory time.}
 
 \item{...}{Ignored (interface compatibility).}
 }

@@ -15,7 +15,7 @@
 #' differentiates w.r.t. a structural parameter (the \code{var_ll} argument is
 #' ignored), holding all variables AND \code{STEADY_STATE()} references fixed.
 #' This yields the *explicit* parameter partial used by the symbolic
-#' solution-derivative layer (Tier 11 #3); the steady-state chain rule is
+#' solution-derivative layer; the steady-state chain rule is
 #' applied separately by the caller.
 #'
 #' @param node     AST node to differentiate.
@@ -182,7 +182,7 @@ ast_differentiate <- function(node, var_name, var_ll = 0L, wrt = "variable") {
                                     ast_funcall("normpdf", list(g))),
                     # 2/sqrt(pi) as a NUMBER: a symbol `pi` would be read as
                     # the model's own parameter `pi` (inflation!) when the
-                    # model declares one (review 2026-09-25 C8).
+                    # model declares one.
                     "erf"  = .ds_binop("*",
                                  ast_number(2 / sqrt(pi)),
                                  ast_funcall("exp", list(
@@ -207,7 +207,7 @@ ast_differentiate <- function(node, var_name, var_ll = 0L, wrt = "variable") {
             #   normcdf(x, mu, s) = normcdf((x - mu)/s)
             #   normpdf(x, mu, s) = normpdf((x - mu)/s) / s
             # These used to fall through to the multi-argument branch below
-            # and return a ZERO derivative (review 2026-09-25 C8).
+            # and return a ZERO derivative.
             if (fname %in% c("normcdf", "normpdf")) {
                 if (!length(args) %in% c(2L, 3L))
                     .dynhr_abort(
@@ -317,7 +317,7 @@ ast_differentiate_param <- function(node, param_name) {
 
 #' Is an AST safe for explicit symbolic parameter differentiation?
 #'
-#' The explicit-partial path (Tier 11 #3) is exact only when the residual
+#' The explicit-partial path is exact only when the residual
 #' contains no \code{STEADY_STATE()} reference (whose parameter dependence is
 #' not captured by the explicit partial) and no non-differentiable construct
 #' (\code{max}, \code{min}, or any other multi-argument / unknown function for

@@ -66,7 +66,7 @@ re-ordering). This is the analytically-available \dQuote{spectrum}
 half of differentiating the generalized Schur / QZ solve (Tier-18 A2
 research remainder): the eigenVALUE Jacobian is exact and cheap; the
 eigenVECTOR / stable-subspace (Schur-vector) Jacobian -- the genuinely hard
-and, per the pathological-DSGE RESEARCH_AGENDA, DEMOTED half -- is not
+and DEMOTED half -- is not
 needed for the first-order solution adjoint (\code{.solution_adjoint},
 which reverses the generalized-Sylvester fixed point directly).
 }

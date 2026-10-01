@@ -1,6 +1,6 @@
 ## R/gradient-solution-adjoint-order2.R
 ## --------------------------------------------------------------------------
-## ADJOINT (reverse-mode) of the ORDER-2 perturbation solve (Tier 18 A2,
+## ADJOINT (reverse-mode) of the ORDER-2 perturbation solve (the
 ## "order-up" analogue of the phase-1 first-order .solution_adjoint).
 ##
 ## The forward layer (solution_derivatives_order2, gradient-solution-deriv-
@@ -61,19 +61,6 @@
 }
 
 
-## ---------------------------------------------------------------------------
-## Transposed generalized-Sylvester / Kronecker solve for K_xx' L = rhs.
-## K_xx = kron(I_{ns2}, A_L) + kron(hxt %x% hxt, fp), so
-## K_xx' = kron(I_{ns2}, A_L') + kron((hxt %x% hxt)', fp').
-## We solve it with the same dense QR the forward uses (K_xx is already
-## explicitly assembled and factorized ONCE upstream); this helper just
-## solves against the transpose.  rhs is the vec of an (n x ns2) matrix.
-## ---------------------------------------------------------------------------
-.o2adj_kxx_transpose_solve <- function(K_xx_t_qr, rhs_vec) {
-  qr.solve(K_xx_t_qr, rhs_vec)
-}
-
-
 #' Reverse-mode order-2 structural-parameter gradient through the perturbation
 #' solve.
 #'
@@ -95,7 +82,8 @@
 #'   ok = named logical, used_analytic = logical)
 #' @noRd
 .solution_adjoint_order2 <- function(model, compiled, dr2, params, param_names,
-                                     bars, h_rel = 1e-6, h_hess = 1e-4) {
+                                     bars, h_rel = 1e-6, h_hess = 1e-4,
+                                     use_cpp = TRUE) {
 
   if (!all(param_names %in% names(params)))
     stop(".solution_adjoint_order2: unknown parameter(s): ",
@@ -130,8 +118,9 @@
   GS  <- ghx %*% S
   A_L <- f0 + fp %*% GS
   hxt <- t(hx)
-  K_xx <- kronecker(diag(ns2), A_L) + kronecker(hxt %x% hxt, fp)
-  K_xx_t_qr <- qr(t(K_xx))
+  ## Transposed order-2 Kronecker solve K_xx' vec(L) = vec(bar): structured C++
+  ## solve (use_cpp = TRUE) or the dense QR reference (use_cpp = FALSE).
+  kxx_t_solve <- .o2_kxx_solver(A_L, fp, hx, transpose = TRUE, use_cpp = use_cpp)
   AL_t_qr   <- qr(t(A_L))
   AB_t_qr   <- qr(t(A_L + fp))
 
@@ -289,7 +278,7 @@
   ## bar on vec(d_ghxx) is vec(bar_dghxx).  L = K_xx^{-T} bar.
   bar_dPhi_xx <- matrix(0, n, ns2)
   if (n_s > 0 && any(bar_dghxx != 0)) {
-    Lvec <- .o2adj_kxx_transpose_solve(K_xx_t_qr, as.numeric(bar_dghxx))
+    Lvec <- as.numeric(kxx_t_solve(matrix(as.numeric(bar_dghxx), n, ns2)))
     ## cotangent on the RHS ( -vec(dPhi_xx) - dK_xx vec(ghxx) ) is Lvec.
     ## => cotangent on dPhi_xx is -matrix(Lvec).
     bar_dPhi_xx <- -matrix(Lvec, n, ns2)
@@ -488,7 +477,7 @@
   ## first-order layer and the analytic tensors are indexed by
   ## compiled$model$param_names only, so they are asked for the model
   ## parameters alone (asking for a shock name was a subscript-out-of-bounds
-  ## crash; ls2003 cumulant, W65).
+  ## crash; ls2003 cumulant).
   model_pars <- compiled$model$param_names %||% names(model$param_values)
   struct_names <- param_names[param_names %in% model_pars]
   ## dG/dH from the first-order layer (shared with the forward path).

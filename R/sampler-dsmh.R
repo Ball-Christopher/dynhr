@@ -6,7 +6,7 @@
 ## high-dimensional models", J. Econometrics 192(2): 406-420, as implemented
 ## in Dynare 7 (matlab/estimation/smc/dsmh.m, posterior_sampling_method =
 ## 'dsmh'). Helpers: .dsmh_tempered, .dsmh_prop_factor, .dsmh_tune_c,
-## .dsmh_validate; per-chain tasks .dsmh_tune_task / .dsmh_mutate_task,
+## .dsmh_args_problem; per-chain tasks .dsmh_tune_task / .dsmh_mutate_task,
 ## dispatched in-session or on a mirai pool by .dsmh_run_groups (n_cores).
 ## --------------------------------------------------------------------------
 
@@ -357,15 +357,71 @@
 }
 
 
-#' Validate a positive whole number
+## Every argument rule of dynhr_dsmh() that needs no likelihood evaluation, in
+## one place: called by dynhr_dsmh() at entry and by validate_spec(). `args` is
+## a named list keyed by dynhr_dsmh()'s argument names (absent = default =
+## valid). Returns the problems as a character vector, character(0) if fine.
+## The "no n_obs / lambda1 / lambda_schedule" rule stays in dynhr_dsmh(): the
+## runner fills n_obs from the data, so a spec cannot be judged on it.
 #' @noRd
-.dsmh_validate <- function(x, nm, min = 1L) {
-  if (!is.numeric(x) || length(x) != 1L || !is.finite(x) || x != round(x) ||
-      x < min)
-    .dynhr_abort("dynhr_dsmh: `", nm, "` must be a whole number >= ", min,
-                 " (got ", paste(format(x), collapse = ", "), ").",
-                 class = "dynhr_error_dsmh_args")
-  as.integer(x)
+.dsmh_args_problem <- function(args, n_par = NULL) {
+  d <- formals(dynhr_dsmh)
+  get <- function(nm) if (nm %in% names(args)) args[[nm]] else eval(d[[nm]])
+  has <- function(nm) !is.null(args[[nm]])
+  p <- character(0)
+  for (nm in c("n_tune_steps", "thin", "max_tune_iter"))
+    p <- c(p, .smc_whole_problem(get(nm), nm, 1L))
+  if (has("n_cores"))
+    p <- c(p, .smc_whole_problem(args$n_cores, "n_cores", 1L))
+  size <- .dsmh_size_problem(get("n_particles"), get("n_groups"),
+                             get("n_strata"))
+  if (!is.null(size)) p <- c(p, size)
+  at <- get("accept_target")
+  if (!is.numeric(at) || length(at) != 2L || !all(is.finite(at)) ||
+      at[1L] <= 0 || at[2L] >= 1 || at[1L] >= at[2L])
+    p <- c(p, paste0("`accept_target` must be c(alpha0, alpha1) with ",
+                     "0 < alpha0 < alpha1 < 1 (got ",
+                     paste(format(at), collapse = ", "), ")."))
+  if (has("lambda_schedule")) {
+    p <- c(p, .smc_schedule_problem(args$lambda_schedule, "lambda_schedule",
+                                         end_at_one = TRUE))
+  } else {
+    p <- c(p, .smc_whole_problem(get("n_stages"), "n_stages", 1L))
+    if (has("lambda1")) {
+      l1 <- args$lambda1
+      if (!is.numeric(l1) || length(l1) != 1L || !is.finite(l1) || l1 <= 0 ||
+          l1 > 1)
+        p <- c(p, paste0("`lambda1` must be in (0, 1] (got ",
+                         paste(format(l1), collapse = ", "), ")."))
+    } else if (has("n_obs")) {
+      p <- c(p, .smc_whole_problem(args$n_obs, "n_obs", 1L))
+    }
+  }
+  p
+}
+
+
+## The cloud-size rules: n_particles, n_groups and n_strata whole numbers
+## (n_particles >= 2), n_particles a multiple of n_groups (each of the G chains
+## yields n_particles / G particles) and of n_strata. Returns the problem as a
+## message, or NULL. Shared by dynhr_dsmh() and validate_spec(), which checks
+## a dsmh sampler_spec when the spec is built instead of after the mode stage.
+#' @noRd
+.dsmh_size_problem <- function(n_particles, n_groups, n_strata) {
+  whole <- function(x, min) is.numeric(x) && length(x) == 1L && is.finite(x) &&
+    x == round(x) && x >= min
+  for (a in list(list(n_particles, "n_particles", 2L),
+                 list(n_groups, "n_groups", 1L), list(n_strata, "n_strata", 1L)))
+    if (!whole(a[[1L]], a[[3L]]))
+      return(paste0("`", a[[2L]], "` must be a whole number >= ", a[[3L]],
+                    " (got ", paste(format(a[[1L]]), collapse = ", "), ")."))
+  if (n_particles %% n_groups != 0)
+    return(paste0("`n_particles` (", n_particles, ") must be a multiple of ",
+                  "`n_groups` (", n_groups, ")."))
+  if (n_particles %% n_strata != 0)
+    return(paste0("`n_strata` (", n_strata, ") must divide `n_particles` (",
+                  n_particles, ") evenly (Dynare: M must divide N*G)."))
+  NULL
 }
 
 
@@ -547,28 +603,22 @@ dynhr_dsmh <- function(log_post_fn,
   if (is.null(prior_sampler) && is.null(prior_spec))
     .dynhr_abort("dynhr_dsmh: supply `prior_spec` or `prior_sampler`.",
                  class = "dynhr_error_dsmh_args")
-  n_particles  <- .dsmh_validate(n_particles, "n_particles", 2L)
-  G            <- .dsmh_validate(n_groups, "n_groups")
-  M            <- .dsmh_validate(n_strata, "n_strata")
-  K            <- .dsmh_validate(n_tune_steps, "n_tune_steps")
-  tau          <- .dsmh_validate(thin, "thin")
-  max_tune_iter <- .dsmh_validate(max_tune_iter, "max_tune_iter")
+  prob <- .dsmh_args_problem(list(
+    n_particles = n_particles, n_groups = n_groups, n_strata = n_strata,
+    n_tune_steps = n_tune_steps, thin = thin, max_tune_iter = max_tune_iter,
+    n_cores = n_cores, accept_target = accept_target, n_stages = n_stages,
+    lambda1 = lambda1, n_obs = n_obs, lambda_schedule = lambda_schedule))
+  if (length(prob))
+    .dynhr_abort("dynhr_dsmh: ", paste(prob, collapse = " "),
+                 class = "dynhr_error_dsmh_args")
+  n_particles  <- as.integer(n_particles)
+  G            <- as.integer(n_groups)
+  M            <- as.integer(n_strata)
+  K            <- as.integer(n_tune_steps)
+  tau          <- as.integer(thin)
+  max_tune_iter <- as.integer(max_tune_iter)
   n_workers    <- if (is.null(n_cores)) 1L
-                  else .mirai_n_cores(.dsmh_validate(n_cores, "n_cores"), G)
-  if (n_particles %% G != 0L)
-    .dynhr_abort("dynhr_dsmh: `n_particles` (", n_particles, ") must be a ",
-                 "multiple of `n_groups` (", G, ").",
-                 class = "dynhr_error_dsmh_args")
-  if (n_particles %% M != 0L)
-    .dynhr_abort("dynhr_dsmh: `n_strata` (", M, ") must divide ",
-                 "`n_particles` (", n_particles, ") evenly (Dynare: M must ",
-                 "divide N*G).", class = "dynhr_error_dsmh_args")
-  if (!is.numeric(accept_target) || length(accept_target) != 2L ||
-      !all(is.finite(accept_target)) || accept_target[1L] <= 0 ||
-      accept_target[2L] >= 1 || accept_target[1L] >= accept_target[2L])
-    .dynhr_abort("dynhr_dsmh: `accept_target` must be c(alpha0, alpha1) ",
-                 "with 0 < alpha0 < alpha1 < 1.",
-                 class = "dynhr_error_dsmh_args")
+                  else .mirai_n_cores(as.integer(n_cores), G)
   N_per <- n_particles %/% G
 
   .local_seed(seed)
@@ -594,25 +644,15 @@ dynhr_dsmh <- function(log_post_fn,
   ## ---- Tempering ladder ---------------------------------------------------
   if (!is.null(lambda_schedule)) {
     lam <- as.numeric(lambda_schedule)
-    if (length(lam) < 1L || any(!is.finite(lam)) || any(lam <= 0) ||
-        any(diff(lam) <= 0) || lam[length(lam)] != 1)
-      .dynhr_abort("dynhr_dsmh: `lambda_schedule` must be strictly ",
-                   "increasing in (0, 1] and end at 1.",
-                   class = "dynhr_error_dsmh_args")
   } else {
-    H <- .dsmh_validate(n_stages, "n_stages")
+    H <- as.integer(n_stages)
     if (is.null(lambda1)) {
       if (is.null(n_obs))
         .dynhr_abort("dynhr_dsmh: supply `n_obs` (Dynare's first rung is ",
                      "lambda1 = 1/(10 * n_par * n_obs)), `lambda1` or ",
                      "`lambda_schedule`.", class = "dynhr_error_dsmh_args")
-      n_obs   <- .dsmh_validate(n_obs, "n_obs")
-      lambda1 <- 1 / (10 * d * n_obs)
+      lambda1 <- 1 / (10 * d * as.integer(n_obs))
     }
-    if (!is.numeric(lambda1) || length(lambda1) != 1L || !is.finite(lambda1) ||
-        lambda1 <= 0 || lambda1 > 1)
-      .dynhr_abort("dynhr_dsmh: `lambda1` must be in (0, 1].",
-                   class = "dynhr_error_dsmh_args")
     ## Dynare: lambda_i = exp((H - i)/(H - 1) * log(lambda1)), i = 1..H.
     lam <- if (H == 1L) 1 else exp((H - seq_len(H)) / (H - 1) * log(lambda1))
     lam[H] <- 1

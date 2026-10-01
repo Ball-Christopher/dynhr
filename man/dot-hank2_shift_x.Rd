@@ -7,7 +7,7 @@
 .hank2_shift_x(D, delta, block)
 }
 \description{
-The collateral coordinate re-basing (D1, brief 19 section 9.12): mass at
+The collateral coordinate re-basing: mass at
 \eqn{(e, x, a)} moves to \eqn{(e, x + \delta a, a)}, per a-slice, via the
 VALIDATED joint-lottery forward operator with an identity income transition
 (the a-component queries grid knots exactly, so only the liquid lottery is

@@ -416,8 +416,7 @@ solve_perturbation_order5 <- function(model, compiled, ss, params, dr4,
       for (i in 2:length(mats)) Kf <- Kf %x% mats[[i]]
       fp %*% ghxxxxx %*% Kf
     }
-    solveA <- function(rhs) tryCatch(solve(A_L, rhs),
-                                     error = function(e) qr.solve(A_L, rhs))
+    solveA <- function(rhs) .solve_higher_order_lu(A_L, rhs)
     ghxxxxu <- solveA(-(phi$xxxxu + fut(hx, hx, hx, hx, hu)))
     ghxxxuu <- solveA(-(phi$xxxuu + fut(hx, hx, hx, hu, hu)))
     ghxxuuu <- solveA(-(phi$xxuuu + fut(hx, hx, hu, hu, hu)))

@@ -46,7 +46,7 @@ multiplier (the residual of the tagged equation)
 has the wrong sign when below -tol times the sum of
 the absolute terms of that residual.  Scale-free:
 rescaling the model's units leaves the regimes
-unchanged (an absolute tolerance before W78,
+unchanged (an absolute tolerance previously,
 2026-09).}
 
 \item{regime_path_init}{Integer vector (length T) warm start for the

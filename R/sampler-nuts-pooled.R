@@ -271,7 +271,7 @@
     names(st) <- par_names
     st
   })
-  ## Fused value + gradient (W92, .hmc_fused_target()): checked against
+  ## Fused value + gradient (.hmc_fused_target()): checked against
   ## log_post_fn at chain 1's start; then every chain's start value and every
   ## leaf come from the fused function, gradients carried with the states.
   fz <- .hmc_fused_target(log_post_fn, grad_fn, states[[1L]], par_names,
@@ -281,7 +281,7 @@
   g_c   <- vector("list", M)
   if (is.null(vg_fn)) {
     lp_c <- vapply(states, tg$lp, numeric(1))
-    ## W94: the separate-call path carries the gradients with the states too
+    ## The separate-call path carries the gradients with the states too
     ## (taken once here; the step-size search and every transition reuse them)
     g_c  <- lapply(states, tg$grad)
   } else {
@@ -364,7 +364,7 @@
       names(th) <- par_names
       states[[c]] <- th
       lp_c[c]     <- if (is.null(vg_fn)) tg$lp(th) else tr$lp
-      g_c[[c]]    <- tr$g   # carried with the state (W92 fused, W94 both)
+      g_c[[c]]    <- tr$g   # carried with the state
       warm_state[it, , c] <- th
       warm_theta[it, , c] <- to_theta(th)
       warm_lp[it, c]      <- trace_lp(th, lp_c[c])
@@ -759,10 +759,10 @@ dynhr_nuts_pooled <- function(log_post_fn, theta_init,
                            lik_init = li, system_priors = system_priors)
   ## THETA-space: .nuts_sampler_target() (warmup) and dynhr_nuts() (the
   ## frozen chains) both apply the eta chain rule when `transform` is set.
-  ## W86: wrapping here as well applied it twice.
-  ## W94: `system_priors` is the context's, the one .worker_lp carries
+  ## Wrapping here as well applied it twice.
+  ## `system_priors` is the context's, the one .worker_lp carries
   ## (.mirai_pool_init), so this is the gradient -- and the fused value -- of
-  ## the sampled target. (W92 dropped the fused value instead, and the
+  ## the sampled target. (Previously the fused value was dropped instead, and the
   ## gradient omitted the system prior.) `fuse = FALSE` still drops it.
   if (!isTRUE(fuse)) attr(g, "logpost_grad") <- NULL
   g

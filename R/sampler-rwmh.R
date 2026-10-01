@@ -6,6 +6,229 @@
 ## Called by estimate_model() in estimate-monolith.R and by run_mcmc_parallel().
 ## --------------------------------------------------------------------------
 
+## --------------------------------------------------------------------------
+## Argument checkers shared by the MCMC samplers
+##
+## Every sampler keeps ONE `.<sampler>_args_problem(args, n_par = NULL)`: a
+## pure function of the arguments (no RNG, no likelihood evaluation) that
+## returns the problems as a character vector (`character(0)` = fine). The
+## sampler calls it at entry and aborts with the joined messages; a caller
+## that already knows the arguments (a spec being validated) calls the same
+## function, so a bad value fails when the spec is built rather than after
+## the mode stage, and the two cannot drift apart.
+##
+## `args` is a named list keyed by the SAMPLER FUNCTION's formal argument
+## names and holds only what the caller supplies: an absent (or NULL) entry
+## is the sampler's default, which is valid by construction. `n_par` is the
+## number of estimated parameters when known; rules that need it are skipped
+## when it is NULL.
+## --------------------------------------------------------------------------
+
+## Short rendering of an offending value for a message.
+.mcmc_fmt <- function(v) {
+  if (is.numeric(v) && length(v) == 1L) format(v, digits = 6)
+  else if (is.character(v) && length(v) == 1L) paste0("\"", v, "\"")
+  else paste0("<", class(v)[1L], " of length ", length(v), ">")
+}
+
+.mcmc_scalar <- function(v) is.numeric(v) && length(v) == 1L && !is.na(v)
+
+## A single finite whole number.
+.mcmc_whole_ok <- function(v) .mcmc_scalar(v) && is.finite(v) && v == round(v)
+
+## Rule constructors. A rule is function(v, nm, n_par) -> NULL | message.
+.mcmc_r_whole <- function(min) function(v, nm, n_par) {
+  if (.mcmc_whole_ok(v) && v >= min) return(NULL)
+  sprintf("`%s` must be a whole number >= %s (got %s).", nm, min, .mcmc_fmt(v))
+}
+
+.mcmc_r_pos <- function(allow_inf = FALSE) function(v, nm, n_par) {
+  if (.mcmc_scalar(v) && v > 0 && (allow_inf || is.finite(v))) return(NULL)
+  sprintf("`%s` must be a single positive %snumber (got %s).", nm,
+          if (allow_inf) "" else "finite ", .mcmc_fmt(v))
+}
+
+## Number in an interval; `lo_open` / `hi_open` say whether the end is excluded.
+.mcmc_r_range <- function(lo, hi, lo_open, hi_open) function(v, nm, n_par) {
+  ok <- .mcmc_scalar(v) && is.finite(v) &&
+    (if (lo_open) v > lo else v >= lo) && (if (hi_open) v < hi else v <= hi)
+  if (ok) return(NULL)
+  sprintf("`%s` must be a single number in %s%s, %s%s (got %s).", nm,
+          if (lo_open) "(" else "[", lo, hi, if (hi_open) ")" else "]",
+          .mcmc_fmt(v))
+}
+
+.mcmc_r_flag <- function() function(v, nm, n_par) {
+  if (isTRUE(v) || isFALSE(v)) return(NULL)
+  sprintf("`%s` must be TRUE or FALSE (got %s).", nm, .mcmc_fmt(v))
+}
+
+.mcmc_r_fun <- function() function(v, nm, n_par) {
+  if (is.function(v)) return(NULL)
+  sprintf("`%s` must be NULL or a function (got %s).", nm, .mcmc_fmt(v))
+}
+
+## `choices` are the sampler's own match.arg() choices; the unevaluated
+## default vector (all choices) is accepted as "use the default".
+.mcmc_r_choice <- function(choices) function(v, nm, n_par) {
+  if (is.character(v) && (identical(v, choices) ||
+                          (length(v) == 1L && v %in% choices))) return(NULL)
+  sprintf("`%s` must be one of %s (got %s).", nm,
+          paste0("\"", choices, "\"", collapse = ", "), .mcmc_fmt(v))
+}
+
+## Diagonal of the mass matrix: one finite positive entry per parameter.
+.mcmc_r_mass <- function() function(v, nm, n_par) {
+  if (!is.numeric(v) || !length(v) || any(!is.finite(v)) || any(v <= 0))
+    return(sprintf("`%s` must be a numeric vector of finite positive entries.", nm))
+  if (!is.null(n_par) && length(v) != n_par)
+    return(sprintf("`%s` must have one entry per estimated parameter (%d; got %d).",
+                   nm, n_par, length(v)))
+  NULL
+}
+
+## A square numeric matrix of the right order (a Cholesky factor).
+.mcmc_r_square <- function() function(v, nm, n_par) {
+  if (!is.matrix(v) || !is.numeric(v) || nrow(v) != ncol(v) || any(!is.finite(v)))
+    return(sprintf("`%s` must be a finite square numeric matrix.", nm))
+  if (!is.null(n_par) && nrow(v) != n_par)
+    return(sprintf("`%s` must be %d x %d, one row/column per estimated parameter (got %d x %d).",
+                   nm, n_par, n_par, nrow(v), ncol(v)))
+  NULL
+}
+
+## Symmetric positive definite matrix of order n_par. `strict` is for a
+## matrix that is factored (chol) or inverted: its smallest eigenvalue must
+## clear the numerical-rank tolerance. Without it (a proposal covariance,
+## which the sampler regularises itself) a numerically singular positive
+## semi-definite matrix is accepted, but an indefinite / negative-definite
+## one, or one with a zero or negative variance (a frozen coordinate), is not.
+.mcmc_r_spd <- function(strict = FALSE) function(v, nm, n_par) {
+  if (!is.matrix(v) || !is.numeric(v) || nrow(v) != ncol(v))
+    return(sprintf("`%s` must be a square numeric matrix (got %s).", nm, .mcmc_fmt(v)))
+  if (!is.null(n_par) && nrow(v) != n_par)
+    return(sprintf("`%s` must be %d x %d, one row/column per estimated parameter (got %d x %d).",
+                   nm, n_par, n_par, nrow(v), ncol(v)))
+  if (any(!is.finite(v)))
+    return(sprintf("`%s` must be finite.", nm))
+  sc <- max(abs(v))
+  if (sc == 0)
+    return(sprintf("`%s` must be positive definite (it is all zeros).", nm))
+  asym <- max(abs(v - t(v)))
+  if (asym > 1e-6 * sc)
+    return(sprintf("`%s` must be symmetric (largest asymmetry %s).", nm,
+                   format(asym, digits = 3)))
+  ev <- eigen((v + t(v)) / 2, symmetric = TRUE, only.values = TRUE)$values
+  lo <- min(ev); hi <- max(ev)
+  bad <- if (strict) lo <= .Machine$double.eps * nrow(v) * hi
+         else (hi <= 0 || lo < -1e-8 * hi || any(diag(v) <= 0))
+  if (bad)
+    return(sprintf("`%s` must be positive definite (smallest eigenvalue %s%s).",
+                   nm, format(lo, digits = 3),
+                   if (!strict && any(diag(v) <= 0))
+                     "; every diagonal entry must be > 0" else ""))
+  NULL
+}
+
+## Run `rules` (named list of rule functions) over the supplied `args`; also
+## report names that are not formals of `fn`.
+.mcmc_check_args <- function(args, fn, fn_name, rules, n_par = NULL) {
+  if (is.null(args)) args <- list()
+  nms <- names(args)
+  if (length(args) && (is.null(nms) || any(!nzchar(nms))))
+    return("arguments must be a named list.")
+  problems <- character(0)
+  ## A function that takes `...` (a wrapper) accepts any name.
+  unknown <- if ("..." %in% names(formals(fn))) character(0)
+             else setdiff(nms, names(formals(fn)))
+  if (length(unknown))
+    problems <- sprintf("unknown argument%s %s (%s() accepts: %s).",
+                        if (length(unknown) > 1L) "s" else "",
+                        paste0("`", unknown, "`", collapse = ", "), fn_name,
+                        paste0("`", setdiff(names(formals(fn)),
+                                            c("log_post_fn", "theta_init", "theta0")),
+                               "`", collapse = ", "))
+  for (nm in intersect(names(rules), nms)) {
+    v <- args[[nm]]
+    if (is.null(v)) next
+    msg <- rules[[nm]](v, nm, n_par)
+    if (!is.null(msg)) problems <- c(problems, msg)
+  }
+  problems
+}
+
+## The value of `nm`: the supplied one, else the sampler's own default.
+.mcmc_arg <- function(args, nm, fn) {
+  v <- args[[nm]]
+  if (!is.null(v)) v else eval(formals(fn)[[nm]])
+}
+
+## Sampler entry: abort with the joined problems.
+.mcmc_abort_if_problems <- function(fn_name, problems) {
+  if (length(problems))
+    .dynhr_abort(fn_name, ": ", paste(problems, collapse = " "),
+                 class = "dynhr_error_invalid_argument")
+  invisible(NULL)
+}
+
+## A metric argument may also be the low-rank metric object (class
+## dynhr_lowrank_metric, R/sampler-metric.R) that pooled NUTS passes as
+## M_inv / chol_M: its constructor validated it; check only its order.
+.mcmc_r_or_lowrank <- function(rule) function(v, nm, n_par) {
+  if (!inherits(v, "dynhr_lowrank_metric")) return(rule(v, nm, n_par))
+  if (!is.null(n_par) && length(v$sd) != n_par)
+    return(sprintf("`%s` (low-rank metric) must have order %d, one per estimated parameter (got %d).",
+                   nm, n_par, length(v$sd)))
+  NULL
+}
+
+## Metric rules shared by the gradient samplers that take them.
+.mcmc_metric_rules <- function(fn) {
+  r <- list(mass_diag = .mcmc_r_mass(),
+            M_inv     = .mcmc_r_or_lowrank(.mcmc_r_spd(strict = FALSE)),
+            chol_M    = .mcmc_r_or_lowrank(.mcmc_r_square()),
+            grad_fn   = .mcmc_r_fun())
+  r[intersect(names(r), names(formals(fn)))]
+}
+
+
+## --------------------------------------------------------------------------
+## RWMH argument checker
+## --------------------------------------------------------------------------
+
+#' Problems with the arguments of rwmh()
+#'
+#' @param args Named list of the supplied rwmh() arguments (absent = default).
+#' @param n_par Number of estimated parameters, or NULL when not known.
+#'   \code{n_draws} counts burn-in draws too, so it must exceed \code{n_burn}.
+#' @return Character vector of problems; \code{character(0)} when fine.
+#' @noRd
+.rwmh_args_problem <- function(args, n_par = NULL) {
+  rules <- list(
+    Sigma_prop  = .mcmc_r_spd(strict = FALSE),
+    n_draws     = .mcmc_r_whole(1L),
+    n_burn      = .mcmc_r_whole(0L),
+    scale       = .mcmc_r_pos(),
+    target_rate = .mcmc_r_range(0, 1, TRUE, TRUE),
+    adapt_every = .mcmc_r_whole(1L),
+    adapt_cov   = .mcmc_r_flag(),
+    n_blocks    = function(v, nm, n_par) {
+      ok <- .mcmc_whole_ok(v) && v >= 1 && (is.null(n_par) || v <= n_par)
+      if (ok) return(NULL)
+      sprintf("`n_blocks` must be a single integer in [1, %s] (got %s).",
+              if (is.null(n_par)) "n_par" else n_par, .mcmc_fmt(v))
+    })
+  p <- .mcmc_check_args(args, rwmh, "rwmh", rules, n_par)
+  nd <- .mcmc_arg(args, "n_draws", rwmh)
+  nb <- .mcmc_arg(args, "n_burn", rwmh)
+  if (.mcmc_whole_ok(nd) && .mcmc_whole_ok(nb) && nb >= 0 && nd >= 1 && nb >= nd)
+    p <- c(p, sprintf(paste0("`n_draws` counts the burn-in draws too, so it must exceed ",
+                             "`n_burn` (got n_draws = %s, n_burn = %s): no draws would be kept."),
+                      nd, nb))
+  p
+}
+
+
 #' Random Walk Metropolis-Hastings sampler
 #'
 #' @param log_post_fn  Function(theta) -> list(logpost, loglik, logprior)
@@ -99,11 +322,10 @@ rwmh <- function(log_post_fn, theta0, Sigma_prop,
   n_par     <- length(theta0)
   par_names <- names(theta0)
 
-  if (!is.logical(adapt_cov) || length(adapt_cov) != 1L || is.na(adapt_cov))
-    stop("adapt_cov must be a single logical value.")
-  if (!is.numeric(n_blocks) || length(n_blocks) != 1L || is.na(n_blocks) ||
-      n_blocks != as.integer(n_blocks) || n_blocks < 1L || n_blocks > n_par)
-    stop("n_blocks must be a single integer in [1, n_par].")
+  .mcmc_abort_if_problems("rwmh", .rwmh_args_problem(
+    list(Sigma_prop = Sigma_prop, n_draws = n_draws, n_burn = n_burn,
+         scale = scale, target_rate = target_rate, adapt_every = adapt_every,
+         adapt_cov = adapt_cov, n_blocks = n_blocks), n_par = n_par))
   n_blocks <- as.integer(n_blocks)
 
   Sigma_curr <- Sigma_prop
@@ -417,7 +639,7 @@ rwmh <- function(log_post_fn, theta0, Sigma_prop,
 #'   on \code{eta = to_unconstrained(theta)} with the target
 #'   \code{logpost(to_constrained(eta)) + log_jacobian(eta)}; stored chain
 #'   rows are \code{to_constrained(eta)} and \code{logpost_trace} /
-#'   \code{post_logpost} the theta-space log-posterior. W86: before this
+#'   \code{post_logpost} the theta-space log-posterior. Before this
 #'   argument existed, \code{run_posterior_estimation()}'s transform_params
 #'   path handed the eta-space proposal covariance to a THETA-space walk.
 #' @param rho_u        AR(1) correlation for U: U' = rho_u * U + sqrt(1 - rho_u^2) * Z.
@@ -487,7 +709,7 @@ rwmh_cpm <- function(log_post_fn, theta0, Sigma_prop,
          "Use make_log_posterior_tpf (TPF likelihood only).", call. = FALSE)
 
   ## Infer dimensions from U_curr.
-  ## U_curr layout (3T+1 entries for Tier 10, 2T+1 for legacy Tier 9):
+  ## U_curr layout (3T+1 entries; 2T+1 for the legacy layout):
   ##   [[1]]:            init normals (n_s x N matrix)
   ##   [[2]].[[T+1]]:    per-period shock normals (n_e x N matrix each)
   ##   [[T+2]].[[2T+1]]: per-period phi=1 resampling z scalars (length-1 numeric each)

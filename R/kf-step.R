@@ -128,9 +128,9 @@ kf_step <- function(s, P, y, TT, ZZ, RR, DD, Sigma_e,
 ## update behind kf_step() and the hand-rolled filters that need more than the
 ## Gaussian ll increment (the Student-t likelihood in
 ## R/kalman-filter-student.R and kf_innovation_diagnostics() in
-## R/kf-innovation-diagnostics.R; brief 23 D1). Keeping ONE copy of the
+## R/kf-innovation-diagnostics.R). Keeping ONE copy of the
 ## covariance update is the point: two hand-rolled copies had dropped the
-## measurement-error Joseph term K diag(me) K' (brief 23 A2).
+## measurement-error Joseph term K diag(me) K'.
 ##
 ## Inputs are already reduced to the rows observed this period:
 ##   v      innovation y_t - d - ZZ s   (length k)

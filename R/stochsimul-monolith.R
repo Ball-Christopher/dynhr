@@ -21,7 +21,7 @@
 ## string) removes a per-draw parse() that showed up hot in profiling. eval()
 ## still runs every call against the current parameter environment.
 ##
-## A-SEC (0.9.4): this cache is a security choke point (see the note above
+## A-SEC: this cache is a security choke point (see the note above
 ## `.ssm_expr_cache` in steady-monolith.R).  An expression is AST-checked
 ## against the .mod allowlist when it is first inserted, so a model built
 ## programmatically -- which never went through parse_shocks_block()'s sandbox
@@ -130,7 +130,7 @@
       }
     }
 
-    ## (0.9.4, A9) There is deliberately NO name-matching fallback here.  Until
+    ## There is deliberately NO name-matching fallback here.  Until
     ## 0.9.4 a shock missing from the shocks block took the value of any
     ## parameter named sig_/stderr_/sigma_<core> -- so `sigma_c = 2` (risk
     ## aversion) silently gave eps_c a variance of 4.  Dynare semantics: a
@@ -217,7 +217,7 @@
 ## the stderr_expr / .get_shock_stderr pattern above).  alpha = 0 (default)
 ## gives a symmetric Gaussian shock; alpha != 0 gives a skew-normal with
 ## E[eps_i] = sigma_i * delta_i * sqrt(2/pi), delta_i = alpha_i/sqrt(1+alpha_i^2).
-## alpha can be NEGATIVE (brief Landmine 7).
+## alpha can be NEGATIVE.
 #' Draw zero-mean shock vectors from the joint closed skew-normal
 #'
 #' The law is the one the package's own skew likelihood evaluates
@@ -401,7 +401,7 @@ compute_irfs <- function(dr, model, n_periods = 40L, shock_size = 1, params = NU
   ## Dynare convention: IRF for shock k uses the k-th column of chol(Sigma_e)
   ## (lower triangular), so correlated shocks propagate to all impact responses.
   ## For a diagonal Sigma_e this reduces to ghu[,k]*sigma_k (backward-compat).
-  ## A10 (0.9.4): the precedence between caller `params` and a covariance
+  ## The precedence between caller `params` and a covariance
   ## carried on `dr` now lives in the shared .irf_shock_scale(), which
   ## compute_irfs_order2() uses too -- `params` wins when supplied.
   Sigma_e_irf <- .irf_shock_scale(dr, model, params)
@@ -419,7 +419,7 @@ compute_irfs <- function(dr, model, n_periods = 40L, shock_size = 1, params = NU
     ## shock_size.  Reduces to shock_stderr[k]*shock_size when Sigma_e diagonal.
     eps <- L_chol[, k] * shock_size
 
-    ## M26: a shock with no declared variance (all-zero Cholesky column) would
+    ## A shock with no declared variance (all-zero Cholesky column) would
     ## otherwise give an identically-zero IRF even though the policy function
     ## ghu[,k] is correct. Drive a UNIT impulse of magnitude `shock_size`
     ## instead, so e.g. monetary-policy IRFs work when the shock variance is set
@@ -535,7 +535,7 @@ simulate_model <- function(dr, n_periods = 200L, shocks = NULL,
     alpha   <- .get_shock_skewness(model, exo, params)
     sigma_e <- shock_stderr[exo]   # named vector, length n_exo
 
-    ## A9 (0.9.4): the drawn shocks must carry the model's FULL covariance --
+    ## The drawn shocks must carry the model's FULL covariance --
     ## `corr a, b` / `var a, b` entries in the shocks block were previously
     ## ignored here and every path was drawn with independent innovations,
     ## which silently contradicted compute_moments()/compute_irfs() and the
@@ -546,7 +546,7 @@ simulate_model <- function(dr, n_periods = 200L, shocks = NULL,
     has_corr <- any(abs(off_sim) > 0)
 
     if (any(alpha != 0) && has_corr) {
-      ## L2 (0.9.4): CORRELATED + SKEWED shocks.  This branch used to warn that
+      ## L2: CORRELATED + SKEWED shocks.  This branch used to warn that
       ## the declared `corr` / `var a,b` entries were IGNORED and draw each
       ## shock independently from its skew-normal marginal -- a simulation whose
       ## DGP silently differed from the model's declared covariance AND from the
@@ -561,7 +561,7 @@ simulate_model <- function(dr, n_periods = 200L, shocks = NULL,
       ## kept because it consumes a fixed RNG stream that seeded regression
       ## tests depend on, and needs no rejection step.
       ## CSN draw: e_i = sigma_i * (delta_i*|z1| + sqrt(1-delta_i^2)*z2) - mu_i
-      ## where mu_i = sigma_i * delta_i * sqrt(2/pi)  (Landmine 6: subtract mean
+      ## where mu_i = sigma_i * delta_i * sqrt(2/pi)  (subtract mean
       ## so shocks are mean-zero; sign error here shifts the steady state).
       delta <- alpha / sqrt(1 + alpha^2)            # length n_exo
       mu_e  <- sigma_e * delta * sqrt(2 / pi)       # E[e_i] before correction
@@ -659,7 +659,7 @@ simulate_model <- function(dr, n_periods = 200L, shocks = NULL,
 ## 3. THEORETICAL MOMENTS (Lyapunov equation)
 ## ============================================================================
 
-## NOTE (D2, 2026-09-02): solve_lyapunov() used to live here.  It is now the
+## NOTE: solve_lyapunov() used to live here.  It is now the
 ## package's SINGLE discrete-Lyapunov solver and lives in R/solve-helpers.R
 ## (together with the `.solve_lyapunov()` alias that R/backend-monolith.R used
 ## to define separately).  Do not re-add a local copy: the near-unit-root
@@ -667,7 +667,7 @@ simulate_model <- function(dr, n_periods = 200L, shocks = NULL,
 ## on purpose.
 
 ## ---------------------------------------------------------------------------
-## M2: stationary-subspace projection via the modal (eigen) decomposition.
+## Stationary-subspace projection via the modal (eigen) decomposition.
 ##
 ## For a state transition A with unit/explosive eigenvalues, the unconditional
 ## state covariance Sigma_s = sum_{k>=0} A^k Q (A')^k DIVERGES.  Dynare reports
@@ -775,7 +775,7 @@ compute_moments <- function(dr, model, n_ar = 5L, params = NULL) {
   if (is.null(params)) params <- model$param_values
 
   ## Build shock covariance matrix Sigma_e (handles cross-shock correlations).
-  ## M28: honour a covariance carried on the decision rules (set when the caller
+  ## Honour a covariance carried on the decision rules (set when the caller
   ## passed solve_perturbation(Sigma_e=)) -- including off-diagonal correlations --
   ## in preference to re-deriving from model$shocks. Falls back to the parsed
   ## shocks block when dr$Sigma_e is absent (common case, byte-identical to before).
@@ -792,7 +792,7 @@ compute_moments <- function(dr, model, n_ar = 5L, params = NULL) {
   ## Shock impact on states
   ghu_state <- ghu[state_idx, , drop = FALSE]    # n_state x n_exo
 
-  ## ---- M2: stationary-subspace projection ------------------------------------
+  ## ---- stationary-subspace projection ------------------------------------
   ## Detect unit/explosive roots via the EIGENVALUES of ghx_state (exact and
   ## basis-independent).  When all roots are stable, solve the Lyapunov
   ## equation as usual.  When a unit/explosive root is present, project onto
@@ -880,7 +880,7 @@ compute_moments <- function(dr, model, n_ar = 5L, params = NULL) {
   ## Strategy:
   ##   - stat_var : indices into 1:n_endo that are stationary (complement of
   ##                nonstat_var, which was determined above by the SAME
-  ##                modal-eigenvalue criterion used for var_cov / M2).
+  ##                modal-eigenvalue criterion used for var_cov).
   ##   - The transition operator on the full space is G = ghx %*% S_sel
   ##     (n_endo x n_endo).  Restricted to the stationary block it is
   ##     G_ss = G[stat_var, stat_var] (stat x stat).
@@ -899,7 +899,7 @@ compute_moments <- function(dr, model, n_ar = 5L, params = NULL) {
     G_ss    <- G[stat_var, stat_var, drop = FALSE]   # n_stat x n_stat
     sd_ss   <- sd_outer[stat_var, stat_var, drop = FALSE]
     sd_ss[sd_ss == 0] <- Inf
-    ## Seed: stationary block of Sigma_y (finite by M2)
+    ## Seed: stationary block of Sigma_y (finite by construction)
     Gamma_ss <- Sigma_y[stat_var, stat_var, drop = FALSE]
     for (lag in seq_len(n_ar)) {
       Gamma_ss    <- G_ss %*% Gamma_ss
@@ -1393,7 +1393,7 @@ compute_moments_order2 <- function(dr, model, n_ar = 5L, params = NULL) {
   colnames(corr_mat) <- endo
 
   ## --- Autocovariances (lag τ ≥ 1) ------------------------------------------
-  ## A13a (0.9.4): exact augmented-system formula; see .order2_autocov() for the
+  ## Exact augmented-system formula; see .order2_autocov() for the
   ## derivation and for what the old ghx/S_sel recursion got wrong.
   autocov  <- .order2_autocov(sys, st, n_ar)
   autocorr <- array(0, dim = c(n_endo, n_endo, n_ar))
@@ -1407,7 +1407,7 @@ compute_moments_order2 <- function(dr, model, n_ar = 5L, params = NULL) {
   ## (Dynare's convention; identical to what compute_moments() and
   ## conditional_variance_decomposition() now do at order 1).
   ##
-  ## 0.9.4 (WS4, follow-up to WS2's A4): this used to zero every Sigma_e entry
+  ## 0.9.4 : this used to zero every Sigma_e entry
   ## except the diagonal (k,k), which simply DISCARDS the off-diagonal
   ## covariance -- with correlated shocks the per-shock pieces then failed to
   ## add up, and the order-1 and order-2 decompositions of the SAME linear model
@@ -1455,7 +1455,7 @@ compute_moments_order2 <- function(dr, model, n_ar = 5L, params = NULL) {
 ## ============================================================================
 ## Augmented pruned-state moment machinery (order 2) -- shared by
 ## compute_moments_order2() (stationary, unconditional) and conditional_welfare()
-## (transient, s0-conditional, Tier 15 B4).
+## (transient, s0-conditional).
 ##
 ## The pruned 2nd-order system is LINEAR in the augmented state
 ##   xi_t = [ x1_t ; x2_t ; x1_t (x) x1_t ]   (dim d = 2*n_s + n_s^2),
@@ -1553,7 +1553,7 @@ compute_moments_order2 <- function(dr, model, n_ar = 5L, params = NULL) {
     as.numeric(solve(diag(sys$d) - sys$Tlin, sys$cc + sys$c_u))
   mean_dev <- as.numeric(sys$Dxi %*% mu_xi) + 0.5 * sys$ghss + sys$c_v
   list(var_cov = var_cov, mean = sys$ys + mean_dev, Sigma_x = Sigma_x,
-       ## A13a (0.9.4): the FULL augmented-state covariance and the innovation
+       ## The FULL augmented-state covariance and the innovation
        ## covariance are needed for the exact lag-tau autocovariance; they were
        ## computed here already but thrown away, and the callers reconstructed a
        ## wrong recursion from Sigma_x / Var_x2 alone.  See .order2_autocov().
@@ -1568,7 +1568,7 @@ compute_moments_order2 <- function(dr, model, n_ar = 5L, params = NULL) {
 
 ## EXACT lag-tau autocovariances of the AFVRR order-2 pruned state space.
 ##
-## A13a (0.9.4). Both compute_moments_order2() and pruned_ss_moments() used
+## A13a. Both compute_moments_order2() and pruned_ss_moments() used
 ##   Gamma(tau) = ghx S_sel Gamma(tau-1),  seeded at
 ##   Gamma(0)_hat = ghx (Sigma_x + Var_x2) ghx'
 ## which is wrong twice over:

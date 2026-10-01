@@ -82,7 +82,7 @@ used to steer the leapfrog trajectory is only approximate.
 
 \strong{Scope / limits (read before use):} this is the PRACTICAL
 single-coordinate construction, not a global diffeomorphism (expected
-prohibitive per the pathological-DSGE RESEARCH_AGENDA -- \code{bk_distance}
+prohibitive -- \code{bk_distance}
 is non-smooth at repeated/defective crossings). It is valid only where
 the crossing eigenvalue at the wall is SIMPLE; \code{bk_wall_transform()}
 fails loud (via the returned transform's \code{to_unconstrained}/

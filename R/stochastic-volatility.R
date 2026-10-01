@@ -183,7 +183,7 @@ stochastic_volatility <- function(...) {
 #'
 #' @param sv_spec   An \code{sv_spec} (\code{model$stochastic_volatility}).
 #' @param exo_names Character vector of shock names in dr$exo_names order
-#'   (Landmine 9: NOT model$varexo_names).
+#'(NOT model$varexo_names).
 #' @return \code{NULL} if the spec is empty; otherwise an integer vector, one
 #'   position per SV entry, into \code{exo_names} (in the spec's row order).
 #' @noRd

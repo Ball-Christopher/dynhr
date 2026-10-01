@@ -1036,7 +1036,7 @@ parse_mod <- function(file_or_text, verbose = FALSE) {
     txt <- file_or_text
   }
 
-  # ---- 2. Expand Dynare macro directives (M18) -------------------------
+  # ---- 2. Expand Dynare macro directives -------------------------
   # Evaluate the supported @#for / @#if / @#ifdef / @#ifndef / @#define macro
   # subset and splice in @{...} interpolations BEFORE the lexer and any block
   # extraction run.  This is an exact byte-for-byte no-op for macro-free
@@ -1143,20 +1143,20 @@ parse_mod <- function(file_or_text, verbose = FALSE) {
 
   if (model_block$found) {
 
-    # ---- D3: ONE ordered timing pass over the model-block TEXT ----
+    # ---- ONE ordered timing pass over the model-block TEXT ----
     # The model body -- equations AND `#` model-local definitions, which are
     # part of the same text -- goes through these steps IN THIS ORDER, before
     # anything is parsed:
     #   (1) predetermined re-timing: every occurrence of a variable declared in
     #       `predetermined_variables` is shifted by -1 (k -> k(-1),
     #       k(+1) -> k, k(-1) -> k(-2)).  Locals are re-timed too, because
-    #       they are text in the same body (review 2026-09-25 A10a).
-    #   (2) EXPECTATION(k)(expr) -> auxiliary endogenous variable (B15).  It
+    #       they are text in the same body.
+    #   (2) EXPECTATION(k)(expr) -> auxiliary endogenous variable.  It
     #       runs on standard timing, so a predetermined variable inside expr
     #       is already re-timed.
     #   (3) auxiliary expansion of |lead|/|lag| > 1 (and exogenous +-1) into
     #       AUX chains.  It sees standard timing, so a predetermined `k(-1)`
-    #       (standard k(-2)) gets its AUX_LAG chain (A10b) and a predetermined
+    #       (standard k(-2)) gets its AUX_LAG chain and a predetermined
     #       `k(+2)` (standard k(+1)) needs none.
     # This is Dynare's order: ModFile::transformPass re-times predetermined
     # variables (DynamicModel::transformPredeterminedVariables, which also
@@ -1297,7 +1297,7 @@ parse_mod <- function(file_or_text, verbose = FALSE) {
 
   # ---- 5. Calibration (top-level param assignments) --------------------
   remaining_txt <- remove_blocks(txt)
-  # M19: pre-evaluate verbatim; blocks (which remove_blocks strips) so derived
+  # Pre-evaluate verbatim; blocks (which remove_blocks strips) so derived
   # scalar params and their matrix intermediates are available.  We do a quick
   # first calibration pass to seed the verbatim env with base param values
   # (verbatim RHS may reference declared params like z_bar, rho_zz, ...),
@@ -1333,7 +1333,7 @@ parse_mod <- function(file_or_text, verbose = FALSE) {
       var_names = all_var_names,
       param_names = param_names, param_values = param_values)
 
-  # ---- M17: fail-loud on declared-but-unvalued parameters --------------------
+  # ---- fail-loud on declared-but-unvalued parameters --------------------
   # Parameters that are DECLARED in the `parameters` block but never assigned a
   # value in the .mod (no top-level calibration, no verbatim; assignment) are
   # absent from / NA in param_values. This is the single most pervasive
@@ -1370,7 +1370,7 @@ parse_mod <- function(file_or_text, verbose = FALSE) {
   # ---- 6. Initval / Endval ---------------------------------------------
   # Create an evaluation environment with known parameter values so that
   # initval/endval expressions can reference parameter names directly.
-  ## A2: allowlist sandbox, not a child of baseenv() -- see
+  ## Allowlist sandbox, not a child of baseenv() -- see
   ## `.dynhr_sandbox_env()` in parse-blocks.R.
   initval_env <- .dynhr_sandbox_env(param_values, .dynhr_safe_matrix_fn_names)
   initval_block <- extract_paired_block(txt, "initval")
@@ -1535,7 +1535,7 @@ parse_mod <- function(file_or_text, verbose = FALSE) {
       idx <- match(nm, base_df$name)
       if (!is.na(idx)) {
         nr <- new_df[new_df$name == nm, ][1, ]
-        # M5: a later shocks block silently overwriting an earlier variance for
+        # A later shocks block silently overwriting an earlier variance for
         # the same shock loses the earlier value (e.g. Ascari keeps only the last
         # block's stderrs). Warn on a genuine conflict, mirroring the correlation
         # dedup warning. Re-stating the same value is silent (byte-compatible).
@@ -1562,7 +1562,7 @@ parse_mod <- function(file_or_text, verbose = FALSE) {
   .merge_correlations <- function(base_df, new_df) {
     if (nrow(new_df) == 0) return(base_df)
     if (nrow(base_df) == 0) return(new_df)
-    # M5: a second `shocks` block must not silently append a duplicate row for a
+    # A second `shocks` block must not silently append a duplicate row for a
     # pair already defined (plain rbind let last-write-wins apply downstream with
     # no signal -- e.g. BKK's corr=0 IRF block vs corr=0.258 sim block). Replace
     # per (unordered) pair, keeping the last definition, and warn on a conflict.
@@ -1591,7 +1591,7 @@ parse_mod <- function(file_or_text, verbose = FALSE) {
   shocks <- list(variances = .empty_variances,
                  correlations = .empty_correlations)
   det_shocks <- .empty_det
-  # M5: retain a per-block breakdown so per-`stoch_simul` scoping can be added
+  # Retain a per-block breakdown so per-`stoch_simul` scoping can be added
   # later without another parser rewrite. Each entry carries the block's own
   # parsed contents plus its `overwrite` flag. The merged `shocks` remains the
   # primary field for backward compatibility.
@@ -1991,7 +1991,7 @@ parse_mod <- function(file_or_text, verbose = FALSE) {
   else NULL
 
   # ---- 10d. metadata (@dynhr: blocks) ---------------------------------
-  ## A13b: no tryCatch and no temp file. `extract_mod_metadata()` takes a path
+  ## No tryCatch and no temp file. `extract_mod_metadata()` takes a path
   ## OR lines directly now (`.mod_lines()`), so the text branch no longer needs
   ## a round trip through the filesystem -- and a genuine metadata parse error
   ## SURFACES instead of silently yielding `list()`, which is what hid
@@ -2006,8 +2006,7 @@ parse_mod <- function(file_or_text, verbose = FALSE) {
   # text BEFORE auxiliary expansion and parsing -- see the D3 comment there.
   # It used to be applied here, on the parsed equation ASTs, which (a) missed
   # the `#` model-local definitions and (b) ran after the aux expansion, so a
-  # predetermined `k(-1)` (standard k(-2)) never got its AUX_LAG chain (review
-  # 2026-09-25 A10).
+  # predetermined `k(-1)` (standard k(-2)) never got its AUX_LAG chain.
 
   # ---- 12. Variable classification -------------------------------------
   vc <- build_variable_classification(equations, var_names, varexo_names,
@@ -2053,7 +2052,7 @@ parse_mod <- function(file_or_text, verbose = FALSE) {
     varobs_names         = varobs_names,
     ## alias: estimation entry points take an `obs_vars` argument -- populate
     ## the same-named model field from the .mod's varobs line so callers can
-    ## omit it (pathological-DSGE paper gap #4, 2026-07)
+    ## omit it
     obs_vars             = varobs_names,
     ramsey_instruments   = ramsey_instruments,
     ramsey_constraints   = ramsey_constraints,
@@ -2069,7 +2068,7 @@ parse_mod <- function(file_or_text, verbose = FALSE) {
     controlled_paths     = controlled_paths
   )
 
-  # ---- 13. MCP constraint tags (M16) ----------------------------------
+  # ---- 13. MCP constraint tags ----------------------------------
   # mcp_parse_tags() reads equation $tag_raw fields and builds MCP spec
   # objects.  Wiring it here mirrors the M6/M13 metadata-wiring pattern
   # (same parse-wiring family).  Errors are caught so a tag-syntax problem
@@ -2153,7 +2152,7 @@ parse_mod <- function(file_or_text, verbose = FALSE) {
 
 
 # ===========================================================================
-# Model-block timing helpers (review 2026-09-25 A10 / B15 / D3)
+# Model-block timing helpers
 #
 # They rewrite the model-block TEXT, so equations and `#` model-local
 # definitions are treated alike (the locals are part of the same text).  The
@@ -2236,7 +2235,7 @@ parse_mod <- function(file_or_text, verbose = FALSE) {
   paste(c(pieces, substr(text, cursor, n)), collapse = "")
 }
 
-## Dynare's EXPECTATION operator on model-block text (review 2026-09-25 B15).
+## Dynare's EXPECTATION operator on model-block text.
 ##
 ## `EXPECTATION(k)(expr)` is the expectation of `expr` conditional on the
 ## information of period t+k (k is a signed integer; k = -1 is "as of t-1").
@@ -2337,8 +2336,7 @@ parse_mod <- function(file_or_text, verbose = FALSE) {
        aux_var_names = aux_names)
 }
 
-## Dynare's var(log) substitution on model-block text (Dynare 6+; review
-## 2026-09-25 B11/E3).
+## Dynare's var(log) substitution on model-block text (Dynare 6+).
 ##
 ## `log_map` maps a declared name x to its log variable LOG_x. Every
 ## occurrence of x -- bare or with an explicit integer timing, in equations and
@@ -2598,7 +2596,7 @@ parse_mod <- function(file_or_text, verbose = FALSE) {
 
 
 # ===========================================================================
-# model_replace / model_remove / var_remove (Dynare 6+; review 2026-09-25 E3)
+# model_replace / model_remove / var_remove (Dynare 6+)
 # ===========================================================================
 
 ## Parse a comma-separated tag list: `key='value'` items, bare `key` items
@@ -2843,7 +2841,7 @@ parse_mod <- function(file_or_text, verbose = FALSE) {
 
 
 # ===========================================================================
-# The `diff` operator (review 2026-09-25 E3)
+# The `diff` operator
 # ===========================================================================
 
 ## Dynare's `diff(EXPR)` = EXPR - EXPR(-1), where EXPR(-1) moves the timing of

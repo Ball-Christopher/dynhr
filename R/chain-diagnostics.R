@@ -2,7 +2,7 @@
 ## --------------------------------------------------------------------------
 ## Standalone MCMC chain diagnostics: rank-normalised split-Rhat, bulk/tail
 ## effective sample size and Monte-Carlo standard error, callable on an
-## arbitrary draws object. Provided so callers (and the paper family -- P2/P6
+## arbitrary draws object. Provided so callers (and the paper family, which
 ## hand-roll a Geyer ESS + Rhat stack across many scripts) do not each
 ## re-implement it. Formulas follow Vehtari, Gelman, Simpson, Carpenter &
 ## Buerkner (2021); the estimators themselves are the package's single set in
@@ -87,7 +87,7 @@ chain_diagnostics <- function(draws, split = TRUE) {
   ## copy, which paired autocorrelations as (rho1+rho2), (rho3+rho4) instead of
   ## Geyer's (rho0+rho1), (rho2+rho3), clamped ESS at the draw count (wrong for
   ## antithetic chains) and had neither rank normalisation nor the folded
-  ## R-hat (brief 23 C7).
+  ## R-hat.
   sp <- if (split) .d5_split else identity
 
   out <- data.frame(param = pnames, mean = NA_real_, sd = NA_real_,

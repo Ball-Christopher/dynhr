@@ -1,7 +1,7 @@
 ## R/hank-mixture-estimation.R
 ## --------------------------------------------------------------------------
 ## Phase-1 Wave-2 (part 2): the STRUCTURAL JOINT estimator for the het-
-## preferences-in-HANK research line (brief-17).
+## preferences-in-HANK research line.
 ##
 ## Phase-1 Wave-1 (R/hank-reweighting.R, hank_phase1_joint_gate) showed that a
 ## JOINT objective -- a noisy MACRO aggregate path plus the net cross-section

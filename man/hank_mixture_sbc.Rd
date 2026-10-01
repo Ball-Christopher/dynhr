@@ -57,7 +57,7 @@ Details).}
 \item{rw_scale}{Reweighting shock-size multiplier (as in
 \code{\link{hank_emulator_reweight_mean}}); also used to build the
 direct-truth nonlinear snapshot's price path (\code{r_path = r + rw_scale *
-rw_shock$r}). Default \code{0.005} (50bps): orchestrator-verified to calibrate
+rw_shock$r}). Default \code{0.005} (50bps): verified to calibrate
 (a smaller \code{0.003} leaves the reweighting channel too weak).}
 
 \item{T_data_seed}{Seed for the fixed reference measurement-error series.}
@@ -67,7 +67,7 @@ rw_shock$r}). Default \code{0.005} (50bps): orchestrator-verified to calibrate
 \item{L_ranks}{Integer rank resolution: ranks are integers in
 \code{0..L_ranks-1}.}
 
-\item{rw_metric}{\code{"fixed_truth"} (default; orchestrator-certified: one
+\item{rw_metric}{\code{"fixed_truth"} (default; one
 per-replication covariance built from the DGP's own truth \code{(D0, D1)}, no
 log-det term) or \code{"emulated_varying"} (theta-varying emulated covariance
 WITH its log-determinant term) -- see Details.}
@@ -105,7 +105,7 @@ the likelihood, any non-empty subset of
     differences out fixed cross-sectional heterogeneity) but, at a realistic
     survey size and shock, it also differences most of the level's spread
     signal away and is nearly uninformative about the spread; kept for
-    completeness and as the original brief-17 observable.}
+    completeness and as the original observable.}
 }
 The default \code{c("macro", "response")} reproduces the joint estimator of
 \code{\link{hank_mixture_joint_logpost}}; \code{c("macro", "level")} is the
@@ -133,7 +133,7 @@ size-\code{N} multinomial cross-sections \code{Dhat0, Dhat1} from \code{D0, D1},
 the observed projected reweighting \code{m_hat = t(B_ref) (Dhat1 - Dhat0)}; (3)
 build ONE \code{B_ref}-basis reweighting covariance for this replication from the
 TRUTH \code{(D0, D1)} the DGP already computed (\code{rw_metric = "fixed_truth"}, the
-default and orchestrator-certified choice): \code{Sigma = (cov_D0(B_ref) +
+default choice): \code{Sigma = (cov_D0(B_ref) +
 cov_D1(B_ref)) / N}, matching the shipped
 \code{\link{hank_mixture_joint_logpost}}/\code{\link{hank_reweight_functional_metric}}
 convention of a metric fixed across candidate thetas within one evaluation.

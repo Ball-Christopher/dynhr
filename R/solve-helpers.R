@@ -32,10 +32,15 @@
 #'   Used on the decision-rule call sites, where a truncation means the
 #'   returned matrix is a PSEUDO-inverse and the resulting rule is not the
 #'   unique solution of the linear system.
+#' @param sv    Optional precomputed \code{svd(M)} (the full decomposition,
+#'   with \code{u} and \code{v}). A caller that already needs the singular
+#'   values of \code{M} for a rank test passes it so the decomposition is
+#'   computed once; the result is identical to \code{.safe_inv(M)}.
 #' @return Pseudoinverse of M.
 #' @noRd
-.safe_inv <- function(M, rtol = 1e-12, tol = NULL, warn_label = NULL) {
-  s <- svd(M)
+.safe_inv <- function(M, rtol = 1e-12, tol = NULL, warn_label = NULL,
+                      sv = NULL) {
+  s <- if (is.null(sv)) svd(M) else sv
   d <- s$d
   cutoff <- if (!is.null(tol)) {
     tol
@@ -63,15 +68,79 @@
   s$v %*% (d_inv * t(s$u))
 }
 
+## TRUE when the compiled doubling kernel is available and the Rcpp backend has
+## not been disabled (options(dynhr.use_rcpp = FALSE)).
+.HAS_RCPP_LYAPUNOV <- function() {
+  if (!isTRUE(getOption("dynhr.use_rcpp", TRUE))) return(FALSE)
+  exists("lyapunov_doubling_cpp", envir = asNamespace("dynhr"),
+         inherits = FALSE, mode = "function")
+}
+
+## Distance from 1 beyond which the QZ eigenvalue radius stands in for the
+## explicit eigen() of the state block (see the post-solve stability guard).
+.STATE_RADIUS_BAND <- 1e-4
+
+## Spectral radius of the first `n_state` stable generalized eigenvalues, NA
+## when the QZ produced fewer than that many.
+.qz_state_radius <- function(ev, n_state) {
+  if (is.null(ev) || length(ev) < n_state) return(NA_real_)
+  max(Mod(ev[seq_len(n_state)]))
+}
+
+## Spectral radius of the state-transition matrix `TT` of a decision rule,
+## taken from the value the solve stored (`dr$state_radius`) when `TT` is
+## IDENTICAL to the block it was computed for, and from a fresh eigen() call
+## otherwise (a modified, augmented or hand-built rule).
+.state_radius <- function(TT, dr) {
+  sr <- dr$state_radius
+  if (is.list(sr) && identical(sr$tt, TT)) return(sr$radius)
+  max(Mod(eigen(TT, symmetric = FALSE, only.values = TRUE)$values))
+}
+
+## Static-variable QR elimination: apply the Householder reflectors to the four
+## system blocks without forming Q (qr_static_transform_implicit_cpp) instead of
+## building the full n x n Q and multiplying (qr_static_transform_cpp).
+## Measured on this machine (optimised build, vendor BLAS; ms per call, min of
+## repeated calls, four n x n blocks plus an n x 8 shock block; ratio is
+## implicit / full-Q):
+##      n  n_static  full Q  implicit  ratio
+##     30        4    0.009    0.009    1.09
+##     30       12    0.011    0.015    1.42
+##     40        5    0.013    0.012    0.92
+##     40       16    0.020    0.019    0.98
+##     50        6    0.020    0.017    0.82
+##     50       20    0.034    0.031    0.91
+##     60       15    0.037    0.027    0.72
+##     80       32    0.104    0.064    0.62
+##     90       22    0.099    0.083    0.84
+##     90       45    0.155    0.100    0.65
+##    120       30    0.197    0.100    0.51
+##    160       40    0.424    0.184    0.43
+##    240       60    1.258    0.447    0.36
+##    240      120    2.031    0.926    0.46
+##    320       80    2.727    1.020    0.37
+## The implicit form is a tie at n = 40 (within timing noise, 0.92-0.98) and a
+## clear win from n = 50 (0.81-0.91) with a growing margin after it (the full Q
+## costs O(n^3) however few static variables there are), so it is
+## used for n >= .STATIC_QR_IMPLICIT_MIN_N and the full-Q form below that.
+## options(dynhr.static_qr_implicit_min_n = ) overrides the boundary.
+.STATIC_QR_IMPLICIT_MIN_N <- 50L
+
+.static_qr_implicit <- function(n) {
+  if (!exists("qr_static_transform_implicit_cpp", envir = asNamespace("dynhr"),
+              inherits = FALSE, mode = "function")) return(FALSE)
+  n >= getOption("dynhr.static_qr_implicit_min_n", .STATIC_QR_IMPLICIT_MIN_N)
+}
+
 # ---- The single discrete-Lyapunov solver ----------------------------------
 #
-# Consolidation note (D2, 2026-09-02). dynhr used to carry FOUR discrete
+# Consolidation note. dynhr used to carry FOUR discrete
 # Lyapunov solvers:
 #   * solve_lyapunov()               R/stochsimul-monolith.R  (doubling, the
 #                                    correct one -- relative tol, stability
 #                                    gate, NaN contract, kron fallback)
 #   * .solve_lyapunov()              R/backend-monolith.R     (direct kron only)
-#   * a pskf copy and a tpf copy     (removed in wave 1)
+#   * a pskf copy and a tpf copy    
 # They disagreed on near-unit-root systems: the direct-kron version's rcond
 # gate fires on highly non-normal but perfectly stable transition matrices
 # (rcond(I - A (x) A) underflows machine eps while the Lyapunov equation
@@ -102,35 +171,60 @@ solve_lyapunov <- function(A, B, max_iter = 500L, tol = 1e-14) {
   ## Fast path: if B is all zeros, solution is zero
   if (all(B == 0)) return(matrix(0, n, n))
 
-  ## Doubling algorithm
-  X <- B
-  A_pow <- A
-  converged <- FALSE
-  for (iter in seq_len(max_iter)) {
-    X_new <- X + A_pow %*% X %*% t(A_pow)
-    if (any(!is.finite(X_new))) break
-    diff <- max(abs(X_new - X))
-    if (!is.finite(diff)) break
-    ## RELATIVE convergence: a near-unit root gives a huge stationary covariance
-    ## (entries ~ 1/(1-rho^2)), so the per-step increment can never fall below an
-    ## ABSOLUTE 1e-14 (it plateaus at ~max|X| * machine-eps). An absolute test
-    ## therefore never converges for near-unit-root systems -> the loop runs all
-    ## max_iter steps and falls through to the O(n^6) kronecker solve (~0.5 s for
-    ## n = 37). Scaling by max|X| makes it converge in the proper ~log2(mixing)
-    ## steps for ANY stable A.
-    ## Purely relative -- no max(1, .) floor (W76, 2026-09-26). With the floor
-    ## the test was ABSOLUTE whenever max|X| < 1, so a small-scale model
-    ## stopped early: art_zlb_mcp with every shock std x 1e-3 (P ~1e-15) got a
-    ## P0 3.3e-4 off in relative terms (~6e-6 nats of loglik), breaking the
-    ## rescale identity loglik(c y, c sigma) + N log(c) = const. Relative, the
-    ## solve is scale-equivariant: X(c^2 B) = c^2 X(B) to round-off. (`<=`: an
-    ## all-zero X_new -- only reachable through underflow -- stops at once.)
-    if (diff <= tol * max(abs(X_new))) { converged <- TRUE; break }
-    A_pow <- A_pow %*% A_pow
-    if (any(!is.finite(A_pow))) break
-    X <- X_new
+  ## Doubling algorithm. The compiled kernel runs the same iteration (same
+  ## products, same relative stopping rule, same give-up-on-non-finite rule);
+  ## measured against the R loop below on this machine (random stable
+  ## systems, min of repeated calls) it is faster at every size tried:
+  ##   n        5     10     20     40     80    120    160    240
+  ##   R (ms) 0.021  0.027  0.091  0.202  0.637  1.371  2.453  5.969
+  ##   C++    0.002  0.005  0.023  0.060  0.224  0.506  0.961  2.500
+  ## so there is no small-n branch -- only the options(dynhr.use_rcpp = FALSE)
+  ## switch and the R loop as the reference. A solve that does not converge
+  ## falls through to the stability gate and the vec/kronecker fallback.
+  if (.HAS_RCPP_LYAPUNOV()) {
+    out <- lyapunov_doubling_cpp(A, B, as.integer(max_iter), tol)
+    if (isTRUE(out$converged)) {
+      X <- out$X
+      ## The R loop's dimnames: B's if it has any, else (rownames(A) twice)
+      ## once the first product has been added; none when the very first
+      ## step already converged.
+      dn <- dimnames(B)
+      if (is.null(dn) && out$iter > 1L && !is.null(rownames(A)))
+        dn <- list(rownames(A), rownames(A))
+      dimnames(X) <- dn
+      return(X)
+    }
+    converged <- FALSE
+  } else {
+    X <- B
+    A_pow <- A
+    converged <- FALSE
+    for (iter in seq_len(max_iter)) {
+      X_new <- X + A_pow %*% X %*% t(A_pow)
+      if (any(!is.finite(X_new))) break
+      diff <- max(abs(X_new - X))
+      if (!is.finite(diff)) break
+      ## RELATIVE convergence: a near-unit root gives a huge stationary
+      ## covariance (entries ~ 1/(1-rho^2)), so the per-step increment can never
+      ## fall below an ABSOLUTE 1e-14 (it plateaus at ~max|X| * machine-eps). An
+      ## absolute test therefore never converges for near-unit-root systems ->
+      ## the loop runs all max_iter steps and falls through to the O(n^6)
+      ## kronecker solve (~0.5 s for n = 37). Scaling by max|X| makes it converge
+      ## in the proper ~log2(mixing) steps for ANY stable A.
+      ## Purely relative -- no max(1, .) floor. With the floor the test was
+      ## ABSOLUTE whenever max|X| < 1, so a small-scale model stopped early:
+      ## art_zlb_mcp with every shock std x 1e-3 (P ~1e-15) got a P0 3.3e-4 off
+      ## in relative terms (~6e-6 nats of loglik), breaking the rescale identity
+      ## loglik(c y, c sigma) + N log(c) = const. Relative, the solve is
+      ## scale-equivariant: X(c^2 B) = c^2 X(B) to round-off. (`<=`: an all-zero
+      ## X_new -- only reachable through underflow -- stops at once.)
+      if (diff <= tol * max(abs(X_new))) { converged <- TRUE; break }
+      A_pow <- A_pow %*% A_pow
+      if (any(!is.finite(A_pow))) break
+      X <- X_new
+    }
+    if (converged) return(X)
   }
-  if (converged) return(X)
 
   ## Stability gate before the O(n^6) vec/kronecker fallback.
   ##
@@ -227,8 +321,8 @@ solve_lyapunov <- function(A, B, max_iter = 500L, tol = 1e-14) {
 #' evaluated (when it strictly improves on the incumbent), rather than
 #' \code{NULL} with a discarded step. The previous behaviour -- return NULL,
 #' caller applies a blind half Newton step -- could send the path to ~1e9 in a
-#' single iteration and singularise the next Jacobian on cold starts (issue
-#' M15). Returning the best vetted point guarantees monotone non-increase of
+#' single iteration and singularise the next Jacobian on cold starts.
+#' Returning the best vetted point guarantees monotone non-increase of
 #' the merit function.
 #' @noRd
 .line_search <- function(Y, delta_vec, R_stack, J_stack,
@@ -250,7 +344,7 @@ solve_lyapunov <- function(A, B, max_iter = 500L, tol = 1e-14) {
 
   # Track the best (lowest-merit) trial point that strictly improves on the
   # incumbent, so an Armijo failure still yields a usable (merit-decreasing)
-  # step rather than discarding all work (M15).
+  # step rather than discarding all work.
   best_theta <- theta_cur
   best_Y     <- NULL
   best_alpha <- 0

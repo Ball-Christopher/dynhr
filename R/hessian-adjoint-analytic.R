@@ -212,7 +212,7 @@
     ## Advance primal state
     s_new <- as.numeric(TT %*% s) + as.numeric(K %*% v)
     P_raw <- tcrossprod(A %*% P, A) + tcrossprod(B %*% Sigma_e, B)
-    ## TRUE measurement-noise law (F3-D): P' += K me_diag K'.
+    ## TRUE measurement-noise law: P' += K me_diag K'.
     if (me_variance != 0) P_raw <- P_raw + me_variance * tcrossprod(K)
     P_new <- .sym(P_raw)
 

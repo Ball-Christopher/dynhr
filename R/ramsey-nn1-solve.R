@@ -1,6 +1,6 @@
 
 ## R/ramsey-nn1-solve.R
-## E4: (n, n+1) system solver. Modifies planner objective in-memory, solves via perturbation.
+## (n, n+1) system solver. Modifies planner objective in-memory, solves via perturbation.
 
 .nn1_solve <- function(model, compiled, ss, params,
                         taylor, nn1_objective, multipliers,

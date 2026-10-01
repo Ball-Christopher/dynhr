@@ -6,8 +6,8 @@
 ##   pkf_smoother_obc() -- DK smoother using kf_store from kalman_filter_obc_pkf
 ##
 ## Uses per-period quantities {v, F_inv, L=TT-K*ZZ, P_in, s_in, RR, ZZ, DD}
-## stored by kalman_filter_obc_pkf(..., return_store = TRUE).  Since W49
-## (0.9.3.93) these are the matrices of the TIME-VARYING piecewise-linear
+## stored by kalman_filter_obc_pkf(..., return_store = TRUE).  Since 0.9.3.93
+## these are the matrices of the TIME-VARYING piecewise-linear
 ## rule the filter accepted in each period (kf_store$rules), so the smoother
 ## is the exact linear smoother conditional on the filtered regime
 ## sequences; it does not re-solve regimes (Dynare's OccBin smoother does).

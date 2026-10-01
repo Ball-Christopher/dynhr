@@ -1,8 +1,7 @@
 ## R/hank-sam-reiter.R
 ## --------------------------------------------------------------------------
 ## Finite-state Reiter emission with ENDOGENOUS transition probabilities
-## (HANK+SAM, W7 of the RANK/HANK paper; design in
-## .claude/orchestration/sam/DESIGN_endogenous_pi.md, E2(a)).
+## (HANK+SAM).
 ##
 ## The KS emission (R/hank-truncation.R) linearizes the household block only
 ## in (Va', r, w) and hard-codes the KS firm. Here the household's income
@@ -62,7 +61,7 @@ hank_sam_reiter_linearize <- function(block, inputs = NULL, delta_fd = 1e-6) {
   ## NOTE the guard below is an AND, so it does NOT fire for a block that has a
   ## Pi_fn but is not a hank_het_block -- which is exactly a two-asset block
   ## built for the HANK+SAM route. Reject that explicitly first: two-asset
-  ## Reiter is deliberately not implemented (briefs/19, section 7), and without
+  ## Reiter is deliberately not implemented, and without
   ## this the call dies downstream on "argument is not a matrix".
   .hank_reject_het2(block, "hank_sam_reiter_linearize", use = NULL)
   .hank_reject_wedge(block, "hank_sam_reiter_linearize")

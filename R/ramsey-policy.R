@@ -100,7 +100,7 @@ ramsey_policy <- function(model,
   if (is.null(discount) && !is.null(planner_discount)) discount <- planner_discount
   if (is.null(params)) params <- model$param_values
 
-  ## M14: free-instrument models have fewer equations than endogenous variables.
+  ## Free-instrument models have fewer equations than endogenous variables.
   ## ramsey_policy() uses solve_perturbation() on the ORIGINAL model, which
   ## requires a square system.  For non-square models, the caller must use
   ## ramsey_model() (augmented-system approach) instead.
@@ -129,7 +129,7 @@ ramsey_policy <- function(model,
     compiled <- compile_model(model, verbose = FALSE,
                               max_order = if (order >= 2L) 2L else 1L)
 
-  objective_text <- planner_objective %||% model$planner_objective$text %||% NULL
+  objective_text <- planner_objective %||% .spec_planner_objective(model)
   if (is.null(objective_text) || !nzchar(trimws(objective_text))) {
     stop("No planner objective provided. Add planner_objective(...) or pass planner_objective=.")
   }
@@ -147,7 +147,7 @@ ramsey_policy <- function(model,
   )
   sim_levels <- attr(sim, "levels")
 
-  ## A7 (0.9.4): use the shared .get_discount() lookup, which ALSO recognises
+  ## Use the shared .get_discount() lookup, which ALSO recognises
   ## the Dynare spelling `betta`.  This block previously looked only for `beta`
   ## and silently fell back to 0.99, so every `betta`-calibrated model was
   ## discounted at the wrong rate with no diagnostic.  There is now no silent
@@ -173,7 +173,7 @@ ramsey_policy <- function(model,
   welfare_steady <- .eval_planner_ast(objective_ast, ss$ss, params, ss$ss) /
     max(1e-8, (1 - discount))
 
-  ## A7 (0.9.4): the unconditional welfare is a Monte-Carlo average over a
+  ## The unconditional welfare is a Monte-Carlo average over a
   ## SERIALLY CORRELATED simulated path, so report its uncertainty instead of
   ## letting callers read the last digits as signal.  Non-overlapping batch
   ## means (batch length ~ sqrt(n)) is the standard consistent estimator of the
@@ -481,7 +481,7 @@ ramsey_model <- function(model,
       welfare          = list(
         steady_value = nn1_result$welfare$steady_state %||% NA_real_,
         unconditional = nn1_result$welfare$unconditional %||% NA_real_,
-        ## A7 (0.9.4): why the unconditional welfare is NA, when it is
+        ## Why the unconditional welfare is NA, when it is
         ## ("order1_certainty_equivalent" at n = 1) -- D18 reports it.
         unconditional_reason =
           nn1_result$welfare$unconditional_reason %||% NA_character_,

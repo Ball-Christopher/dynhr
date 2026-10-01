@@ -3,7 +3,7 @@
 ## Rao-Blackwellized particle filter (RB-PF) for measurement-side stochastic
 ## volatility on the shocks of a linear DSGE, and its log-posterior factory.
 ##
-## Design (verified in the scoping spikes; see the SV brief):
+## Design (verified in the scoping spikes; see the SV derivation):
 ## Conditional on a volatility path {h_t}, an SV-on-shocks linear DSGE is
 ## exactly linear-Gaussian and its log-likelihood is a Kalman filter with
 ## shock_scale = exp(h_t / 2).  So we particle-filter ONLY the low-dimensional
@@ -96,7 +96,7 @@
 #' @param n_particles Number of volatility particles.
 #' @param me_diag    Optional length-n_obs baseline ME variances (NULL = none).
 #'   TRUE i.i.d. observation noise: it enters F AND the Joseph state-covariance
-#'   term (F4-A), matching \code{\link{kf_step}} and \code{\link{kalman_filter}}.
+#'   term, matching \code{\link{kf_step}} and \code{\link{kalman_filter}}.
 #' @return Scalar log-likelihood estimate, or \code{-Inf} if every particle is
 #'   infeasible at some period.
 #' @noRd
@@ -128,7 +128,8 @@
                "zero-likelihood region."),
         as.integer(n_particles), as.integer(res$fail_period)),
         call. = FALSE)
-    return(res$loglik)
+    return(.sv_rbpf_finish(res$loglik, res$n_degenerate, n_particles,
+                           ncol(Y)))
   }
 
   N     <- as.integer(n_particles)
@@ -151,6 +152,7 @@
 
   scale_full <- rep(1, n_exo)                 # non-SV shocks stay at scale 1
   loglik <- 0
+  n_degenerate <- 0
 
   for (t in seq_len(n_T)) {
     ## Propagate the log-variance (bootstrap proposal = AR(1) prior).
@@ -168,6 +170,7 @@
       step <- kf_step(s_p[, i], P_p[[i]], y_t, TT, ZZ, RR, DD, Sigma_e,
                       scale = scale_full, d = d, me_diag = me_diag)
       if (is.null(step)) {                     # non-PD forecast cov -> weight 0
+        n_degenerate <- n_degenerate + 1
         ll_t[i] <- -Inf
         s_new[, i] <- s_p[, i]; P_new[[i]] <- P_p[[i]]
       } else {
@@ -178,7 +181,8 @@
 
     ## Log-mean-exp period increment; bail if the whole cloud is infeasible.
     m <- max(ll_t)
-    if (!is.finite(m)) return(-Inf)
+    if (!is.finite(m))
+      return(.sv_rbpf_finish(-Inf, n_degenerate, n_particles, n_T))
     w_un <- exp(ll_t - m)
     loglik <- loglik + m + log(mean(w_un))
 
@@ -190,6 +194,42 @@
     P_p <- P_new[idx]
   }
 
+  .sv_rbpf_finish(loglik, n_degenerate, n_particles, n_T)
+}
+
+
+#' Attach and report the degenerate particle-step count (internal)
+#'
+#' A degenerate particle-step is one that took a weight-0 path (non-finite,
+#' non-PD or non-invertible forecast covariance, or a non-finite
+#' log-likelihood). The count changes no number: the log-likelihood is
+#' returned exactly as computed, with the count as attribute
+#' \code{n_degenerate}. A positive count is announced once per run through a
+#' classed message (\code{dynhr_sv_rbpf_degenerate}) so a PMMH/SMC loop is not
+#' flooded.
+#'
+#' @param loglik Scalar log-likelihood estimate.
+#' @param n_degenerate Number of weight-0 particle-steps.
+#' @param n_particles,n_T Particle count and number of periods (for the
+#'   message's denominator).
+#' @return \code{loglik} with attribute \code{n_degenerate}.
+#' @noRd
+.sv_rbpf_finish <- function(loglik, n_degenerate, n_particles, n_T) {
+  n_degenerate <- as.numeric(n_degenerate)
+  if (isTRUE(n_degenerate > 0))
+    .dynhr_inform(
+      sprintf(paste0("sv_rbpf_loglik: %.0f of %.0f particle-steps (%.2g%%) ",
+                     "degenerated (non-finite or non-PD forecast covariance) ",
+                     "and received weight zero; the likelihood values are ",
+                     "kept finite where the cloud survives but may not be ",
+                     "meaningful there. Check the volatility ",
+                     "hyperparameters (sigma_eta in particular)."),
+              n_degenerate, as.numeric(n_particles) * as.numeric(n_T),
+              100 * n_degenerate /
+                (as.numeric(n_particles) * as.numeric(n_T))),
+      once = TRUE, key = "sv_rbpf_degenerate",
+      class = "dynhr_sv_rbpf_degenerate")
+  attr(loglik, "n_degenerate") <- n_degenerate
   loglik
 }
 
@@ -228,7 +268,7 @@
 #'   the RB-PF does not need it, but it is available for stochastically-singular
 #'   observation blocks). It is TRUE i.i.d. observation noise -- the same law
 #'   \code{\link{kalman_filter}} implements -- entering both the forecast
-#'   covariance and the Joseph state-covariance update (F4-A).
+#'   covariance and the Joseph state-covariance update.
 #' @param seed        Integer RNG seed (default \code{NULL} = fresh randomness
 #'   each call; required for valid PMMH).
 #' @param power       Power-posterior tempering exponent zeta:
@@ -348,6 +388,7 @@ make_log_posterior_sv_rbpf <- function(model, data, prior_spec, obs_vars,
                         sv_idx, hyper, length(exo), n_particles,
                         me_diag = me_diag),
         error = function(e) .dynhr_reraise_bug(e, -Inf))
+      loglik <- as.numeric(loglik)            # drop the diagnostic attribute
       if (!is.finite(loglik)) return(NULL)
       list(loglik = loglik)
     },
@@ -357,7 +398,7 @@ make_log_posterior_sv_rbpf <- function(model, data, prior_spec, obs_vars,
 
   function(theta) {
     ## Seeding is LOCAL: a non-NULL seed makes THIS evaluation reproducible
-    ## without resetting the caller's global .Random.seed (A1) -- an outer
+    ## without resetting the caller's global .Random.seed -- an outer
     ## sampler that draws around the likelihood keeps its own stream.
     .with_local_seed(seed, eval_one(theta))
   }

@@ -70,8 +70,7 @@ chi-squared goodness-of-fit test against the (exact, generally unequal --
 see "Bin-count exactness" below) expected counts under uniformity.
 }
 \details{
-\strong{Motivation (2026-07-02 P2c incident;
-\code{ORDER3_PRUNED_SS_FOLLOWUP.md} "FINAL VERDICT").} The bare chi-squared
+\strong{Motivation (an order-3 pruned-SS incident).} The bare chi-squared
 verdict both FALSE-ALARMED (a batch with p = 0.011 driven partly by rank
 noise) and UNDER-DETECTED (a "calibrated" batch with a one-sided top-bin
 excess that replicated across reruns). The decisive signal in both cases

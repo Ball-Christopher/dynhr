@@ -1,6 +1,6 @@
 ## R/method-of-moments.R
 ## --------------------------------------------------------------------------
-## GMM / SMM estimation by moment matching (E2-A).
+## GMM / SMM estimation by moment matching.
 ##
 ## The cumulant machinery in R/cumulant-likelihood.R already builds a
 ## CONTEMPORANEOUS model-implied moment map -- [mean; vec(Sigma_y); vec(c3);
@@ -337,7 +337,7 @@
   ## by zero on a degenerate moment); the full inverse goes through
   ## .mom_omega_inverse(), which does its own scaled eigendecomposition.
   ## The ridge is PER MOMENT (ridge x its own variance; the largest variance
-  ## only for a degenerate one), the cumulant GMM's rule .gmm_ridge() (W77):
+  ## only for a degenerate one), the cumulant GMM's rule .gmm_ridge():
   ## the old ridge x max(diag Omega) x I added the variance of the
   ## highest-order moment -- c^8 in the units of the data for an order-4
   ## moment -- to every moment, so the diagonal weight of a mean moment
@@ -358,7 +358,7 @@
 #' `-2 *` and `-0.5 *` are exact in binary floating point, computing the
 #' identity criterion as `-2 *` that expression makes `-0.5 * criterion`
 #' reproduce the cumulant log-likelihood BIT-FOR-BIT, which is the documented
-#' contract (and the E2-A oracle (i) gate).
+#' contract (and its oracle gate).
 #' @noRd
 .mom_criterion_value <- function(d, W, T_obs) {
   if (identical(attr(W, "method"), "identity"))
@@ -462,9 +462,9 @@
     error = function(e) .dynhr_reraise_bug(e, NULL)))
   if (is.null(dr) || !isTRUE(dr$bk_satisfied)) return(NULL)
   ## Stationarity: the whole moment map is a stationary-distribution object.
+  ## the radius the solve stored for this block (recomputed if it differs)
   sr <- tryCatch(
-    max(Mod(eigen(dr$ghx[dr$state_idx, , drop = FALSE],
-                  only.values = TRUE)$values)),
+    .state_radius(dr$ghx[dr$state_idx, , drop = FALSE], dr),
     error = function(e) Inf)
   if (!is.finite(sr) || sr >= 1) return(NULL)
   list(dr = dr, params = params, ss = ss$values)

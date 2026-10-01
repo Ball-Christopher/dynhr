@@ -30,8 +30,7 @@
 ## P0's gradient contribution is zero by construction.
 ##
 ## shock_scale (n_exo x T multiplicative shock-std factors, heteroskedastic
-## shocks / SV conditional path): supported by the R reference since
-## 0.9.0.0008. Per period the effective shock covariance is
+## shocks / SV conditional path): fixed data. Per period the effective shock covariance is
 ## Se_t = diag(sc_t) Sigma_e diag(sc_t) with sc_t FIXED DATA, so every
 ## backward-sweep accumulation into the Sigma_e gradient is sandwiched
 ## elementwise by outer(sc_t, sc_t) (chain rule through Se_t), and every
@@ -40,10 +39,20 @@
 ## the BASELINE Sigma_e -- matching kalman_filter's lik_init = "stationary"
 ## convention under shock_scale -- so the Lyapunov adjoint contributions are
 ## NOT sandwiched. Mirrors the dense adjoint's shock_scale treatment
-## (R/gradient-adjoint-kf.R). The compiled fast path (kf_adjoint_uni_cpp)
-## does not take shock_scale; the R reference runs instead.
+## (R/gradient-adjoint-kf.R).
 ##
-## Scope: scalar me_variance; no me_extra (use the dense adjoint for that).
+## me_extra (n_obs x T extra measurement-error variances, filter_tunes soft
+## tunes): fixed data. Period t's observed rows O_t carry the ME diagonal
+## me_variance + me_extra[O_t, t], which enters F_t AND the Joseph true-noise
+## term P_t += K_t diag(.) K_t' -- exactly kalman_filter's missing-data step.
+## Its adjoint is bar_K += 2 bar_P K diag(.); nothing is differentiated
+## through me_extra itself. Unobserved rows' me_extra entries are never read.
+##
+## The compiled kernel (kf_adjoint_uni_cpp) implements the same recursion,
+## shock_scale and me_extra included, and is the default; this R code is the
+## reference behind options(dynhr.use_rcpp = FALSE).
+##
+## Scope: scalar me_variance.
 ## --------------------------------------------------------------------------
 
 #' Adjoint KF gradient with missing-data + optional supplied P0
@@ -58,10 +67,16 @@
 #'                   fixed input (no Lyapunov adjoint).
 #' @param shock_scale optional n_exo x n_T matrix of multiplicative shock-std
 #'                   factors (fixed data; see the file header). NULL = baseline.
-#' @return list(loglik, grad).
+#' @param me_extra   optional n_obs x n_T matrix of extra measurement-error
+#'                   variances (fixed data; see the file header). NULL = none.
+#' @param return_bars when TRUE, also return the raw adjoint matrices as
+#'                   \code{bars = list(G_TT, G_RR, G_ZZ, G_DD, g_d, G_Sig)}
+#'                   (the input of the reverse-mode solution adjoint).
+#' @return list(loglik, grad[, bars]).
 #' @noRd
 .kf_loglik_adjoint_uni <- function(Y, ss, d_ss_list, me_variance = 0,
-                                   P0 = NULL, shock_scale = NULL) {
+                                   P0 = NULL, shock_scale = NULL,
+                                   me_extra = NULL, return_bars = FALSE) {
   TT <- ss$TT; RR <- ss$RR; ZZ <- ss$ZZ; DD <- ss$DD
   d  <- as.numeric(ss$d); Sigma_e <- ss$Sigma_e
 
@@ -77,6 +92,17 @@
                  ncol(shock_scale) != n_T))
     stop(".kf_loglik_adjoint_uni: shock_scale must be n_exo x n_T.",
          call. = FALSE)
+  has_me <- !is.null(me_extra)
+  if (has_me && (!is.matrix(me_extra) || nrow(me_extra) != n_obs ||
+                 ncol(me_extra) != n_T))
+    stop(".kf_loglik_adjoint_uni: me_extra must be n_obs x n_T.",
+         call. = FALSE)
+  ## Observed-row ME diagonal at period t (vector over O).
+  me_at <- if (has_me) {
+    function(O, t) me_variance + me_extra[O, t]
+  } else {
+    function(O, t) rep(me_variance, length(O))
+  }
   ## Per-period effective shock covariance (baseline when no scaling).
   Se_at <- if (has_sc) {
     function(t) Sigma_e * outer(shock_scale[, t], shock_scale[, t])
@@ -104,8 +130,7 @@
   }
 
   ## -- Fast path: compiled univariate adjoint (kf_adjoint_uni_cpp) ----------
-  ## (not extended for shock_scale -- the R reference below handles it)
-  if (.HAS_RCPP_KF_ADJOINT_UNI() && !has_sc) {
+  if (.HAS_RCPP_KF_ADJOINT_UNI()) {
     zTT0  <- matrix(0, n_state, n_state)
     zRR0  <- matrix(0, n_state, n_exo)
     zZZ0  <- matrix(0, n_obs, n_state)
@@ -132,15 +157,27 @@
 
     ## Pass P0_use (already computed above: either supplied or Lyapunov).
     ## p0_supplied tells the C++ kernel whether to run the Lyapunov adjoint.
+    ## Absent time-varying inputs travel as 0 x 0 matrices (the kernel then
+    ## runs its constant-system arithmetic).
+    no_tv <- matrix(0, 0, 0)
     out <- kf_adjoint_uni_cpp(Y, TT, RR, ZZ, DD, d, Sigma_e,
                               dTT_cube, dRR_cube, dZZ_cube, dDD_cube, dd_mat,
                               dSigma_cube, me_variance, .KF_LL_MIN,
-                              P0_use, p0_supplied)
+                              P0_use, p0_supplied,
+                              if (has_sc) shock_scale else no_tv,
+                              if (has_me) me_extra else no_tv,
+                              isTRUE(return_bars))
 
     if (!isTRUE(out$ok)) {
       return(list(loglik = -Inf, grad = rep(NA_real_, n_par)))
     }
-    return(list(loglik = out$loglik, grad = as.numeric(out$grad)))
+    res <- list(loglik = out$loglik, grad = as.numeric(out$grad))
+    if (isTRUE(return_bars))
+      res$bars <- list(G_TT = out$bars$G_TT, G_RR = out$bars$G_RR,
+                       G_ZZ = out$bars$G_ZZ, G_DD = out$bars$G_DD,
+                       g_d  = as.numeric(out$bars$g_d),
+                       G_Sig = out$bars$G_Sig)
+    return(res)
   }
 
   ## -- Forward pass with per-period observed-row subsetting -----------------
@@ -170,7 +207,8 @@
     ZZo <- ZZ[O, , drop = FALSE]; DDo <- DD[O, , drop = FALSE]
     HHo <- tcrossprod(DDo %*% Se_t, DDo)
     SSo <- RR %*% Se_t %*% t(DDo)
-    me_o <- me_variance * diag(q)
+    me_vec_o <- me_at(O, t)
+    me_o <- diag(me_vec_o, q)
 
     PZ <- P %*% t(ZZo)
     Ft <- .sym(ZZo %*% PZ + HHo + me_o)
@@ -193,8 +231,9 @@
 
     s <- as.numeric(TT %*% s) + as.numeric(K %*% v)
     P_raw <- tcrossprod(A %*% P, A) + tcrossprod(B %*% Se_t, B)
-    ## TRUE measurement-noise law (F3-D): P' += K me_o K'.
-    if (me_variance != 0) P_raw <- P_raw + me_variance * tcrossprod(K)
+    ## TRUE measurement-noise law: P' += K me_o K'.
+    if (has_me) P_raw <- P_raw + K %*% (me_vec_o * t(K))
+    else if (me_variance != 0) P_raw <- P_raw + me_variance * tcrossprod(K)
     P <- .sym(P_raw)
   }
 
@@ -241,7 +280,9 @@
     bar_K <- outer(bar_s, v)
     ## Adjoint of the ME Joseph term P_t += K me_o K' (me_o is DATA):
     ## d tr(bar_P K me K') / dK = 2 me bar_P K.
-    if (me_variance != 0)
+    if (has_me)
+      bar_K <- bar_K + 2 * (bar_P %*% K) %*% diag(me_at(O, t), q)
+    else if (me_variance != 0)
       bar_K <- bar_K + 2 * me_variance * (bar_P %*% K)
     bar_v <- as.numeric(t(K) %*% bar_s)
     bar_s_prev <- as.numeric(t(TT) %*% bar_s)
@@ -318,5 +359,9 @@
     if (!is.null(dpar$dSigma_e)) gj <- gj + sum(G_Sig * dpar$dSigma_e)
     grad[j] <- gj
   }
-  list(loglik = loglik, grad = grad)
+  out <- list(loglik = loglik, grad = grad)
+  if (isTRUE(return_bars))
+    out$bars <- list(G_TT = G_TT, G_RR = G_RR, G_ZZ = G_ZZ, G_DD = G_DD,
+                     g_d = g_d, G_Sig = G_Sig)
+  out
 }

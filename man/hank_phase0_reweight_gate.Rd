@@ -65,7 +65,7 @@ A list with:
 }
 \description{
 Assembles the full Phase-0 synthetic-survey experiment for the
-het-preferences-in-HANK research line (brief-17): (1) a TRUTH 2-type
+het-preferences-in-HANK research line: (1) a TRUTH 2-type
 mixture with discount factors \code{centre* -+ spread*}; (2) its
 first-order net distribution reweighting under a small aggregate shock;
 (3) two synthetic household surveys (pre- and post-shock) drawn from the

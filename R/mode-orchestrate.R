@@ -162,6 +162,13 @@ combined_optimize <- function(fn, par, lower = -Inf, upper = Inf,
 }
 
 
+## The optimisers .run_mode_finding() dispatches on: the arms of its switch and
+## the choices an estimation spec's mode$method is checked against. A test
+## keeps the arms of the switch in step with this vector.
+.mode_finding_methods <- c("newrat", "cmaes_newrat", "cmaes", "nmkb", "jade",
+                           "nelder", "combined", "cmaes_nmkb", "cmaes_jade")
+
+
 #' Orchestrate mode-finding for MCMC initialisation
 #'
 #' Builds parameter bounds from `prior_spec`, wraps the log-posterior as
@@ -208,7 +215,7 @@ combined_optimize <- function(fn, par, lower = -Inf, upper = Inf,
                               verbose = TRUE,
                               record_curvature = FALSE) {
 
-  ## Name theta_init by prior_spec (0.9.4): an unnamed start used to give an
+  ## Name theta_init by prior_spec: an unnamed start used to give an
   ## unnamed theta_mode and silently drop the prior-bound box constraints.
   if (!is.null(prior_spec) && !is.null(prior_spec$name))
     theta_init <- .theta_by_name(theta_init, prior_spec$name,
@@ -442,8 +449,8 @@ combined_optimize <- function(fn, par, lower = -Inf, upper = Inf,
     ## Unknown method: fail loud rather than silently running a different
     ## optimizer (cmaes+nmkb) than the one requested (e.g. a typo'd method).
     stop(".run_mode_finding: unknown mode-finding method \"", method, "\". ",
-         "Valid: newrat, cmaes_newrat, cmaes, nmkb, jade, nelder, combined, ",
-         "cmaes_nmkb, cmaes_jade. (L-BFGS-B is not a standalone method -- it ",
+         "Valid: ", paste(.mode_finding_methods, collapse = ", "),
+         ". (L-BFGS-B is not a standalone method -- it ",
          "runs as the polish stage inside \"combined\" and \"cmaes_jade\".)",
          call. = FALSE)
   )
@@ -503,7 +510,7 @@ combined_optimize <- function(fn, par, lower = -Inf, upper = Inf,
 #' \code{method_of_moments()} and the HANK AR runner, neither of which wants
 #' to pay for a Hessian. The samplers, however, need posterior curvature.
 #'
-#' HISTORY (fixed 2026-09-04). \code{run_full_estimation()} and
+#' HISTORY. \code{run_full_estimation()} and
 #' \code{estimate-runner.R} both wrote
 #' \code{if (!is.null(mode_res$V_mode)) ... else diag(prior_spec$std^2)}.
 #' Because \code{.run_mode_finding()} never sets \code{V_mode}, that condition

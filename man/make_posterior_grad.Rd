@@ -20,6 +20,7 @@ make_posterior_grad(
   freq_band = c(0, pi),
   cumulant_orders = 1:4,
   cumulant_weight = "identity",
+  weight_matrix = NULL,
   debias = TRUE,
   pruned_order = 2L,
   power = NULL,
@@ -54,9 +55,9 @@ equivalence classification (default: prior means).}
   Lyapunov equation; this used to be finite differences of the forward.)
   On the Gaussian likelihood it picks
   \code{"hybrid"} instead when no analytic Kalman kernel covers the data at
-  \code{theta_ref} (missing observations together with \code{me_extra} or
-  a unit root; a unit root together with \code{me_extra} or
-  \code{shock_scale}), since every draw would then take the FD-hybrid
+  \code{theta_ref} (a unit root together with missing observations,
+  \code{me_extra} or \code{shock_scale}), since every draw would then take
+  the FD-hybrid
   fallback anyway, always under \code{lik_init = "kappa"} (see
   \code{lik_init}), and when the filter drops observation components at
   \code{theta_ref} (a singular innovation covariance; see Details). The
@@ -93,6 +94,19 @@ equivalence classification (default: prior means).}
   first gradient evaluation) and falls back to \code{"hybrid"} entirely for
   the lifetime of the returned closure.
 
+  \strong{Finite-difference fall-backs.} Every route to the
+  \code{"hybrid"} finite-difference gradient warns once per gradient
+  closure with class \code{dynhr_warning_grad_fd_fallback}, naming the
+  route and the conditions: \code{grad_method = "auto"} resolving to
+  \code{"hybrid"} at build time (a unit root together with missing data,
+  \code{me_extra} or \code{shock_scale}, or \code{lik_init = "kappa"}), a
+  draw no analytic kernel covers, an unavailable exact-diffuse kernel, or a
+  failed kernel. Fallback draws are counted in
+  \code{as.list(attr(<gradient>, "kernel_stats"))}. To log every
+  estimation that takes the path, handle the class, e.g.
+  \code{withCallingHandlers(..., dynhr_warning_grad_fd_fallback =
+  function(w) message(conditionMessage(w)))}.
+
   \code{"adjoint"} is identical to \code{"implicit"} except the tangent
   recursion is replaced by the reverse-mode adjoint Kalman filter
   (\code{.kf_loglik_adjoint}): one forward pass storing per-step filter
@@ -100,7 +114,7 @@ equivalence classification (default: prior means).}
   the number of parameters instead of O(n_par). The two agree to ~1e-12;
   prefer \code{"adjoint"} for models with many estimated parameters.
 
-  \code{"adjoint_solution"} (Tier 18 A2) extends \code{"adjoint"} with
+  \code{"adjoint_solution"} extends \code{"adjoint"} with
   reverse mode through the perturbation solve as well: the adjoint Kalman
   filter exports its bar matrices wrt (TT, RR, ZZ, DD, d), and
   \code{.solution_adjoint()} turns them into the structural-parameter
@@ -110,9 +124,12 @@ equivalence classification (default: prior means).}
   structural parameter via \code{solution_derivatives}). The Sigma_e
   channel (estimated shock stds, stderr expressions) is still routed
   through the filter adjoint's \code{G_Sig}. Agrees with \code{"adjoint"}
-  to ~1e-10. Draws needing the missing-data or exact-diffuse kernels (which
-  do not export bars) fall back to the \code{"adjoint"} construction for
-  that draw; whittle/pruned likelihoods treat it as \code{"implicit"}. For
+  to ~1e-10. Draws needing the exact-diffuse kernel (which does not export
+  bars), and missing-data draws without \code{me_extra} /
+  \code{shock_scale}, use the \code{"adjoint"} construction for that draw;
+  missing-data draws with \code{me_extra} or \code{shock_scale} take the
+  reverse path through the missing-data kernel's bars; whittle/pruned
+  likelihoods treat it as \code{"implicit"}. For
   the cumulant likelihood it reverses orders 1-3 on the order-2 rule (the
   moment cotangent is taken back through the third-cumulant tensor
   Lyapunov, then one first-order and one order-2 solution adjoint);
@@ -137,6 +154,13 @@ restriction (ignored for the Gaussian likelihood).}
 \code{1:4}) and the weighting scheme; used only when
 \code{likelihood = "cumulant"} and must match the forward
 \code{make_log_posterior_cumulant} settings.}
+
+\item{weight_matrix}{Optional fixed p x p symmetric positive-definite
+moment weight matrix for \code{likelihood = "cumulant"} (as from
+\code{estimate_gmm_weight_matrix()}); the loglik is then
+\eqn{-(T/2) \delta' W \delta} and the gradient is exact for it. Must match
+the forward \code{make_log_posterior_cumulant} setting. \code{NULL}
+(default) is the identity weighting.}
 
 \item{debias}{Logical; for \code{likelihood = "whittle"}, differentiate
 the debiased Whittle loglik (expected-periodogram form, Sykulski et al.

@@ -8,7 +8,7 @@
 ##
 ## Both return Function(theta) -> list(logpost, loglik, logprior[, regime_path])
 ## and are drop-in replacements for make_log_posterior() when the model has OBC
-## constraints.  Since W49 (0.9.3.93) both evaluate the same likelihood:
+## constraints.  Since 0.9.3.93 both evaluate the same likelihood:
 ## Dynare's OccBin piecewise-linear Kalman filter (time-varying rules of the
 ## regime sequence expected in every period).  The PKF closure no longer
 ## warm-starts from attr(theta, "regime_hint"): a warm start made the
@@ -20,7 +20,7 @@
 #'
 #' Mirrors make_log_posterior (dynhr_estimation.R); the likelihood of each
 #' parameter draw is the OccBin piecewise-linear Kalman filter's, obtained
-#' through obc_guess_verify() (before W49 an outer guess-and-verify loop with
+#' through obc_guess_verify() (previously an outer guess-and-verify loop with
 #' one policy per regime followed by kalman_filter_obc()).
 #'
 #' Validation guards (obc_assert_linear, obc_parse_tags) run ONCE at factory

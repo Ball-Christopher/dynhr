@@ -40,7 +40,7 @@ least one SV shock).}
 the RB-PF does not need it, but it is available for stochastically-singular
 observation blocks). It is TRUE i.i.d. observation noise -- the same law
 \code{\link{kalman_filter}} implements -- entering both the forecast
-covariance and the Joseph state-covariance update (F4-A).}
+covariance and the Joseph state-covariance update.}
 
 \item{seed}{Integer RNG seed (default \code{NULL} = fresh randomness
 each call; required for valid PMMH).}

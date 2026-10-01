@@ -473,8 +473,8 @@ BEGIN_RCPP
 END_RCPP
 }
 // kf_adjoint_uni_cpp
-List kf_adjoint_uni_cpp(const arma::mat& Y, const arma::mat& TT, const arma::mat& RR, const arma::mat& ZZ, const arma::mat& DD, const arma::vec& d, const arma::mat& Sigma_e, const arma::cube& dTT_cube, const arma::cube& dRR_cube, const arma::cube& dZZ_cube, const arma::cube& dDD_cube, const arma::mat& dd_mat, const arma::cube& dSigma_cube, double me_variance, double ll_min, const arma::mat& P0_in, bool p0_supplied);
-RcppExport SEXP _dynhr_kf_adjoint_uni_cpp(SEXP YSEXP, SEXP TTSEXP, SEXP RRSEXP, SEXP ZZSEXP, SEXP DDSEXP, SEXP dSEXP, SEXP Sigma_eSEXP, SEXP dTT_cubeSEXP, SEXP dRR_cubeSEXP, SEXP dZZ_cubeSEXP, SEXP dDD_cubeSEXP, SEXP dd_matSEXP, SEXP dSigma_cubeSEXP, SEXP me_varianceSEXP, SEXP ll_minSEXP, SEXP P0_inSEXP, SEXP p0_suppliedSEXP) {
+List kf_adjoint_uni_cpp(const arma::mat& Y, const arma::mat& TT, const arma::mat& RR, const arma::mat& ZZ, const arma::mat& DD, const arma::vec& d, const arma::mat& Sigma_e, const arma::cube& dTT_cube, const arma::cube& dRR_cube, const arma::cube& dZZ_cube, const arma::cube& dDD_cube, const arma::mat& dd_mat, const arma::cube& dSigma_cube, double me_variance, double ll_min, const arma::mat& P0_in, bool p0_supplied, const arma::mat& shock_scale_mat, const arma::mat& me_extra_mat, bool return_bars);
+RcppExport SEXP _dynhr_kf_adjoint_uni_cpp(SEXP YSEXP, SEXP TTSEXP, SEXP RRSEXP, SEXP ZZSEXP, SEXP DDSEXP, SEXP dSEXP, SEXP Sigma_eSEXP, SEXP dTT_cubeSEXP, SEXP dRR_cubeSEXP, SEXP dZZ_cubeSEXP, SEXP dDD_cubeSEXP, SEXP dd_matSEXP, SEXP dSigma_cubeSEXP, SEXP me_varianceSEXP, SEXP ll_minSEXP, SEXP P0_inSEXP, SEXP p0_suppliedSEXP, SEXP shock_scale_matSEXP, SEXP me_extra_matSEXP, SEXP return_barsSEXP) {
 BEGIN_RCPP
     Rcpp::RObject rcpp_result_gen;
     Rcpp::RNGScope rcpp_rngScope_gen;
@@ -495,7 +495,31 @@ BEGIN_RCPP
     Rcpp::traits::input_parameter< double >::type ll_min(ll_minSEXP);
     Rcpp::traits::input_parameter< const arma::mat& >::type P0_in(P0_inSEXP);
     Rcpp::traits::input_parameter< bool >::type p0_supplied(p0_suppliedSEXP);
-    rcpp_result_gen = Rcpp::wrap(kf_adjoint_uni_cpp(Y, TT, RR, ZZ, DD, d, Sigma_e, dTT_cube, dRR_cube, dZZ_cube, dDD_cube, dd_mat, dSigma_cube, me_variance, ll_min, P0_in, p0_supplied));
+    Rcpp::traits::input_parameter< const arma::mat& >::type shock_scale_mat(shock_scale_matSEXP);
+    Rcpp::traits::input_parameter< const arma::mat& >::type me_extra_mat(me_extra_matSEXP);
+    Rcpp::traits::input_parameter< bool >::type return_bars(return_barsSEXP);
+    rcpp_result_gen = Rcpp::wrap(kf_adjoint_uni_cpp(Y, TT, RR, ZZ, DD, d, Sigma_e, dTT_cube, dRR_cube, dZZ_cube, dDD_cube, dd_mat, dSigma_cube, me_variance, ll_min, P0_in, p0_supplied, shock_scale_mat, me_extra_mat, return_bars));
+    return rcpp_result_gen;
+END_RCPP
+}
+// kalman_chandrasekhar_loop_cpp
+List kalman_chandrasekhar_loop_cpp(const arma::mat& Y_minus_d, const arma::mat& ZZ, const arma::mat& TT, const arma::mat& SS, const arma::mat& HH_full, const arma::mat& P0, arma::vec s, double ll_const, double ss_tol, double ll_min, bool return_filtered);
+RcppExport SEXP _dynhr_kalman_chandrasekhar_loop_cpp(SEXP Y_minus_dSEXP, SEXP ZZSEXP, SEXP TTSEXP, SEXP SSSEXP, SEXP HH_fullSEXP, SEXP P0SEXP, SEXP sSEXP, SEXP ll_constSEXP, SEXP ss_tolSEXP, SEXP ll_minSEXP, SEXP return_filteredSEXP) {
+BEGIN_RCPP
+    Rcpp::RObject rcpp_result_gen;
+    Rcpp::RNGScope rcpp_rngScope_gen;
+    Rcpp::traits::input_parameter< const arma::mat& >::type Y_minus_d(Y_minus_dSEXP);
+    Rcpp::traits::input_parameter< const arma::mat& >::type ZZ(ZZSEXP);
+    Rcpp::traits::input_parameter< const arma::mat& >::type TT(TTSEXP);
+    Rcpp::traits::input_parameter< const arma::mat& >::type SS(SSSEXP);
+    Rcpp::traits::input_parameter< const arma::mat& >::type HH_full(HH_fullSEXP);
+    Rcpp::traits::input_parameter< const arma::mat& >::type P0(P0SEXP);
+    Rcpp::traits::input_parameter< arma::vec >::type s(sSEXP);
+    Rcpp::traits::input_parameter< double >::type ll_const(ll_constSEXP);
+    Rcpp::traits::input_parameter< double >::type ss_tol(ss_tolSEXP);
+    Rcpp::traits::input_parameter< double >::type ll_min(ll_minSEXP);
+    Rcpp::traits::input_parameter< bool >::type return_filtered(return_filteredSEXP);
+    rcpp_result_gen = Rcpp::wrap(kalman_chandrasekhar_loop_cpp(Y_minus_d, ZZ, TT, SS, HH_full, P0, s, ll_const, ss_tol, ll_min, return_filtered));
     return rcpp_result_gen;
 END_RCPP
 }
@@ -541,6 +565,37 @@ BEGIN_RCPP
     Rcpp::traits::input_parameter< const arma::vec& >::type me_diag_vec(me_diag_vecSEXP);
     Rcpp::traits::input_parameter< double >::type kalman_tol(kalman_tolSEXP);
     rcpp_result_gen = Rcpp::wrap(kalman_standard_loop_cpp(Y_minus_d, ZZ, TT, RR, DD, HH_full, Sigma_e, SS, P, ll_const, ss_tol, ll_min, return_filtered, me_diag_vec, kalman_tol));
+    return rcpp_result_gen;
+END_RCPP
+}
+// kalman_standard_general_loop_cpp
+List kalman_standard_general_loop_cpp(const arma::mat& Y_minus_d, const arma::mat& ZZ, const arma::mat& TT, const arma::mat& RR, const arma::mat& DD, const arma::mat& HH, const arma::mat& QQ, const arma::mat& Sigma_e, const arma::mat& SS, arma::vec s, arma::mat P, int t_start, double init_loglik, double ll_const, double ss_tol, double ll_min, bool return_filtered, const arma::vec& me_vec, const arma::mat& me_extra, const arma::mat& shock_scale, double kalman_tol);
+RcppExport SEXP _dynhr_kalman_standard_general_loop_cpp(SEXP Y_minus_dSEXP, SEXP ZZSEXP, SEXP TTSEXP, SEXP RRSEXP, SEXP DDSEXP, SEXP HHSEXP, SEXP QQSEXP, SEXP Sigma_eSEXP, SEXP SSSEXP, SEXP sSEXP, SEXP PSEXP, SEXP t_startSEXP, SEXP init_loglikSEXP, SEXP ll_constSEXP, SEXP ss_tolSEXP, SEXP ll_minSEXP, SEXP return_filteredSEXP, SEXP me_vecSEXP, SEXP me_extraSEXP, SEXP shock_scaleSEXP, SEXP kalman_tolSEXP) {
+BEGIN_RCPP
+    Rcpp::RObject rcpp_result_gen;
+    Rcpp::RNGScope rcpp_rngScope_gen;
+    Rcpp::traits::input_parameter< const arma::mat& >::type Y_minus_d(Y_minus_dSEXP);
+    Rcpp::traits::input_parameter< const arma::mat& >::type ZZ(ZZSEXP);
+    Rcpp::traits::input_parameter< const arma::mat& >::type TT(TTSEXP);
+    Rcpp::traits::input_parameter< const arma::mat& >::type RR(RRSEXP);
+    Rcpp::traits::input_parameter< const arma::mat& >::type DD(DDSEXP);
+    Rcpp::traits::input_parameter< const arma::mat& >::type HH(HHSEXP);
+    Rcpp::traits::input_parameter< const arma::mat& >::type QQ(QQSEXP);
+    Rcpp::traits::input_parameter< const arma::mat& >::type Sigma_e(Sigma_eSEXP);
+    Rcpp::traits::input_parameter< const arma::mat& >::type SS(SSSEXP);
+    Rcpp::traits::input_parameter< arma::vec >::type s(sSEXP);
+    Rcpp::traits::input_parameter< arma::mat >::type P(PSEXP);
+    Rcpp::traits::input_parameter< int >::type t_start(t_startSEXP);
+    Rcpp::traits::input_parameter< double >::type init_loglik(init_loglikSEXP);
+    Rcpp::traits::input_parameter< double >::type ll_const(ll_constSEXP);
+    Rcpp::traits::input_parameter< double >::type ss_tol(ss_tolSEXP);
+    Rcpp::traits::input_parameter< double >::type ll_min(ll_minSEXP);
+    Rcpp::traits::input_parameter< bool >::type return_filtered(return_filteredSEXP);
+    Rcpp::traits::input_parameter< const arma::vec& >::type me_vec(me_vecSEXP);
+    Rcpp::traits::input_parameter< const arma::mat& >::type me_extra(me_extraSEXP);
+    Rcpp::traits::input_parameter< const arma::mat& >::type shock_scale(shock_scaleSEXP);
+    Rcpp::traits::input_parameter< double >::type kalman_tol(kalman_tolSEXP);
+    rcpp_result_gen = Rcpp::wrap(kalman_standard_general_loop_cpp(Y_minus_d, ZZ, TT, RR, DD, HH, QQ, Sigma_e, SS, s, P, t_start, init_loglik, ll_const, ss_tol, ll_min, return_filtered, me_vec, me_extra, shock_scale, kalman_tol));
     return rcpp_result_gen;
 END_RCPP
 }
@@ -666,6 +721,20 @@ BEGIN_RCPP
     return rcpp_result_gen;
 END_RCPP
 }
+// lyapunov_doubling_cpp
+List lyapunov_doubling_cpp(const arma::mat& A, const arma::mat& B, int max_iter, double tol);
+RcppExport SEXP _dynhr_lyapunov_doubling_cpp(SEXP ASEXP, SEXP BSEXP, SEXP max_iterSEXP, SEXP tolSEXP) {
+BEGIN_RCPP
+    Rcpp::RObject rcpp_result_gen;
+    Rcpp::RNGScope rcpp_rngScope_gen;
+    Rcpp::traits::input_parameter< const arma::mat& >::type A(ASEXP);
+    Rcpp::traits::input_parameter< const arma::mat& >::type B(BSEXP);
+    Rcpp::traits::input_parameter< int >::type max_iter(max_iterSEXP);
+    Rcpp::traits::input_parameter< double >::type tol(tolSEXP);
+    rcpp_result_gen = Rcpp::wrap(lyapunov_doubling_cpp(A, B, max_iter, tol));
+    return rcpp_result_gen;
+END_RCPP
+}
 // mcp_sparse_solve_cpp
 NumericVector mcp_sparse_solve_cpp(IntegerVector i_idx, IntegerVector j_idx, NumericVector x_vals, NumericVector rhs, int n_dim);
 RcppExport SEXP _dynhr_mcp_sparse_solve_cpp(SEXP i_idxSEXP, SEXP j_idxSEXP, SEXP x_valsSEXP, SEXP rhsSEXP, SEXP n_dimSEXP) {
@@ -730,6 +799,34 @@ BEGIN_RCPP
     return rcpp_result_gen;
 END_RCPP
 }
+// o2_sylvester_kron2_cpp
+Rcpp::List o2_sylvester_kron2_cpp(const arma::mat& A, const arma::mat& F, const arma::mat& H, const arma::mat& RHS, int max_refine);
+RcppExport SEXP _dynhr_o2_sylvester_kron2_cpp(SEXP ASEXP, SEXP FSEXP, SEXP HSEXP, SEXP RHSSEXP, SEXP max_refineSEXP) {
+BEGIN_RCPP
+    Rcpp::RObject rcpp_result_gen;
+    Rcpp::RNGScope rcpp_rngScope_gen;
+    Rcpp::traits::input_parameter< const arma::mat& >::type A(ASEXP);
+    Rcpp::traits::input_parameter< const arma::mat& >::type F(FSEXP);
+    Rcpp::traits::input_parameter< const arma::mat& >::type H(HSEXP);
+    Rcpp::traits::input_parameter< const arma::mat& >::type RHS(RHSSEXP);
+    Rcpp::traits::input_parameter< int >::type max_refine(max_refineSEXP);
+    rcpp_result_gen = Rcpp::wrap(o2_sylvester_kron2_cpp(A, F, H, RHS, max_refine));
+    return rcpp_result_gen;
+END_RCPP
+}
+// o2_third_cross_bar_hx_cpp
+arma::mat o2_third_cross_bar_hx_cpp(const arma::mat& hx, const arma::mat& c3, const arma::mat& M);
+RcppExport SEXP _dynhr_o2_third_cross_bar_hx_cpp(SEXP hxSEXP, SEXP c3SEXP, SEXP MSEXP) {
+BEGIN_RCPP
+    Rcpp::RObject rcpp_result_gen;
+    Rcpp::RNGScope rcpp_rngScope_gen;
+    Rcpp::traits::input_parameter< const arma::mat& >::type hx(hxSEXP);
+    Rcpp::traits::input_parameter< const arma::mat& >::type c3(c3SEXP);
+    Rcpp::traits::input_parameter< const arma::mat& >::type M(MSEXP);
+    rcpp_result_gen = Rcpp::wrap(o2_third_cross_bar_hx_cpp(hx, c3, M));
+    return rcpp_result_gen;
+END_RCPP
+}
 // ordered_qz_cpp
 List ordered_qz_cpp(const arma::mat& E, const arma::mat& D, double critmod);
 RcppExport SEXP _dynhr_ordered_qz_cpp(SEXP ESEXP, SEXP DSEXP, SEXP critmodSEXP) {
@@ -750,6 +847,48 @@ BEGIN_RCPP
     Rcpp::RObject rcpp_result_gen;
     Rcpp::RNGScope rcpp_rngScope_gen;
     rcpp_result_gen = Rcpp::wrap(hank_peak_rss());
+    return rcpp_result_gen;
+END_RCPP
+}
+// pskf_filter_cpp
+Rcpp::List pskf_filter_cpp(const arma::mat& Y, const arma::mat& TT, const arma::mat& ZZ, const arma::vec& mu_eta, const arma::mat& Sigma_eta, const arma::mat& Gamma_eta, const arma::vec& nu_eta, const arma::mat& Delta_eta, const arma::vec& mu_eps, const arma::mat& Sigma_eps, const arma::mat& P0, double cut_tol, double max_q, double offset_miwa_qmax, bool fast_solve, bool store_path, SEXP keep_override, bool store_keep);
+RcppExport SEXP _dynhr_pskf_filter_cpp(SEXP YSEXP, SEXP TTSEXP, SEXP ZZSEXP, SEXP mu_etaSEXP, SEXP Sigma_etaSEXP, SEXP Gamma_etaSEXP, SEXP nu_etaSEXP, SEXP Delta_etaSEXP, SEXP mu_epsSEXP, SEXP Sigma_epsSEXP, SEXP P0SEXP, SEXP cut_tolSEXP, SEXP max_qSEXP, SEXP offset_miwa_qmaxSEXP, SEXP fast_solveSEXP, SEXP store_pathSEXP, SEXP keep_overrideSEXP, SEXP store_keepSEXP) {
+BEGIN_RCPP
+    Rcpp::RObject rcpp_result_gen;
+    Rcpp::traits::input_parameter< const arma::mat& >::type Y(YSEXP);
+    Rcpp::traits::input_parameter< const arma::mat& >::type TT(TTSEXP);
+    Rcpp::traits::input_parameter< const arma::mat& >::type ZZ(ZZSEXP);
+    Rcpp::traits::input_parameter< const arma::vec& >::type mu_eta(mu_etaSEXP);
+    Rcpp::traits::input_parameter< const arma::mat& >::type Sigma_eta(Sigma_etaSEXP);
+    Rcpp::traits::input_parameter< const arma::mat& >::type Gamma_eta(Gamma_etaSEXP);
+    Rcpp::traits::input_parameter< const arma::vec& >::type nu_eta(nu_etaSEXP);
+    Rcpp::traits::input_parameter< const arma::mat& >::type Delta_eta(Delta_etaSEXP);
+    Rcpp::traits::input_parameter< const arma::vec& >::type mu_eps(mu_epsSEXP);
+    Rcpp::traits::input_parameter< const arma::mat& >::type Sigma_eps(Sigma_epsSEXP);
+    Rcpp::traits::input_parameter< const arma::mat& >::type P0(P0SEXP);
+    Rcpp::traits::input_parameter< double >::type cut_tol(cut_tolSEXP);
+    Rcpp::traits::input_parameter< double >::type max_q(max_qSEXP);
+    Rcpp::traits::input_parameter< double >::type offset_miwa_qmax(offset_miwa_qmaxSEXP);
+    Rcpp::traits::input_parameter< bool >::type fast_solve(fast_solveSEXP);
+    Rcpp::traits::input_parameter< bool >::type store_path(store_pathSEXP);
+    Rcpp::traits::input_parameter< SEXP >::type keep_override(keep_overrideSEXP);
+    Rcpp::traits::input_parameter< bool >::type store_keep(store_keepSEXP);
+    rcpp_result_gen = Rcpp::wrap(pskf_filter_cpp(Y, TT, ZZ, mu_eta, Sigma_eta, Gamma_eta, nu_eta, Delta_eta, mu_eps, Sigma_eps, P0, cut_tol, max_q, offset_miwa_qmax, fast_solve, store_path, keep_override, store_keep));
+    return rcpp_result_gen;
+END_RCPP
+}
+// qr_static_transform_implicit_cpp
+List qr_static_transform_implicit_cpp(const NumericMatrix& f_static, const NumericMatrix& f_minus_r, const NumericMatrix& f_zero_r, const NumericMatrix& f_plus_r, const NumericMatrix& f_exo_r);
+RcppExport SEXP _dynhr_qr_static_transform_implicit_cpp(SEXP f_staticSEXP, SEXP f_minus_rSEXP, SEXP f_zero_rSEXP, SEXP f_plus_rSEXP, SEXP f_exo_rSEXP) {
+BEGIN_RCPP
+    Rcpp::RObject rcpp_result_gen;
+    Rcpp::RNGScope rcpp_rngScope_gen;
+    Rcpp::traits::input_parameter< const NumericMatrix& >::type f_static(f_staticSEXP);
+    Rcpp::traits::input_parameter< const NumericMatrix& >::type f_minus_r(f_minus_rSEXP);
+    Rcpp::traits::input_parameter< const NumericMatrix& >::type f_zero_r(f_zero_rSEXP);
+    Rcpp::traits::input_parameter< const NumericMatrix& >::type f_plus_r(f_plus_rSEXP);
+    Rcpp::traits::input_parameter< const NumericMatrix& >::type f_exo_r(f_exo_rSEXP);
+    rcpp_result_gen = Rcpp::wrap(qr_static_transform_implicit_cpp(f_static, f_minus_r, f_zero_r, f_plus_r, f_exo_r));
     return rcpp_result_gen;
 END_RCPP
 }
@@ -886,21 +1025,28 @@ static const R_CallMethodDef CallEntries[] = {
     {"_dynhr_eval_jac_tape_cpp", (DL_FUNC) &_dynhr_eval_jac_tape_cpp, 11},
     {"_dynhr_eval_triplet_tape_cpp", (DL_FUNC) &_dynhr_eval_triplet_tape_cpp, 7},
     {"_dynhr_kf_adjoint_cpp", (DL_FUNC) &_dynhr_kf_adjoint_cpp, 18},
-    {"_dynhr_kf_adjoint_uni_cpp", (DL_FUNC) &_dynhr_kf_adjoint_uni_cpp, 17},
+    {"_dynhr_kf_adjoint_uni_cpp", (DL_FUNC) &_dynhr_kf_adjoint_uni_cpp, 20},
+    {"_dynhr_kalman_chandrasekhar_loop_cpp", (DL_FUNC) &_dynhr_kalman_chandrasekhar_loop_cpp, 11},
     {"_dynhr_kalman_ss_loop_cpp", (DL_FUNC) &_dynhr_kalman_ss_loop_cpp, 10},
     {"_dynhr_kalman_standard_loop_cpp", (DL_FUNC) &_dynhr_kalman_standard_loop_cpp, 15},
+    {"_dynhr_kalman_standard_general_loop_cpp", (DL_FUNC) &_dynhr_kalman_standard_general_loop_cpp, 21},
     {"_dynhr_kalman_univariate_loop_cpp", (DL_FUNC) &_dynhr_kalman_univariate_loop_cpp, 16},
     {"_dynhr_kf_adjoint_diffuse_cpp", (DL_FUNC) &_dynhr_kf_adjoint_diffuse_cpp, 9},
     {"_dynhr_kf_loglik_dG_cpp", (DL_FUNC) &_dynhr_kf_loglik_dG_cpp, 15},
     {"_dynhr_kf_score_sigma_cpp", (DL_FUNC) &_dynhr_kf_score_sigma_cpp, 15},
     {"_dynhr_kf_tangent_cpp", (DL_FUNC) &_dynhr_kf_tangent_cpp, 17},
+    {"_dynhr_lyapunov_doubling_cpp", (DL_FUNC) &_dynhr_lyapunov_doubling_cpp, 4},
     {"_dynhr_mcp_sparse_solve_cpp", (DL_FUNC) &_dynhr_mcp_sparse_solve_cpp, 5},
     {"_dynhr_mvn_logcdf_cpp", (DL_FUNC) &_dynhr_mvn_logcdf_cpp, 5},
     {"_dynhr_mvn_logcdf2_cpp", (DL_FUNC) &_dynhr_mvn_logcdf2_cpp, 3},
     {"_dynhr_mvn_logcdf3_cpp", (DL_FUNC) &_dynhr_mvn_logcdf3_cpp, 2},
     {"_dynhr_mvn_logcdf_dispatch_cpp", (DL_FUNC) &_dynhr_mvn_logcdf_dispatch_cpp, 3},
+    {"_dynhr_o2_sylvester_kron2_cpp", (DL_FUNC) &_dynhr_o2_sylvester_kron2_cpp, 5},
+    {"_dynhr_o2_third_cross_bar_hx_cpp", (DL_FUNC) &_dynhr_o2_third_cross_bar_hx_cpp, 3},
     {"_dynhr_ordered_qz_cpp", (DL_FUNC) &_dynhr_ordered_qz_cpp, 3},
     {"_dynhr_hank_peak_rss", (DL_FUNC) &_dynhr_hank_peak_rss, 0},
+    {"_dynhr_pskf_filter_cpp", (DL_FUNC) &_dynhr_pskf_filter_cpp, 18},
+    {"_dynhr_qr_static_transform_implicit_cpp", (DL_FUNC) &_dynhr_qr_static_transform_implicit_cpp, 5},
     {"_dynhr_qr_static_transform_cpp", (DL_FUNC) &_dynhr_qr_static_transform_cpp, 5},
     {"_dynhr_sv_rbpf_loglik_cpp", (DL_FUNC) &_dynhr_sv_rbpf_loglik_cpp, 14},
     {"_dynhr_tpf_propagate_particles", (DL_FUNC) &_dynhr_tpf_propagate_particles, 8},

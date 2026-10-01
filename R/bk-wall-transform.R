@@ -1,7 +1,6 @@
 ## R/bk-wall-transform.R
 ## --------------------------------------------------------------------------
-## Wall-coordinate reparameterization (attempt #12 ask (b) / pathological-DSGE
-## RESEARCH_AGENDA Thread 4b, PRACTICAL scope). Samplers currently see
+## Wall-coordinate reparameterization (PRACTICAL scope). Samplers currently see
 ## loglik = -Inf outside the Blanchard-Kahn determinate region, so boundary
 ## proposals are wasted divergences. A GLOBAL diffeomorphism from R^P onto
 ## the determinate region is expected PROHIBITIVE (bk_distance()'s |lambda_c|
@@ -236,7 +235,7 @@
 #'
 #' \strong{Scope / limits (read before use):} this is the PRACTICAL
 #' single-coordinate construction, not a global diffeomorphism (expected
-#' prohibitive per the pathological-DSGE RESEARCH_AGENDA -- \code{bk_distance}
+#' prohibitive -- \code{bk_distance}
 #' is non-smooth at repeated/defective crossings). It is valid only where
 #' the crossing eigenvalue at the wall is SIMPLE; \code{bk_wall_transform()}
 #' fails loud (via the returned transform's \code{to_unconstrained}/

@@ -612,8 +612,8 @@
 
   lik <- if (is.null(ctx)) "gaussian" else ctx$likelihood
 
-  ## Dispatch table — "pkf", "ppf", "copf" added for OBC models (Tier 10 item 5;
-  ## Tier 15 §C: ppf/copf keys added so particle-filter-estimated OBC models use
+  ## Dispatch table — "pkf", "ppf", "copf" added for OBC models (the
+  ## ppf/copf keys exist so particle-filter-estimated OBC models use
   ## the correct terminal-state summary rather than silently falling back to pkf).
   dispatch <- list(
     gaussian = "gaussian",
@@ -711,7 +711,9 @@
       Pk
     }, error = function(e) .dynhr_reraise_bug(e, QQ_s))
 
-    if (!is.null(tpf_seed)) set.seed(tpf_seed)
+    ## Seeded for the particle cloud only; the caller's RNG stream is restored
+    ## when this function returns.
+    .local_seed(tpf_seed)
 
     if (is.null(P0_tpf) || !is.finite(max(abs(P0_tpf)))) {
       particles <- matrix(0, nrow = n_2s, ncol = N)
@@ -863,7 +865,7 @@
 
     sys_cache <- cache_system_structure(compiled)
     ## Re-derive SSM-computed params for a consistent linearization point
-    ## (no-op for non-SSM-parameter models; Tier 13 #1).
+    ## (no-op for non-SSM-parameter models).
     params <- ss_result$params %||% params
     sys       <- extract_system_matrices_fast(sys_cache, ss_result$ss, params)
 
@@ -914,7 +916,7 @@
     return(list(s0 = s0, P0 = P0))
   }
 
-  ## ---- OBC PPF / COPF path (Tier 15 §C) ----------------------------------
+  ## ---- OBC PPF / COPF path ----------------------------------
   ## Both "ppf" and "copf" summarise the terminal particle cloud to (mean, cov)
   ## exactly as the TPF path does, giving a Gaussian summary for the downstream
   ## Waggoner-Zha / soft-KF forecaster (which is purely Gaussian-state).

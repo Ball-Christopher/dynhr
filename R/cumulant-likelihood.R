@@ -266,11 +266,14 @@
 
 
 ## rcond(V) below which the eigenbasis route of the tensor-Lyapunov solves is
-## abandoned for doubling. The eigenbasis route loses ~ eps / rcond(V) relative
-## accuracy, so 1e-6 bounds its error near 1e-10 while leaving every
-## well-conditioned basis (fs2000: 0.06-0.13; the failure: ~1e-277) on the
-## original, bit-identical path.
-.tensor_lyap_rcond_tol <- 1e-6
+## abandoned for doubling. The eigenbasis route loses accuracy quickly as
+## rcond(V) falls (measured against a dense Kronecker solve for a nearly
+## repeated, non-normal root pair: rcond 1e-3 -> ~1e-11, 1e-5 -> ~3e-6
+## relative error), whereas doubling stays at ~1e-15 for the same matrices, so
+## 1e-3 keeps the eigenbasis error near 1e-11 while every well-conditioned
+## basis (fs2000: 0.06-0.13; rbc-type models: ~0.1-0.6) stays on the original,
+## bit-identical path.
+.tensor_lyap_rcond_tol <- 1e-3
 
 #' Eigenbasis of hx for the tensor-Lyapunov solves, or NULL when unusable
 #'
@@ -1619,7 +1622,7 @@ compute_fourth_cumulant <- function(dr, model, params = NULL,
 #' \code{sample_cumulants()$c3} is \code{n_obs x n_obs^2} with column
 #' \eqn{(j-1) n_{obs} + k}.
 #'
-#' The assembly this replaces (E4-B) was a two-level \code{for (a) for (b)}
+#' The assembly this replaces was a two-level \code{for (a) for (b)}
 #' loop writing \code{c3_obs_only[a, (a-1) * n_obs + b]}, i.e. it kept ONLY the
 #' \eqn{(i, i, k)} sub-slice and left the remaining \eqn{n_{obs}^2 - n_{obs}}
 #' columns of every row at zero.  The lengths matched, so nothing recycled and
@@ -2211,7 +2214,7 @@ make_log_posterior_cumulant <- function(model, data, prior_spec, obs_vars,
 }
 
 
-## Ridge-regularise a GMM long-run covariance PER MOMENT (W77, 2026-09-26):
+## Ridge-regularise a GMM long-run covariance PER MOMENT:
 ##   Omega_reg = Omega + ridge * diag(diag(Omega)),
 ## i.e. a ridge on the CORRELATION form. The moments stack orders 1-4 whose
 ## scales are sigma^1 ... sigma^4, so Omega's diagonal spans sigma^2 ...
@@ -2437,7 +2440,7 @@ make_log_posterior_cumulant <- function(model, data, prior_spec, obs_vars,
   if (p_11 > 0L) {
     Omega_11 <- Sigma_y   # h=0 contribution
 
-    ## Lag truncation RELATIVE to the block (W77): an absolute 1e-12 stopped
+    ## Lag truncation RELATIVE to the block: an absolute 1e-12 stopped
     ## at h = 1 whenever the observables' variances were below ~1e-12 (every
     ## shock std x 1e-4 put Omega_22 ~ 1e-16 under it -- a lag-0-only
     ## long-run variance, 3 units of cumulant loglik off), and summed all

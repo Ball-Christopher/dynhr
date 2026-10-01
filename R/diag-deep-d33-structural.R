@@ -54,7 +54,7 @@
 # numbers that masquerade as a flat map.
 # ---------------------------------------------------------------------------
 
-# 0.9.4 (A2): D33's private sandbox was folded into the package-wide .mod
+# 0.9.4: D33's private sandbox was folded into the package-wide .mod
 # expression sandbox (`.dynhr_safe_fn_names` / `.dynhr_sandbox_env()` in
 # R/parse-blocks.R), which the PARSER now uses too. One allowlist, one
 # constructor -- D33 and parse_mod() can no longer drift apart.

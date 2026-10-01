@@ -198,8 +198,7 @@ robust_confidence_set <- function(theta_mode,
   if (is.null(params)) params <- names(theta_mode)
   if (is.null(params)) stop("robust_confidence_set: theta_mode must be named or params must be supplied.")
 
-  ## Fail-loud validation of the per-period loglik closure (pathological-DSGE
-  ## paper gap #1a: a NULL field access -- e.g. `$ll_contrib` instead of
+  ## Fail-loud validation of the per-period loglik closure (a NULL field access -- e.g. `$ll_contrib` instead of
   ## kalman_filter()'s actual `$loglik_contrib` -- yields a length-0 vector
   ## that previously flowed through silently and produced a degenerate
   ## [-Inf, Inf] confidence set).

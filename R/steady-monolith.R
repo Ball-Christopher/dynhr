@@ -17,7 +17,7 @@
 ## so each distinct line is parsed once per session. eval() (the actual
 ## computation) is unchanged, so results are bit-identical.
 ##
-## A-SEC (0.9.4): the two parse caches (`.ssm_expr_cache` here and
+## A-SEC: the two parse caches (`.ssm_expr_cache` here and
 ## `.dynhr_expr_cache` in stochsimul-monolith.R) are the security CHOKE POINT
 ## for .mod text that is re-evaluated at solve time.  An expression is
 ## AST-checked against the .mod allowlist when it is FIRST inserted into a
@@ -454,7 +454,7 @@ solve_steady_state <- function(model, compiled = NULL, params = NULL,
     r  <- compiled$static$residuals_fn(ss, x0, ss_params, ss)
     max_r <- max(abs(r))
 
-    ## ---- Affine constants (0.9.4, ledger A6) -----------------------------
+    ## ---- Affine constants (0.9.4) -----------------------------
     ## `model(linear)` does NOT imply "written in deviations from its own
     ## steady state". `r = rbar + phi*x` with rbar = 0.03 is a perfectly legal
     ## linear model whose steady state is r = 0.03; the pre-0.9.4 shortcut

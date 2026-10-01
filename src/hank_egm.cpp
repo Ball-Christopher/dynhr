@@ -72,10 +72,10 @@ List hank_egm_step_cpp(NumericMatrix Va_p_, NumericVector a_grid_,
   arma::vec a_grid(a_grid_.begin(), n_a, false);
   arma::vec y(y_.begin(), n_e, false);
 
-  // Tier 2: optional additive (e,a) incidence matrix on cash-on-hand, at the
+  // Optional additive (e,a) incidence matrix on cash-on-hand, at the
   // FIXED (beginning-of-period) grid only -- see the R doc on .hank_egm_step
   // / hank_het_block's Tr_incidence. Empty/NULL is a strict no-op, so the
-  // Tier-1 vector-incidence and no-incidence paths (y already carries any
+  // vector-incidence and no-incidence paths (y already carries any
   // e-indexed transfer) are bit-identical to before this parameter existed.
   bool has_extra = coh_extra_.isNotNull();
   arma::mat coh_extra;
@@ -152,7 +152,7 @@ List hank_egm_solve_cpp(NumericVector a_grid_, NumericVector y_, double r,
   const double tiny = 1e-12;
   double inv_eis = 1.0 / eis;
 
-  // Tier 2: see hank_egm_step_cpp -- empty/NULL is a strict no-op.
+  // See hank_egm_step_cpp -- empty/NULL is a strict no-op.
   bool has_extra = coh_extra_.isNotNull();
   arma::mat coh_extra;
   if (has_extra) {

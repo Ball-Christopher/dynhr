@@ -92,11 +92,11 @@ kalman_filter_obc_inversion <- function(Y, dr_slack, regime_cache,
   ## Observable steady-state means
   d <- dr_slack$ys[obs_vars]
 
-  ## Per-period rules along the regime path (W49, 0.9.3.93): the PKF's
+  ## Per-period rules along the regime path: the PKF's
   ## time-varying rules when regime_cache holds those of a
   ## kalman_filter_obc_pkf() run with this path, otherwise the rules of
   ## perfect foresight of the path (R/obc-filter.R .obc_path_rules()).
-  ## Before W49 every binding period used the one-period policy of
+  ## Previously every binding period used the one-period policy of
   ## obc_ensure_policy() (next period slack).
   rules <- .obc_path_rules(regime_cache, regime_path)
   pk    <- .obc_pkf_prep(NULL, dr_slack, obs_idx, Sigma_e, 0, 1L)

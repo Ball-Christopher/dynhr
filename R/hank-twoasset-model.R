@@ -8,8 +8,8 @@
 ## points in R/hank-model.R (.hank_block_jacobian and .hank_model_eval) need to
 ## know that kind = "het2" routes to hank_het2_jacobian / hank_td2_nonlinear.
 ##
-## ROADMAP -- deliberately deferred variants of the household side (this file
-## is the natural home for them; see briefs/19-twoasset-hank-scope.md section 2):
+## Deliberately deferred variants of the household side (this file
+## is the natural home for them):
 ##   * KMV kinked cost (linear + convex, an inaction region). hank_egm2_solve
 ##     requires chi2 > 1 precisely because its illiquid-FOC crossing search
 ##     assumes a strictly convex, hence strictly monotone, marginal cost; the
@@ -18,7 +18,7 @@
 ##     EGM). The trigger for this is whether the convex spec can hit a target
 ##     hand-to-mouth share at defensible parameters -- a calibration question,
 ##     not a numerical one.
-##   * two-asset Reiter / finite-state emission (see the W5 checkpoint).
+##   * two-asset Reiter / finite-state emission.
 ## --------------------------------------------------------------------------
 
 

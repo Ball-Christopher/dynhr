@@ -18,7 +18,7 @@
 #' ... (slack after the last binding period), so a binding period that is
 #' followed by another binding period is NOT solved with the one-period
 #' binding policy of \code{obc_solve_binding()} (which assumes the next
-#' period slack; fixed 2026-09-25, W48).  Shocks are surprises.
+#' period slack).  Shocks are surprises.
 #'
 #' y_t = ghx_t * s_{t-1} + ghu_t * eps_t + c_t
 #'

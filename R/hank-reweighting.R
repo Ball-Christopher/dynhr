@@ -1,6 +1,6 @@
 ## R/hank-reweighting.R
 ## --------------------------------------------------------------------------
-## Phase-0 machinery for the het-preferences-in-HANK research line (brief-17):
+## Phase-0 machinery for the het-preferences-in-HANK research line:
 ## a K-type preference MIXTURE (types share the grid/income process; only the
 ## discount factor differs) plus the reweighting-loss diagnostic that compares
 ## an OBSERVED net survey reweighting against the model-implied one.
@@ -372,7 +372,7 @@ hank_reweighting_loss <- function(dD_hat, JD_mix, dZ, W = NULL) {
 #' spread) grid of candidate 2-type discount-factor mixtures
 #'
 #' Assembles the full Phase-0 synthetic-survey experiment for the
-#' het-preferences-in-HANK research line (brief-17): (1) a TRUTH 2-type
+#' het-preferences-in-HANK research line: (1) a TRUTH 2-type
 #' mixture with discount factors \code{centre* -+ spread*}; (2) its
 #' first-order net distribution reweighting under a small aggregate shock;
 #' (3) two synthetic household surveys (pre- and post-shock) drawn from the
@@ -594,7 +594,7 @@ hank_phase0_reweight_gate <- function(betas = c(0.95, 0.98),
   ## Auxiliary matrix Z: per-cell indicator design (N x n_cell), so control
   ## totals X are exactly the TRUE mixture macro cell-mass*[asset,income,1]
   ## moments -- here we calibrate to (aggregate assets A, aggregate
-  ## consumption C, total mass), the 3 truth macro totals named in the brief.
+  ## consumption C, total mass), the 3 truth macro totals named in the design.
   ## Build per-cell (a, e*a-weighted-consumption-proxy) contributions from the
   ## TRUTH mixture policy (consumption at steady state r,w; first-order
   ## accurate for a small shock) so X is expressed in the same per-unit basis

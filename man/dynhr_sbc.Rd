@@ -57,8 +57,9 @@ repurposed as \code{n_particles} and \code{n_burn} / \code{thin} are used
 only to derive \code{L_target = floor(n_draws / thin)}; the ESS floor
 \code{>= 0.3 * n_particles} is enforced. For \code{"dime"}, \code{n_draws}
 is used as \code{n_iter} (post-burn iterations per walker). A gradient-based
-sampler with a non-differentiable likelihood (\code{"tpf"}, \code{"pskf"},
-\code{"student_t"}) is unsupported and raises an error.}
+sampler with \code{"tpf"} (stochastic) or \code{"student_t"} (no gradient
+path) is unsupported and raises an error; with \code{"pskf"} it uses the
+frozen-selection finite-difference gradient.}
 
 \item{me_variance}{Measurement-error variance, forwarded to
 \code{make_log_posterior} (default 0).}

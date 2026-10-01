@@ -44,7 +44,7 @@ and every multiplier has the right sign up to
 \code{tol} times its equation's term magnitudes
 (\code{max(tol, 1e-6)} for the \code{converged}
 flag), so the solution does not depend on the
-units of the model (absolute before W79)}
+units of the model (absolute previously)}
 
 \item{regime_path_init}{Integer vector (length T) for warm-starting the
 Newton solver; ignored for method = "lemke"}

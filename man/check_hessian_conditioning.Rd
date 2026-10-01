@@ -35,11 +35,10 @@ Invisibly, a list with elements \code{kappa_fd}, \code{kappa_ref},
   \code{TRUE} when \code{ratio > ratio_tol}).
 }
 \description{
-The pathological-DSGE paper's central finding is that
 \code{numDeriv::hessian}'s DEFAULT step overshoots near-unit-root /
 determinacy boundaries and inflates the reported posterior-Hessian
 condition number by 5-7 orders of magnitude relative to an analytic or
-BFGS-curvature reference (examples from that paper: nk_small FD 1.1e11 vs
+BFGS-curvature reference (examples: nk_small FD 1.1e11 vs
 analytic 3.6e5; sw2007-stress FD 2e16 vs analytic 2.4e8). This helper
 compares the two condition numbers and warns when the FD one is
 implausibly larger, so the trap is caught instead of silently poisoning a

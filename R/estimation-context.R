@@ -7,8 +7,7 @@
 ## shock_scale, freq_band, system_priors, tpf_options, gradient_policy).
 ## A new option costs one new field here, not a package-wide sweep.
 ##
-## ROADMAP Tier 7 item 2.
-## ROADMAP Tier 8 item 10 (Phase 1): plan compiles into ctx.
+## A plan, when supplied, is compiled into the context.
 ## --------------------------------------------------------------------------
 
 
@@ -79,7 +78,7 @@
 #' @param gradient_policy  \code{"auto"} (default), \code{"analytic"}, or
 #'   \code{"numerical"}.  Controls the gradient path used by
 #'   \code{make_posterior_grad}; \code{me_extra} and \code{shock_scale} are
-#'   now supported by the analytic gradient path (Tier 7, ROADMAP item 3).
+#'   now supported by the analytic gradient path.
 #' @param plan         Optional \code{dynhr_plan} object.  When supplied the
 #'   plan is compiled into the context: the filter-tunes and shock-scale specs
 #'   are resolved and attached to the stored plan.  The plan is also stored in
@@ -155,7 +154,7 @@ estimation_context <- function(
   likelihood      <- match.arg(likelihood)
   gradient_policy <- match.arg(gradient_policy)
 
-  ## ---- Plan compilation (Tier 8 item 10 Phase 1) ----------------------
+  ## ---- Plan compilation ----------------------
   ## When a plan is supplied: run the two estimation adapters
   ## (plan_to_filter_tunes + plan_to_shock_scale_spec) and attach the
   ## resolved specs as attributes on the plan object.  The model-aware entry
@@ -373,7 +372,7 @@ print.dynhr_estimation_context <- function(x, ...) {
 #' the analytic (tangent/adjoint KF) gradient path out -- standard Gaussian
 #' likelihood and gradient_policy not explicitly \code{"numerical"}.  The
 #' analytic gradient now supports per-period \code{me_extra} and
-#' \code{shock_scale} inputs (ROADMAP Tier 7 item 3), so those are no longer
+#' \code{shock_scale} inputs, so those are no longer
 #' blocking conditions.  Whether to USE the analytic path is the caller's
 #' \code{analytic_grad} flag; this predicate only answers whether it is allowed.
 #' Replaces three duplicated inline guards in the runner files.
@@ -386,7 +385,7 @@ print.dynhr_estimation_context <- function(x, ...) {
   ## evaluated (the spectral_radius >= 1 guard in make_log_posterior_whittle),
   ## so the near-unit-root regime is self-limiting for whittle.
   ## cumulant: make_posterior_grad(likelihood = "cumulant") mirrors the forward
-  ## order-2 solve and dispatches to cumulant_loglik_grad (Tier 14 B2).
+  ## order-2 solve and dispatches to cumulant_loglik_grad.
   ## pskf/tpf are excluded: those likelihoods have no analytic gradient path.
   ## pruned: make_posterior_grad(likelihood = "pruned") IS implemented and
   ## VALIDATED for BOTH pruned orders -- order 2 is the exact adjoint-chain

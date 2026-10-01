@@ -51,7 +51,9 @@ probabilities for the outer credible band (default \code{c(0.10, 0.90)}).}
 
 \item{inner_bands}{Inner credible band (default \code{c(0.16, 0.84)}).}
 
-\item{seed}{Optional integer seed for the subsample draw.}
+\item{seed}{Optional integer seed for the subsample draw and the
+forecast draws that follow it. The result is reproducible for a fixed
+seed; the caller's global RNG stream is restored on exit.}
 
 \item{...}{Additional arguments forwarded to
 \code{\link{conditional_forecast}} (e.g. \code{free_shocks}, \code{Q}).}

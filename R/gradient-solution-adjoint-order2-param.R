@@ -1,7 +1,7 @@
 ## R/gradient-solution-adjoint-order2-param.R
 ## --------------------------------------------------------------------------
 ## ANALYTIC, d2X-FREE second-parameter-derivative (Hessian) of the frozen-bars
-## solution-adjoint gradient (Tier 18 A2, "adjoint_solution" T2 route for
+## solution-adjoint gradient (the "adjoint_solution" T2 route for
 ## posterior_hessian).
 ##
 ## posterior_hessian's T2 term is T2[i,j] = <G_X, d2X_ij>, the Hessian of

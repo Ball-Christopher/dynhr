@@ -11,7 +11,7 @@
 ##                                  fast path (single_spell=TRUE) or iterative
 ##   compute_irfs_obc()          -- OBC-aware IRF computation (obc_solver arg)
 ##
-## THE PIECEWISE-LINEAR SOLUTION (fixed 2026-09-25, W48)
+## THE PIECEWISE-LINEAR SOLUTION
 ##
 ##   A regime path is simulated with TIME-VARYING rules from the backward
 ##   recursion of .obc_pwl_rules() (R/obc-binding.R): the rule of a binding
@@ -255,7 +255,7 @@ boehl_find_spell_duration <- function(shock_seq, ctx, spell_regime,
 #'                         has the wrong sign when below -tol times the sum of
 #'                         the absolute terms of that residual.  Scale-free:
 #'                         rescaling the model's units leaves the regimes
-#'                         unchanged (an absolute tolerance before W78,
+#'                         unchanged (an absolute tolerance previously,
 #'                         2026-09).
 #' @param regime_path_init Integer vector (length T) warm start for the
 #'                         iterative path; ignored when single_spell = TRUE

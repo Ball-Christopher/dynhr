@@ -20,7 +20,7 @@ posterior_hessian(
   h_t2 = 1e-05,
   h_rel2 = 1e-04,
   t1_method = c("hvp", "analytic"),
-  t2_method = c("loop", "contract_once", "hvp_solution", "adjoint_solution"),
+  t2_method = c("loop", "contract_once", "hvp_solution", "adjoint_solution", "auto"),
   check_mode = NULL,
   mode_grad_tol = NULL,
   require_mode = FALSE,
@@ -119,7 +119,18 @@ like \code{"loop"}/\code{"contract_once"}. It NEVER materialises the
 \code{O(np^2 . n^2)} d2X blocks and NEVER re-solves the model. The Sigma_e
 second-order channel is handled exactly by the same
 \code{<G_Sig, d2Sigma_e>} FD stencil the other paths use. Default
-\code{"loop"} keeps existing callers byte-identical.}
+\code{"loop"} keeps existing callers byte-identical.
+\code{"auto"} picks the fastest method that applies:
+\code{"adjoint_solution"} when the model was compiled with
+\code{param_deriv = "second"} and every non-shock entry of
+\code{param_names} is a model parameter (exact and fully analytic in the
+solution), otherwise \code{"hvp_solution"}. If the chosen method cannot
+form the solution curvature (a perturbed parameter point fails to solve),
+the call is redone with \code{"loop"}. On Smets-Wouters (2007) the
+\code{"hvp_solution"} Hessian agrees with \code{"loop"} to about 1e-8
+relative at the mode and is about 3.5 times faster; being a central
+difference of an exact gradient, its relative error can reach about 1e-6
+next to a parameter bound.}
 
 \item{check_mode}{logical or \code{NULL} (default). \code{NULL} = AUTO:
 run the guard whenever \code{prior_spec} is supplied, silently skip when

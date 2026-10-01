@@ -195,7 +195,7 @@ was built from in `inst/GIT_COMMIT`: line 1 is the 40-hex SHA, line 2 is
 `version: <DESCRIPTION Version>`, so commit-and-version agreement can be checked
 from the installed files alone, with no git and no network. For a release
 installed from GitHub (or its tarball) the SHA is that of the development
-commit the release was cut from (releases from 0.9.4.20 on); a build from a
+commit the release was cut from (releases from 0.9.4.17 on); a build from a
 development checkout is stamped by `tools/stamp_git_commit.R`.
 `hank_het3_manifest()` surfaces it as `git_commit` for run manifests.
 

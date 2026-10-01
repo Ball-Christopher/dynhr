@@ -16,7 +16,7 @@
 ##   S_yy(ω)   = H * Sigma_e * H^* + me_variance * I
 ##             = 2*pi * f(ω)   (f = spectral density; Gamma_0 = ∫_{-pi}^{pi} f)
 ##
-## Current-state transfer function (used by D24):
+## Current-state transfer function:
 ##   H(e^{iω}) = obs_mat * (I − T * z)^{-1} * R
 ##   S_yy(ω)   = H * Sigma_e * H^*
 ## This is handled by .spectral_density_core_current_no_d (no z factor, no D).
@@ -73,7 +73,7 @@
 
 
 ## --------------------------------------------------------------------------
-## Internal kernel — current-state convention without D (used by D24)
+## Internal kernel — current-state convention without D
 ## --------------------------------------------------------------------------
 
 ## Transfer function for the current-state convention with no direct-impact D.

@@ -60,7 +60,7 @@ Mixes \code{\link{hank_hh_hmm_loglik}} over the type quadrature
 household: \code{log sum_k omega_k * p(y_i | beta_k, Theta)}, via
 log-sum-exp for numerical stability) and sums the per-household
 log-likelihoods across the panel (households are conditionally
-independent given the aggregate path \code{Theta}, per the brief).
+independent given the aggregate path \code{Theta}).
 }
 \seealso{
 \code{\link{hank_hh_hmm_loglik}}, \code{\link{hank_mixture_blocks}},

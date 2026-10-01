@@ -8,7 +8,7 @@
 ## version (quadrature != NULL) where the equilibrium expectation is integrated
 ## over Gauss-Hermite or monomial quadrature nodes of the shock distribution.
 ##
-## Algorithm (deterministic, §2 of scope-C7 brief):
+## Algorithm (deterministic):
 ##
 ##  For each period t = 1 ... T-1:
 ##    1. Forward auxiliary path (n_aux steps from x_sim[,t] via SS rule).

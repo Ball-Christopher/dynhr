@@ -1,6 +1,6 @@
 ## R/ramsey-nn1-objective.R
 ## --------------------------------------------------------------------------
-## E3: Modified (n, n+1) objective construction for the Gross-Hansen
+## Modified (n, n+1) objective construction for the Gross-Hansen
 ## approximation.
 ##
 ## Builds the polynomial coefficients of the modified periodic objective

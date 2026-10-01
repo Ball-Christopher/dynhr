@@ -226,7 +226,7 @@ hank_het2_jacobian_nd <- function(block, T_h,
   b_ss <- block$b; a_ss <- block$a
   is_pi_input <- !(i %in% c("rb", "ra", "w", "Tr", "theta_coll"))
   n_cell <- block$n_e * block$n_b * block$n_a
-  ## COLLATERAL (D1, brief 19 section 9.12): policies live in the gap
+  ## COLLATERAL: policies live in the gap
   ## coordinate x = b + theta*a, so the LIQUID-output response is
   ## d(b_liq) = dB - theta*dA for EVERY input; the theta input additionally
   ## enters TWO adjacent steps (theta_today at the shock date, dtheta_next one

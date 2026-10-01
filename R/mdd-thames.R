@@ -212,7 +212,7 @@ thames_mdd <- function(draws,
       "thames_mdd requires N > 2d; have N = %d, d = %d (after dropping non-finite values)",
       N, d))
 
-  ## ---- support (B6) -----------------------------------------------------
+  ## ---- support -----------------------------------------------------
   ## Bounds are matched to the draw columns by name when both carry names,
   ## else taken positionally; a NULL side is unbounded.
   .align_bound <- function(b, default, what) {
@@ -342,7 +342,7 @@ thames_mdd <- function(draws,
     log_vol    <- .log_vol(r, log_det_sigma)
     lp_in      <- lp_e[in_A]
 
-    ## B6 (brief 23, 2026-09-25): the reciprocal identity is
+    ## The reciprocal identity is
     ##   E_post[ 1_A(theta) / u(theta) ] = Vol(A n S) / Z,
     ## S the support of the posterior -- the ellipsoid mass OUTSIDE S carries
     ## no posterior draws, so dividing by the full Vol(A) overstates log Z by
@@ -374,7 +374,7 @@ thames_mdd <- function(draws,
     ## Both methods work on a relative scale to avoid overflow.
     if (n_in > 1L) {
       if (identical(se_method, "iid")) {
-        ## 0.9.4 (ledger A11) -- the iid SE was ~2.4x too SMALL because it
+        ## 0.9.4 -- the iid SE was ~2.4x too SMALL because it
         ## averaged over the WRONG sample.
         ##
         ## The estimator is  (1/Z)^ = mean_{i = 1..N_e}(v_i) / Vol(A)  with
@@ -436,7 +436,7 @@ thames_mdd <- function(draws,
     } else {
       se_logz <- NA_real_
     }
-    ## Independent Monte Carlo error of log(p) (B6), in quadrature.
+    ## Independent Monte Carlo error of log(p), in quadrature.
     if (use_support) se_logz <- sqrt(se_logz^2 + sf$se^2)
 
     ## Reliability: effective sample size of the in-region importance weights
@@ -599,7 +599,7 @@ thames_mdd_from_chains <- function(chains, ...) {
     ## ---- Call thames_mdd with batch SE by default -----------------------
     dots <- list(...)
     if (is.null(dots$se_method)) dots$se_method <- "batch"
-    ## B6: the prior-support box recorded by the SMC drivers
+    ## The prior-support box recorded by the SMC drivers
     ## ($support_lower / $support_upper) turns on the support correction
     ## unless the caller passed its own bounds.
     if (!"lower" %in% names(dots) && !is.null(chains$support_lower))
@@ -623,7 +623,7 @@ thames_mdd_from_chains <- function(chains, ...) {
 ## chain order. A weighted SMC cloud whose $post_logpost is still aligned with
 ## $particles (no $resample_idx -- a raw dynhr_smc() result, or a driver that
 ## resampled only $chain) is first resampled with every per-particle field
-## re-indexed together (B5). Multi-chain objects concatenate the per-chain
+## re-indexed together. Multi-chain objects concatenate the per-chain
 ## $post_logpost in chain order, the same order as the pooled $chain.
 ##
 ## Returns list(draws, logpost, chains, reason): `logpost` is NULL (and

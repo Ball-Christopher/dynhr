@@ -31,14 +31,19 @@
 #' @param n_warmup     Burn-in / warmup draws per method. Recycled to
 #'   \code{length(methods)}.  Default \code{5000}.
 #' @param n_draws      Post-warmup draws to retain per method. Recycled.
-#'   Default \code{20000}.
-#' @param n_chains     Number of MCMC chains per method (for RWMH). Recycled.
-#'   Default \code{4}.
+#'   Default \code{20000}. For \code{"DIME"} it is the number of post-warmup
+#'   iterations PER WALKER, so the kept draws number \code{n_draws} times
+#'   the number of walkers.
+#' @param n_chains     Number of MCMC chains per method (for RWMH and NUTS).
+#'   Recycled. Default \code{4}. Several NUTS chains run on a worker pool when
+#'   \code{parallel = TRUE} and in sequence otherwise (chain \code{k} is
+#'   seeded \code{seed + k}, as on the pool).
 #' @param n_particles  Number of SMC particles (only for \code{"SMC"}), or
 #'   the DSMH cloud size \eqn{N G} (only for \code{"DSMH"}).
 #'   Recycled.  Default \code{2000}.
 #' @param n_walkers    Number of ensemble walkers for the DIME sampler
-#'   (\code{NULL} = \code{max(5 * n_par, 20)}).  Ignored for all other
+#'   (\code{NULL} = \code{max(5 * n_par, 20)}; at least \code{n_par + 1},
+#'   below which the ensemble is rank-deficient).  Ignored for all other
 #'   samplers.
 #' @param parallel     Run multi-chain \code{"RWMH"}/\code{"NUTS"} batches and
 #'   \code{"SMC"} in parallel (default \code{FALSE}). When \code{TRUE}, chains
@@ -287,7 +292,7 @@ run_posterior_estimation <- function(mode_result,
   ## Run record (R/run-record.R): resolved args, option snapshot and RNG
   ## state at ENTRY -- before the body touches any argument or the RNG.
   .rr <- .dynhr_rr_begin("run_posterior_estimation", environment(), list(...))
-  ## E5 C2: a thin wrapper. The arguments become an estimation spec whose mode
+  ## A thin wrapper. The arguments become an estimation spec whose mode
   ## stage is `mode_result` (validate_spec() holds the cross-field checks) and
   ## the one spec runner samples it (.est_sampler_stage()).
   spec <- as_estimation_spec(.rr$args, entry = "run_posterior_estimation")
@@ -297,7 +302,7 @@ run_posterior_estimation <- function(mode_result,
 }
 
 ## Retired argument spellings of the estimation runners -> the current name
-## (brief 32 P3). The 0.9.3 renames made run_posterior_estimation()'s counts
+##. The 0.9.3 renames made run_posterior_estimation()'s counts
 ## follow the sampler convention, and unified data / obs_vars / me_variance
 ## across the likelihood entry points.
 .dynhr_retired_count_args <- c(
@@ -389,7 +394,7 @@ run_posterior_estimation <- function(mode_result,
 
   # Seed the WHOLE stage (chain-dispersal draws and every sampler's RNG)
   # before anything else touches the RNG stream. The parallel (mirai) paths
-  # take the seed as their seed_base (E5 C2: they used to ignore it).
+  # take the seed as their seed_base (they used to ignore it).
   if (!is.null(seed)) set.seed(seed)
 
   .vcat <- function(...) if (verbose) .dynhr_cat(...)
@@ -573,11 +578,11 @@ run_posterior_estimation <- function(mode_result,
   # Step 1: The sampler sequence
   # -------------------------------------------------------------------
   n_methods <- length(samplers)
-  unsupported <- vapply(samplers, function(s) identical(s$method, "smc2"),
+  unsupported <- vapply(samplers, function(s) s$method %in% .spec_unsupported_samplers,
                         logical(1))
   if (any(unsupported))
-    .dynhr_abort("run_estimation: sampler \"smc2\" is not run by the spec runner ",
-                 "yet; call smc2() directly.",
+    .dynhr_abort("run_estimation: ",
+                 .spec_unsupported_sampler_msg(samplers[[which(unsupported)[1L]]]$method),
                  class = "dynhr_error_spec_unsupported")
   methods    <- vapply(samplers, .est_method_key, character(1))
   int_field  <- function(f) vapply(samplers, function(s)
@@ -603,13 +608,13 @@ run_posterior_estimation <- function(mode_result,
   ## printed here and kept on the stage result (chains[[m]]$resolved) and in
   ## the result's $resolved, which the run record copies.
   ##
-  ## W94: the gradient is of the SAMPLED target, log_post_fn = the mode
+  ## The gradient is of the SAMPLED target, log_post_fn = the mode
   ## stage's objective (run_mode_finding() builds it from the likelihood
   ## spec's system prior and power_posterior, and its Step-5 gradient takes
-  ## both, brief 28 S1). Before W94 neither reached this gradient: with a
+  ## both). Previously neither reached this gradient: with a
   ## system prior NUTS / ChEES / MALA / HMC sampled log_post_fn with the
   ## gradient of another posterior (valid -- the MH step uses log_post_fn --
-  ## but inefficient), and W92 refused the fused log-posterior there. Now the
+  ## but inefficient), and the fused log-posterior there. Now the
   ## fused value IS log_post_fn's (the samplers still check it at the start
   ## point, .hmc_fused_target()). The infeasibility penalty is the one piece
   ## make_posterior_grad() cannot take: with it the objective is a finite
@@ -690,7 +695,7 @@ run_posterior_estimation <- function(mode_result,
           if (nc > 1L)
             .dynhr_inform("  CPM: parallel chains not yet supported; running serial (nc=1).")
           ## transform_params: rwmh_cpm samples eta (with the Jacobian) using
-          ## the eta-space Sigma_prop_eta, as .run_rwmh_batch does. W86: the
+          ## the eta-space Sigma_prop_eta, as .run_rwmh_batch does. The
           ## transform used not to be passed, so the eta covariance drove a
           ## THETA-space random walk (sig near 0.02: proposals ~1/d = 50x too
           ## wide).
@@ -737,7 +742,7 @@ run_posterior_estimation <- function(mode_result,
         }  # end else (non-CPM RWMH path)
       },
       "HMC"  = {
-        ## Analytic gradient (W94: the same gate and builder as NUTS / MALA /
+        ## Analytic gradient (The same gate and builder as NUTS / MALA /
         ## ChEES; HMC used to get the numerical gradient whatever was asked).
         hmc_grad <- if (analytic_grad) .stage_grad("HMC") else NULL
         stage_grad_method <- attr(hmc_grad, "grad_method")
@@ -769,7 +774,7 @@ run_posterior_estimation <- function(mode_result,
             is.matrix(Sigma_prop) && all(is.finite(Sigma_prop))) {
           # G_inv is the covariance of the SAMPLER's coordinates: in eta-space
           # under transform_params (dynhr_mala runs on eta there) -- see
-          # .dense_metric_basis(). Before W86 the theta-space Sigma_prop was
+          # .dense_metric_basis(). Previously the theta-space Sigma_prop was
           # handed over as the eta metric: off by d_i d_j per entry.
           mala_db <- .dense_metric_basis(
             Sigma_prop, if (transform_params) param_transform, current_theta,
@@ -826,6 +831,40 @@ run_posterior_estimation <- function(mode_result,
                         verbose    = verbose), sampler_args))
       },
       "NUTS" = {
+        # The covariance behind the chains' initial mass (1/diag) and the
+        # chain-2..N dispersion of the parallel AND the sequential serial
+        # path: ONE precedence, the serial NUTS branch's --
+        #   1. the sampler's own Sigma_prop,
+        #   2. at a bound mode (no own Sigma_prop, chain start = the mode):
+        #      mode_result$Sigma_prop_eta, already in eta-space,
+        #   3. the mode's Sigma_prop (theta-space; delta-method to eta
+        #      under transform_params).
+        # All three carry the RWMH scale 2.38^2 / n_par. This used to take
+        # mode_result$V_mode (UNSCALED) ahead of the sampler's own
+        # Sigma_prop, and at a bound mode mixed it with the SCALED
+        # Sigma_prop_eta. The mass scale is not neutral for NUTS: it moves
+        # the initial step size and hence the whole adapted run. V_mode,
+        # rescaled to the same 2.38^2 / n_par, is only the last resort when
+        # the mode stored no Sigma_prop (the parallel path needs a matrix;
+        # the serial branch then runs the identity mass).
+        # transform_params: the result is the ETA-SPACE covariance (the same
+        # delta-method helper used for Sigma_prop_eta above, evaluated at the
+        # current chain start `current_theta`; mirrors the serial NUTS branch's
+        # `eta_mode_nuts`); at a bound mode mode_result$Sigma_prop_eta (see
+        # .bound_eta_of). NULL when no covariance is available.
+        .nuts_disp_cov <- function() {
+          nuts_Sig <- Sigma_prop %||%
+            (if (is.matrix(mode_result$V_mode))
+               mode_result$V_mode * (2.38^2 / length(current_theta)))
+          if (!is.null(nuts_Sig) && is.null(rownames(nuts_Sig)))
+            rownames(nuts_Sig) <- colnames(nuts_Sig) <- names(current_theta)
+          if (!is.null(nuts_Sig) && transform_params && !is.null(param_transform)) {
+            nuts_Sig_eta <- .bound_eta_of(s, current_theta) %||%
+              .cov_theta_to_eta(nuts_Sig, param_transform, current_theta)
+            if (!is.null(nuts_Sig_eta)) nuts_Sig <- nuts_Sig_eta
+          }
+          nuts_Sig
+        }
         # Parallel multi-chain NUTS on a mirai pool. Standard Gaussian models
         # recompile the posterior per daemon; OBC/PKF and cumulant models ship
         # the already-built log_post_fn closure once instead.
@@ -858,38 +897,7 @@ run_posterior_estimation <- function(mode_result,
             .vcat(sprintf("  [NUTS] parallel chains will build analytic gradients (%s) per daemon...\n",
                           .grad_method_label(stage_grad_method, grad_method)))
           }
-          # The covariance behind the chains' initial mass (1/diag) and the
-          # chain-2..N dispersion: ONE precedence, the serial NUTS branch's
-          # (W87) --
-          #   1. the sampler's own Sigma_prop,
-          #   2. at a bound mode (no own Sigma_prop, chain start = the mode):
-          #      mode_result$Sigma_prop_eta, already in eta-space,
-          #   3. the mode's Sigma_prop (theta-space; delta-method to eta
-          #      under transform_params).
-          # All three carry the RWMH scale 2.38^2 / n_par. This used to take
-          # mode_result$V_mode (UNSCALED) ahead of the sampler's own
-          # Sigma_prop, and at a bound mode mixed it with the SCALED
-          # Sigma_prop_eta. The mass scale is not neutral for NUTS: it moves
-          # the initial step size and hence the whole adapted run. V_mode,
-          # rescaled to the same 2.38^2 / n_par, is only the last resort when
-          # the mode stored no Sigma_prop (the parallel path needs a matrix;
-          # the serial branch then runs the identity mass).
-          nuts_Sig <- Sigma_prop %||%
-            (if (is.matrix(mode_result$V_mode))
-               mode_result$V_mode * (2.38^2 / length(current_theta)))
-          if (is.null(rownames(nuts_Sig)))
-            rownames(nuts_Sig) <- colnames(nuts_Sig) <- names(current_theta)
-          # transform_params: run_nuts_mirai's `Sigma_prop` (and hence its
-          # mass_diag = 1/diag(Sigma_prop)) must be in ETA-SPACE -- convert
-          # nuts_Sig via the same delta-method helper used for Sigma_prop_eta
-          # above, evaluated at the current chain start `current_theta`
-          # (mirrors the serial NUTS branch's `eta_mode_nuts`).
-          # At a bound mode: mode_result$Sigma_prop_eta (see .bound_eta_of).
-          if (transform_params && !is.null(param_transform)) {
-            nuts_Sig_eta <- .bound_eta_of(s, current_theta) %||%
-              .cov_theta_to_eta(nuts_Sig, param_transform, current_theta)
-            if (!is.null(nuts_Sig_eta)) nuts_Sig <- nuts_Sig_eta
-          }
+          nuts_Sig <- .nuts_disp_cov()
           par_res <- do.call(run_nuts_mirai, c(list(
             parsed_model = if (par_standard) model else NULL,
             Y = if (par_standard) par_data else NULL,
@@ -909,7 +917,8 @@ run_posterior_estimation <- function(mode_result,
                        metric else "diagonal",
             adapt = s$adapt,
             progress = verbose),
-            if (!is.null(seed)) list(seed_base = seed)))
+            if (!is.null(seed)) list(seed_base = seed),
+            .par_sampler_extra("nuts", sampler_args)))
           list(chains = par_res$chains, chain_stats = par_res$chain_stats)
         } else {
         # NUTS warmup can stall indefinitely on steep / poorly-conditioned
@@ -948,7 +957,7 @@ run_posterior_estimation <- function(mode_result,
         # transform_params dynhr_nuts runs on eta, so M_inv must be the eta
         # covariance D^-1 Sigma_prop D^-1 (D = diag(dtheta/deta) at the chain
         # start; Sigma_prop_eta at a bound mode) -- .dense_metric_basis().
-        # W86: this path used to hand the THETA-space Sigma_prop over as the
+        # This path used to hand the THETA-space Sigma_prop over as the
         # eta M_inv (off by d_i d_j per entry, e.g. ~1e3 for a std near 0.02).
         # The inverse / Cholesky are taken on the theta-space matrix and scaled
         # analytically (M = D Sigma^-1 D, chol(M) = chol(Sigma^-1) D), as the
@@ -958,7 +967,7 @@ run_posterior_estimation <- function(mode_result,
         # generalisation to the full matrix. We do NOT use hessian_exact
         # directly.
         # metric = "whittle_fim" builds the same matrix first, silently: it is
-        # that metric's fallback, already in the sampler's space (W87: the
+        # that metric's fallback, already in the sampler's space (The
         # fallback used to be unreachable -- the message said 'hessian' while
         # the run silently got the diagonal metric).
         nuts_M_inv  <- NULL
@@ -1079,52 +1088,123 @@ run_posterior_estimation <- function(mode_result,
         # model.
         nuts_grad <- if (analytic_grad) .stage_grad("NUTS") else NULL
         stage_grad_method <- attr(nuts_grad, "grad_method")
-        t0_nuts <- proc.time()
-        nuts_sec <- max(30L, as.integer(s$timeout))
-        res <- tryCatch({
-          setTimeLimit(elapsed = nuts_sec, transient = TRUE)
-          do.call(dynhr_nuts, c(list(log_post_fn, current_theta,
-                     n_draws = nd, n_warmup = nb,
-                     mass_diag = nuts_mass, grad_fn = nuts_grad,
-                     M_inv = nuts_M_inv, chol_M = nuts_chol_M,
-                     ## Adapted metrics reach dynhr_nuts by name; the fixed
-                     ## dense ones ("hessian"/"whittle_fim") arrive as
-                     ## M_inv/chol_M above.
-                     metric = if (metric %in% c("diagonal", "warmup_dense", "lowrank", "fisher_diag"))
-                                metric else "diagonal",
-                     transform = if (transform_params) param_transform else NULL,
-                     chain_id = 1L, checkpoint = sampler_checkpoint), sampler_args))
-        }, error = function(e) {
-          elapsed <- round((proc.time() - t0_nuts)[["elapsed"]], 1)
-          if (grepl("reached elapsed time limit|time limit|timed out",
-                    conditionMessage(e), ignore.case = TRUE)) {
-            .vcat(sprintf(
-              "\n  [NUTS] Timed out after %.1fs (nuts_timeout_seconds = %d).\n",
-              elapsed, nuts_sec))
-            .vcat("  This usually means NUTS warmup is diverging (step-size -> 0).\n")
-            .vcat("  Cause: ill-conditioned Sigma_prop (Hessian fallback) or very\n")
-            .vcat("  steep / non-smooth posterior.  Try RWMH or SMC instead.\n")
-            NULL
-          } else {
-            stop(e)   # re-raise unexpected errors
-          }
-        }, finally = {
-          setTimeLimit(elapsed = Inf, transient = FALSE)
-        })
-        if (is.null(res)) {
-          # Timeout path: return an empty result so the loop continues
-          list(chains    = list(),
-               chain_stats = data.frame(chain = integer(0), accept_rate = numeric(0),
-                                        final_logpost = numeric(0),
-                                        stringsAsFactors = FALSE))
-        } else {
-          list(chains = list(res), chain_stats = data.frame(
-            chain = 1L, accept_rate = res$acceptance_rate %||% NA,
-            final_logpost = tail(res$post_logpost %||% rep(NA, nd), 1),
-            stringsAsFactors = FALSE
-          ))
+        nuts_sec <- max(.spec_nuts_min_timeout, as.integer(s$timeout))
+
+        ## One chain, under the stage's time limit. A chain that hits the
+        ## limit yields NULL after a classed warning (it used to be a
+        ## verbose-only message, invisible to a quiet run).
+        .nuts_one_chain <- function(th0, ch) {
+          t0_nuts <- proc.time()
+          out <- tryCatch({
+            setTimeLimit(elapsed = nuts_sec, transient = TRUE)
+            do.call(dynhr_nuts, c(list(log_post_fn, th0,
+                       n_draws = nd, n_warmup = nb,
+                       mass_diag = nuts_mass, grad_fn = nuts_grad,
+                       M_inv = nuts_M_inv, chol_M = nuts_chol_M,
+                       ## Adapted metrics reach dynhr_nuts by name; the fixed
+                       ## dense ones ("hessian"/"whittle_fim") arrive as
+                       ## M_inv/chol_M above.
+                       metric = if (metric %in% c("diagonal", "warmup_dense", "lowrank", "fisher_diag"))
+                                  metric else "diagonal",
+                       transform = if (transform_params) param_transform else NULL,
+                       chain_id = ch, checkpoint = sampler_checkpoint), sampler_args))
+          }, error = function(e) {
+            elapsed <- round((proc.time() - t0_nuts)[["elapsed"]], 1)
+            if (grepl("reached elapsed time limit|time limit|timed out",
+                      conditionMessage(e), ignore.case = TRUE)) {
+              .dynhr_warn(sprintf(
+                paste0("NUTS chain %d timed out after %.1fs (nuts_timeout_seconds = %d) and ",
+                       "returns no draws. This usually means NUTS warmup is diverging ",
+                       "(step-size -> 0): an ill-conditioned Sigma_prop (Hessian fallback) or a ",
+                       "very steep / non-smooth posterior. Try RWMH or SMC instead."),
+                ch, elapsed, nuts_sec),
+                class = "dynhr_warning_nuts_timeout", call. = FALSE)
+              NULL
+            } else {
+              stop(e)   # re-raise unexpected errors
+            }
+          }, finally = {
+            setTimeLimit(elapsed = Inf, transient = FALSE)
+          })
+          list(res = out,
+               elapsed_min = (proc.time()[["elapsed"]] - t0_nuts[["elapsed"]]) / 60)
         }
-        }  # end else (serial single-chain NUTS)
+
+        if (nc <= 1L) {
+          one <- .nuts_one_chain(current_theta, 1L)
+          res <- one$res
+          if (is.null(res)) {
+            # Timeout path: return an empty result so the loop continues
+            list(chains    = list(),
+                 chain_stats = data.frame(chain = integer(0), accept_rate = numeric(0),
+                                          final_logpost = numeric(0),
+                                          stringsAsFactors = FALSE))
+          } else {
+            list(chains = list(res), chain_stats = data.frame(
+              chain = 1L, accept_rate = res$acceptance_rate %||% NA,
+              final_logpost = tail(res$post_logpost %||% rep(NA, nd), 1),
+              stringsAsFactors = FALSE
+            ))
+          }
+        } else {
+          ## Several chains without a pool: run them SEQUENTIALLY, seeded and
+          ## dispersed as the parallel path does (chain ch is seeded
+          ## seed_base + ch; chain 1 starts at the mode, chains 2..n at
+          ## the mode + 0.5 * chol(Sigma) z, in eta-space under a transform), so
+          ## the serial and the parallel runs are comparable and the chains
+          ## feed the same R-hat / ESS diagnostics. The ambient RNG state is
+          ## restored afterwards, as the daemons leave it untouched.
+          .nuts_sequential <- function() {
+            rng_saved <- if (exists(".Random.seed", envir = globalenv(), inherits = FALSE))
+              get(".Random.seed", envir = globalenv())
+            on.exit(if (!is.null(rng_saved))
+                      assign(".Random.seed", rng_saved, envir = globalenv()))
+            nuts_Sig_disp  <- .nuts_disp_cov()
+            nuts_seed_base <- .dynhr_opt("seed_base", seed)
+            n_th <- length(current_theta)
+            chains_nuts <- list()
+            cs_nuts <- data.frame(
+              chain = integer(), accept_rate = numeric(), final_logpost = numeric(),
+              n_divergent = integer(), mean_treedepth = numeric(),
+              elapsed_min = numeric(), stringsAsFactors = FALSE)
+            for (ch in seq_len(nc)) {
+              set.seed(nuts_seed_base + ch)
+              th0 <- current_theta
+              if (ch > 1L && !is.null(nuts_Sig_disp)) {
+                Lc <- .robust_chol(nuts_Sig_disp, n_th)
+                z  <- rnorm(n_th)
+                if (transform_params && !is.null(param_transform)) {
+                  eta0 <- param_transform$to_unconstrained(current_theta) +
+                    0.5 * as.numeric(Lc %*% z)
+                  names(eta0) <- names(current_theta)
+                  th0 <- param_transform$to_constrained(eta0)
+                } else {
+                  th0 <- current_theta + 0.5 * as.numeric(Lc %*% z)
+                  names(th0) <- names(current_theta)
+                  for (k in seq_along(th0)) {
+                    th0[k] <- max(th0[k], prior_spec$lower[k] + 1e-6)
+                    th0[k] <- min(th0[k], prior_spec$upper[k] - 1e-6)
+                  }
+                }
+                if (!is.finite(log_post_fn(th0)$logpost)) th0 <- current_theta
+              }
+              .vcat(sprintf("  [NUTS] chain %d/%d...\n", ch, nc))
+              one <- .nuts_one_chain(th0, ch)
+              if (is.null(one$res)) next
+              chains_nuts[[length(chains_nuts) + 1L]] <- one$res
+              cs_nuts <- rbind(cs_nuts, data.frame(
+                chain          = ch,
+                accept_rate    = one$res$acceptance_rate %||% NA_real_,
+                final_logpost  = tail(one$res$post_logpost, 1),
+                n_divergent    = one$res$n_divergent %||% NA_integer_,
+                mean_treedepth = one$res$mean_treedepth %||% NA_real_,
+                elapsed_min    = one$elapsed_min, stringsAsFactors = FALSE))
+            }
+            list(chains = chains_nuts, chain_stats = cs_nuts)
+          }
+          .nuts_sequential()
+        }
+        }  # end else (serial NUTS: one chain, or several run in sequence)
       },
       "SMC" = {
         # Standard Gaussian models recompile the posterior per daemon; OBC/PKF
@@ -1153,7 +1233,7 @@ run_posterior_estimation <- function(mode_result,
         ## matrix so all downstream consumers (diagnostics, Bayesian IRF,
         ## smoother) receive a standard draw matrix.  The original particles
         ## and weights remain in $particles and $smc_weights.
-        ## B5: re-index $post_logpost (and every other per-particle vector)
+        ## Re-index $post_logpost (and every other per-particle vector)
         ## with the SAME resampling indices as $chain, so THAMES and any other
         ## (draw, log-posterior) consumer pairs each draw with its own value.
         if (.is_smc_weighted(res)) {
@@ -1254,7 +1334,8 @@ run_posterior_estimation <- function(mode_result,
             ctx          = par_ctx,
             log_post_fn  = if (par_standard) NULL else log_post_fn,
             verbose      = verbose),
-            if (!is.null(seed)) list(seed_base = seed)))
+            if (!is.null(seed)) list(seed_base = seed),
+            .par_sampler_extra("dime", sampler_args)))
         else
           do.call(run_dime, c(list(log_post_fn, prior_spec = prior_spec,
                    n_chain = s$n_walkers,
@@ -1346,7 +1427,7 @@ run_posterior_estimation <- function(mode_result,
   if (isTRUE(spec$outputs$stoch_simul)) {
     .vcat("-- Stoch_simul at posterior mean --\n")
 
-    ## 0.9.4 (ledger A1): RE-SOLVE at the posterior mean through the
+    ## 0.9.4: RE-SOLVE at the posterior mean through the
     ## likelihood's own pipeline (apply_theta_to_params() handles the
     ## shock-named entries), never the calibration-time `solved$dr`. If the
     ## posterior mean does not solve, both stay NULL.
@@ -1714,4 +1795,20 @@ print.dynhr_posterior_result <- function(x, ...) {
   out <- list(rhat = rhat, ess = ess, combined = combined)
   if (any(lens != n_min)) out$n_used <- n_min
   out
+}
+
+
+## The sampler$extra arguments a parallel (mirai) NUTS / DIME run passes on:
+## those its function takes. Any other is refused, never dropped (the
+## parallel paths used to ignore sampler$extra entirely); validate_spec()
+## refuses the same names when the spec is built.
+.par_sampler_extra <- function(method, sampler_args) {
+  uns <- .spec_parallel_extra_unsupported(method, sampler_args)
+  if (length(uns))
+    .dynhr_abort("run_posterior_estimation: ",
+                 paste0("`", uns, "`", collapse = ", "),
+                 " is not supported on the parallel (mirai) ", toupper(method),
+                 " path, which would ignore it; set parallel = FALSE or drop it.",
+                 class = "dynhr_error_inapplicable_argument")
+  sampler_args
 }

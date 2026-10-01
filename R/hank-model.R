@@ -223,8 +223,7 @@ hank_mixture_block_spec <- function(name, blocks, omega, inputs = c("r", "w"),
 ## rule coefficient, an NKPC slope): a frozen-Jacobian rebuild reproduces H_U
 ## to max|diff| = 0, so that work was provably redundant. Skipping it makes
 ## such a rebuild 16x cheaper at T_h = 400 (0.558 -> 0.035 s), which is what
-## makes both affinity detection and FD-based dH_U/dtheta affordable -- see
-## briefs/21-structural-score-api-scope.md.
+## makes both affinity detection and FD-based dH_U/dtheta affordable.
 ##
 ## The key is list(blk, ss, T_h). Keying on the whole block is deliberate and
 ## conservative: for a het kind the Jacobian is a function of the solved block

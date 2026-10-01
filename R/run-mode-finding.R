@@ -12,6 +12,19 @@
 ## --------------------------------------------------------------------------
 
 
+## The `...` names of run_mode_finding() that go to the OPTIMISER (the formals
+## of .run_mode_finding() after its three positional arguments); every other
+## `...` name goes to the log-posterior constructor. One definition for the
+## runner's split and for the spec's check of mode$extra.
+.rmf_optimiser_arg_names <- function()
+  setdiff(names(formals(.run_mode_finding)),
+          c("log_post_fn", "theta_init", "prior_spec"))
+
+## The keys the mode stage reads from `mode_options` (mode$options of a spec).
+## `verbose` is accepted and ignored (the spec's compute$verbose governs).
+.mode_option_keys <- c("use_analytic_grad", "use_analytic_hess", "h0_method",
+                       "record_curvature", "verbose")
+
 #' Validate and clip a caller-supplied \code{theta_init} against a prior spec
 #'
 #' Matching is BY NAME against \code{priors$name} (never by position: the prior
@@ -85,7 +98,7 @@
 
 #' Default mode-finding start: INITVAL / estimated_params_init, else prior mean
 #'
-#' E1 (2026-09-25): Dynare starts the optimiser at the \code{estimated_params}
+#' Dynare starts the optimiser at the \code{estimated_params}
 #' INITVAL (overridden by an \code{estimated_params_init} block; \code{set_prior.m} falls
 #' back to the prior mean only where INITVAL is NaN). \code{extract_prior_spec()}
 #' records that value in \code{priors$init}; before this fix it was read nowhere and
@@ -142,7 +155,7 @@
   .grad_init_in_force(dr$ghx[dr$state_idx, , drop = FALSE],
                       dr$ghu[dr$state_idx, , drop = FALSE],
                       .get_shock_cov(model, model$varexo_names, sol$params),
-                      lik_init)
+                      lik_init, dr = dr)
 }
 
 
@@ -190,11 +203,13 @@
 #'   fallback); pruned additionally runs the multi-start step via the
 #'   closure-shipped parallel path. \code{"tpf"}/\code{"ppf"}/\code{"copf"}
 #'   (particle-filter likelihoods with a noisy unbiased loglik estimate) are
-#'   deliberately NOT accepted here -- their estimation noise breaks
-#'   deterministic optimizers (Nelder-Mead/CMA-ES/newrat all assume a fixed
-#'   objective at repeated evaluations of the same point); use
+#'   deliberately NOT accepted by this function -- their estimation noise
+#'   breaks deterministic optimizers (Nelder-Mead/CMA-ES/newrat all assume a
+#'   fixed objective at repeated evaluations of the same point); use
 #'   \code{\link{run_full_estimation}} or particle MCMC (PMMH) via
-#'   \code{\link{run_posterior_estimation}} instead.
+#'   \code{\link{run_posterior_estimation}} instead. (An estimation spec run
+#'   by \code{\link{run_estimation}} does accept them and, when its mode
+#'   stage runs, warns that the optimiser works on a noisy objective.)
 #' @param pruned_order Integer, \code{2L} (default) or \code{3L}: AFVRR
 #'   pruned state-space order used when \code{likelihood = "pruned"}
 #'   (ignored otherwise; \code{3L} with another likelihood is an error).
@@ -414,7 +429,7 @@ run_mode_finding <- function(solved,
   ## Run record (R/run-record.R): resolved args, option snapshot and RNG
   ## state at ENTRY -- before the body touches any argument or the RNG.
   .rr <- .dynhr_rr_begin("run_mode_finding", environment(), list(...))
-  ## E5 C2: a thin wrapper. The arguments become an estimation spec (the
+  ## A thin wrapper. The arguments become an estimation spec (the
   ## single home of the cross-field checks, validate_spec()) and the one spec
   ## runner does the work (mode stage: .est_mode_stage()).
   spec <- as_estimation_spec(.rr$args, entry = "run_mode_finding")
@@ -423,12 +438,17 @@ run_mode_finding <- function(solved,
 
 ## Log-posterior-constructor extras (likelihood$extra / mode$extra) that
 ## make_posterior_grad() takes too: the mode stage forwards them to both.
-.mode_grad_extras <- c("cumulant_orders", "cumulant_weight", "debias")
+.mode_grad_extras <- c("cumulant_orders", "cumulant_weight", "weight_matrix",
+                       "debias")
 ## Extras that change the objective of `likelihood` but that the analytic
 ## gradient cannot take: with one of them the mode stage keeps the numerical
-## gradient rather than differentiate another posterior.
+## gradient rather than differentiate another posterior. (The per-daemon pool
+## gradient, .mirai_bind_worker_grad, is built only for the standard Gaussian
+## posterior -- see grad_on_pool -- so it never sees these extras.)
 .mode_grad_blocking_extras <- function(likelihood)
-  switch(likelihood, cumulant = c("order", "h", "weight_matrix"), character(0))
+  switch(likelihood,
+         cumulant = c("order", "h"),
+         character(0))
 
 ## The mode stage of the spec runner (formerly the body of run_mode_finding()).
 ## `spec`: a validated dynhr_estimation_spec; `inp`: the prepared inputs
@@ -467,7 +487,10 @@ run_mode_finding <- function(solved,
   system_priors       <- lik$system_priors
   ## run_mode_finding()'s `...`: log-posterior-constructor extras (student_df
   ## is a likelihood field of the spec) and optimiser arguments.
-  lp_dots <- c(lik$extra, md$extra,
+  ## Names the optimiser takes (its formals after the three positional
+  ## arguments) go to the optimiser only; the rest to the constructor.
+  .opt_names <- .rmf_optimiser_arg_names()
+  lp_dots <- c(lik$extra, md$extra[setdiff(names(md$extra), .opt_names)],
                if (!is.null(lik$student_df)) list(student_df = lik$student_df))
 
   ## ONE daemon pool spans the whole standard parallel run: the seeded portfolio
@@ -489,7 +512,7 @@ run_mode_finding <- function(solved,
 
   ## Apply unified plan= if supplied (the plan / filter_tunes /
   ## heteroskedastic_shocks conflicts are checked by likelihood_spec()).
-  ## Tier 8 item 10: plan adaptation routes through estimation_context()
+  ## Plan adaptation routes through estimation_context()
   ## so that the compiled specs live in ctx$plan for provenance.
   if (!is.null(plan)) {
     .plan_ctx <- estimation_context(plan = plan,
@@ -578,7 +601,7 @@ run_mode_finding <- function(solved,
       .mf_dots$burn_in_init <- 0L
     }
     ## The target, ONE list: the objective gets it all and the Step-5
-    ## gradient gets the part make_posterior_grad() takes (brief 28 S1: the
+    ## gradient gets the part make_posterior_grad() takes (the
     ## gradient used to miss the extras and the tempering exponent passed
     ## through them, and so differentiated another posterior). The exponent
     ## is the typed field (validate_spec() refuses it as an `extra`).
@@ -680,15 +703,14 @@ run_mode_finding <- function(solved,
     mode_transform <- build_param_transform(priors, names(theta_init))
   }
 
-  ## W88: Step 6 differences the EXACT gradient when the mode stage has one
+  ## Step 6 differences the EXACT gradient when the mode stage has one
   ## (2n gradient calls instead of the 2n(n+1)-evaluation lp stencil). The
   ## serial Step-5 path builds it (grad_fn below) and Step 6 reuses it; the
   ## per-daemon pool path (no host gradient) builds it on each daemon under
   ## the same eligibility (grad_on_pool).
   grad_fn <- NULL
   grad_on_pool <- isTRUE(mo$use_analytic_grad %||% TRUE) && !use_obc &&
-    likelihood %in% c("gaussian", "cumulant", "whittle") &&
-    !length(intersect(names(lp_dots), .mode_grad_blocking_extras(likelihood)))
+    identical(likelihood, "gaussian") && par_standard
 
   if (!isTRUE(optimise)) {
     mode_res <- NULL
@@ -715,7 +737,7 @@ run_mode_finding <- function(solved,
                        lik_init = "stationary"),
       error = function(e) {
         ## A worker/host version skew is not "pool unavailable": every stage
-        ## would hit it again. Re-raise it (brief 23 B1 follow-up).
+        ## would hit it again. Re-raise it.
         if (inherits(e, "dynhr_error_worker_version_skew")) stop(e)
         ## Nor is a programming error: tear the half-started pool down, then
         ## re-raise it.
@@ -755,7 +777,7 @@ run_mode_finding <- function(solved,
         me_extra       = me_extra, shock_scale = shock_scale_mat,
         ## the daemons' .worker_lp is re-bound with it (pool_ready): without
         ## it the chains optimised the posterior WITHOUT the system prior
-        ## (W76, 2026-09-26)
+        ##
         system_priors  = system_priors,
         transform      = mode_transform,
         analytic_grad  = isTRUE(mo$use_analytic_grad %||% TRUE),
@@ -822,7 +844,7 @@ run_mode_finding <- function(solved,
     if (use_analytic_grad && !use_obc &&
         method %in% methods_using_grad &&
         likelihood %in% c("gaussian", "cumulant", "whittle")) {
-      ## The SAME target as log_post_fn (brief 28 S1): lp_target's gradient
+      ## The SAME target as log_post_fn: lp_target's gradient
       ## arguments (power_posterior, system prior, ...) plus the extras
       ## make_posterior_grad() takes. An extra that changes the objective but
       ## that the gradient cannot take leaves the numerical gradient.
@@ -849,6 +871,22 @@ run_mode_finding <- function(solved,
           .vcat("  Using analytic gradient for the L-BFGS-B polish stage\n")
         }
       }
+    }
+    ## PSKF has no analytic gradient, and optim()'s internal L-BFGS-B finite
+    ## differences cannot be kept on one pruning selection: a step across a
+    ## selection switch returns jump / (2 * 1e-3). The polish stage gets the
+    ## frozen-selection difference instead (.pskf_mode_grad_fn). It is the
+    ## optimiser's gradient only: Step 6 must not difference it again (each
+    ## call freezes the selection at its own point), so `grad_fn` stays NULL
+    ## and the Step-6 Hessian is the frozen num_hessian / numDeriv stencil.
+    ## The newrat / cmaes_newrat stages difference through csminwel's own
+    ## numerical gradient, which is frozen there.
+    mode_grad_fn <- grad_fn
+    if (is.null(grad_fn)) {
+      mode_grad_fn <- .pskf_mode_polish_grad(likelihood, method, log_post_fn,
+                                             priors)
+      if (!is.null(mode_grad_fn))
+        .vcat("  Using frozen-selection finite differences for the L-BFGS-B polish stage\n")
     }
 
     ## Build a theta-space analytic posterior Hessian supplier for the newrat
@@ -939,6 +977,11 @@ run_mode_finding <- function(solved,
               include_prior = TRUE, prior_spec = .priors,
               system_priors = .sys_pr,
               lik_init = .lik_init,
+              ## the seed only needs a good curvature, and the "loop" path
+              ## (full second-order solution derivatives) is several times
+              ## slower than the d2X-free methods at a Smets-Wouters-sized
+              ## model
+              t2_method = "auto",
               check_mode = FALSE)
             ## Convert logpost Hessian -> neg-logpost Hessian (flip sign).
             -H_logpost
@@ -959,8 +1002,11 @@ run_mode_finding <- function(solved,
     ## consumed above by make_log_posterior(); strip them here so they don't
     ## also leak into .run_mode_finding()'s optimizer-args `...` (which has no
     ## such formals and errors on an unused argument).
-    dots_optim <- md$extra
-    dots_optim[c("student_df", "cut_tol")] <- NULL
+    ## `...` goes to both the log-posterior constructor and the optimiser;
+    ## the optimiser takes only its own named options (a likelihood extra
+    ## such as cumulant_orders is not one of them).
+    dots_optim <- md$extra[intersect(names(md$extra),
+                                     names(formals(.run_mode_finding)))]
     ## Opt-in (default FALSE, off by default): stash the newrat/csminwel final
     ## BFGS inverse-Hessian (H0 seed updated by every curvature pair collected
     ## along the optimiser trajectory) in mode_res$H_bfgs, THETA-space. Purely
@@ -973,7 +1019,7 @@ run_mode_finding <- function(solved,
         nm_maxit    = n_iter,
         method      = method,
         transform   = mode_transform,
-        grad_fn     = grad_fn,
+        grad_fn     = mode_grad_fn,
         hessian_fn  = hessian_fn,
         verbose     = verbose,
         record_curvature = isTRUE(mo$record_curvature %||% FALSE)
@@ -995,7 +1041,7 @@ run_mode_finding <- function(solved,
   # -------------------------------------------------------------------
   .vcat("-- Step 6: Build proposal covariance --\n")
 
-  ## Tier 11 #2 (curvature-aware estimation): when use_exact_hessian = TRUE and
+  ## Curvature-aware estimation: when use_exact_hessian = TRUE and
   ## the model is the standard Gaussian KF (no OBC/PKF, cumulant/whittle,
   ## me_extra, heteroskedastic shocks, diffuse init, or missing data), compute
   ## the analytic posterior Hessian at the mode (re-solving the decision rule
@@ -1019,7 +1065,7 @@ run_mode_finding <- function(solved,
       if (!isTRUE(ss_m$converged))
         stop("steady state did not converge at the mode")
       ## Re-derive SSM-computed params so the exact Hessian uses the consistent
-      ## (not stale) p_c (no-op for non-SSM-parameter models; Tier 13 #1).
+      ## (not stale) p_c (no-op for non-SSM-parameter models).
       pm <- ss_m$params %||% pm
       dr_m <- solve_perturbation(model, compiled, ss_m$ss, pm, verbose = FALSE)
       ## At a bound-constrained (KKT) mode the gradient is non-zero along the
@@ -1035,6 +1081,7 @@ run_mode_finding <- function(solved,
                              include_prior = TRUE, prior_spec = priors,
                              system_priors = system_priors,
                              lik_init = lik_init,
+                             t2_method = "auto",
                              check_mode = if (.kkt6) FALSE else NULL)
       if (any(!is.finite(H))) stop("non-finite entries in exact Hessian")
       .vcat("  Computed exact posterior Hessian at mode (analytic adjoint).\n")
@@ -1089,7 +1136,7 @@ run_mode_finding <- function(solved,
       ## Re-bind .worker_lp on the live portfolio pool instead of recompiling the
       ## model on every daemon again (Step 5 -> Step 6 pool sharing).
       pool_ready   = shared_pool_ok,
-      ## W88: the Hessian from the exact gradient (host / per daemon)
+      ## The Hessian from the exact gradient (host / per daemon)
       grad_fn      = grad_fn,
       grad_on_pool = grad_on_pool,
       system_priors = system_priors
@@ -1108,10 +1155,10 @@ run_mode_finding <- function(solved,
 
   ## Build estimation context to store in the result: the ctx carries all
   ## options so they can be read back without loss (system_priors, freq_band).
-  ## Tier 8 item 10: store plan provenance in mode_ctx$plan.
+  ## Store plan provenance in mode_ctx$plan.
   ## When use_obc = TRUE, stamp the OBC filter type (likelihood$obc_filter) so
   ## that conditional_forecast() dispatches to the correct terminal-state path
-  ## (Tier 10 item 5; Tier 15 §C: ppf/copf stamping). The mode stage always
+  ## (ppf/copf stamping). The mode stage always
   ## builds make_log_posterior_obc_pkf.
   mode_ctx_likelihood <- if (use_obc) lik$obc_filter else likelihood
   mode_ctx <- estimation_context(
@@ -1158,7 +1205,7 @@ run_mode_finding <- function(solved,
       use_obc    = use_obc
     )
   )
-  ## Laplace marginal likelihood (Tier 11 #2): free once the exact posterior
+  ## Laplace marginal likelihood: free once the exact posterior
   ## Hessian is available. NA when the Hessian is absent or -H is not PD.
   if (!is.null(hessian_exact))
     result$log_marglik_laplace <- laplace_log_marglik(result)
@@ -1240,13 +1287,13 @@ build_sigma_prop <- function(lp_fn, theta_mode, prior_spec,
                               ## of discarding it. V_mode is NULL on the
                               ## empirical-covariance path.
                               return_V = FALSE,
-                              ## W88: the mode stage's theta-space gradient
+                              ## The mode stage's theta-space gradient
                               ## (make_posterior_grad()). When usable the
                               ## Hessian is the central difference of it
                               ## (grad_hessian(): 2n calls) instead of the
                               ## 2n(n+1)-evaluation lp stencil.
                               grad_fn = NULL,
-                              ## W88: the per-daemon (par_standard) pool path
+                              ## The per-daemon (par_standard) pool path
                               ## may build the gradient on each daemon from
                               ## the daemon's model (the Step-5 eligibility:
                               ## analytic gradient not opted out, no OBC,
@@ -1284,7 +1331,7 @@ build_sigma_prop <- function(lp_fn, theta_mode, prior_spec,
   # decoupled (.step6_bound_hessian, R/mode-hessian.R); the stencil for the
   # rest never moves them. No such coordinate -> the path below is unchanged.
   #
-  # With an exact gradient (W88; grad_fn on the host, or grad_on_pool on the
+  # With an exact gradient (grad_fn on the host, or grad_on_pool on the
   # per-daemon pool) the Hessian is the symmetrised central difference of the
   # gradient (grad_hessian(): 2n calls, R/mode-hessian.R) -- the same
   # bound-active selection, the bound coordinates' one-sided curvature from
@@ -1374,7 +1421,7 @@ build_sigma_prop <- function(lp_fn, theta_mode, prior_spec,
       }
       .vcat(sprintf("    (filter = %s, %d daemons%s)\n", fit_filter, n_cores_h,
                     if (isTRUE(pool_ready)) ", shared pool" else ""))
-      ## W88: the exact gradient of the daemon posterior, built per daemon from
+      ## The exact gradient of the daemon posterior, built per daemon from
       ## its model (.mirai_bind_worker_grad), differenced over the pool. Not
       ## used when the daemon gradient resolves to "hybrid" or is unavailable.
       if (isTRUE(grad_on_pool)) {
@@ -1535,10 +1582,18 @@ build_sigma_prop <- function(lp_fn, theta_mode, prior_spec,
 #' @param coords Coordinates to differentiate (default all). Entries outside
 #'   \code{coords} x \code{coords} are left 0 -- used by Step 6 to keep the
 #'   stencil off a bound-active coordinate (see .step6_bound_hessian).
+#'
+#' A PSKF log-posterior is differenced on the pruning selection made at
+#' \code{theta} (evaluated first, so it records; see .pskf_freeze_open): a
+#' second difference across a selection switch would otherwise return
+#' jump / h^2. Functions that run no PSKF filter are unaffected.
 #' @noRd
 num_hessian <- function(fn, theta, h = 1e-4, coords = seq_along(theta)) {
   n <- length(theta)
   H <- matrix(0, nrow = n, ncol = n)
+  fr <- .pskf_freeze_open()
+  on.exit(.pskf_freeze_close(fr), add = TRUE)
+  fn <- .pskf_freeze_wrap(fn)
   f0 <- fn(theta)
   f0_val <- if (is.list(f0)) f0$logpost else f0
 
@@ -1615,38 +1670,28 @@ num_hessian_mirai <- function(fn, theta, h = 1e-4, n_cores = NULL,
     on.exit(mirai::daemons(NULL), add = TRUE)
   }
 
-  stencil <- function(pair, .theta, .h, .par_names) {
-    lp <- get0(".worker_lp", envir = globalenv(), inherits = FALSE)
-    .eval <- function(th) {
-      names(th) <- .par_names
-      r <- lp(th)
-      if (is.list(r)) r$logpost else r
-    }
-    i <- pair[1L]; j <- pair[2L]
-    hi <- .h * max(1, abs(.theta[i]))
-    hj <- .h * max(1, abs(.theta[j]))
-    th_pp <- th_pm <- th_mp <- th_mm <- .theta
-    th_pp[i] <- th_pp[i] + hi; th_pp[j] <- th_pp[j] + hj
-    th_pm[i] <- th_pm[i] + hi; th_pm[j] <- th_pm[j] - hj
-    th_mp[i] <- th_mp[i] - hi; th_mp[j] <- th_mp[j] + hj
-    th_mm[i] <- th_mm[i] - hi; th_mm[j] <- th_mm[j] - hj
-    f_pp <- .eval(th_pp); f_pm <- .eval(th_pm)
-    f_mp <- .eval(th_mp); f_mm <- .eval(th_mm)
-    (f_pp - f_pm - f_mp + f_mm) / (4 * hi * hj)
-  }
-  ## CRITICAL: sever the stencil's environment. It needs nothing from this
-  ## frame (it takes .theta/.h/.par_names via .args and fetches the worker
-  ## log-posterior via get0(".worker_lp", globalenv()) on the daemon). Left
-  ## attached, mirai_map serialises this frame -- including `fn`, the passed
-  ## log-posterior -- with EVERY one of the n(n+1)/2 tasks. For a real
-  ## make_posterior() closure (heavy adjoint/model state) that is ~50x slower
-  ## per eval inside a full run_mode_finding than standalone (NZSIM: 270s vs
-  ## 5s). globalenv() ships nothing.
-  environment(stencil) <- globalenv()
+  ## PSKF: the pruning selection the log-posterior makes at theta, recorded
+  ## here in the main process (fn is at hand) and replayed by every daemon
+  ## evaluation (.num_hessian_stencil seeds its frozen-selection scope with
+  ## it). Seeding needs no change to the posterior closure's interface, which
+  ## an explicit keep_override argument would. An empty list -- not a PSKF
+  ## posterior, or pool_ready, where the daemons hold a posterior recompiled
+  ## per daemon (standard Gaussian models only) -- leaves the stencil as
+  ## before.
+  keep_paths <- if (!pool_ready && is.function(fn))
+    .pskf_record_centre(fn, theta) else list()
 
+  ## .num_hessian_stencil is a namespace function, so mirai_map serialises
+  ## its environment as a reference to the daemon's dynhr namespace, not as
+  ## this frame. A closure over this frame would ship `fn` -- the passed
+  ## log-posterior -- with EVERY one of the n(n+1)/2 tasks; for a real
+  ## make_posterior() closure (heavy adjoint/model state) that was ~50x
+  ## slower per eval inside a full run_mode_finding than standalone (NZSIM:
+  ## 270s vs 5s).
   raw <- mirai::mirai_map(
-    pairs, stencil,
-    .args = list(.theta = theta, .h = h, .par_names = par_names)
+    pairs, .num_hessian_stencil,
+    .args = list(.theta = theta, .h = h, .par_names = par_names,
+                 .keep_paths = keep_paths)
   )[]
 
   H <- matrix(0, nrow = n, ncol = n)
@@ -1660,6 +1705,40 @@ num_hessian_mirai <- function(fn, theta, h = 1e-4, n_cores = NULL,
   if (verbose) .dynhr_cat(sprintf("    Hessian: %.1f sec\n",
                            (proc.time() - t0)[["elapsed"]]))
   H
+}
+
+#' One four-point central-difference Hessian entry on a mirai daemon
+#'
+#' Evaluates the daemon's \code{.worker_lp} on the stencil of the parameter
+#' pair \code{pair} (see \code{num_hessian_mirai}). \code{.keep_paths}
+#' (from \code{.pskf_record_centre} in the main process) seeds a
+#' frozen-selection scope, so a PSKF posterior is differenced on the pruning
+#' selection made at the centre; an empty list evaluates plainly.
+#' @noRd
+.num_hessian_stencil <- function(pair, .theta, .h, .par_names,
+                                 .keep_paths = list()) {
+  lp <- get0(".worker_lp", envir = globalenv(), inherits = FALSE)
+  .eval <- function(th) {
+    names(th) <- .par_names
+    r <- lp(th)
+    if (is.list(r)) r$logpost else r
+  }
+  if (length(.keep_paths)) {
+    fr <- .pskf_freeze_open(.keep_paths)
+    on.exit(.pskf_freeze_close(fr), add = TRUE)
+    .eval <- .pskf_freeze_wrap(.eval)
+  }
+  i <- pair[1L]; j <- pair[2L]
+  hi <- .h * max(1, abs(.theta[i]))
+  hj <- .h * max(1, abs(.theta[j]))
+  th_pp <- th_pm <- th_mp <- th_mm <- .theta
+  th_pp[i] <- th_pp[i] + hi; th_pp[j] <- th_pp[j] + hj
+  th_pm[i] <- th_pm[i] + hi; th_pm[j] <- th_pm[j] - hj
+  th_mp[i] <- th_mp[i] - hi; th_mp[j] <- th_mp[j] + hj
+  th_mm[i] <- th_mm[i] - hi; th_mm[j] <- th_mm[j] - hj
+  f_pp <- .eval(th_pp); f_pm <- .eval(th_pm)
+  f_mp <- .eval(th_mp); f_mm <- .eval(th_mm)
+  (f_pp - f_pm - f_mp + f_mm) / (4 * hi * hj)
 }
 
 

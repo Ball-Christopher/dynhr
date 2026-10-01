@@ -106,15 +106,12 @@
         "the BK condition -- widen/re-center the priors.", call. = FALSE)
   m_ref <- model
   m_ref$param_values <- params_ref
-  old_seed <- if (exists(".Random.seed", envir = .GlobalEnv))
-    get(".Random.seed", envir = .GlobalEnv) else NULL
-  set.seed(999080204L)   ## harness-internal only; NOT the replication seed
-  sim_ref <- simulate_model_order3(dr3_ref, n_periods = 200L, burn_in = 300L,
-                                   model = m_ref, pruning = TRUE)
-  if (!is.null(old_seed))
-    assign(".Random.seed", old_seed, envir = .GlobalEnv)
-  else if (exists(".Random.seed", envir = .GlobalEnv))
-    rm(".Random.seed", envir = .GlobalEnv)
+  ## harness-internal seed, NOT the replication seed; the caller's stream
+  ## (or its absence) is restored afterwards
+  sim_ref <- .with_local_seed(
+    999080204L,
+    simulate_model_order3(dr3_ref, n_periods = 200L, burn_in = 300L,
+                          model = m_ref, pruning = TRUE))
   ref_var <- mean(apply(sim_ref[, obs_vars, drop = FALSE], 2, var))
 
   list(model = model, compiled = compiled, priors = priors,
@@ -189,8 +186,8 @@
 #'
 #' Runtime, measured at implementation time (this machine, pure-R order-3
 #' TPF kernel, no compiled backend for order = 3L): ONE likelihood
-#' evaluation at \code{T_obs = 30}, \code{n_particles = 200} (the brief's
-#' reference sizing), including the per-theta order-3 re-solve, took
+#' evaluation at \code{T_obs = 30}, \code{n_particles = 200} (the reference
+#' sizing), including the per-theta order-3 re-solve, took
 #' ~2.4-3.0s. At that cost \code{n_draws = 2000}/\code{n_warmup = 600}
 #' (the sv_rbpf_sbc-style starting point) would take ~1.5-2 HOURS per
 #' replication, far outside budget. A first shrink to \code{T_obs = 20},
@@ -209,9 +206,8 @@
 #' ~0.4-0.55s per evaluation) with a short chain (\code{n_draws = 100},
 #' \code{n_warmup = 50}, \code{thin_L = 25}) measured ~55-90s per
 #' replication serially (~154 likelihood evaluations including the 4
-#' PF-noise diagnostic draws) -- see the brief
-#' \code{brief-tpf-order3-sbc-2026-08-04.md} for the full sizing derivation
-#' and the deviation from its 2000/600 starting point.
+#' PF-noise diagnostic draws) (a reduction from the
+#' 2000/600 starting point).
 #'
 #' KNOWN SCIENTIFIC RISK (documented, not fixed here): the TPF's ADAPTIVE
 #' tempering schedule makes the likelihood estimator only approximately
@@ -397,7 +393,7 @@ tpf_order3_sbc <- function(n_repl = 100L, T_obs = 20L, n_particles = 150L,
   }
 
   ## run_one() re-seeds (seed + r) in THIS process on the serial path; restore
-  ## the caller's RNG stream when this function exits (C1).
+  ## the caller's RNG stream when this function exits.
   .local_seed(seed)
   reps <- if (cores > 1L) {
     parallel::mclapply(seq_len(n_repl), run_one, mc.cores = cores,

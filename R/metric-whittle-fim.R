@@ -275,7 +275,7 @@ whittle_fim <- function(TT, RR, ZZ, DD, Sigma_e,
 #'
 #' @details
 #' Reuses the existing solution-derivative machinery
-#' (\code{solution_derivatives()}, Tier 11/12 implicit-differentiation path)
+#' (\code{solution_derivatives()}, the implicit-differentiation path)
 #' for parameters that move the decision rule, exactly as the "implicit"
 #' branch of \code{make_posterior_grad()} does (see
 #' R/analytic-gradient.R around the \code{d_ss_list} construction). Any
@@ -327,7 +327,7 @@ whittle_fim <- function(TT, RR, ZZ, DD, Sigma_e,
   DD      <- dr$ghu[oi, , drop = FALSE]
   Sigma_e <- .get_shock_cov(model, exo, params)
 
-  ## dSigma_e/dtheta_nm. W93: EXACT, from the plan/eval pair
+  ## dSigma_e/dtheta_nm. EXACT, from the plan/eval pair
   ## make_posterior_grad() uses (.shock_cov_deriv_plan/.shock_cov_deriv_eval,
   ## R/posterior.R), the plan built and evaluated ONCE for this metric build.
   ## theta_nm reaches Sigma_e through params[key], key = the name

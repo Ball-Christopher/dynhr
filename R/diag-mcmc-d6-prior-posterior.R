@@ -44,7 +44,7 @@
       ab[2] > ab[1] && all(is.finite(sh)) && all(sh > 0)
     },
     "gamma"   = is.finite(p1 - s) && p1 - s > 0 && is.finite(p2) && p2 > 0,
-    ## sd = Inf is a PROPER inverse gamma in both conventions (A12: IG1
+    ## sd = Inf is a PROPER inverse gamma in both conventions (IG1
     ## alpha -> 1, IG2 shape = 2), so only p2 > 0 is required.
     "inv_gamma" =, "inv_gamma1" =, "inv_gamma2" =
       is.finite(p1 - s) && p1 - s > 0 && p2 > 0,
@@ -77,7 +77,7 @@
     if (is.na(lo)) lo <- -Inf
     if (is.na(hi)) hi <-  Inf
     p1 <- as.numeric(priors$p1[i]); p2 <- as.numeric(priors$p2[i])
-    ## Dynare p3/p4 (brief 23 A3/W4): generalised beta support / shift.
+    ## Dynare p3/p4: generalised beta support / shift.
     p3 <- if (is.null(priors$p3)) NA_real_ else as.numeric(priors$p3[i])
     p4 <- if (is.null(priors$p4)) NA_real_ else as.numeric(priors$p4[i])
     Fh <- .d6_prior_cdf(hi, priors$distribution[i], p1, p2, p3, p4)

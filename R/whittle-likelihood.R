@@ -200,7 +200,7 @@
 ##   s_t = TT s_{t-1} + RR eps_t
 ##   y_t = ZZ s_{t-1} + DD eps_t
 ##
-## Autocovariance (verified in proto; see brief §2.2–2.3):
+## Autocovariance (verified in proto; see §2.2–2.3):
 ##   c(0)   = ZZ P0 ZZ' + DD Sigma_e DD' [+ me_variance * I]
 ##   c(tau) = ZZ TT^{tau-1} K   for tau >= 1
 ##
@@ -246,6 +246,61 @@
 }
 
 
+## .whittle_fejer_sum(c_arr, omega, T_len, method)
+##   Shared kernel of the expected periodogram and its parameter derivatives:
+##     (1/2pi) [ C(0) + sum_{tau=1}^{T-1} (1 - tau/T) (C(tau) + C(tau)') cos(omega_j tau) ]
+##   for an array C[n, n, T_len] whose slice tau+1 holds lag tau.  Returns a
+##   list of length(omega) n x n matrices (1 x 1 when
+##   n == 1); no clamping, no symmetrisation.
+##   method "matrix": one (J x (T-1)) %*% ((T-1) x n^2) product, O(J T n^2).
+##   method "fft": on the Fourier grid omega_j = 2 pi j / T the lag sum is the
+##     real part of a length-T DFT of the Fejer-weighted lag sequence, O(T log T).
+##   method "auto": "fft" when omega lies on the Fourier grid and T_len is at
+##     least .WHITTLE_FFT_MIN_T, otherwise "matrix".
+.WHITTLE_FFT_MIN_T <- 512L
+
+.whittle_fejer_sum <- function(c_arr, omega, T_len, method = "auto") {
+  J      <- length(omega)
+  n      <- dim(c_arr)[1L]
+  inv2pi <- 1.0 / (2.0 * pi)
+  c0     <- c_arr[,, 1L]
+  out    <- vector("list", J)
+  shape  <- function(v) matrix(v, n, n)
+  if (T_len <= 1L) {
+    for (j in seq_len(J)) out[[j]] <- shape(c0) * inv2pi
+    return(out)
+  }
+  tau_seq <- seq_len(T_len - 1L)
+  w_tau   <- 1.0 - tau_seq / T_len
+  ## Symmetrised, Fejer-weighted lags (c(-tau) = c(tau)' for a real process,
+  ## so the lag pair contributes c(tau) + c(tau)', not 2 c(tau)): (T-1) x n^2.
+  L  <- c_arr[,, tau_seq + 1L, drop = FALSE]
+  A  <- matrix(L, nrow = n * n)
+  At <- matrix(aperm(L, c(2L, 1L, 3L)), nrow = n * n)
+  A  <- t(A + At) * w_tau
+
+  fgrid <- omega * T_len / (2 * pi)
+  on_grid <- all(abs(fgrid - round(fgrid)) < 1e-8)
+  if (identical(method, "auto")) {
+    method <- if (on_grid && T_len >= .WHITTLE_FFT_MIN_T) "fft" else "matrix"
+  }
+  if (identical(method, "fft") && !on_grid) method <- "matrix"
+
+  if (identical(method, "fft")) {
+    jj <- as.integer(round(fgrid)) %% T_len
+    S  <- matrix(0, J, n * n)
+    for (k in seq_len(n * n)) {
+      S[, k] <- Re(stats::fft(c(0, A[, k])))[jj + 1L]
+    }
+  } else {
+    S <- cos(outer(omega, tau_seq)) %*% A                    ## J x n^2
+  }
+  c0v <- as.vector(c0)
+  for (j in seq_len(J)) out[[j]] <- shape(c0v + S[j, ]) * inv2pi
+  out
+}
+
+
 ## .whittle_compute_EI(c_arr, omega, T_len)
 ##   c_arr: array[n_obs, n_obs, T_len] from .whittle_compute_ctau
 ##   omega: vector of Fourier frequencies (length J)
@@ -257,36 +312,14 @@
 ##
 ## Eigenvalue clamp: same as in .whittle_loglik (pmax(ev, eps * max(ev)))
 ## ensures EI is numerically PD even for near-cancellation at high frequencies.
-.whittle_compute_EI <- function(c_arr, omega, T_len) {
+.whittle_compute_EI <- function(c_arr, omega, T_len, method = "auto") {
   J     <- length(omega)
   n_obs <- dim(c_arr)[1L]
 
-  ## Fejer weights for tau = 1, ..., T_len-1
-  tau_seq <- seq_len(T_len - 1L)
-  w_tau   <- 1.0 - tau_seq / T_len
-
-  ## Precompute cosine table: cos_mat[j, tau] = cos(omega_j * tau)
-  ## dims: J x (T_len-1)
-  cos_mat <- outer(omega, tau_seq, function(w, t) cos(w * t))
-
-  EI_list <- vector("list", J)
-  inv2pi  <- 1.0 / (2.0 * pi)
+  EI_list <- .whittle_fejer_sum(c_arr, omega, T_len, method = method)
 
   for (j in seq_len(J)) {
-    EI_j <- c_arr[,,1L]          ## start with c(0); Fejer weight (1 - 0/T) = 1
-    if (T_len > 1L) {
-      ## For a stationary multivariate real process, the contribution of lags tau
-      ## and -tau to the Fejer sum is (1-tau/T) * (c(tau) + c(-tau)) * cos(omega*tau).
-      ## Since c(-tau) = c(tau)' (transpose, not c(tau) itself for multivariate!),
-      ## the correct coefficient is (c(tau) + c(tau)') per lag, not 2*c(tau).
-      ## For the univariate case c(tau) is scalar so c(tau)' = c(tau) and the two
-      ## expressions coincide; for n_obs > 1 they differ when c(tau) is asymmetric.
-      for (tau in tau_seq) {
-        c_tau <- c_arr[,, tau + 1L]
-        EI_j  <- EI_j + w_tau[tau] * (c_tau + t(c_tau)) * cos_mat[j, tau]
-      }
-    }
-    EI_j <- EI_j * inv2pi
+    EI_j <- EI_list[[j]]
 
     ## Clamp: EI should be PD but floating-point cancellation can yield tiny negatives
     ## at high frequencies for persistent processes.  Same rule as eigenvalue clamp
@@ -401,30 +434,8 @@
 ##   omega: Fourier frequencies (length J)
 ##   T_len: sample length
 ##   -> list of J real symmetric n_obs x n_obs matrices dEI(omega_j)/dtheta_k
-.whittle_compute_dEI <- function(dcArr, omega, T_len) {
-  J     <- length(omega)
-  n_obs <- dim(dcArr)[1L]
-
-  tau_seq <- seq_len(T_len - 1L)
-  w_tau   <- 1.0 - tau_seq / T_len
-  cos_mat <- outer(omega, tau_seq, function(w, t) cos(w * t))
-
-  dEI_list <- vector("list", J)
-  inv2pi   <- 1.0 / (2.0 * pi)
-
-  for (j in seq_len(J)) {
-    dEI_j <- dcArr[,,1L]
-    if (T_len > 1L) {
-      ## Same symmetry fix as .whittle_compute_EI: use (dc(tau) + dc(tau)') not 2*dc(tau).
-      for (tau in tau_seq) {
-        dc_tau <- dcArr[,, tau + 1L]
-        dEI_j  <- dEI_j + w_tau[tau] * (dc_tau + t(dc_tau)) * cos_mat[j, tau]
-      }
-    }
-    dEI_list[[j]] <- dEI_j * inv2pi
-  }
-
-  dEI_list
+.whittle_compute_dEI <- function(dcArr, omega, T_len, method = "auto") {
+  .whittle_fejer_sum(dcArr, omega, T_len, method = method)
 }
 
 
@@ -530,6 +541,14 @@
 ## 4.  LOG-POSTERIOR FACTORY  (parallel to make_log_posterior in posterior.R)
 ## --------------------------------------------------------------------------
 
+## The Whittle frequency band: two finite numbers with 0 <= lo < hi <= pi
+## (radians). One rule for make_log_posterior_whittle() and for an estimation
+## spec's likelihood$freq_band (validate_spec()).
+.whittle_freq_band_ok <- function(freq_band)
+  is.numeric(freq_band) && length(freq_band) == 2L &&
+    all(is.finite(freq_band)) && freq_band[1L] >= 0 &&
+    freq_band[2L] <= pi && freq_band[1L] < freq_band[2L]
+
 #' Create a Whittle-likelihood log-posterior evaluator
 #'
 #' Returns a closure \code{function(theta) -> list(logpost, loglik, logprior)}
@@ -578,9 +597,7 @@ make_log_posterior_whittle <- function(model, data, prior_spec, obs_vars,
          call. = FALSE)
 
   ## Validate freq_band
-  if (!is.numeric(freq_band) || length(freq_band) != 2L ||
-      !all(is.finite(freq_band)) || freq_band[1L] < 0 ||
-      freq_band[2L] > pi || freq_band[1L] >= freq_band[2L])
+  if (!.whittle_freq_band_ok(freq_band))
     stop("make_log_posterior_whittle: freq_band must be c(lo, hi) with ",
          "0 <= lo < hi <= pi.", call. = FALSE)
 
@@ -873,7 +890,7 @@ make_log_posterior_whittle <- function(model, data, prior_spec, obs_vars,
       dDD_k <- dDD_arr[[k]]
       dSe_k <- dSe_arr[[k]]
 
-      ## dH_k from the brief:
+      ## dH_k from the reference derivation:
       ##   dH = dZZ * (z*B_raw) + ZZ * z * A^{-1} * (dTT * z * B_raw + dRR) + dDD
       ## With B_j = z * B_raw, so z * B_raw = B_j and B_raw = B_j / z:
       ##   inner = dTT * B_j + dRR_k   [note: dTT*z*B_raw = dTT*B_j]

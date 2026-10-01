@@ -20,6 +20,12 @@ reference BLAS and R linked against Accelerate or OpenBLAS are different
 machines for this purpose, and the difference is invisible in
 \code{R.version}. Two benchmark results whose \code{blas} differ are not
 measuring the same software stack, whatever the hardware says.
+
+\code{blas_reference} and \code{lapack_reference} are \code{TRUE} when R is
+using its bundled reference BLAS / LAPACK (\code{Rblas} / \code{Rlapack}),
+and \code{blas_note} then says what that costs and how to switch to an
+optimised library (otherwise \code{NA}). \code{matprod} is R's
+matrix-product setting as \code{sessionInfo()} reports it.
 }
 \examples{
 dynhr_system_info()

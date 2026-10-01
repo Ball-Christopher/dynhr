@@ -1,10 +1,10 @@
 ## R/hank-truncation.R
 ## --------------------------------------------------------------------------
 ## Finite-state, Kalman-filterable HANK via a SCALAR-ANCHORED COARSE asset
-## grid (Tier 18 flagship, milestone m5; scratch derivation + verification in
-## .claude/orchestration/truncation/, sessions 2026-07-05..08).
+## grid (derivation and verification are
+## documented below).
 ##
-## Construction (m4b, orchestrator-verified):
+## Construction:
 ##   1. Solve the model on a FINE grid (the truth): `hank_ks_steady`.
 ##   2. Re-solve the household block on a COARSE grid (n_a ~ 16-40) at the
 ##      SAME prices, with ONE scalar discount wedge beta_eff = beta*exp(lx)
@@ -368,7 +368,7 @@ hank_reiter_linearize <- function(ks, delta_fd = 1e-6) {
   ## sparse route built a whole n x n Lambda for a single matvec each time --
   ## quadratic in the grid size for a product that is linear in it. Measured at
   ## n_a = 60, n_e = 3 (installed -O2) the loop was 73% of
-  ## hank_reiter_linearize; see briefs/21 section 12. .hank_forward_push()
+  ## hank_reiter_linearize. .hank_forward_push()
   ## contracts the same identity instead of materializing it, so this is an
   ## algebraic reassociation (round-off-level agreement, asserted in
   ## test-hank-forward-push.R), not a different discretization.
@@ -686,14 +686,14 @@ hank_reiter_pskf_loglik <- function(data, rss, alpha_z = 0, obs_vars = "A",
 #' \code{\link{hank_reiter_kalman_loglik}} directly (its
 #' \code{.kf_univariate_dispatch} path) when \code{data} has gaps.
 #'
-#' @section \code{me_variance} (RESOLVED in 0.9.2.x -- F3-D):
+#' @section \code{me_variance} (RESOLVED in 0.9.2.x):
 #' \code{\link{hank_reiter_kalman_loglik}} routes through
 #' \code{.kf_univariate_dispatch} and \code{.kf_loglik_adjoint} runs the
 #' multivariate recursion. Up to 0.9.2.0004 these implemented DIFFERENT
 #' \code{me_variance} conventions -- true iid measurement noise vs. an
 #' \code{F}-only regulariser -- and with 2 observables at
 #' \code{me_variance = 1e-8} their logliks differed by ~2 nats, so their
-#' outputs could not be mixed. F3-D made \code{me_variance} TRUE iid diagonal
+#' outputs could not be mixed. This made \code{me_variance} TRUE iid diagonal
 #' measurement noise on the multivariate paths too (it now enters the Joseph
 #' covariance update as well as \code{F}), so the two agree at ANY
 #' \code{me_variance} (verified to ~1e-9 here) and this function's

@@ -56,7 +56,7 @@ does not change an existing spec.
   \item{\code{me_variance}}{Measurement-error variance: one value, or one per observable. Default: the \code{me_variance} option (registered default \code{0}).}
   \item{\code{lik_init}}{Kalman filter P0 initialisation. One of \code{"auto"}, \code{"stationary"}, \code{"diffuse"}, \code{"kappa"}. Default: \code{"auto"}.}
   \item{\code{freq_band}}{Whittle frequency band c(lo, hi) in radians (whittle only). Default: \code{c(0, 3.14159265358979)}.}
-  \item{\code{pskf_cdf}}{PSKF CDF evaluation: accurate (default) or fast (the pre-0.9.3.118 Mendell-Elston / plain-Miwa evaluation; pskf only). One of \code{"accurate"}, \code{"fast"}. Default: the \code{pskf_cdf} option (registered default \code{"accurate"}).}
+  \item{\code{pskf_cdf}}{PSKF CDF evaluation: accurate (default and only value; pskf only). Default: the \code{pskf_cdf} option (registered default \code{"accurate"}).}
   \item{\code{power_posterior}}{Power-posterior tempering exponent in (0, 1] applied to the log-likelihood. Default: the \code{power_posterior} option (registered default \code{1}).}
   \item{\code{gradient_policy}}{Gradient path of make_posterior_grad(): auto, analytic or numerical. One of \code{"auto"}, \code{"analytic"}, \code{"numerical"}. Default: \code{"auto"}.}
   \item{\code{student_df}}{Student-t degrees of freedom (> 2); required for student_t. Default: \code{NULL}.}

@@ -114,7 +114,7 @@ run_mcmc_parallel <- function(
   L <- t(chol(Sigma_prop))
 
   starts <- vector("list", n_chains)
-  ## Host-side start dispersion; restore the caller's RNG stream on exit (C1).
+  ## Host-side start dispersion; restore the caller's RNG stream on exit.
   .local_seed(seed_base)
   for (ch in seq_len(n_chains)) {
     set.seed(seed_base + ch)
@@ -320,7 +320,7 @@ run_mode_parallel <- function(
   starts <- vector("list", n_chains)
   starts[[1L]] <- theta_init
 
-  ## Host-side start dispersion; restore the caller's RNG stream on exit (C1).
+  ## Host-side start dispersion; restore the caller's RNG stream on exit.
   .local_seed(seed_base)
   for (ch in seq(2L, n_chains)) {
     set.seed(seed_base + ch)

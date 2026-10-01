@@ -56,7 +56,7 @@
 #' \eqn{\sum_x d(x)\, g(x)} over \code{(e, b, a)} cells.  The two-asset sibling
 #' of \code{\link{hank_aggregate}}, and it inherits that function's contract:
 #' shapes must match cell-for-cell, and mismatches are an ERROR rather than a
-#' silent recycle (adversarial review 2026-07-13, P2).
+#' silent recycle.
 #'
 #' @param d Distribution: a length-\code{n_e*n_b*n_a} vector in the package's
 #'   two-asset order, or an \code{n_e x n_b x n_a} array.

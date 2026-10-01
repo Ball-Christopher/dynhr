@@ -16,7 +16,7 @@
 ##
 ##   where Phi_s = sum_{s'} P[s,s'] * G_{s'} (transition-weighted coupling).
 ##
-## FUNCTIONAL ITERATION (Eq. C in the brief):
+## FUNCTIONAL ITERATION (Eq. C in the reference derivation):
 ##   Initialise G_s^{(0)} from single-regime QZ per regime.
 ##   At each iteration k+1:
 ##     Phi_s^{(k)} = sum_{s'} P[s,s'] * G_{s'}^{(k)}
@@ -203,7 +203,7 @@ solve_ms_perturbation <- function(model, compiled,
 
   ## ---- Step 2: extract the "reduced" system blocks needed for iteration ----
   ## For the functional iteration, we work with the dynamic block (post-QR
-  ## static elimination) in the reduced n_d x n_minus form. The brief shows
+  ## static elimination) in the reduced n_d x n_minus form. The reference derivation shows
   ## that after static elimination, the relevant matrices are:
   ##   A^s_+ (dynamic rows of Qf_plus, columns for forward vars)  -- n_d x n_plus
   ##   A^s_0 (dynamic rows of Qf_zero, all dynamic cols)          -- n_d x n_d
@@ -222,7 +222,7 @@ solve_ms_perturbation <- function(model, compiled,
   ## i.e. (f_zero^s + f_plus^s * Phi_s) * ghx_s = -f_minus^s  (state cols only)
   ##
   ## We work in the FULL n_endo space using the original (un-QR'd) matrices,
-  ## solving the state column of ghx directly. This matches the brief's Eq. C
+  ## solving the state column of ghx directly. This matches the reference derivation's Eq. C
   ## and avoids reconstructing the static elimination machinery.
   ##
   ## More precisely: ghx is n_endo x n_state. The system for the state block is:
@@ -235,7 +235,7 @@ solve_ms_perturbation <- function(model, compiled,
 
   ## Build Phi_s_full: n_endo x n_endo. Only the state_idx columns are nonzero.
   ## Phi_s_full[, state_idx] = sum_{s'} P[s,s'] * ghx_{s'}[, state_idx via state rows]
-  ## Actually Phi_s in the brief is n_state x n_state (state-to-state block).
+  ## Actually Phi_s in the reference derivation is n_state x n_state (state-to-state block).
   ## The full-system analogue for the ghu solve is:
   ##   (f_zero^s + f_plus^s * Phi_s_embed) * ghu_s = -f_exo^s
   ## where Phi_s_embed is n_endo x n_endo with Phi_s_embed[, c] = 0 for non-state c,
@@ -262,10 +262,10 @@ solve_ms_perturbation <- function(model, compiled,
   ## For the MS iteration, the iteration step at regime s is:
   ##   Build Phi_embed = matrix(0, n_endo, n_endo); Phi_embed[, state_idx] = t(Phi_s @ t(ghx))
   ##   No -- Phi_s (n_state x n_state) acts on the state columns of ghx.
-  ##   The MS Sylvester (Eq. C in brief, after static elim) is a n_d x n_minus system.
+  ##   The MS Sylvester (Eq. C of the derivation, after static elim) is a n_d x n_minus system.
   ##
   ## CORRECT FORMULATION for full-space direct solve:
-  ## Following the brief §3 step 2: "Solve (A^s_0 + A^s_+ * Phi_s^{(k)}) * G_s = -A^s_-"
+  ## Following the reference derivation §3 step 2: "Solve (A^s_0 + A^s_+ * Phi_s^{(k)}) * G_s = -A^s_-"
   ## These are the reduced (post-QR) matrices. We need to replicate the static elim.
   ##
   ## SIMPLER ALTERNATIVE: use solve_perturbation_fast() with a MODIFIED compiled
@@ -501,7 +501,7 @@ solve_ms_perturbation <- function(model, compiled,
   Phi_embed
 }
 
-## Regime constants c_const (W47, 2026-09-25).
+## Regime constants c_const.
 ##
 ## THE LAW.  Regime s's equations are linearised around ITS OWN steady state
 ## ys_s (sys_list[[s]] holds the Jacobians at (ys_s, ys_s, ys_s, 0)):

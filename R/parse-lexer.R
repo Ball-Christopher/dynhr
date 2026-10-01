@@ -36,7 +36,7 @@ strip_comments_and_macros <- function(txt) {
 ## so `x = ...;` inside a block is not read as a parameter assignment) strip
 ## exactly these. They used to keep two different lists, and a block on only
 ## one of them leaked: `conditional_forecast_paths; var y; ...` declared `y` a
-## second time (review 2026-09-25 B12).
+## second time.
 ##
 ## Only genuine blocks (closed by `end;`) belong here. A COMMAND such as
 ## `identification(...)`, `var_model(...)` or `pac_model(...)` ends at its own

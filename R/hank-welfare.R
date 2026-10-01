@@ -1,6 +1,6 @@
 ## R/hank-welfare.R
 ## --------------------------------------------------------------------------
-## Welfare machinery (W0) for a one-asset HANK het block: the LEVEL value
+## Welfare machinery for a one-asset HANK het block: the LEVEL value
 ## function and consumption-equivalent variation (CEV).
 ##
 ## Het blocks (see R/hank-het-block.R, R/hank-egm.R) store the steady-state

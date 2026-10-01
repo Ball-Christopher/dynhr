@@ -464,7 +464,7 @@ solve_perturbation <- function(model, compiled, ss, params, verbose = FALSE,
     }
   }
 
-  ## M28: populate dr$Sigma_e so downstream compute_irfs/compute_moments always
+  ## Populate dr$Sigma_e so downstream compute_irfs/compute_moments always
   ## use the correct shock covariance (incl. off-diagonal correlations from the
   ## shocks block) rather than re-deriving it on each call or falling back to a
   ## diagonal-only approximation.
@@ -769,8 +769,14 @@ solve_perturbation_fast <- function(model, compiled, ss, params,
       ## C++ uses non-pivoted QR (matches R's dqrdc2 in the full-rank case),
       ## so the pivot is the identity and inv_piv is trivial. Householder
       ## sign differences cancel downstream; see test-static-elim-parity.R.
-      qt <- qr_static_transform_cpp(f_static, f_minus_r, f_zero_r,
-                                    f_plus_r, f_exo_r)
+      ## Above the measured crossover the reflectors are applied to the four
+      ## blocks without ever forming the n x n Q (see .STATIC_QR_IMPLICIT_MIN_N).
+      qt <- if (.static_qr_implicit(n))
+        qr_static_transform_implicit_cpp(f_static, f_minus_r, f_zero_r,
+                                         f_plus_r, f_exo_r)
+      else
+        qr_static_transform_cpp(f_static, f_minus_r, f_zero_r,
+                                f_plus_r, f_exo_r)
       Qf_minus <- qt$Qf_minus; Qf_zero <- qt$Qf_zero
       Qf_plus  <- qt$Qf_plus;  Qf_exo  <- qt$Qf_exo
       inv_piv  <- seq_len(n_s)
@@ -1070,11 +1076,14 @@ solve_perturbation_fast <- function(model, compiled, ss, params,
     ## `bk_satisfied` stayed TRUE, so the pseudo-inverse artefact was fed
     ## straight to the Kalman filter and estimation could accept such points.
     ## Record the failure and flip `bk_satisfied` below (see `bk_rank_ok`).
-    z11_sv <- svd(Z11, nu = 0L, nv = 0L)$d
+    ## One SVD serves both the rank test and the pseudo-inverse below.
+    z11_svd <- svd(Z11)
+    z11_sv  <- z11_svd$d
     bk_rank_ok <- length(z11_sv) > 0L && all(is.finite(z11_sv)) &&
       min(z11_sv) > 1e-12 * max(z11_sv)
 
-    Z11_inv <- .safe_inv(Z11, warn_label = "solve_perturbation: QZ block Z11")
+    Z11_inv <- .safe_inv(Z11, warn_label = "solve_perturbation: QZ block Z11",
+                         sv = z11_svd)
     T11_inv <- .safe_inv(T11, warn_label = "solve_perturbation: QZ block T11")
 
     g_minus_y <- Re(Z11 %*% T11_inv %*% S11 %*% Z11_inv)
@@ -1123,7 +1132,7 @@ solve_perturbation_fast <- function(model, compiled, ss, params,
   # golden-comparison tests.  If the model does not have the
   # specified variable or parameter, the entry is silently skipped.
   # ------------------------------------------------------------------
-  # NOTE (2026-05-31): a hardcoded `ar1_contam` patch used to live here. It
+  # NOTE: a hardcoded `ar1_contam` patch used to live here. It
   # zeroed the entire ghx column of `eps_pref` (keeping only the AR(1) diagonal
   # `rho_pref`) whenever it detected off-diagonal entries, on the theory that QZ
   # deflating-subspace basis ambiguity for repeated eigenvalues "contaminated"
@@ -1223,7 +1232,7 @@ solve_perturbation_fast <- function(model, compiled, ss, params,
   ghu <- ghu_sol$x
   if (ghu_sol$singular) bk_ok <- FALSE
 
-  # NOTE (2026-05-31): a hardcoded `shock_ar1_map` patch used to live here. It
+  # NOTE: a hardcoded `shock_ar1_map` patch used to live here. It
   # zeroed the ghu column of `eps_pref_` (keeping only the unit impact on
   # `eps_pref`), on the false premise that a shock entering a pure-AR(1)
   # equation "should only" hit that AR(1) variable. But when the AR(1) variable
@@ -1260,7 +1269,7 @@ solve_perturbation_fast <- function(model, compiled, ss, params,
   # but ghu[v,] != 0, so they are NOT zeroed -- matching Dynare which
   # keeps iid shock states (harmless zero-root state).
   #
-  # Scope (0.9.4, W45): Dynare 7.1 folds v away ONLY when an equation
+  # Scope: Dynare 7.1 folds v away ONLY when an equation
   # reads literally `v = 0` (either side, after constant simplification:
   # `v = 0`, `0 = v`, `v = 0*y` are folded; `rho*v = 0` and `v = rho`
   # are NOT -- v stays a state with its true, non-zero ghx column).  So
@@ -1310,11 +1319,27 @@ solve_perturbation_fast <- function(model, compiled, ss, params,
   ## non-explosive and flip to bk_satisfied = FALSE otherwise, so callers (e.g.
   ## make_log_posterior) reject it as -Inf. The 1 + 1e-6 margin admits genuine
   ## unit-root / trend models (state radius ~ 1).
+  ##
+  ## The radius is taken from the stable QZ eigenvalues this solve already has
+  ## whenever it is clearly away from the unit circle (more than
+  ## .STATE_RADIUS_BAND from 1, where the two computations -- which agree to
+  ## ~1e-13 across the model corpus -- cannot land on different sides of either
+  ## 1 + 1e-6 here or the 1 - 1e-6 stationarity test in kalman_filter()); only
+  ## a radius that close to 1 pays for the explicit eigen() of the state block.
+  ## The value is kept on the decision rule, together with the block it
+  ## describes, so kalman_filter() does not recompute it.
+  state_radius <- NULL
   if (bk_ok && n_state > 0L) {
-    state_sr <- tryCatch(
-      max(Mod(eigen(ghx[state_idx, , drop = FALSE],
-                    symmetric = FALSE, only.values = TRUE)$values)),
-      error = function(e) NA_real_)
+    tt_blk <- ghx[state_idx, , drop = FALSE]
+    sr_qz  <- .qz_state_radius(qz_result$eigenvalues, n_state)
+    exact  <- !(is.finite(sr_qz) && abs(sr_qz - 1) > .STATE_RADIUS_BAND)
+    state_sr <- if (exact) {
+      tryCatch(
+        max(Mod(eigen(tt_blk, symmetric = FALSE, only.values = TRUE)$values)),
+        error = function(e) NA_real_)
+    } else sr_qz
+    if (is.finite(state_sr))
+      state_radius <- list(tt = tt_blk, radius = state_sr, exact = exact)
     if (is.finite(state_sr) && state_sr > 1 + 1e-6) {
       if (verbose)
         .dynhr_cat(sprintf(paste0("  Post-solve guard: realized state transition is ",
@@ -1336,6 +1361,7 @@ solve_perturbation_fast <- function(model, compiled, ss, params,
     n_stable     = n_state,
     n_exo        = n_exo,
     eigenvalues  = qz_result$eigenvalues,
+    state_radius = state_radius,
     n_unstable   = n_unstable,
     bk_satisfied = bk_ok,
     ## TRUE when BK failed specifically through the RANK condition (singular

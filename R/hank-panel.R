@@ -1,13 +1,12 @@
 ## R/hank-panel.R
 ## --------------------------------------------------------------------------
 ## Per-household PANEL log-likelihood for the discount-factor-mixture HANK
-## (P1 hand-off brief, references/level-vs-response-paper/PANEL_LIKELIHOOD_BRIEF.md,
-## deliverables 1-3; deliverable 3 -- integrating out the latent AGGREGATE
+## (Deliverable 3 -- integrating out the latent AGGREGATE
 ## price path -- is hank_mixture_panel_loglik_marginal at the bottom of this
 ## file: plain Monte Carlo over prior path particles, with per-period SISR
-## variance control explicitly left to P-panel research).
+## variance control explicitly left to future research).
 ##
-## THE KEY SIMPLIFICATION (the brief's framing): dynhr discretizes household
+## THE KEY SIMPLIFICATION (the framing): dynhr discretizes household
 ## state onto a FINITE (e, a) grid (n_e income states x n_a asset gridpoints,
 ## n_cell = n_e*n_a cells; see R/hank-distribution.R's cell-order convention).
 ## A household's latent trajectory therefore lives on a finite state space and
@@ -196,7 +195,7 @@
 #' @param blocks_k A \code{\link{hank_het_block}}: the single candidate type
 #'   this trajectory's likelihood is evaluated under.
 #' @param Pi Numeric \code{n_e x n_e} income transition matrix (must equal
-#'   \code{blocks_k$Pi}; passed explicitly per the brief's signature, and
+#'   \code{blocks_k$Pi}; passed explicitly, and
 #'   checked for consistency).
 #' @param aggregate_path \code{NULL} for the steady-state path, or a list
 #'   \code{list(r_path, w_path)} of length-\code{T} level paths for a
@@ -206,8 +205,8 @@
 #' @param a0_dist Optional length-\code{n_e*n_a} initial distribution over
 #'   \code{(e, a)} cells for period 1 (defaults to the type-conditional
 #'   ergodic distribution \code{blocks_k$D}, i.e. \code{hank_mixture_dist}'s
-#'   per-type ergodic distribution -- the correct initialization per the
-#'   brief's "selection / initial conditions" identification point).
+#'   per-type ergodic distribution -- the correct initialization for the
+#'   "selection / initial conditions" identification point).
 #'
 #' @return A list with \code{loglik} (scalar) and \code{alpha_T} (the final
 #'   filtered, normalized distribution over \code{(e,a)} cells, length
@@ -272,7 +271,7 @@ hank_hh_hmm_loglik <- function(y_i, obs_spec, blocks_k, Pi, aggregate_path,
 #' household: \code{log sum_k omega_k * p(y_i | beta_k, Theta)}, via
 #' log-sum-exp for numerical stability) and sums the per-household
 #' log-likelihoods across the panel (households are conditionally
-#' independent given the aggregate path \code{Theta}, per the brief).
+#' independent given the aggregate path \code{Theta}).
 #'
 #' @param panel A list of length \code{M}, one entry per household, each a
 #'   \code{T_i x length(obs_spec)} numeric matrix/data frame as expected by
@@ -366,7 +365,7 @@ hank_mixture_panel_loglik <- function(panel, obs_spec, blocks_by_type, omega,
 #' Panel log-likelihood with the latent aggregate path integrated out
 #' (particle / Monte Carlo marginalization)
 #'
-#' The P1 panel brief's deliverable 3: the full-panel likelihood
+#' The full-panel likelihood
 #' \deqn{L(\eta) = E_\Theta\left[\prod_i L_i(\eta \mid \Theta)\right]}
 #' with the common latent aggregate price path \eqn{\Theta = \{r_t, w_t\}}
 #' integrated out by simple Monte Carlo over path particles: each particle is

@@ -590,7 +590,7 @@ mcp_constraint_map <- function(mcp_specs) {
 
 #' Evaluate an occbin_constraints bound expression against parameters
 #'
-#' A-SEC (0.9.4): the text comes from the .mod file, so it is evaluated in the
+#' A-SEC: the text comes from the .mod file, so it is evaluated in the
 #' params-seeded .mod allowlist sandbox (arithmetic + elementary maths only),
 #' never with the function frame as enclosure.  A disallowed call aborts with
 #' `dynhr_error_unsafe_mod_expression`.  Unresolvable text (not R, an unbound

@@ -615,8 +615,8 @@ occbin_build_regime_fns <- function(compiled, regime_map) {
 #' period.  The expectation term carries the next period's rule AND its
 #' constant, E_t y_{t+1} = G_{t+1} s_t + c_{t+1}, and a slack period that
 #' precedes a binding period is solved with the slack system and that
-#' anticipating terminal rule -- not with ghx_slack.  (Before 2026-09-25,
-#' W48, the recursion dropped c_{t+1}, so the bound's constant never reached
+#' anticipating terminal rule -- not with ghx_slack.  (Previously
+#' the recursion dropped c_{t+1}, so the bound's constant never reached
 #' the earlier periods of a spell, and every slack period used ghx_slack.)
 #' Shocks are surprises; the rules are then propagated forward from t = 1.
 #'
@@ -698,7 +698,7 @@ occbin_build_regime_fns <- function(compiled, regime_map) {
 #'                       times the magnitude of its terms (sum over the terms
 #'                       of |dF/dy| |y|, shocks included; plus a round-off
 #'                       floor), so the solution does not depend on the units
-#'                       of the model (an absolute max|R| < tol before W79)
+#'                       of the model (an absolute max|R| < tol previously)
 #' @param max_regime_iter Maximum outer regime-switching iterations (default 30)
 #' @param step_size      Newton step-length (default 1.0; ignored for pwlinear)
 #' @param line_search    Logical: perform backtracking line search (default TRUE; ignored for pwlinear)
@@ -898,7 +898,7 @@ occbin_solve_path <- function(compiled,
 
         max_res <- max(abs(sys$R))
         max_res_final <- max_res
-        ## RELATIVE stop (W79): every stacked equation's residual within tol
+        ## RELATIVE stop: every stacked equation's residual within tol
         ## times the magnitude of its own terms (sum |J| |dy|, as
         ## .obc_mult_keeps() does with M), plus a round-off floor relative to
         ## the largest one (an equation whose terms are all round-off).
@@ -994,7 +994,7 @@ occbin_solve_path <- function(compiled,
     # notional path, so the bound/direction logic is shared and sign-robust.
     #
     # The same holds for pwlinear: the relax residual is evaluated on the
-    # piecewise-linear path itself.  (Before 2026-09-25, W48, pwlinear took
+    # piecewise-linear path itself.  (Previously pwlinear took
     # the notional from the ALL-SLACK path -- the slack-policy prediction --
     # which ignores how the binding periods themselves move the path.)
     Y_notional <- Y

@@ -72,7 +72,7 @@ extract_prior_spec <- function(model, verbose = TRUE) {
   ## `corr a, b` rows carry the SECOND shock in `name2` and the row kind in
   ## `type`. Reading only `name` collapsed such a row to the FIRST shock's
   ## name, so the likelihood read the correlation draw as that shock's STDERR
-  ## (0.9.4 latent item L3) -- or, if a `stderr` prior for the same shock was
+  ## -- or, if a `stderr` prior for the same shock was
   ## also present, tripped the duplicate-name guard.
   col_of <- function(nm) if (nm %in% cnames) which(cnames == nm)[1] else NA_integer_
   col_type  <- col_of("type")

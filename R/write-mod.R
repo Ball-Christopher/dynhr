@@ -2,7 +2,7 @@
 ## --------------------------------------------------------------------------
 ## write_mod(): render a parsed `dynhr_mod` object back to Dynare .mod source.
 ##
-## Design contract (E1-C):
+## Design contract:
 ##   * write_mod() is faithful to the PARSED model, not to the original file
 ##     text.  parse_mod(write_mod(parse_mod(f))) must equal parse_mod(f) for
 ##     every field the parser populates.

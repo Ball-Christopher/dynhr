@@ -1,13 +1,13 @@
 ## R/ramsey-nn1.R
 ## --------------------------------------------------------------------------
-## E5: Top-level entry point for the Gross-Hansen (n, n+1) approximation.
+## Top-level entry point for the Gross-Hansen (n, n+1) approximation.
 ##
 ## ramsey_nn1() is the main function. It implements the full pipeline:
 ##   1. Parse model, compile, solve SS
-##   2. Compute steady-state multipliers (E1)
-##   3. Compute Taylor expansions (E2)
-##   4. Build modified objective (E3)
-##   5. Build and solve modified model (E4)
+##   2. Compute steady-state multipliers
+##   3. Compute Taylor expansions
+##   4. Build modified objective
+##   5. Build and solve modified model
 ##   6. Compute welfare
 ##   7. Compare with Phase B (if available)
 ##   8. Return dynhr_nn1_result
@@ -198,7 +198,7 @@ ramsey_nn1 <- function(model,
 
   timing$ss <- as.numeric(difftime(Sys.time(), t1, units = "secs"))
 
-  # ---- 4. Compute steady-state multipliers (E1) ----
+  # ---- 4. Compute steady-state multipliers ----
   if (verbose) .dynhr_cat("[2/6] Computing steady-state multipliers...\n")
   t1 <- Sys.time()
 
@@ -230,7 +230,7 @@ ramsey_nn1 <- function(model,
 
   timing$multipliers <- as.numeric(difftime(Sys.time(), t1, units = "secs"))
 
-  # ---- 5. Compute Taylor expansions (E2) ----
+  # ---- 5. Compute Taylor expansions ----
   if (verbose) .dynhr_cat(sprintf("[3/6] Computing Taylor expansions (order %d)...\n", n + 1))
   t1 <- Sys.time()
 
@@ -249,7 +249,7 @@ ramsey_nn1 <- function(model,
 
   timing$taylor <- as.numeric(difftime(Sys.time(), t1, units = "secs"))
 
-  # ---- 6. Build modified objective (E3) ----
+  # ---- 6. Build modified objective ----
   if (verbose) .dynhr_cat("[4/6] Building modified objective W_t^{(n,n+1)}...\n")
   t1 <- Sys.time()
 
@@ -266,7 +266,7 @@ ramsey_nn1 <- function(model,
 
   timing$objective <- as.numeric(difftime(Sys.time(), t1, units = "secs"))
 
-  # ---- 7. Build and solve modified model (E4) ----
+  # ---- 7. Build and solve modified model ----
   if (verbose) .dynhr_cat("[5/6] Building and solving modified model...\n")
   t1 <- Sys.time()
 
@@ -360,7 +360,7 @@ ramsey_nn1 <- function(model,
   welfare_ss <- .eval_planner_ast(obj_ast, ss, params, ss) / (1 - beta)
 
   # --- Unconditional welfare ---
-  # A7 (0.9.4): at FIRST order the solution is certainty-equivalent -- the
+  # At FIRST order the solution is certainty-equivalent -- the
   # unconditional mean of every endogenous variable IS its deterministic steady
   # state -- so there is no stochastic welfare to compute at n = 1. The old code
   # simply COPIED welfare_ss into `unconditional` ("placeholder"), manufacturing

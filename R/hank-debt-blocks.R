@@ -1,6 +1,6 @@
 ## R/hank-debt-blocks.R
 ## --------------------------------------------------------------------------
-## Debt-side primitives D2 and D4 (briefs/19 section 9.7): staggered rate
+## Debt-side primitives: staggered rate
 ## repricing and the Fisher channel. Both are exact-algebra simple blocks in
 ## the DAG plus, for Fisher, a date-1 stock-revaluation helper.
 ##

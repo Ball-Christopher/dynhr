@@ -491,13 +491,8 @@ global_pf_sbc <- function(n_repl = 100L, T_obs = 60L, n_particles = 600L,
     stop("global_pf_sbc: the reference solve at the PRIOR MEAN theta failed (",
          ref$reason, ") -- re-centre the priors or widen the projection ",
          "settings.", call. = FALSE)
-  old_seed <- if (exists(".Random.seed", envir = .GlobalEnv))
-    get(".Random.seed", envir = .GlobalEnv) else NULL
-  set.seed(920260903L)
-  sim_ref <- .global_sbc_simulate(ref$g, ref$s0, ref$Le, 400L)
-  if (!is.null(old_seed)) assign(".Random.seed", old_seed, envir = .GlobalEnv)
-  else if (exists(".Random.seed", envir = .GlobalEnv))
-    rm(".Random.seed", envir = .GlobalEnv)
+  sim_ref <- .with_local_seed(
+    920260903L, .global_sbc_simulate(ref$g, ref$s0, ref$Le, 400L))
   if (is.null(sim_ref))
     stop("global_pf_sbc: the reference panel at the prior mean is not finite.",
          call. = FALSE)
@@ -547,7 +542,7 @@ global_pf_sbc <- function(n_repl = 100L, T_obs = 60L, n_particles = 600L,
     if (compare_kf) {
       ## HARNESS oracle: an EXACT likelihood on the same data. The
       ## univariate filter is kept as the comparator for continuity; since
-      ## F3-D (2026-09-03) the multivariate filter is the same true-ME law
+      ## the multivariate filter is the same true-ME law
       ## and either would do (see the header of test-global-likelihood.R).
       f_kf <- function(th) {
         lpri <- log_prior(th, priors)

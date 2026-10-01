@@ -83,7 +83,7 @@
 ## beats the general-k .solve_kron_compact for this k=1 case. _factor self-tests
 ## on a fixed RHS and returns NULL (=> caller falls back to .solve_kron_compact)
 ## if QZ fails or the realized residual is large, so the result is never wrong.
-## self_test = FALSE (W89) skips that fixed-RHS solve for a caller that solves
+## self_test = FALSE skips that fixed-RHS solve for a caller that solves
 ## ONE right-hand side and gates ITS residual instead (.solution_adjoint): the
 ## self-test was a full second back-substitution pass. A rank-deficient block
 ## QR (which would make qr.solve() stop, and the self-test fail) still returns
@@ -246,7 +246,7 @@ solution_derivatives <- function(model, compiled, dr, params, param_names,
   A_qr <- qr(A)
 
   ## ------------------------------------------------------------------
-  ## Analytic (finite-difference-free) primitive derivatives (Tier 11 #3).
+  ## Analytic (finite-difference-free) primitive derivatives.
   ## When the model supports symbolic parameter differentiation, build the
   ## TOTAL steady-state sensitivity dys and dynamic-Jacobian derivatives for
   ## all requested parameters ONCE (one static-Jacobian factorization + one
@@ -278,7 +278,7 @@ solution_derivatives <- function(model, compiled, dr, params, param_names,
   ## zero (certainty equivalence; their only channel is Sigma_e, which this
   ## function does not return). The analytic primitive layer is indexed by the
   ## model parameters alone, so asking it for a shock name was a
-  ## subscript-out-of-bounds crash (brief W68 item 2; the same fix W65 made in
+  ## subscript-out-of-bounds crash (the same fix as in
   ## .solution_adjoint_order2's first-order call).
   model_pars <- compiled$model$param_names %||% names(model$param_values)
 
@@ -381,7 +381,7 @@ solution_derivatives <- function(model, compiled, dr, params, param_names,
                                  precomp = NULL) {
 
   if (!is.null(precomp)) {
-    ## ANALYTIC path (Tier 11 #3): the TOTAL steady-state and dynamic-Jacobian
+    ## ANALYTIC path: the TOTAL steady-state and dynamic-Jacobian
     ## derivatives are supplied symbolically (param_jacobian_fn + model Hessian
     ## contracted with dys), with no per-parameter steady-state re-solve or
     ## primitive finite difference. See R/gradient-primitive-deriv.R.

@@ -125,7 +125,7 @@ discretionary_policy <- function(model,
                    "the model has no discretionary_policy(instruments = ...) ",
                    "command.", class = "dynhr_error_policy_spec")
   }
-  has_objective <- nzchar(model$planner_objective$text %||% "")
+  has_objective <- nzchar(.spec_planner_objective(model))
   if (is.null(loss_vars)) {
     if (!has_objective)
       .dynhr_abort("discretionary_policy: no 'loss_vars' supplied and the ",
@@ -602,7 +602,7 @@ discretionary_policy <- function(model,
   bigw <- matrix(0, n_endo, n_endo)
   rownames(bigw) <- colnames(bigw) <- endo
 
-  obj_text <- model$planner_objective$text
+  obj_text <- .spec_planner_objective(model)
   used_objective <- FALSE
 
   if (!is.null(obj_text) && nzchar(obj_text)) {

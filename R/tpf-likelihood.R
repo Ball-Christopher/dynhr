@@ -1213,7 +1213,7 @@ tpf_run_period3 <- function(particles, y_t, dr3, Sigma_e, L_e,
 #' must set.seed() before each evaluation externally); otherwise the PF is
 #' deterministic and SD = 0.
 #'
-#' CRITICAL (Landmine 1): if the closure was built with \code{seed = 42L}
+#' CRITICAL: if the closure was built with \code{seed = 42L}
 #' (non-NULL), it calls \code{set.seed(42)} at each evaluation, making the
 #' PF fully deterministic.  This function always builds a fresh
 #' \code{seed = NULL} wrapper around the supplied closure; the external
@@ -1576,7 +1576,7 @@ make_log_posterior_tpf <- function(model, data, prior_spec, obs_vars,
     me_variance <- .kf_me_variance(me_variance, obs_vars,
                                    "make_log_posterior_tpf",
                                    allow_vector = FALSE)
-  ## --- Hard stop: me_variance = 0 is degenerate (Landmine 1) --------------
+  ## --- Hard stop: me_variance = 0 is degenerate --------------
   if (!is.numeric(me_variance) || length(me_variance) != 1L ||
       !is.finite(me_variance) || me_variance <= 0) {
     stop(
@@ -1588,7 +1588,7 @@ make_log_posterior_tpf <- function(model, data, prior_spec, obs_vars,
     )
   }
 
-  ## Warn on very small me_variance (weight-collapse risk, Landmine 3)
+  ## Warn on very small me_variance (weight-collapse risk)
   if (me_variance < 1e-6) {
     .dynhr_warn(
       "make_log_posterior_tpf: me_variance = ", me_variance, " is very small. ",
@@ -1651,7 +1651,7 @@ make_log_posterior_tpf <- function(model, data, prior_spec, obs_vars,
     ZZ       <- dr2$ghx[obs_idx, , drop = FALSE]   # n_obs x n_s
     DD       <- dr2$ghu[obs_idx, , drop = FALSE]   # n_obs x n_e
     d_obs    <- dr2$ys[obs_vars]                    # n_obs
-    ## 0.5 * ghss at obs variables (Landmine 5)
+    ## 0.5 * ghss at obs variables
     ghss_obs <- 0.5 * dr2$ghss[obs_idx]             # n_obs
 
     ## Nonlinear obs-row tensors (2026-08-04 obs-tensor fix): the pruned-model
@@ -1752,7 +1752,7 @@ make_log_posterior_tpf <- function(model, data, prior_spec, obs_vars,
     ##   (Legacy: was K-vector z_k for mid-stage resamples; repurposed since
     ##    mid-stage resamples never fire in practice (u_mid_slots_used==0).)
     ## When U_list is NULL: all randomness drawn internally (standard path).
-    ## Backward compatibility: if length(U_list) == 2T+1 (legacy Tier 9 layout),
+    ## Backward compatibility: if length(U_list) == 2T+1 (legacy layout),
     ## mutation buffer slots are treated as NULL (no CRN for mutation, fresh draws).
     U_init_normals <- if (!is.null(U_list)) U_list[[1L]] else NULL
 
@@ -1778,7 +1778,7 @@ make_log_posterior_tpf <- function(model, data, prior_spec, obs_vars,
     ## the diagonal version silently discards every state CORRELATION, so a
     ## near-singular P0 (the exact case where chol fails) is replaced by an
     ## independent-states cloud with the right marginals and the wrong joint.
-    ## The jitter is RELATIVE to each state's own variance (W77): an absolute
+    ## The jitter is RELATIVE to each state's own variance: an absolute
     ## 1e-12 was 1e-4 of a state variance of 1e-8 (every shock std x 1e-4),
     ## which moved the fixed-seed loglik by 8e-8 against the rescale identity
     ## -- and is invariant to any rescaling of the states this way.
@@ -2074,7 +2074,7 @@ make_log_posterior_tpf <- function(model, data, prior_spec, obs_vars,
     ## uniforms); the shock normals come from U_list (seed has no effect on them).
     ## The seeding is LOCAL: .with_local_seed() restores the caller's global
     ## .Random.seed on exit, so a seeded closure no longer freezes the RNG
-    ## stream of whatever sampler is calling it (A1).
+    ## stream of whatever sampler is calling it.
     .with_local_seed(seed, eval_one(theta, U_list = U_list))
   }
 }

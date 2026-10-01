@@ -52,7 +52,7 @@ every stacked equation's residual is within tol
 times the magnitude of its terms (sum over the terms
 of |dF/dy| |y|, shocks included; plus a round-off
 floor), so the solution does not depend on the units
-of the model (an absolute max|R| < tol before W79)}
+of the model (an absolute max|R| < tol previously)}
 
 \item{max_regime_iter}{Maximum outer regime-switching iterations (default 30)}
 

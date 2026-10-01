@@ -177,7 +177,7 @@
 # ESS with Geyer's initial positive + monotone sequence using the
 # between-chain-aware autocorrelation 1 - (W - mean acov_t) / var_plus.
 #
-# 0.9.4 (ledger A5): these replace a SECOND, WRONG set of shared helpers that
+# 0.9.4: these replace a SECOND, WRONG set of shared helpers that
 # used to live here -- `.effective_sample_size()`, `.rank_normalise()`,
 # `.rhat_rank_norm()`, `.rhat_classic_multi()`, `.ess_bulk_multi()`,
 # `.ess_tail_multi()`, `.convergence_summary()`. Three defects, all silent:

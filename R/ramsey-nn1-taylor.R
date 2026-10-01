@@ -1,6 +1,6 @@
 ## R/ramsey-nn1-taylor.R
 ## --------------------------------------------------------------------------
-## E2: Taylor expansion engine for the (n, n+1) approximation.
+## Taylor expansion engine for the (n, n+1) approximation.
 ##
 ## Computes n-order Taylor expansions of the planner objective and each
 ## model constraint at the deterministic steady state, returning polynomial

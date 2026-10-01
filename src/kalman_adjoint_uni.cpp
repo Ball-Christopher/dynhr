@@ -24,11 +24,30 @@
 // (no Lyapunov adjoint). When false, the Lyapunov adjoint is computed after
 // the backward sweep (mirrors R reference's p0_supplied logic exactly).
 //
+// Time-varying inputs (both optional; pass a 0 x 0 matrix when absent, which
+// runs the constant-system arithmetic unchanged):
+//   shock_scale_mat -- n_exo x n_T multiplicative shock-std factors sc_t
+//                      (fixed data). Period t uses Se_t = Sigma_e % (sc_t sc_t')
+//                      in HHo / SSo / the covariance update (and in QQ_t on a
+//                      fully-missing period); every backward accumulation into
+//                      G_Sig is sandwiched elementwise by sc_t sc_t' (chain
+//                      rule through Se_t). The stationary Lyapunov P0 stays on
+//                      the BASELINE Sigma_e (kalman_filter's convention), so the
+//                      Lyapunov adjoint terms are not sandwiched.
+//   me_extra_mat    -- n_obs x n_T extra measurement-error variances (fixed
+//                      data). Period t's observed rows get the ME diagonal
+//                      me_variance + me_extra[O_t, t]: it enters F_t and the
+//                      Joseph true-noise term P_t += K diag(.) K' (adjoint:
+//                      bar_K += 2 bar_P K diag(.)).
+// return_bars: also return the raw adjoint matrices (G_TT, G_RR, G_ZZ, G_DD,
+// g_d, G_Sig) for the reverse-mode solution adjoint.
+//
 // Contract:
 //   kf_adjoint_uni_cpp(Y, TT, RR, ZZ, DD, d, Sigma_e,
 //                      dTT_cube, dRR_cube, dZZ_cube, dDD_cube, dd_mat,
-//                      dSigma_cube, me_variance, ll_min, P0, p0_supplied)
-//   -> list(ok, loglik, grad)
+//                      dSigma_cube, me_variance, ll_min, P0, p0_supplied,
+//                      shock_scale_mat, me_extra_mat, return_bars)
+//   -> list(ok, loglik, grad[, bars])
 
 #include <RcppArmadillo.h>
 // [[Rcpp::depends(RcppArmadillo)]]
@@ -61,7 +80,10 @@ List kf_adjoint_uni_cpp(const arma::mat& Y,
                         double me_variance,
                         double ll_min,
                         const arma::mat& P0_in,
-                        bool p0_supplied) {
+                        bool p0_supplied,
+                        const arma::mat& shock_scale_mat,
+                        const arma::mat& me_extra_mat,
+                        bool return_bars) {
 
   const arma::uword n_state = TT.n_rows;
   const arma::uword n_obs   = ZZ.n_rows;
@@ -72,6 +94,14 @@ List kf_adjoint_uni_cpp(const arma::mat& Y,
   const double ll_2pi = std::log(2.0 * M_PI);
 
   arma::vec grad_na = arma::vec(n_par, arma::fill::value(NA_REAL));
+
+  // Time-varying inputs: a 0 x 0 matrix means "absent".
+  const bool has_sc = shock_scale_mat.n_elem > 0;
+  const bool has_me = me_extra_mat.n_elem > 0;
+  if (has_sc && (shock_scale_mat.n_rows != n_exo || shock_scale_mat.n_cols != n_T))
+    Rcpp::stop("kf_adjoint_uni_cpp: shock_scale must be n_exo x n_T.");
+  if (has_me && (me_extra_mat.n_rows != n_obs || me_extra_mat.n_cols != n_T))
+    Rcpp::stop("kf_adjoint_uni_cpp: me_extra must be n_obs x n_T.");
 
   // -----------------------------------------------------------------------
   // Initialisation: P0 from Lyapunov or caller-supplied.
@@ -151,9 +181,15 @@ List kf_adjoint_uni_cpp(const arma::mat& Y,
 
     if (q == 0) {
       // Pure prediction step (K = 0): A = TT, B = RR.
-      // s_t = TT s_{t-1},  P_t = sym(TT P TT' + QQ)
+      // s_t = TT s_{t-1},  P_t = sym(TT P TT' + QQ_t)
       s = TT * s;
-      P = sym(TT * P * TT.t() + QQ);
+      if (has_sc) {
+        const arma::vec sc_t = shock_scale_mat.col(t);
+        const arma::mat Se_t = Sigma_e % (sc_t * sc_t.t());
+        P = sym(TT * P * TT.t() + sym(RR * Se_t * RR.t()));
+      } else {
+        P = sym(TT * P * TT.t() + QQ);
+      }
       continue;
     }
 
@@ -161,9 +197,24 @@ List kf_adjoint_uni_cpp(const arma::mat& Y,
     const arma::mat ZZo = ZZ.rows(O);        // q x n_state
     const arma::mat DDo = DD.rows(O);        // q x n_exo
     const arma::vec do_ = d.elem(O);         // q
-    const arma::mat HHo = sym(DDo * Sigma_e * DDo.t());  // q x q
-    const arma::mat SSo = RR * Sigma_e * DDo.t();        // n_state x q
-    const arma::mat me_o = me_variance * arma::eye(q, q);
+    // Period-t shock covariance (baseline when shock_scale is absent).
+    arma::mat Se_t;
+    if (has_sc) {
+      const arma::vec sc_t = shock_scale_mat.col(t);
+      Se_t = Sigma_e % (sc_t * sc_t.t());
+    } else {
+      Se_t = Sigma_e;
+    }
+    const arma::mat HHo = sym(DDo * Se_t * DDo.t());     // q x q
+    const arma::mat SSo = RR * Se_t * DDo.t();           // n_state x q
+    // ME diagonal of the observed rows: me_variance (+ me_extra[O, t]).
+    arma::mat me_o;
+    if (has_me) {
+      const arma::vec me_col = me_extra_mat.col(t);
+      me_o = arma::diagmat(me_variance + me_col.elem(O));
+    } else {
+      me_o = me_variance * arma::eye(q, q);
+    }
 
     arma::mat PZ = P * ZZo.t();                         // n_state x q
     arma::mat Ft = sym(ZZo * PZ + HHo + me_o);         // q x q
@@ -197,8 +248,10 @@ List kf_adjoint_uni_cpp(const arma::mat& Y,
     s = TT * s + K * v;
     {
       // TRUE measurement-noise law (F3-D): P' += K me_o K'.
-      arma::mat P_raw = A * P * A.t() + B * Sigma_e * B.t();
-      if (me_variance != 0.0) {
+      arma::mat P_raw = A * P * A.t() + B * Se_t * B.t();
+      if (has_me) {
+        P_raw += K * me_o * K.t();
+      } else if (me_variance != 0.0) {
         const arma::mat KKt = K * K.t();
         P_raw += me_variance * KKt;
       }
@@ -239,6 +292,16 @@ List kf_adjoint_uni_cpp(const arma::mat& Y,
 
     bar_P = sym(bar_P);
 
+    // Period-t shock covariance and the G_Sig sandwich weights sc_t sc_t'.
+    arma::mat Se_t, W_t;
+    if (has_sc) {
+      const arma::vec sc_t = shock_scale_mat.col(t);
+      W_t  = sc_t * sc_t.t();
+      Se_t = Sigma_e % W_t;
+    } else {
+      Se_t = Sigma_e;
+    }
+
     if (q == 0) {
       // Pure-prediction adjoint: A = TT, B = RR.
       // Mirrors R reference lines 128-138:
@@ -251,9 +314,10 @@ List kf_adjoint_uni_cpp(const arma::mat& Y,
       //   G_TT  += bar_A
       //   G_RR  += bar_B
       arma::mat bar_A    = 2.0 * bar_P * TT * P_prev;
-      arma::mat bar_B    = 2.0 * bar_P * RR * Sigma_e;
+      arma::mat bar_B    = 2.0 * bar_P * RR * Se_t;
       arma::mat bar_P_prev = TT.t() * bar_P * TT;
-      G_Sig += RR.t() * bar_P * RR;
+      if (has_sc) G_Sig += W_t % (RR.t() * bar_P * RR);
+      else        G_Sig += RR.t() * bar_P * RR;
       G_TT  += bar_s * s_prev.t();
       arma::vec bar_s_prev = TT.t() * bar_s;
       G_TT  += bar_A;
@@ -275,18 +339,23 @@ List kf_adjoint_uni_cpp(const arma::mat& Y,
     const arma::mat ZZo = ZZ.rows(O);   // q x n_state
     const arma::mat DDo = DD.rows(O);   // q x n_exo
 
-    // ---- Step 1: P_t = sym(A P_prev A' + B Sigma_e B') --------------------
+    // ---- Step 1: P_t = sym(A P_prev A' + B Se_t B') -----------------------
     arma::mat bar_A           = 2.0 * bar_P * A * P_prev;
-    arma::mat bar_B           = 2.0 * bar_P * B * Sigma_e;
+    arma::mat bar_B           = 2.0 * bar_P * B * Se_t;
     arma::mat bar_P_prev_AP   = A.t() * bar_P * A;
-    G_Sig += B.t() * bar_P * B;
+    if (has_sc) G_Sig += W_t % (B.t() * bar_P * B);
+    else        G_Sig += B.t() * bar_P * B;
 
     // ---- Step 2: s_t = TT s_prev + K v ------------------------------------
     G_TT  += bar_s * s_prev.t();
     arma::mat bar_K     = bar_s * v.t();
     // Adjoint of the ME Joseph term P_t += K me_o K' (me_o is DATA):
     // d tr(bar_P K me K') / dK = 2 me bar_P K.
-    if (me_variance != 0.0) {
+    if (has_me) {
+      const arma::vec me_col = me_extra_mat.col(t);
+      const arma::vec me_vec_o = me_variance + me_col.elem(O);
+      bar_K += 2.0 * (bar_P * K) * arma::diagmat(me_vec_o);
+    } else if (me_variance != 0.0) {
       const arma::mat BPK = bar_P * K;
       bar_K += 2.0 * me_variance * BPK;
     }
@@ -317,17 +386,19 @@ List kf_adjoint_uni_cpp(const arma::mat& Y,
     G_ZZ.rows(O)  += bar_Mnum.t() * TT * P_prev;    // scatter to rows O
     arma::mat bar_P_prev_Mnum = TT.t() * bar_Mnum * ZZo;
 
-    // From SSo = RR Sigma_e DDo':
-    G_RR          += bar_Mnum * DDo * Sigma_e;
-    G_DD.rows(O)  += bar_Mnum.t() * RR * Sigma_e;   // scatter to rows O
-    G_Sig         += RR.t() * bar_Mnum * DDo;
+    // From SSo = RR Se_t DDo':
+    G_RR          += bar_Mnum * DDo * Se_t;
+    G_DD.rows(O)  += bar_Mnum.t() * RR * Se_t;      // scatter to rows O
+    if (has_sc) G_Sig += W_t % (RR.t() * bar_Mnum * DDo);
+    else        G_Sig += RR.t() * bar_Mnum * DDo;
 
     // ---- Step 7: F = sym(ZZo P_prev ZZo' + HHo + me_o) -------------------
     // bar_F already symmetrized above.
     arma::mat bar_P_prev_F = ZZo.t() * bar_F * ZZo;
     G_ZZ.rows(O)  += 2.0 * bar_F * ZZo * P_prev;   // scatter to rows O
-    G_DD.rows(O)  += 2.0 * bar_F * DDo * Sigma_e;   // scatter to rows O
-    G_Sig         += DDo.t() * bar_F * DDo;
+    G_DD.rows(O)  += 2.0 * bar_F * DDo * Se_t;      // scatter to rows O
+    if (has_sc) G_Sig += W_t % (DDo.t() * bar_F * DDo);
+    else        G_Sig += DDo.t() * bar_F * DDo;
 
     // ---- Step 8: v = y[O,t] - d[O] - ZZo s_prev --------------------------
     g_d.elem(O)   -= bar_v;                          // scatter to rows O
@@ -406,6 +477,17 @@ List kf_adjoint_uni_cpp(const arma::mat& Y,
     grad(j) = gj;
   }
 
+  if (return_bars) {
+    return List::create(_["loglik"] = loglik,
+                        _["grad"]   = grad,
+                        _["ok"]     = true,
+                        _["bars"]   = List::create(_["G_TT"]  = G_TT,
+                                                   _["G_RR"]  = G_RR,
+                                                   _["G_ZZ"]  = G_ZZ,
+                                                   _["G_DD"]  = G_DD,
+                                                   _["g_d"]   = g_d,
+                                                   _["G_Sig"] = G_Sig));
+  }
   return List::create(_["loglik"] = loglik,
                       _["grad"]   = grad,
                       _["ok"]     = true);

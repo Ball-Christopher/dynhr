@@ -93,7 +93,7 @@ An object of class \code{"dynhr_passport_run"}: a list with one
   \code{run_mode_finding()} result, for reuse/inspection).
 }
 \description{
-The paper's "estimation passport" (pathological-dsge-paper, @sec-passport)
+The "estimation passport"
 bundles seven cheap-but-decisive checks that should be run BEFORE
 committing to a long estimation. This function computes all seven directly
 from \code{(model, data)} -- no pre-existing diagnostic suite or mode-find

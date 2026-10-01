@@ -75,7 +75,7 @@
     description = "Power-posterior tempering exponent zeta in (0, 1]"),
   pskf_cdf = list(
     default = "accurate", changes_results = TRUE,
-    description = "PSKF multivariate-normal CDF evaluation: accurate (deterministic C++ tilted separation-of-variables lattice, log-scale error below max(1e-5, 1e-7|log p|); compensation up to dim 5) or fast (pre-0.9.4 Mendell-Elston compensation, plain Miwa)"),
+    description = "PSKF multivariate-normal CDF evaluation: accurate (deterministic C++ tilted separation-of-variables lattice, log-scale error below max(1e-5, 1e-7|log p|); compensation up to dim 5); the only accepted value"),
   allow_monge_metric = list(
     default = FALSE, changes_results = FALSE,
     description = "Permit the experimental metric = \"monge\" MALA option"),
@@ -204,21 +204,17 @@
 #'     log-likelihood; only \code{$logpost} is tempered. Default \code{1} is
 #'     bit-identical to the standard Bayesian posterior and is compatible with
 #'     every existing sampler without any changes.}
-#'   \item{\code{pskf_cdf}}{\code{"accurate"} (default) or \code{"fast"};
-#'     how the skew-normal (PSKF) likelihood, \code{likelihood = "pskf"} and
+#'   \item{\code{pskf_cdf}}{\code{"accurate"} (the default and only accepted
+#'     value; \code{"fast"} was removed in 0.9.4.24 and now raises an error, as
+#'     it ran the slower R filter and was less accurate); how the skew-normal
+#'     (PSKF) likelihood, \code{likelihood = "pskf"} and
 #'     \code{make_log_posterior_pskf_order2()}, evaluates its multivariate-normal
 #'     CDFs. \code{"accurate"} evaluates the pruning compensation with the
 #'     deterministic CDF up to dimension 5, and every 3- to 7-dimensional CDF
 #'     with a deterministic C++ separation-of-variables lattice rule (Genz
 #'     reordering, minimax tilting, log scale) whose error is below
 #'     max(1e-5, 1e-7 |log p|); 2-dimensional CDFs are computed on the log
-#'     scale. \code{"fast"} is the evaluation before dynhr 0.9.4
-#'     (Mendell-Elston for the compensation, plain Miwa): about 3 to 4 times cheaper under
-#'     multi-shock skew and approximate: measured 3e-4 nat off an exact
-#'     likelihood with one skewed shock (T = 20), 0.002 nat with two skewed
-#'     shocks (T = 100) and 0.3 nat with three (T = 60). (Before dynhr 0.9.4.8
-#'     a Mendell-Elston sign error put it 0.14 to 18 nats off.) Resolved once
-#'     when the log-posterior is built.}
+#'     scale. Resolved once when the log-posterior is built.}
 #'   \item{\code{allow_monge_metric}}{\code{FALSE} (default); the experimental
 #'     \code{metric = "monge"} MALA option in \code{run_posterior_estimation()}
 #'     errors unless this is \code{TRUE}, because the Monge metric collapses the
@@ -271,10 +267,14 @@ dynhr_set_options <- function(...) {
   nms <- names(args)
   if (is.null(nms) || any(nms == ""))
     stop("All arguments to dynhr_set_options() must be named.")
+  ## validate before anything is assigned: a refused value leaves every
+  ## option untouched
+  if ("pskf_cdf" %in% nms && !is.null(args[["pskf_cdf"]]))
+    .pskf_cdf_check(args[["pskf_cdf"]])
   prev <- lapply(nms, function(nm) {
     p <- if (exists(nm, envir = .dynhr_opts, inherits = FALSE))
       get(nm, envir = .dynhr_opts) else NULL
-    ## NULL un-sets (brief 32 P3c): the previous value of an unset option is
+    ## NULL un-sets: the previous value of an unset option is
     ## returned as NULL, so the restore idiom
     ## old <- dynhr_set_options(x = v); do.call(dynhr_set_options, old)
     ## used to STORE NULL, and .dynhr_opt(x) then returned NULL instead of the
@@ -569,7 +569,9 @@ dynhr_reset_options <- function(...) {
 #' Reported: the loaded dynhr version, its \code{GIT_COMMIT} stamp, whether it was
 #' loaded via pkgload (\code{devtools::load_all()}), the version and stamp of the
 #' installed copy that workers would load (flagged when it differs), the BLAS
-#' and LAPACK R is linked against, the core count, and the mirai daemon status.
+#' and LAPACK R is linked against (flagged, with how to switch, when they are
+#' R's slow reference implementations), the core count, and the mirai daemon
+#' status.
 #'
 #' @return Invisibly, a list of class \code{"dynhr_sitrep"} holding the reported
 #'   fields; printing it reproduces the report.
@@ -592,6 +594,7 @@ dynhr_sitrep <- function() {
     inst_commit  <- .dynhr_git_stamp_at(inst_path)
   }
   si <- utils::sessionInfo()
+  br <- .blas_report(si$BLAS, si$LAPACK, si$matprod)
   st <- mirai::status()
   out <- structure(list(
     version           = unname(getNamespaceVersion(ns)),
@@ -603,6 +606,10 @@ dynhr_sitrep <- function() {
     installed_commit  = inst_commit,
     blas              = if (is.null(si$BLAS)) NA_character_ else si$BLAS,
     lapack            = if (is.null(si$LAPACK)) NA_character_ else si$LAPACK,
+    matprod           = br$matprod,
+    blas_reference    = br$blas_reference,
+    lapack_reference  = br$lapack_reference,
+    blas_note         = br$note,
     cores             = parallel::detectCores(),
     mirai_connections = as.integer(st$connections),
     mirai_daemons     = as.character(st$daemons)
@@ -635,6 +642,8 @@ print.dynhr_sitrep <- function(x, ...) {
       "  workers load: ", worker_line, "\n",
       "  BLAS        : ", na_or(x$blas, "unknown"), "\n",
       "  LAPACK      : ", na_or(x$lapack, "unknown"), "\n",
+      if (isTRUE(x$blas_reference) || isTRUE(x$lapack_reference))
+        paste0("  ** ", x$blas_note, "\n"),
       "  cores       : ", na_or(x$cores, "unknown"), "\n",
       "  mirai       : ",
       if (isTRUE(x$mirai_connections > 0L))

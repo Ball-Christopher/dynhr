@@ -30,7 +30,7 @@ behavior exactly.
 deviations from the steady state -- e.g. raw \code{simulate_model()} /
 \code{simulate_model_order2()} output, which are deviations -- makes
 every innovation carry the whole steady state and silently inflates
-\eqn{v_t^2/F_t} by orders of magnitude (F4-C: it turned an
+\eqn{v_t^2/F_t} by orders of magnitude (it turned an
 \eqn{O(\sigma^2)} model difference into a \eqn{\sigma}-invariant 2.8-nat
 offset against the linear Kalman filter).  Add \code{dr$ys[obs_vars]}
 to simulated deviations before filtering.}
@@ -62,7 +62,7 @@ Runs a standard Kalman filter on the order-2 AFVRR augmented state
 \eqn{\xi_t = [x^{(1)}_t;\, x^{(2)}_t;\, x^{(1)}_t \otimes x^{(1)}_t]}
 using STATIONARY (time-invariant) noise covariances.  This is the
 "cheap deterministic linear-KF on the AFVRR augmented pruned state"
-described in the scope brief: cheaper than TPF, richer than the
+described in the reference derivation: cheaper than TPF, richer than the
 unconditional-cumulant likelihood.
 }
 \details{

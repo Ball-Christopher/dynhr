@@ -347,5 +347,23 @@
   if (!is.numeric(n) || length(n) != 1L || !is.finite(n) || n < 1 || n > 16)
     stop(caller, ": 'n' must be a single integer in 1:16.")
   raw <- serialize(parts, connection = NULL, xdr = TRUE, version = 3L)
-  substr(hank_fnv1a64_cpp(raw), 1L, as.integer(n))
+  substr(hank_fnv1a64_cpp(.hank_canonical_serialize_header(raw)), 1L,
+         as.integer(n))
+}
+
+## The version-3 serialisation header records the writing R version and the
+## session's native encoding ("UTF-8", "US-ASCII" under LANG=C, ...), so the
+## same content hashed in two sessions could differ. Replace it with one fixed
+## header -- the one R 4.6.0 writes in a UTF-8 session, which every existing
+## fingerprint was computed with, so those values are unchanged -- and the
+## hash depends on the content only.
+.hank_serialize_header_v3 <- as.raw(c(
+  0x58, 0x0a, 0x00, 0x00, 0x00, 0x03, 0x00, 0x04, 0x06, 0x00, 0x00, 0x03,
+  0x05, 0x00, 0x00, 0x00, 0x00, 0x05, 0x55, 0x54, 0x46, 0x2d, 0x38))
+
+.hank_canonical_serialize_header <- function(raw) {
+  ## "X\n", then four big-endian ints (format version, writer R version,
+  ## minimal reader version, encoding-name length), then the encoding name.
+  nelen <- readBin(raw[15:18], "integer", size = 4L, endian = "big")
+  c(.hank_serialize_header_v3, raw[-seq_len(18L + nelen)])
 }

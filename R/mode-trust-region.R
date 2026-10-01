@@ -114,9 +114,13 @@ mode_trust_region <- function(fn, x0, gr = NULL, he = NULL,
   grad_fn <- if (!is.null(gr)) function(x) gr(x, ...) else function(x)
     .tr_num_grad(fn, x, ...)
   hess_fn <- if (!is.null(he)) function(x) he(x, ...) else function(x) {
-    if (requireNamespace("numDeriv", quietly = TRUE))
-      numDeriv::hessian(function(z) fn(z, ...), x)
-    else .tr_num_hess(fn, x, ...)
+    if (requireNamespace("numDeriv", quietly = TRUE)) {
+      ## numDeriv evaluates x first, so a PSKF objective's pruning selection
+      ## is recorded there and replayed at every stencil point
+      fr <- .pskf_freeze_open()
+      on.exit(.pskf_freeze_close(fr), add = TRUE)
+      numDeriv::hessian(.pskf_freeze_wrap(function(z) fn(z, ...)), x)
+    } else .tr_num_hess(fn, x, ...)
   }
 
   x  <- x0
@@ -168,10 +172,20 @@ mode_trust_region <- function(fn, x0, gr = NULL, he = NULL,
 #' @keywords internal
 .tr_num_grad <- function(fn, x, ..., h = 1e-6) {
   n <- length(x); g <- numeric(n)
+  ## A PSKF objective is differenced on the pruning selection made at x
+  ## (.pskf_freeze_open, R/pskf-likelihood.R): the first stencil point
+  ## records, and .pskf_freeze_anchor re-records at x (re-evaluating that
+  ## point only if x selects differently). No effect without a PSKF filter.
+  fr <- .pskf_freeze_open()
+  on.exit(.pskf_freeze_close(fr), add = TRUE)
+  fz <- .pskf_freeze_wrap(fn)
   for (i in seq_len(n)) {
     step <- h * max(1, abs(x[i]))
     xp <- x; xm <- x; xp[i] <- xp[i] + step; xm[i] <- xm[i] - step
-    g[i] <- (fn(xp, ...) - fn(xm, ...)) / (2 * step)
+    fp <- fz(xp, ...)
+    if (i == 1L && .pskf_freeze_anchor(function(z) fz(z, ...), x))
+      fp <- fz(xp, ...)
+    g[i] <- (fp - fz(xm, ...)) / (2 * step)
   }
   g
 }
@@ -181,13 +195,20 @@ mode_trust_region <- function(fn, x0, gr = NULL, he = NULL,
 #' @keywords internal
 .tr_num_hess <- function(fn, x, ..., h = 1e-4) {
   n <- length(x); H <- matrix(0, n, n)
+  ## frozen PSKF selection, anchored at x as in .tr_num_grad
+  fr <- .pskf_freeze_open()
+  on.exit(.pskf_freeze_close(fr), add = TRUE)
+  fz <- .pskf_freeze_wrap(fn)
   for (i in seq_len(n)) for (j in i:n) {
     hi <- h * max(1, abs(x[i])); hj <- h * max(1, abs(x[j]))
     xpp <- x; xpp[i] <- xpp[i] + hi; xpp[j] <- xpp[j] + hj
     xpm <- x; xpm[i] <- xpm[i] + hi; xpm[j] <- xpm[j] - hj
     xmp <- x; xmp[i] <- xmp[i] - hi; xmp[j] <- xmp[j] + hj
     xmm <- x; xmm[i] <- xmm[i] - hi; xmm[j] <- xmm[j] - hj
-    H[i, j] <- (fn(xpp, ...) - fn(xpm, ...) - fn(xmp, ...) + fn(xmm, ...)) /
+    fpp <- fz(xpp, ...)
+    if (i == 1L && j == 1L && .pskf_freeze_anchor(function(z) fz(z, ...), x))
+      fpp <- fz(xpp, ...)
+    H[i, j] <- (fpp - fz(xpm, ...) - fz(xmp, ...) + fz(xmm, ...)) /
       (4 * hi * hj)
     H[j, i] <- H[i, j]
   }

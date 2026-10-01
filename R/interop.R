@@ -1,6 +1,6 @@
 ## R/interop.R
 ## --------------------------------------------------------------------------
-## Ecosystem interop for posterior output (brief 23 Tier E2, 2026-09-25).
+## Ecosystem interop for posterior output.
 ##
 ##   posterior (Suggests): as_draws(), as_draws_array(), as_draws_df()
 ##   coda      (Suggests): as.mcmc(), as.mcmc.list()

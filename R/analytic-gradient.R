@@ -32,14 +32,14 @@
 #' @noRd
 .dlog_prior_density1 <- function(x, dist, p1, p2, p3 = NA_real_,
                                  p4 = NA_real_) {
-  ## Dynare p3/p4 (brief 23 A3): generalised beta on [p3, p4]; p3 is a SHIFT
+  ## Dynare p3/p4: generalised beta on [p3, p4]; p3 is a SHIFT
   ## for gamma and both inverse gammas. Mirrors .lp_dist1() exactly.
   s <- if (is.na(p3)) 0 else p3
   switch(.normalize_dist(dist),
     "inv_gamma" =, "inv_gamma1" = {
       y <- x - s
       if (y <= 0) return(0)
-      ## A12: share the ONE (alpha, theta) mapping, including the sd = Inf
+      ## Share the ONE (alpha, theta) mapping, including the sd = Inf
       ## limit -- `(alpha - 1) * (p2^2 + p1^2)` was 0 * Inf = NaN there.
       ps <- .ig1_params(p1 - s, p2)
       # log f = log2 + a*log(theta) - lgamma(a) - (2a+1) log y - theta/y^2
@@ -48,7 +48,7 @@
     "inv_gamma2" = {
       y <- x - s
       if (y <= 0) return(0)
-      ## A12: no `shape <= 2` special case. That branch fired exactly when
+      ## No `shape <= 2` special case. That branch fired exactly when
       ## sd = Inf and returned the gradient of the IMPROPER -log(x) density,
       ## which no longer matches log_prior().
       ps <- .ig2_params(p1 - s, p2)
@@ -89,19 +89,10 @@
 #' Returns 0 for any parameter out of bounds (the caller already rejects those).
 #' @noRd
 .dlog_prior <- function(theta, prior_spec) {
-  g <- numeric(length(theta))
-  names(g) <- names(theta)
-  has_p3 <- "p3" %in% names(prior_spec)
-  has_p4 <- "p4" %in% names(prior_spec)
-  for (i in seq_len(nrow(prior_spec))) {
-    nm <- prior_spec$name[i]
-    if (!(nm %in% names(theta))) next
-    g[nm] <- .dlog_prior_density1(theta[[nm]], prior_spec$distribution[i],
-                                  prior_spec$p1[i], prior_spec$p2[i],
-                                  if (has_p3) prior_spec$p3[i] else NA_real_,
-                                  if (has_p4) prior_spec$p4[i] else NA_real_)
-  }
-  g
+  ## per-family evaluation with the hyper-parameter conversions precomputed
+  ## once per prior spec (R/prior-density.R); identical to the per-row
+  ## .dlog_prior_density1 loop it replaces
+  .dlog_prior_grouped(theta, prior_spec)
 }
 
 #' Conservative set of parameter names that can move .get_shock_cov().
@@ -133,7 +124,7 @@
             par_names %in% toks]
 }
 
-#' Validate every prior_spec distribution name at BUILD time (Item F3).
+#' Validate every prior_spec distribution name at BUILD time .
 #'
 #' \code{.dlog_prior_density1} is only invoked lazily, inside the per-draw
 #' gradient closure returned by \code{\link{make_posterior_grad}}; a typo or
@@ -268,7 +259,7 @@
   }
 
   ## R fallback (bit-equivalent reference; see test-kf-score-parity).
-  ## me_diag is TRUE observation noise (F3-D): it enters F AND the Joseph
+  ## me_diag is TRUE observation noise: it enters F AND the Joseph
   ## covariance update.
   has_me_true <- any(me_diag != 0)
   for (t in seq_len(n_T)) {
@@ -318,7 +309,7 @@
 
     s <- as.numeric(TT %*% s + Kg %*% v)
     Pn <- tcrossprod(TmKZ %*% P, TmKZ) + tcrossprod(RmKD %*% Sigma_e, RmKD)
-    ## TRUE measurement-noise law (F3-D): P' += K me K'.
+    ## TRUE measurement-noise law: P' += K me K'.
     if (has_me_true) Pn <- Pn + tcrossprod(Kg %*% me_diag, Kg)
     P  <- (Pn + t(Pn)) * 0.5
   }
@@ -366,9 +357,9 @@
 #'   Lyapunov equation; this used to be finite differences of the forward.)
 #'   On the Gaussian likelihood it picks
 #'   \code{"hybrid"} instead when no analytic Kalman kernel covers the data at
-#'   \code{theta_ref} (missing observations together with \code{me_extra} or
-#'   a unit root; a unit root together with \code{me_extra} or
-#'   \code{shock_scale}), since every draw would then take the FD-hybrid
+#'   \code{theta_ref} (a unit root together with missing observations,
+#'   \code{me_extra} or \code{shock_scale}), since every draw would then take
+#'   the FD-hybrid
 #'   fallback anyway, always under \code{lik_init = "kappa"} (see
 #'   \code{lik_init}), and when the filter drops observation components at
 #'   \code{theta_ref} (a singular innovation covariance; see Details). The
@@ -405,6 +396,19 @@
 #'   first gradient evaluation) and falls back to \code{"hybrid"} entirely for
 #'   the lifetime of the returned closure.
 #'
+#'   \strong{Finite-difference fall-backs.} Every route to the
+#'   \code{"hybrid"} finite-difference gradient warns once per gradient
+#'   closure with class \code{dynhr_warning_grad_fd_fallback}, naming the
+#'   route and the conditions: \code{grad_method = "auto"} resolving to
+#'   \code{"hybrid"} at build time (a unit root together with missing data,
+#'   \code{me_extra} or \code{shock_scale}, or \code{lik_init = "kappa"}), a
+#'   draw no analytic kernel covers, an unavailable exact-diffuse kernel, or a
+#'   failed kernel. Fallback draws are counted in
+#'   \code{as.list(attr(<gradient>, "kernel_stats"))}. To log every
+#'   estimation that takes the path, handle the class, e.g.
+#'   \code{withCallingHandlers(..., dynhr_warning_grad_fd_fallback =
+#'   function(w) message(conditionMessage(w)))}.
+#'
 #'   \code{"adjoint"} is identical to \code{"implicit"} except the tangent
 #'   recursion is replaced by the reverse-mode adjoint Kalman filter
 #'   (\code{.kf_loglik_adjoint}): one forward pass storing per-step filter
@@ -412,7 +416,7 @@
 #'   the number of parameters instead of O(n_par). The two agree to ~1e-12;
 #'   prefer \code{"adjoint"} for models with many estimated parameters.
 #'
-#'   \code{"adjoint_solution"} (Tier 18 A2) extends \code{"adjoint"} with
+#'   \code{"adjoint_solution"} extends \code{"adjoint"} with
 #'   reverse mode through the perturbation solve as well: the adjoint Kalman
 #'   filter exports its bar matrices wrt (TT, RR, ZZ, DD, d), and
 #'   \code{.solution_adjoint()} turns them into the structural-parameter
@@ -422,9 +426,12 @@
 #'   structural parameter via \code{solution_derivatives}). The Sigma_e
 #'   channel (estimated shock stds, stderr expressions) is still routed
 #'   through the filter adjoint's \code{G_Sig}. Agrees with \code{"adjoint"}
-#'   to ~1e-10. Draws needing the missing-data or exact-diffuse kernels (which
-#'   do not export bars) fall back to the \code{"adjoint"} construction for
-#'   that draw; whittle/pruned likelihoods treat it as \code{"implicit"}. For
+#'   to ~1e-10. Draws needing the exact-diffuse kernel (which does not export
+#'   bars), and missing-data draws without \code{me_extra} /
+#'   \code{shock_scale}, use the \code{"adjoint"} construction for that draw;
+#'   missing-data draws with \code{me_extra} or \code{shock_scale} take the
+#'   reverse path through the missing-data kernel's bars; whittle/pruned
+#'   likelihoods treat it as \code{"implicit"}. For
 #'   the cumulant likelihood it reverses orders 1-3 on the order-2 rule (the
 #'   moment cotangent is taken back through the third-cumulant tensor
 #'   Lyapunov, then one first-order and one order-2 solution adjoint);
@@ -444,6 +451,12 @@
 #'   \code{1:4}) and the weighting scheme; used only when
 #'   \code{likelihood = "cumulant"} and must match the forward
 #'   \code{make_log_posterior_cumulant} settings.
+#' @param weight_matrix Optional fixed p x p symmetric positive-definite
+#'   moment weight matrix for \code{likelihood = "cumulant"} (as from
+#'   \code{estimate_gmm_weight_matrix()}); the loglik is then
+#'   \eqn{-(T/2) \delta' W \delta} and the gradient is exact for it. Must match
+#'   the forward \code{make_log_posterior_cumulant} setting. \code{NULL}
+#'   (default) is the identity weighting.
 #' @param debias Logical; for \code{likelihood = "whittle"}, differentiate
 #'   the debiased Whittle loglik (expected-periodogram form, Sykulski et al.
 #'   2019 — the default of the estimation entry points). Must match the
@@ -560,6 +573,7 @@ make_posterior_grad <- function(model, data, prior_spec, obs_vars, compiled,
                                 freq_band = c(0, pi),
                                 cumulant_orders = 1:4,
                                 cumulant_weight = "identity",
+                                weight_matrix = NULL,
                                 debias = TRUE,
                                 pruned_order = 2L,
                                 power = NULL,
@@ -573,8 +587,8 @@ make_posterior_grad <- function(model, data, prior_spec, obs_vars, compiled,
   grad_method <- match.arg(grad_method)
   lik_init    <- match.arg(lik_init)
   grad_method_requested <- grad_method   # "auto" is resolved after the base solve
-  .validate_prior_spec_dist(prior_spec)  # F3: fail loud at BUILD time, not mid-chain
-  ## Brief 23 A6: the gradient must be of the SAME target the posterior
+  .validate_prior_spec_dist(prior_spec)  # fail loud at BUILD time, not mid-chain
+  ## The gradient must be of the SAME target the posterior
   ## closures evaluate, logpost = logprior + zeta * loglik + log p_sys. Resolve
   ## zeta once, here, exactly as every make_log_posterior* factory does.
   power <- .resolve_power_posterior(power, "make_posterior_grad")
@@ -612,6 +626,7 @@ make_posterior_grad <- function(model, data, prior_spec, obs_vars, compiled,
                                 me_variance = me_variance,
                                 cumulant_orders = cumulant_orders,
                                 cumulant_weight = cumulant_weight,
+                                weight_matrix = weight_matrix,
                                 power = power)
   } else if (use_pruned) {
     ## Pruned-SS Gaussian KF on the AFVRR augmented state. Order 2: analytic
@@ -661,9 +676,14 @@ make_posterior_grad <- function(model, data, prior_spec, obs_vars, compiled,
             (!is.null(shock_scale) && !all(shock_scale == 1))
 
   ## Solve the model at a parameter vector, returning the decision rule (or NULL).
-  .solve_dr <- function(theta) .grad_solve_dr(model, compiled, sys_cache, theta)
+  ## One-entry structural-parameter cache (see .structural_cache_new), owned by
+  ## this closure.
+  grad_cache <- if (isTRUE(getOption("dynhr.structural_cache", TRUE)))
+    .structural_cache_new(model) else NULL
+  .solve_dr <- function(theta)
+    .grad_solve_dr(model, compiled, sys_cache, theta, cache = grad_cache)
 
-  ## --- Fused log-posterior (W92) ---------------------------------------------
+  ## --- Fused log-posterior ---------------------------------------------
   ## The Gaussian closures below already hold the log-likelihood at theta: the
   ## analytic kernel's (tang$loglik) or the objective's own (lp_fn(theta), the
   ## FD base of "hybrid" and of every fallback). They note it here, so that
@@ -674,7 +694,7 @@ make_posterior_grad <- function(model, data, prior_spec, obs_vars, compiled,
   fuse_env <- new.env(parent = emptyenv())
   .fuse_note <- function(loglik) fuse_env$loglik <- loglik
 
-  ## --- Tempering + system prior (brief 23 A6) --------------------------------
+  ## --- Tempering + system prior --------------------------------
   ## Every branch below builds a closure returning d/dtheta [logprior + loglik]
   ## (the untempered score; lp_fn is used only for its RAW $loglik). The
   ## target the posterior closures evaluate is
@@ -698,6 +718,7 @@ make_posterior_grad <- function(model, data, prior_spec, obs_vars, compiled,
                                     me_variance = me_variance,
                                     cumulant_orders = cumulant_orders,
                                     cumulant_weight = cumulant_weight,
+                                    weight_matrix = weight_matrix,
                                     system_priors = system_priors, power = 1)
       } else if (identical(pruned_order, 3L) || identical(pruned_order, 3)) {
         make_log_posterior_pruned3(model, data, prior_spec, obs_vars, compiled,
@@ -775,7 +796,7 @@ make_posterior_grad <- function(model, data, prior_spec, obs_vars, compiled,
     .stamp_method(wrapped)
   }
 
-  ## W92: the fused companion of a finished Gaussian gradient closure `gfn`,
+  ## The fused companion of a finished Gaussian gradient closure `gfn`,
   ## function(theta) -> list(logpost, grad): grad is gfn(theta) itself, and
   ## logpost is make_log_posterior's target assembled exactly as its closure
   ## assembles it (R/posterior-closure.R, system_prior_mode "lp"):
@@ -854,16 +875,16 @@ make_posterior_grad <- function(model, data, prior_spec, obs_vars, compiled,
                 length(sig_names), paste(sig_names, collapse = ","),
                 length(num_names), paste(num_names, collapse = ",")))
 
-  ## Singular innovation covariance at theta_ref (W68): does the Gaussian
+  ## Singular innovation covariance at theta_ref: does the Gaussian
   ## forward DROP observation components there (kalman_filter's singular-F
   ## fallback to the univariate filter, which skips every component whose
   ## conditional variance is below the ABSOLUTE kalman_tol)? The dropped set
   ## can change with theta, so the objective can be discontinuous, and the
   ## analytic kernels -- dense multivariate recursions -- differentiate the
   ## undropped likelihood, a different function. No gradient method can
-  ## repair that; the builder says so and uses FD of the objective. (W68 met
+  ## repair that; the builder says so and uses FD of the objective. (It met
   ## this on art_zlb_mcp, whose well-conditioned but ~1e-9-scale F the old
-  ## absolute pivot cut called singular; since W74 the fallback follows
+  ## absolute pivot cut called singular; now the fallback follows
   ## Dynare's scale-invariant rule (.kf_F_singular) and art_zlb_mcp stays
   ## multivariate. What remains is an F that Dynare also sends to the
   ## univariate filter: a component variance below kalman_tol beside
@@ -904,6 +925,28 @@ make_posterior_grad <- function(model, data, prior_spec, obs_vars, compiled,
       me_extra = me_extra, shock_scale = shock_scale,
       cumulant_orders = cumulant_orders, lik_init = lik_init,
       singular_F = singular_F)
+    ## singular_F warns on its own (dynhr_warning_grad_singular_F) below.
+    if (identical(grad_method, "hybrid") && !isTRUE(singular_F)) {
+      if (identical(lik_init, "kappa")) {
+        .grad_warn_fd_fallback(
+          "grad_method = \"auto\" resolved to \"hybrid\": lik_init = \"kappa\" (big-kappa P0) has no analytic kernel",
+          n_par = length(par_names))
+      } else if (!is.null(base)) {
+        dr0 <- base$dr; si0 <- dr0$state_idx
+        TT0 <- dr0$ghx[si0, , drop = FALSE]
+        init0 <- .grad_init_in_force(
+          TT0, dr0$ghu[si0, , drop = FALSE],
+          .get_shock_cov(model, model$varexo_names, base$params), lik_init,
+          dr = dr0)
+        .grad_warn_fd_fallback(
+          paste0("grad_method = \"auto\" resolved to \"hybrid\" at theta_ref: ",
+                 "no analytic kernel covers a unit root together with ",
+                 "missing data, me_extra or shock_scale"),
+          .grad_fd_conditions(.grad_tt_radius(TT0, dr0), init0,
+                              sum(is.na(data)), me_extra, shock_scale),
+          length(par_names))
+      }
+    }
     if (verbose)
       .dynhr_cat(sprintf("  Gradient method: auto -> %s\n", grad_method))
   }
@@ -914,10 +957,10 @@ make_posterior_grad <- function(model, data, prior_spec, obs_vars, compiled,
 
   ## dSigma_e/dtheta_nm for sigma-like params (and reused as the certainty-
   ## equivalence dSigma_e block under "implicit"). Parameters that cannot
-  ## reach .get_shock_cov() at all get an exact zero (W59). See
+  ## reach .get_shock_cov() at all get an exact zero. See
   ## .sigma_e_param_deps() for the conservative dependency set.
   ##
-  ## W91: the derivative is EXACT (.shock_cov_deriv_eval: forward-mode walk of
+  ## The derivative is EXACT (.shock_cov_deriv_eval: forward-mode walk of
   ## .get_shock_cov's priority chain with stats::D() on the shocks-block
   ## expressions), evaluated once per params vector for every dependent
   ## parameter and memoised, so the per-parameter call sites below read it
@@ -947,7 +990,7 @@ make_posterior_grad <- function(model, data, prior_spec, obs_vars, compiled,
       ## A non-finite Sigma_e (an overflowing std, e.g. a sampler trial point
       ## at s = 4e154 -> s^2 = Inf) has no exact derivative, and the walk's
       ## drift guard would compare Inf - Inf (NA) and ERROR, crashing the
-      ## sampler instead of registering a divergence (W92). Such a draw takes
+      ## sampler instead of registering a divergence. Such a draw takes
       ## the per-parameter FD below, as a non-finite entry already did.
       S_ref <- .get_shock_cov(model, exo, params)
       dS_memo$val <- if (all(is.finite(S_ref)))
@@ -988,12 +1031,15 @@ make_posterior_grad <- function(model, data, prior_spec, obs_vars, compiled,
       params <- .apply_theta_to_params(model, theta)
       ss <- solve_steady_state(model, compiled, params, verbose = FALSE)
       if (is.null(ss) || !isTRUE(ss$converged)) return(g)   # infeasible: prior-only
-      params <- ss$params %||% params                       # consistent p_c (Tier 13)
+      params <- ss$params %||% params                       # consistent p_c
       sys <- extract_system_matrices_fast(sys_cache, ss$ss, params)
       d1  <- .solve_from_system(sys, model, compiled, ss$ss, params, FALSE)
       if (is.null(d1) || !isTRUE(d1$bk_satisfied)) return(g)
       ghx_state <- d1$ghx[d1$state_idx, , drop = FALSE]
-      if (max(Mod(eigen(ghx_state, symmetric = FALSE, only.values = TRUE)$values)) >= 1) return(g)
+      ## Radius stored by the solve for exactly this block (.state_radius;
+      ## an eigen() otherwise). A QZ-derived radius is at least
+      ## .STATE_RADIUS_BAND away from 1, so the test below decides alike.
+      if (.state_radius(ghx_state, d1) >= 1) return(g)
       ## Mirror make_log_posterior_cumulant's solve-order choice EXACTLY: it
       ## solves order 2 only when an order-3/4 cumulant is requested (ghxx/ghss
       ## feed the skewness/kurtosis terms), else the bare first-order rule. The
@@ -1027,13 +1073,15 @@ make_posterior_grad <- function(model, data, prior_spec, obs_vars, compiled,
                                      par_names, obs_vars, data,
                                      orders = cumulant_orders,
                                      me_variance = me_variance,
-                                     dSigma_e_list = dS_list)
+                                     dSigma_e_list = dS_list,
+                                     weight_matrix = weight_matrix)
       } else if (grad_method == "adjoint_solution") {
         g_adj <- tryCatch(
           .cumulant_loglik_grad_adjoint(model, compiled, dr_use, params,
                                         par_names, obs_vars, data,
                                         orders = cumulant_orders,
-                                        me_variance = me_variance),
+                                        me_variance = me_variance,
+                                        weight_matrix = weight_matrix),
           error = function(e)
             .dynhr_reraise_bug(e, setNames(rep(NA_real_, np), par_names)))
         ## If the reverse path declined wholesale (all NA — e.g. order 4 or a
@@ -1043,7 +1091,8 @@ make_posterior_grad <- function(model, data, prior_spec, obs_vars, compiled,
           tryCatch(
             cumulant_loglik_grad(model, compiled, dr_use, params, par_names,
                                  obs_vars, data, orders = cumulant_orders,
-                                 me_variance = me_variance, deriv = "implicit"),
+                                 me_variance = me_variance, deriv = "implicit",
+                                 weight_matrix = weight_matrix),
             error = function(e)
               .dynhr_reraise_bug(e, setNames(rep(NA_real_, np), par_names)))
         } else g_adj
@@ -1051,7 +1100,8 @@ make_posterior_grad <- function(model, data, prior_spec, obs_vars, compiled,
         tryCatch(
           cumulant_loglik_grad(model, compiled, dr_use, params, par_names,
                                obs_vars, data, orders = cumulant_orders,
-                               me_variance = me_variance, deriv = "implicit"),
+                               me_variance = me_variance, deriv = "implicit",
+                               weight_matrix = weight_matrix),
           error = function(e)
             .dynhr_reraise_bug(e, setNames(rep(NA_real_, np), par_names)))
       }
@@ -1084,8 +1134,7 @@ make_posterior_grad <- function(model, data, prior_spec, obs_vars, compiled,
   ##
   ## Order 3: the FULL fold-chain derivative (analytic d(ghxxx)/dtheta etc.
   ## plus a derivative-Lyapunov pass through the order-3 augmented system) is
-  ## OUT OF SCOPE (see R/pruned-grad-chain-order3.R's file header / the D1
-  ## completion report's scope section). D1 instead implements a
+  ## OUT OF SCOPE (see R/pruned-grad-chain-order3.R's file header). This code instead implements a
   ## SEMI-ANALYTIC middle path (R/pruned-grad-chain-order3.R,
   ## .pgo3_grad_chain): ONE .pruned_kf_correlated_adjoint() filter pass
   ## supplies d(loglik)/d(9 SSM inputs), and central FD of the ASSEMBLY ONLY
@@ -1211,7 +1260,7 @@ make_posterior_grad <- function(model, data, prior_spec, obs_vars, compiled,
 
   ## --- "hybrid" gradient closure --------------------------------------------
   hybrid_grad_fn <- function(theta) {
-    ## Every closure here reads theta BY NAME into prior order (brief 31 A2):
+    ## Every closure here reads theta BY NAME into prior order:
     ## the old `names(theta) <- par_names` relabelled a PERMUTED named theta
     ## positionally, silently scrambling it. Unnamed = prior order.
     theta <- .theta_by_name(theta, par_names, "make_posterior_grad")
@@ -1237,14 +1286,14 @@ make_posterior_grad <- function(model, data, prior_spec, obs_vars, compiled,
     ## root) or kappa init the sigma params take FD of lp_fn instead, which
     ## carries the same lik_init. (A near-unit root under "diffuse" used to
     ## get the finite -- but stationary -- score here.)
-    init_now <- .grad_init_in_force(TT, RR, Sigma_e, lik_init)
+    init_now <- .grad_init_in_force(TT, RR, Sigma_e, lik_init, dr = dr)
     if (identical(init_now, "reject")) return(g)
     sigma_fd <- has_tv || singular_F || !identical(init_now, "stationary")
 
     ## Analytic Kalman score for the sigma-like params. The FD base value is
     ## the OBJECTIVE's own loglik (lp_fn), never the score recursion's: the
     ## two are different likelihoods whenever the forward filter drops
-    ## components (the singular-F univariate fallback; W68, art_zlb_mcp:
+    ## components (the singular-F univariate fallback; art_zlb_mcp:
     ## 1241 vs 3297), and (lp_fn(theta + h) - <other likelihood>) / h was the
     ## 1e8-relative "gradient". The comparison also decides whether the
     ## analytic sigma score is the objective's: if not, FD for those too.
@@ -1478,7 +1527,7 @@ make_posterior_grad <- function(model, data, prior_spec, obs_vars, compiled,
   ## caught; missing data reached the dense adjoint, which errors on NA.)
   warned_special <- FALSE
 
-  ## F5: lightweight fallback-usage counters, so a chain silently degrading
+  ## Lightweight fallback-usage counters, so a chain silently degrading
   ## from the analytic Kalman-adjoint/tangent kernel to the FD-hybrid path
   ## leaves a trace (fallback draws do NOT register as NUTS divergences and,
   ## after the first warning(), the `warned_special` latch above goes silent
@@ -1518,11 +1567,11 @@ make_posterior_grad <- function(model, data, prior_spec, obs_vars, compiled,
     ## consistent). Missing data on a STATIONARY model is handled by the
     ## missing-data univariate adjoint kernel (.kf_loglik_adjoint_uni): it does
     ## per-period observed-row subsetting on the stationary Lyapunov P0 and is
-    ## forward-consistent with the production KF to machine precision (Tier 14;
+    ## forward-consistent with the production KF to machine precision (
     ## the orphaning rationale -- a ~0.5 nat loglik gap -- was a production
-    ## steady-state-lock-vs-fully-missing bug, now fixed). That kernel supports
-    ## neither me_extra nor shock_scale, so those (and unit-root draws) still
-    ## take the exact FD-hybrid path.
+    ## steady-state-lock-vs-fully-missing bug, now fixed). That kernel takes
+    ## per-period me_extra and shock_scale too; unit-root draws with missing
+    ## data, me_extra or shock_scale still take the exact FD-hybrid path.
     has_missing <- anyNA(Y)
     ## Mirror kalman_filter(lik_init = "auto") EXACTLY: a near-/at-unit root only
     ## forces the diffuse path when the stationary Lyapunov P0 is non-finite or
@@ -1530,26 +1579,27 @@ make_posterior_grad <- function(model, data, prior_spec, obs_vars, compiled,
     ## now uses the stationary init, so the gradient MUST use the stationary
     ## adjoint too -- otherwise the gradient would be d(diffuse loglik)/dtheta
     ## while the loglik is the stationary one, breaking newrat's line search.
-    ## Explicit lik_init (W68): "diffuse" is the diffuse init on every root
+    ## Explicit lik_init: "diffuse" is the diffuse init on every root
     ## within 1e-6 of the unit circle (not only where the Lyapunov P0 fails,
     ## as under "auto"); "stationary" on a unit root is a -Inf posterior, so
     ## the prior score is all there is. ("kappa" never reaches this closure:
     ## refused at build time.)
-    init_now <- .grad_init_in_force(TT, RR, Sigma_e, lik_init)
+    init_now <- .grad_init_in_force(TT, RR, Sigma_e, lik_init, dr = dr)
     if (identical(init_now, "reject")) return(g)
     has_unit_root <- identical(init_now, "diffuse")
     ## Specialized kernels cover two of the special-init cases exactly:
     ##  * stationary + missing data            -> .kf_loglik_adjoint_uni
-    ##    (supports shock_scale since 0.9.0.0008 -- per-period Se_t in the R
-    ##    reference, sandwiched Sigma_e adjoint; validated vs numDeriv in
-    ##    test-gradient-shock-scale-wired.R. me_extra remains excluded.)
+    ##    (per-period observed rows, shock_scale Se_t with the sandwiched
+    ##    Sigma_e adjoint, and me_extra on the observed rows' ME diagonal;
+    ##    compiled; validated against finite differences of the forward
+    ##    filter and of a brute-force joint Gaussian likelihood)
     ##  * unit-root (diffuse) + complete data  -> .kf_loglik_adjoint_diffuse
     ##    (no me_extra/shock_scale; needs complete data through the diffuse phase)
-    ## Any remaining special case (unit-root + missing; special-init + me_extra;
-    ## diffuse + shock_scale) takes the exact FD-hybrid path, which
-    ## differentiates the forward likelihood directly.
-    use_uni_adjoint <- has_missing && !has_unit_root &&
-      is.null(me_extra)
+    ## A unit root together with missing data, me_extra or shock_scale takes
+    ## the exact FD-hybrid path, which differentiates the forward likelihood
+    ## directly: the forward filter runs the SEQUENTIAL exact-diffuse
+    ## recursion there, which no adjoint kernel mirrors.
+    use_uni_adjoint <- has_missing && !has_unit_root
     use_diffuse_adjoint <- has_unit_root && !has_missing &&
       is.null(me_extra) && is.null(shock_scale)
     ## == (has_unit_root || has_missing) && !use_uni_adjoint &&
@@ -1557,10 +1607,13 @@ make_posterior_grad <- function(model, data, prior_spec, obs_vars, compiled,
     if (.grad_no_kernel_covers(has_unit_root, has_missing, me_extra, shock_scale)) {
       kernel_stats$n_fallback_special_init <- kernel_stats$n_fallback_special_init + 1L
       if (!warned_special) {
-        .dynhr_warn("make_posterior_grad: ", grad_method, " gradient with a ",
-                "non-stationary init and/or (me_extra/shock_scale +) missing ",
-                "data falls back to the exact FD-hybrid path for this case.",
-                call. = FALSE)
+        .grad_warn_fd_fallback(
+          paste0(grad_method, " gradient: no analytic kernel covers a unit ",
+                 "root together with missing data, me_extra or shock_scale, ",
+                 "so this draw (and every such draw) uses finite differences"),
+          .grad_fd_conditions(.grad_tt_radius(TT, dr), init_now,
+                              sum(is.na(Y)), me_extra, shock_scale),
+          length(par_names))
         warned_special <<- TRUE
       }
       return(hybrid_grad_fn(theta))
@@ -1584,10 +1637,13 @@ make_posterior_grad <- function(model, data, prior_spec, obs_vars, compiled,
 
     ## Full reverse mode ("adjoint_solution"): the dense adjoint kernel exports
     ## its bar matrices and .solution_adjoint() replaces the per-parameter
-    ## forward Sylvester solves. The uni/diffuse special-case kernels do not
-    ## export bars, so those draws use the "adjoint" construction instead.
+    ## forward Sylvester solves. The exact-diffuse kernel does not export bars,
+    ## so its draws use the "adjoint" construction instead. The missing-data
+    ## kernel does too, so missing-data draws take the reverse path as well
+    ## (sw2007 with 2 NA: 21 -> 9 ms; the gradient moves ~3e-12 relative from
+    ## the forward "adjoint" construction it used before).
     use_sol_adjoint <- grad_method == "adjoint_solution" &&
-      !use_uni_adjoint && !use_diffuse_adjoint
+      !use_diffuse_adjoint
 
     ## Build d_ss_list: sigma params get dSigma_e only; all other params get
     ## solution_derivatives() blocks (one shared call/factorization). Under
@@ -1645,9 +1701,11 @@ make_posterior_grad <- function(model, data, prior_spec, obs_vars, compiled,
           !is.finite(tang$loglik)) {
         kernel_stats$n_fallback_diffuse <- kernel_stats$n_fallback_diffuse + 1L
         if (!warned_special) {
-          .dynhr_warn("make_posterior_grad: exact-diffuse adjoint gradient ",
-                  "unavailable for this draw; using the FD-hybrid fallback.",
-                  call. = FALSE)
+          .grad_warn_fd_fallback(
+            paste0("the exact-diffuse adjoint kernel could not run for this ",
+                   "draw (a unit root with complete data; its forward or ",
+                   "initialisation stage failed numerically)"),
+            n_par = length(par_names))
           warned_special <<- TRUE
         }
         return(hybrid_grad_fn(theta))
@@ -1667,11 +1725,13 @@ make_posterior_grad <- function(model, data, prior_spec, obs_vars, compiled,
       tang <- tryCatch({
         if (use_uni_adjoint) {
           ## Missing-data multivariate adjoint with per-period observed-row
-          ## subsetting; stationary Lyapunov P0 (P0 = NULL). me_variance is scalar.
-          ## shock_scale (when present) routes to the kernel's R reference,
-          ## which substitutes Se_t per period (see gradient-adjoint-uni.R).
+          ## subsetting; stationary Lyapunov P0 (P0 = NULL). me_variance is
+          ## scalar; shock_scale / me_extra enter per period (see
+          ## gradient-adjoint-uni.R). Bars only when reversing the solve.
           .kf_loglik_adjoint_uni(Y, ss, d_ss_list, me_variance = me_variance,
-                                 P0 = NULL, shock_scale = shock_scale)
+                                 P0 = NULL, shock_scale = shock_scale,
+                                 me_extra = me_extra,
+                                 return_bars = use_sol_adjoint)
         } else if (use_sol_adjoint) {
           ## Dense stationary adjoint WITH bar export (the _ss long-T variant does
           ## not export bars; the O(T) n^2 storage is accepted here).
@@ -1702,9 +1762,10 @@ make_posterior_grad <- function(model, data, prior_spec, obs_vars, compiled,
       if (is.null(tang)) {
         kernel_stats$n_fallback_nondiffuse <- kernel_stats$n_fallback_nondiffuse + 1L
         if (!warned_special) {
-          .dynhr_warn("make_posterior_grad: ", grad_method, " gradient kernel ",
-                  "failed for this draw (numerical KF failure); using the ",
-                  "FD-hybrid fallback.", call. = FALSE)
+          .grad_warn_fd_fallback(
+            paste0("the ", grad_method, " gradient kernel failed for this ",
+                   "draw (a numerical Kalman-filter failure)"),
+            n_par = length(par_names))
           warned_special <<- TRUE
         }
         return(hybrid_grad_fn(theta))
@@ -1727,7 +1788,9 @@ make_posterior_grad <- function(model, data, prior_spec, obs_vars, compiled,
       sol_adj <- if (!is.null(tang$bars)) tryCatch(
         .solution_adjoint(model, compiled, dr, params,
                           param_names = num_names, obs_vars = obs_vars,
-                          bars = tang$bars),
+                          bars = tang$bars,
+                          prep = .grad_adjoint_prep(compiled, dr$ys, params,
+                                                    sol$sys)),
         error = function(e) .dynhr_reraise_bug(e, NULL)
       ) else NULL
       for (nm in num_names) {
@@ -1791,13 +1854,17 @@ make_posterior_grad <- function(model, data, prior_spec, obs_vars, compiled,
 ## the stationary init, so the gradient kernels must too. (Moved verbatim from
 ## the tangent/adjoint closure of make_posterior_grad(); the "auto" resolution
 ## applies the same test at theta_ref.)
-.grad_needs_diffuse_init <- function(TT, RR, Sigma_e) {
-  if (nrow(TT) == 0 ||
-      !any(Mod(eigen(TT, symmetric = FALSE, only.values = TRUE)$values) > 1 - 1e-6))
+## `dr` (optional): the decision rule TT was taken from. Its stored spectral
+## radius (.state_radius) replaces the eigen() call when TT is the identical
+## block; "any |eig| > 1 - 1e-6" is "radius > 1 - 1e-6", and a radius taken
+## from the QZ eigenvalues is at least .STATE_RADIUS_BAND away from 1, so the
+## decision is the same either way.
+.grad_needs_diffuse_init <- function(TT, RR, Sigma_e, dr = NULL) {
+  if (nrow(TT) == 0 || !(.grad_tt_radius(TT, dr) > 1 - 1e-6))
     return(FALSE)
   QQ_g <- RR %*% Sigma_e %*% t(RR)
   P0_g <- tryCatch(solve_lyapunov(TT, QQ_g), error = function(e) NULL)
-  ## the forward filter's (relative) validity rule, shared (W77)
+  ## the forward filter's (relative) validity rule, shared
   !.kf_stationary_P0_ok(P0_g)
 }
 
@@ -1814,30 +1881,82 @@ make_posterior_grad <- function(model, data, prior_spec, obs_vars, compiled,
 ## .kf_diffuse_P0()'s unit-root block, every root with ||lambda| - 1| < 1e-6,
 ## which includes the still-stationary roots in (1 - 1e-6, 1) that "auto"
 ## keeps stationary.
-.grad_init_in_force <- function(TT, RR, Sigma_e, lik_init = "auto") {
+## `dr` (optional) as in .grad_needs_diffuse_init(): the stored radius decides
+## "max |eig| >= 1" and, when it is below 1 - 1e-6, "any ||eig| - 1| < 1e-6"
+## (no eigenvalue can then be that close to 1); only a radius within 1e-6 of
+## the unit circle or beyond it needs the full spectrum.
+.grad_init_in_force <- function(TT, RR, Sigma_e, lik_init = "auto",
+                                dr = NULL) {
   if (identical(lik_init, "kappa")) return("kappa")
   if (identical(lik_init, "auto"))
-    return(if (.grad_needs_diffuse_init(TT, RR, Sigma_e)) "diffuse"
+    return(if (.grad_needs_diffuse_init(TT, RR, Sigma_e, dr)) "diffuse"
            else "stationary")
   if (nrow(TT) == 0) return("stationary")
-  mods <- Mod(eigen(TT, symmetric = FALSE, only.values = TRUE)$values)
+  rad <- .grad_tt_radius(TT, dr)
   if (identical(lik_init, "stationary"))
-    return(if (max(mods) >= 1) "reject" else "stationary")
+    return(if (rad >= 1) "reject" else "stationary")
+  if (rad < 1 - 1e-6) return("stationary")
+  mods <- Mod(eigen(TT, symmetric = FALSE, only.values = TRUE)$values)
   if (any(abs(mods - 1) < 1e-6)) "diffuse" else "stationary"
+}
+
+
+## Spectral radius of the state transition TT: the value stored on the decision
+## rule `dr` when TT is its identical state block (.state_radius), a fresh
+## eigen() otherwise or when no rule is given.
+.grad_tt_radius <- function(TT, dr = NULL) {
+  if (!is.null(dr)) return(.state_radius(TT, dr))
+  max(Mod(eigen(TT, symmetric = FALSE, only.values = TRUE)$values))
 }
 
 
 ## TRUE when no analytic (tangent / adjoint) Kalman kernel covers a draw, so
 ## the implicit/adjoint/adjoint_solution closures take the exact FD-"hybrid"
-## path for it: the missing-data kernel needs a stationary init and no
-## me_extra; the exact-diffuse kernel needs complete data and neither me_extra
-## nor shock_scale.
+## path for it: the missing-data kernel (which takes me_extra and shock_scale)
+## needs a stationary init; the exact-diffuse kernel needs complete data and
+## neither me_extra nor shock_scale.
 .grad_no_kernel_covers <- function(has_unit_root, has_missing, me_extra,
                                    shock_scale) {
-  use_uni     <- has_missing && !has_unit_root && is.null(me_extra)
+  use_uni     <- has_missing && !has_unit_root
   use_diffuse <- has_unit_root && !has_missing &&
     is.null(me_extra) && is.null(shock_scale)
   (has_unit_root || has_missing) && !use_uni && !use_diffuse
+}
+
+
+## The warning for a gradient that falls back to finite differences of the
+## log-posterior (grad_method "hybrid"), naming how it got there so a user
+## can monitor which estimations take the path. One class for every such
+## route: auto resolving to "hybrid" at build time, a draw no analytic
+## kernel covers, an unavailable exact-diffuse kernel, a failed kernel.
+## `route` says which; `cond` (optional) lists the data / init conditions.
+.grad_warn_fd_fallback <- function(route, cond = NULL, n_par = NA_integer_) {
+  .dynhr_warn(
+    "make_posterior_grad: ", route,
+    if (!is.null(cond)) paste0(" (", cond, ")"),
+    ". The gradient is the FD-hybrid central finite difference of the ",
+    "log-posterior",
+    if (is.finite(n_par)) sprintf(" (about %d extra log-posterior evaluations per gradient)", 2L * n_par),
+    ": exact to finite-difference accuracy, slower than the analytic kernels. ",
+    "Fallback draws are counted in attr(<gradient>, \"kernel_stats\") ",
+    "(n_fallback_special_init / n_fallback_diffuse / n_fallback_nondiffuse); ",
+    "this warning is given once per gradient closure.",
+    class = "dynhr_warning_grad_fd_fallback", call. = FALSE)
+}
+
+## The conditions that send a draw to the FD path, as text: the state
+## transition's spectral radius and the init in force, and which of missing
+## data / me_extra / shock_scale are present.
+.grad_fd_conditions <- function(radius, init_in_force, n_missing, me_extra,
+                                shock_scale) {
+  paste0(
+    "state-transition spectral radius ", formatC(radius, digits = 10, format = "g"),
+    " -> lik_init in force \"", init_in_force, "\" (a unit root: the forward ",
+    "filter runs the sequential exact-diffuse recursion, which no adjoint ",
+    "kernel mirrors); missing observations: ",
+    if (n_missing > 0) paste(n_missing, "cells") else "none",
+    "; me_extra: ", if (is.null(me_extra)) "no" else "yes",
+    "; shock_scale: ", if (is.null(shock_scale)) "no" else "yes")
 }
 
 
@@ -1850,7 +1969,7 @@ make_posterior_grad <- function(model, data, prior_spec, obs_vars, compiled,
 ##  * an EXACT singularity (an observable that is an exact combination of
 ##    others, no measurement error): the dense kernel fails (non-finite) on
 ##    it, so every draw already takes the exact FD fallback of the forward,
-##    whose dropped set is stable (test-gradient-shock-scale-wired.R W3);
+##    whose dropped set is stable (test-gradient-shock-scale-wired.R);
 ##  * a draw outside the dense stationary kernel's domain (diffuse init,
 ##    missing data): those draws take the FD-hybrid path anyway.
 ## Flagged: a singularity by SCALE that Dynare's rule also routes to the
@@ -1859,7 +1978,7 @@ make_posterior_grad <- function(model, data, prior_spec, obs_vars, compiled,
 ## chol succeeds, the kernel returns the undropped likelihood, and the
 ## forward drops the tiny component. (A well-conditioned F of small overall
 ## scale -- art_zlb_mcp, observable variances ~1e-9 -- is no longer routed
-## there since W74, so it is not flagged.) One filter pass (plus one kernel pass
+## there, so it is not flagged.) One filter pass (plus one kernel pass
 ## when components are dropped) at build time; the forward's own fallback
 ## warning is superseded by the builder's classed one.
 .grad_singular_F_mismatch <- function(model, data, obs_vars, base,
@@ -1869,7 +1988,7 @@ make_posterior_grad <- function(model, data, prior_spec, obs_vars, compiled,
   dr <- base$dr; si <- dr$state_idx; oi <- match(obs_vars, dr$endo_names)
   TT <- dr$ghx[si, , drop = FALSE]; RR <- dr$ghu[si, , drop = FALSE]
   Sigma_e <- .get_shock_cov(model, model$varexo_names, base$params)
-  init <- .grad_init_in_force(TT, RR, Sigma_e, lik_init)
+  init <- .grad_init_in_force(TT, RR, Sigma_e, lik_init, dr = dr)
   if (!identical(init, "stationary")) return(NULL)
   Y <- if (is.null(dim(data))) matrix(data, nrow = length(obs_vars)) else data
   if (nrow(Y) != length(obs_vars)) Y <- t(Y)
@@ -1896,18 +2015,60 @@ make_posterior_grad <- function(model, data, prior_spec, obs_vars, compiled,
 
 ## First-order solve at theta for the gradient builders: list(dr, params), or
 ## NULL when the steady state or the Blanchard-Kahn condition fails.
-.grad_solve_dr <- function(model, compiled, sys_cache, theta) {
+.grad_solve_dr <- function(model, compiled, sys_cache, theta, cache = NULL) {
   params <- .apply_theta_to_params(model, theta)
+  ## `cache`: a .structural_cache_new() environment. The solve below is cold
+  ## (no warm start), so it is a pure function of the structural parameters
+  ## and a draw that moves only covariance-side ones reuses it as is.
+  hit <- NULL
+  if (!is.null(cache)) {
+    key <- .structural_cache_key(cache, params)
+    hit <- .structural_cache_lookup(cache, key)
+  }
+  if (!is.null(hit))
+    return(list(dr = hit$sol$dr, params = .structural_cache_params(hit, params),
+                sys = hit$sol$sys))
+  params_in <- params
   ss <- solve_steady_state(model, compiled, params, verbose = FALSE)
   if (is.null(ss) || !isTRUE(ss$converged)) return(NULL)
   ## Re-derive any steady_state_model-computed parameter so the base decision
   ## rule (and the returned params) are consistent with the re-solved steady
-  ## state (no-op for non-SSM-parameter models; Tier 13 #1).
+  ## state (no-op for non-SSM-parameter models).
   params <- ss$params %||% params
   sys <- extract_system_matrices_fast(sys_cache, ss$ss, params)
   dr  <- .solve_from_system(sys, model, compiled, ss$ss, params, FALSE)
   if (is.null(dr) || !isTRUE(dr$bk_satisfied)) return(NULL)
-  list(dr = dr, params = params)
+  if (!is.null(cache))
+    .structural_cache_store(cache, key, params_in, params, ss,
+                            list(dr = dr, sys = sys))
+  list(dr = dr, params = params, sys = sys)
+}
+
+
+## What the reverse-mode solution adjoint and the analytic primitive
+## contraction both need at (ys, params), built ONCE from the system matrices
+## the first-order solve already extracted: the declaration-order level blocks
+## (what extract_system_matrices() returns -- the fast extractor keeps equation
+## order), the dynamic expansion point and the equation-to-declaration layout.
+## NULL (callers then rebuild everything themselves, as before) for OccBin
+## models, a non-square system, or a base Jacobian with a non-finite entry
+## (the analytic path declines those; the slow extractor repairs them with a
+## warning).
+.grad_adjoint_prep <- function(compiled, ys, params, sys) {
+  if (is.null(sys) || !is.null(compiled[["occbin"]])) return(NULL)
+  dyn <- compiled$dynamic
+  if (nrow(sys$f_zero) != dyn$n_eq || dyn$n_eq != length(compiled$model$var_names))
+    return(NULL)
+  dy <- .build_dy_ss_o2(compiled, ys)
+  Jbase <- dyn$jacobian_fn(dy, params, ys)
+  if (any(!is.finite(Jbase))) return(NULL)
+  layout <- .dsys_layout(compiled, Jbase)
+  perm <- layout$perm
+  sys0 <- list(f_minus = sys$f_minus[perm, , drop = FALSE],
+               f_zero  = sys$f_zero[perm, , drop = FALSE],
+               f_plus  = sys$f_plus[perm, , drop = FALSE],
+               f_exo   = sys$f_exo[perm, , drop = FALSE])
+  list(sys0 = sys0, dy = dy, layout = layout)
 }
 
 
@@ -1948,7 +2109,7 @@ make_posterior_grad <- function(model, data, prior_spec, obs_vars, compiled,
 
 ## Resolve make_posterior_grad(grad_method = "auto") to a concrete method.
 ##
-## Rule (W62 benchmark, 2026-09-26; median of >= 20 interleaved calls per
+## Rule (benchmark; median of >= 20 interleaved calls per
 ## method, accuracy against a five-point central difference):
 ##   * gaussian -> "adjoint_solution": fastest (or tied within timing noise)
 ##     of the exact methods on EVERY model measured -- AR(1) (2 params,
@@ -1965,7 +2126,7 @@ make_posterior_grad <- function(model, data, prior_spec, obs_vars, compiled,
 ##   * cumulant -> "adjoint_solution" when the third cumulant is matched and
 ##     the fourth is not (3 in cumulant_orders, 4 not): the reverse-mode path
 ##     covers exactly orders 1-3 on the order-2 rule the forward solves there.
-##     W65 benchmark (median of 5-7 interleaved calls, T = 150-200, accuracy
+##     benchmark (median of 5-7 interleaved calls, T = 150-200, accuracy
 ##     against a five-point central difference of the log-posterior):
 ##     rbc2shock 4 structural params, orders 1:3: 22 ms vs implicit 1921 ms
 ##     (rel err 2.9e-8 vs 1.9e-7); rbc2shock with 2 estimated shock stds,
@@ -1975,17 +2136,17 @@ make_posterior_grad <- function(model, data, prior_spec, obs_vars, compiled,
 ##     reverse path declines wholesale and runs the implicit path anyway
 ##     (rbc2shock 1:4: 2127 vs 2188 ms, identical gradient), and without
 ##     order 3 the forward solves a first-order rule the reverse path does not
-##     take (same code path, nk_demo 1:2: 13 vs 12 ms). Since W68 that shared
+##     take (same code path, nk_demo 1:2: 13 vs 12 ms). That shared
 ##     path for orders within 1:2 is EXACT (.cumulant_loglik_grad_order1:
 ##     solution_derivatives + derivative Lyapunov), not FD of the forward.
 ##   * whittle, pruned -> "implicit". Whittle runs one analytic path for every
 ##     non-hybrid method; pruned does not consult grad_method.
-##   * gaussian with lik_init = "kappa" -> "hybrid" (W68): the big-kappa P0 has
+##   * gaussian with lik_init = "kappa" -> "hybrid": the big-kappa P0 has
 ##     no analytic kernel, and the other methods refuse it. An explicit
 ##     "diffuse" / "stationary" moves the unit-root test to that init's rule
 ##     (.grad_init_in_force()).
 ##   * gaussian where the forward drops observation components at theta_ref
-##     (singular_F: the singular-F univariate fallback) -> "hybrid" (W68):
+##     (singular_F: the singular-F univariate fallback) -> "hybrid":
 ##     the objective is discontinuous there and no analytic kernel follows
 ##     the dropping; make_posterior_grad() warns and uses FD for every
 ##     parameter.
@@ -2008,7 +2169,7 @@ make_posterior_grad <- function(model, data, prior_spec, obs_vars, compiled,
     has_unit_root <- identical(.grad_init_in_force(
       dr$ghx[si, , drop = FALSE], dr$ghu[si, , drop = FALSE],
       .get_shock_cov(model, model$varexo_names, base$params),
-      lik_init), "diffuse")
+      lik_init, dr = dr), "diffuse")
   }
   if (.grad_no_kernel_covers(has_unit_root, has_missing, me_extra, shock_scale))
     return("hybrid")

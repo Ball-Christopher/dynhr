@@ -173,6 +173,36 @@ proposal_cov <- function(lp_fn, theta_mode, prior_spec,
 }
 
 
+#' numDeriv Hessian of the negative log-posterior for .proposal_cov_full
+#'
+#' NULL on any non-finite evaluation -- numDeriv's Richardson extrapolation
+#' cannot be steered with a penalty value. A PSKF posterior is differenced on
+#' the pruning selection made at \code{theta_mode}, which is evaluated first
+#' and so records it (.pskf_freeze_open): a second difference across a
+#' selection switch would otherwise return jump / h^2. Functions that run no
+#' PSKF filter are unaffected.
+#' @noRd
+.proposal_numderiv_hessian <- function(neg_lp, theta_mode) {
+  fr <- .pskf_freeze_open()
+  on.exit(.pskf_freeze_close(fr), add = TRUE)
+  neg_lp <- .pskf_freeze_wrap(neg_lp)
+  f0 <- tryCatch(neg_lp(theta_mode),
+                 error = function(e) .dynhr_reraise_bug(e, NA_real_))
+  if (!is.finite(f0)) return(NULL)
+  neg_lp_checked <- function(theta) {
+    v <- tryCatch(neg_lp(theta),
+                  error = function(e) .dynhr_reraise_bug(e, NA_real_))
+    if (!is.finite(v))
+      stop("non-finite log-posterior encountered during Hessian evaluation")
+    v
+  }
+  tryCatch(
+    numDeriv::hessian(neg_lp_checked, as.numeric(theta_mode)),
+    error = function(e) .dynhr_reraise_bug(e, NULL)
+  )
+}
+
+
 #' Full-Hessian proposal covariance with eigenvalue repair
 #'
 #' Inverse of the (symmetrised) negative Hessian of the log-posterior at
@@ -202,7 +232,7 @@ proposal_cov <- function(lp_fn, theta_mode, prior_spec,
 
   H <- NULL
   bnd_eta <- NULL
-  ## Exact gradient available (W88): central differences of the gradient,
+  ## Exact gradient available: central differences of the gradient,
   ## 2n calls, instead of numDeriv's Richardson stencil on the log-posterior.
   ## The bound-active coordinates (same reach as the bound path below) are
   ## differenced one-sided inward from their own gradient component and
@@ -232,23 +262,7 @@ proposal_cov <- function(lp_fn, theta_mode, prior_spec,
   }
 
   if (is.null(H) && requireNamespace("numDeriv", quietly = TRUE)) {
-    ## Abort (return NULL) on any non-finite evaluation -- numDeriv's
-    ## Richardson extrapolation cannot be steered with a penalty value.
-    f0 <- tryCatch(neg_lp(theta_mode),
-                   error = function(e) .dynhr_reraise_bug(e, NA_real_))
-    if (is.finite(f0)) {
-      neg_lp_checked <- function(theta) {
-        v <- tryCatch(neg_lp(theta),
-                      error = function(e) .dynhr_reraise_bug(e, NA_real_))
-        if (!is.finite(v))
-          stop("non-finite log-posterior encountered during Hessian evaluation")
-        v
-      }
-      H <- tryCatch(
-        numDeriv::hessian(neg_lp_checked, as.numeric(theta_mode)),
-        error = function(e) .dynhr_reraise_bug(e, NULL)
-      )
-    }
+    H <- .proposal_numderiv_hessian(neg_lp, theta_mode)
   }
 
   if (is.null(H)) {
@@ -451,11 +465,10 @@ proposal_cov <- function(lp_fn, theta_mode, prior_spec,
 
 #' Sanity-check an FD Hessian's condition number against a reference Hessian
 #'
-#' The pathological-DSGE paper's central finding is that
 #' \code{numDeriv::hessian}'s DEFAULT step overshoots near-unit-root /
 #' determinacy boundaries and inflates the reported posterior-Hessian
 #' condition number by 5-7 orders of magnitude relative to an analytic or
-#' BFGS-curvature reference (examples from that paper: nk_small FD 1.1e11 vs
+#' BFGS-curvature reference (examples: nk_small FD 1.1e11 vs
 #' analytic 3.6e5; sw2007-stress FD 2e16 vs analytic 2.4e8). This helper
 #' compares the two condition numbers and warns when the FD one is
 #' implausibly larger, so the trap is caught instead of silently poisoning a
@@ -541,7 +554,7 @@ check_hessian_conditioning <- function(H_fd, H_ref, ratio_tol = 1e3,
         "Recommend: (1) use the analytic posterior_hessian() instead of numDeriv's ",
         "default-step FD Hessian; (2) if FD is unavoidable, use a smaller, ",
         "feasibility-aware step size; default numDeriv steps were found to inflate ",
-        "kappa by 5-7 orders of magnitude on the pathological-DSGE paper's models ",
+        "kappa by 5-7 orders of magnitude on near-boundary DSGE models ",
         "(nk_small: FD 1.1e11 vs analytic 3.6e5; sw2007-stress: 2e16 vs 2.4e8)."
       ),
       label_fd, kappa_fd, label_ref, kappa_ref, ratio, ratio_tol
@@ -610,7 +623,7 @@ check_hessian_conditioning <- function(H_fd, H_ref, ratio_tol = 1e3,
 ## central FD stencil of the Step-6 Hessian then steps outside the support,
 ## the prior returns -Inf, and the whole row/column of that coordinate became
 ## non-finite -> .make_pd assigned PRIOR variances (NZSIM at the Dynare mc5
-## mode, W83 2026-09-28: five parameters 1e-8..1e-13 from their bounds).
+## mode: five parameters 1e-8..1e-13 from their bounds).
 ##
 ## What the proposal SHOULD be there depends on the sampler space:
 ##
@@ -686,11 +699,16 @@ check_hessian_conditioning <- function(H_fd, H_ref, ratio_tol = 1e3,
 #' \code{curv = (f2 - 2 f1 + f0) / h^2} (first-order accurate) and
 #' \code{slope = (4 f1 - f2 - 3 f0) / (2 h)}, the derivative along \code{s}
 #' (second-order accurate). The step is shrunk only if \code{2 h} would
-#' reach the FAR bound.
+#' reach the FAR bound. A PSKF log-posterior is differenced on the pruning
+#' selection made at \code{theta} (evaluated first, so it records; see
+#' .pskf_freeze_open); other functions are unaffected.
 #' @noRd
 .step6_one_sided <- function(f, theta, i, h, lower, upper) {
   iw  <- .step6_inward(theta, i, h, lower, upper)
   s   <- iw$dir; h <- iw$h
+  fr  <- .pskf_freeze_open()
+  on.exit(.pskf_freeze_close(fr), add = TRUE)
+  f   <- .pskf_freeze_wrap(f)
   f0  <- f(theta)
   th1 <- theta; th1[i] <- theta[[i]] + s * h
   th2 <- theta; th2[i] <- theta[[i]] + 2 * s * h
@@ -822,7 +840,12 @@ check_hessian_conditioning <- function(H_fd, H_ref, ratio_tol = 1e3,
   }
   he <- 1e-3
   e  <- opt$maximum
-  curv <- (fe(e + he) - 2 * fe(e) + fe(e - he)) / he^2
+  ## PSKF: the three points share the selection made at e (evaluated first)
+  fr <- .pskf_freeze_open()
+  on.exit(.pskf_freeze_close(fr), add = TRUE)
+  fz <- .pskf_freeze_wrap(fe)
+  f_e  <- fz(e)
+  curv <- (fz(e + he) - 2 * f_e + fz(e - he)) / he^2
   if (is.finite(curv) && curv < 0) -1 / curv else 1
 }
 
@@ -853,7 +876,7 @@ check_hessian_conditioning <- function(H_fd, H_ref, ratio_tol = 1e3,
 
 
 ## --------------------------------------------------------------------------
-## Step-6 Hessian from the exact gradient (W88, 2026-09-28)
+## Step-6 Hessian from the exact gradient
 ## --------------------------------------------------------------------------
 ##
 ## num_hessian() differences the LOG-POSTERIOR over every (i, j) pair:
@@ -882,7 +905,7 @@ check_hessian_conditioning <- function(H_fd, H_ref, ratio_tol = 1e3,
 ## nested difference has the worse roundoff. A gradient stencil with a
 ## non-finite entry falls back to num_hessian.
 ##
-## Bound-active coordinates (W84, above): unchanged selection (the lp
+## Bound-active coordinates (above): unchanged selection (the lp
 ## stencil's reach decides, so the same parameters are decoupled); their
 ## inward curvature is the one-sided difference of their own gradient
 ## component, phi''(0) = s (4 g1 - g2 - 3 g0) / (2 h) with g_k the component

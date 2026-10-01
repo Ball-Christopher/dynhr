@@ -26,7 +26,7 @@ A list with the nine \code{.pruned_kf_correlated}/adjoint inputs
   reuse by the gradient chain.
 }
 \description{
-Pure extract-function refactor (D1, zero behaviour change): factors the
+Pure extract-function refactor (zero behaviour change): factors the
 assembly block that used to live inline in \code{pruned_ss_loglik3} (fold
 of the linear state-innovation correlation into effective matrices, plus
 the observation-side subsetting) into a single internal builder, so it can

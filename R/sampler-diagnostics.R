@@ -117,7 +117,7 @@ sampler_diagnostics <- function(fit, chains_list = NULL) {
     if (is.null(p_names)) p_names <- paste0("theta_", seq_len(n_par))
     colnames(draws_m) <- p_names
 
-    ## 0.9.4 (ledger A5): one implementation. This block used to call the
+    ## 0.9.4: one implementation. This block used to call the
     ## shared `.effective_sample_size()` / `.convergence_summary()` helpers,
     ## which double-counted lag 0 (every ESS ~3x too low), concatenated chains
     ## instead of using the between-chain variance, and omitted the folded

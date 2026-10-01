@@ -107,8 +107,8 @@ aborts that replication with a recorded reason (counted in
 
 Runtime, measured at implementation time (this machine, pure-R order-3
 TPF kernel, no compiled backend for order = 3L): ONE likelihood
-evaluation at \code{T_obs = 30}, \code{n_particles = 200} (the brief's
-reference sizing), including the per-theta order-3 re-solve, took
+evaluation at \code{T_obs = 30}, \code{n_particles = 200} (the reference
+sizing), including the per-theta order-3 re-solve, took
 ~2.4-3.0s. At that cost \code{n_draws = 2000}/\code{n_warmup = 600}
 (the sv_rbpf_sbc-style starting point) would take ~1.5-2 HOURS per
 replication, far outside budget. A first shrink to \code{T_obs = 20},
@@ -127,9 +127,8 @@ in most replications. The shipped defaults (\code{T_obs = 20},
 ~0.4-0.55s per evaluation) with a short chain (\code{n_draws = 100},
 \code{n_warmup = 50}, \code{thin_L = 25}) measured ~55-90s per
 replication serially (~154 likelihood evaluations including the 4
-PF-noise diagnostic draws) -- see the brief
-\code{brief-tpf-order3-sbc-2026-08-04.md} for the full sizing derivation
-and the deviation from its 2000/600 starting point.
+PF-noise diagnostic draws) (a reduction from the
+2000/600 starting point).
 
 KNOWN SCIENTIFIC RISK (documented, not fixed here): the TPF's ADAPTIVE
 tempering schedule makes the likelihood estimator only approximately

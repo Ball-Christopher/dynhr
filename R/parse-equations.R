@@ -347,8 +347,7 @@ tokenize_expr <- function(text, context = NULL) {
     }
 
     # An unrecognised character is a syntax error, never skipped: skipping it
-    # turned `y != x` into `y = x` and let a stray `$` vanish (review
-    # 2026-09-25 A8).  LaTeX names (`$y$`) live in declarations, which never
+    # turned `y != x` into `y = x` and let a stray `$` vanish.  LaTeX names (`$y$`) live in declarations, which never
     # reach this tokenizer.
     hint <- if (ch == "!" && i + 1L <= n && substr(text, i + 1L, i + 1L) == "=")
       " (the `!=` operator is not supported)" else ""
@@ -592,7 +591,7 @@ new_expr_parser <- function(tokens, var_names = character(0),
         # step 4), so it never reaches this parser from there.  Anywhere else
         # (e.g. planner_objective) it has no implementation: it used to become
         # an EXPECTATION funcall with a zero derivative and then an "unknown
-        # function" error downstream (review 2026-09-25 B15).
+        # function" error downstream.
         if (name == "EXPECTATION") {
           .dynhr_abort(
             "parse_mod: the EXPECTATION operator is only implemented inside ",
@@ -658,8 +657,7 @@ new_expr_parser <- function(tokens, var_names = character(0),
 #'
 #' The WHOLE text must be consumed: tokens left over after a complete
 #' expression (`2*z) + 5*z(-1)`, `a < b < c`, `x = = y`) abort with class
-#' `dynhr_error_mod_syntax` instead of being silently dropped (review
-#' 2026-09-25 A8). A single trailing `;` is tolerated.
+#' `dynhr_error_mod_syntax` instead of being silently dropped. A single trailing `;` is tolerated.
 #' @noRd
 parse_expression <- function(text, var_names = character(0),
                              param_names = character(0),

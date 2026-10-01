@@ -60,12 +60,12 @@
 #' .cumulant_loglik() — including the attr(dr, "order") guard for orders 3-4
 #' — so that the gradient is consistent with the function being differentiated.
 #'
-#' `lags` (E2-A) appends the model-implied autocovariances Gamma(h) =
+#' `lags` appends the model-implied autocovariances Gamma(h) =
 #' Cov(y_t, y_{t-h}) for the strictly-positive lags, AFTER the contemporaneous
 #' cumulant blocks -- the single definition of the moment ordering shared by
 #' `.cumulant_loglik()`, `estimate_gmm_weight_matrix()` and
 #' `method_of_moments()`. `lags = integer(0)` (the default) is byte-identical
-#' to the pre-E2-A function.
+#' to the earlier function.
 #'
 #' Returns NULL if any quantity is non-finite.
 #' @noRd
@@ -148,7 +148,7 @@
     m_model <- c(m_model, as.numeric(c4_model))
   }
 
-  ## ---- Autocovariances Gamma(h), h >= 1 (E2-A) ----
+  ## ---- Autocovariances Gamma(h), h >= 1 ----
   ## Measurement error is i.i.d., so it enters Gamma(0) (handled above) and
   ## NOT Gamma(h) for h >= 1 -- do not propagate me_variance here.
   if (length(lags)) {
@@ -210,7 +210,8 @@
 cumulant_loglik_grad <- function(model, compiled, dr, params, param_names,
                                  obs_vars, data, orders = 1:4,
                                  me_variance = 0, h_rel = 1e-4,
-                                 deriv = c("fd", "implicit")) {
+                                 deriv = c("fd", "implicit"),
+                                 weight_matrix = NULL) {
   deriv <- match.arg(deriv)
 
   ## Dispatch to implicit path for orders 1-2 only; fall back to FD for 3-4.
@@ -219,7 +220,8 @@ cumulant_loglik_grad <- function(model, compiled, dr, params, param_names,
                                           param_names, obs_vars, data,
                                           orders = orders,
                                           me_variance = me_variance,
-                                          h_rel = h_rel))
+                                          h_rel = h_rel,
+                                          weight_matrix = weight_matrix))
   }
 
   ## ---- FD path (original implementation) ----
@@ -276,6 +278,9 @@ cumulant_loglik_grad <- function(model, compiled, dr, params, param_names,
   # degrades the same way .cumulant_loglik does rather than erroring here.
   m_emp_matched <- rep_len(m_emp, n_moments)
   delta_base <- m_emp_matched - m_base     # m_hat - m(theta), length = n_moments
+  wdelta <- .cumulant_score_weighted_delta(delta_base, T_obs, weight_matrix)
+  if (is.null(wdelta))
+    return(setNames(rep(NA_real_, length(param_names)), param_names))
 
   # ---- 4. For each param: central-difference m(theta) ----
   grad <- setNames(rep(NA_real_, length(param_names)), param_names)
@@ -301,7 +306,7 @@ cumulant_loglik_grad <- function(model, compiled, dr, params, param_names,
           .build_moment_vector(dr,   model, params,   obs_vars, orders, me_variance))
         if (!is.null(m_p) && !is.null(m_c)) {
           dm <- (m_p - m_c) / h
-          grad[k] <- sum(delta_base * dm) * T_obs / n_moments
+          grad[k] <- sum(wdelta * dm)
         }
       } else if (!is.null(dr_m)) {
         m_m <- suppressWarnings(
@@ -310,7 +315,7 @@ cumulant_loglik_grad <- function(model, compiled, dr, params, param_names,
           .build_moment_vector(dr,   model, params,   obs_vars, orders, me_variance))
         if (!is.null(m_m) && !is.null(m_c)) {
           dm <- (m_c - m_m) / h
-          grad[k] <- sum(delta_base * dm) * T_obs / n_moments
+          grad[k] <- sum(wdelta * dm)
         }
       }
       next
@@ -326,7 +331,7 @@ cumulant_loglik_grad <- function(model, compiled, dr, params, param_names,
     dm <- (m_p - m_m) / (2 * h)   # central difference of moment vector
 
     # dL/dtheta_k = (m_hat - m)' * dm * T / n_moments
-    grad[k] <- sum(delta_base * dm) * T_obs / n_moments
+    grad[k] <- sum(wdelta * dm)
   }
 
   grad
@@ -363,7 +368,8 @@ cumulant_loglik_grad <- function(model, compiled, dr, params, param_names,
 .cumulant_loglik_grad_adjoint <- function(model, compiled, dr, params,
                                           param_names, obs_vars, data,
                                           orders = 1:4, me_variance = 0,
-                                          h_rel = 1e-4) {
+                                          h_rel = 1e-4,
+                                          weight_matrix = NULL) {
 
   np <- length(param_names)
   na_out <- setNames(rep(NA_real_, np), param_names)
@@ -404,8 +410,10 @@ cumulant_loglik_grad <- function(model, compiled, dr, params, param_names,
   m_emp_matched <- rep_len(m_emp, n_moments)
   delta_base <- m_emp_matched - m_base
 
-  ## dL/dm_model = delta_base * T / n_moments  (loglik = -0.5 sum(delta^2)/n * T)
-  bar_m <- delta_base * T_obs / n_moments
+  ## dL/dm_model = T W delta (loglik = -T/2 delta' W delta); the identity
+  ## weight is W = I/p.
+  bar_m <- .cumulant_score_weighted_delta(delta_base, T_obs, weight_matrix)
+  if (is.null(bar_m)) return(na_out)
 
   ## ---- 2. Split bar_m into per-order blocks -------------------------------
   ghx <- dr$ghx; ghu <- dr$ghu; ghss <- dr$ghss
@@ -466,7 +474,7 @@ cumulant_loglik_grad <- function(model, compiled, dr, params, param_names,
     ## the transposed scatter onto exactly those rows/columns.  It used to be a
     ## two-level for(a)/for(b) loop hitting only the (i,i,k) slice, which left
     ## the (i,j,k), j != i, cotangents at zero -- the adjoint mirror of the
-    ## forward E4-B bug.
+    ## earlier forward bug.
     bar_c3_obs <- matrix(0, n_endo, n_endo * n_endo)
     b3_full <- matrix(b3_obs, n_obs, n_obs * n_obs)
     bar_c3_obs[obs_idx, .c3_obs_col_index(obs_idx, n_endo)] <- b3_full
@@ -574,7 +582,8 @@ cumulant_loglik_grad <- function(model, compiled, dr, params, param_names,
                                             param_names, obs_vars, data,
                                             orders = 1:4,
                                             me_variance = 0,
-                                            h_rel = 1e-4) {
+                                            h_rel = 1e-4,
+                                            weight_matrix = NULL) {
 
   if (!inherits(dr, "DecisionRules2"))
     stop(".cumulant_loglik_grad_implicit: dr must be a DecisionRules2 object")
@@ -611,6 +620,9 @@ cumulant_loglik_grad <- function(model, compiled, dr, params, param_names,
   n_moments <- length(m_base)
   m_emp_matched <- rep_len(m_emp, n_moments)
   delta_base <- m_emp_matched - m_base
+  wdelta <- .cumulant_score_weighted_delta(delta_base, T_obs, weight_matrix)
+  if (is.null(wdelta))
+    return(setNames(rep(NA_real_, np), param_names))
 
   ## ---- 4. Determine which orders are present ----
   orders_12 <- intersect(orders, 1:2)      # orders 1-2: analytic via solution_deriv_order2
@@ -733,7 +745,7 @@ cumulant_loglik_grad <- function(model, compiled, dr, params, param_names,
       d_ghss    <- d2$d_ghss      # n
       ## Sigma_e's OWN theta-dependence (estimated shock stds wired via
       ## stderr_expr): without the ghu*dSigma_e*ghu' term below,
-      ## d(Sigma_y)/dtheta silently drops the shock-covariance channel (C5
+      ## d(Sigma_y)/dtheta silently drops the shock-covariance channel (a
       ## sibling of the .o2sd_dSigma_x gap). Zero for params that do not
       ## enter Sigma_e.
       d_Sigma_e <- d2$d_Sigma_e
@@ -786,15 +798,33 @@ cumulant_loglik_grad <- function(model, compiled, dr, params, param_names,
       ## If cd34 failed for this param, dm stays 0 for orders 3-4 (safe)
     }
 
-    grad[k] <- sum(delta_base * dm) * T_obs / n_moments
+    grad[k] <- sum(wdelta * dm)
   }
 
   grad
 }
 
 
+## Score weight of the cumulant loglik: d loglik / d m(theta) = T W delta.
+## The forward (.cumulant_loglik) is -T/2 delta' W delta with a supplied
+## weight_matrix and -T/(2p) ||delta||^2 without one, i.e. W = I/p; the
+## identity branch is kept as T * delta / p so it stays bit-identical to the
+## pre-weight code. W is FIXED (it does not depend on theta), so it adds no
+## derivative term. Returns NULL when W is not a p x p matrix (the caller then
+## declines and the per-parameter FD-of-forward fallback applies).
+#' @noRd
+.cumulant_score_weighted_delta <- function(delta, T_obs, weight_matrix = NULL) {
+  p <- length(delta)
+  if (is.null(weight_matrix)) return(delta * T_obs / p)
+  if (!is.matrix(weight_matrix) || any(dim(weight_matrix) != p) ||
+      !all(is.finite(weight_matrix)))
+    return(NULL)
+  ## The forward quadratic form only sees the symmetric part of W.
+  T_obs * as.numeric(0.5 * (weight_matrix + t(weight_matrix)) %*% delta)
+}
+
 # ============================================================================
-# Exact gradient for cumulant orders within 1:2 on the FIRST-ORDER rule (W68)
+# Exact gradient for cumulant orders within 1:2 on the FIRST-ORDER rule
 # ============================================================================
 
 #' Exact gradient of the cumulant log-likelihood for orders within 1:2.
@@ -824,7 +854,8 @@ cumulant_loglik_grad <- function(model, compiled, dr, params, param_names,
 .cumulant_loglik_grad_order1 <- function(model, compiled, dr, params,
                                          param_names, obs_vars, data,
                                          orders = 1:2, me_variance = 0,
-                                         dSigma_e_list = NULL) {
+                                         dSigma_e_list = NULL,
+                                         weight_matrix = NULL) {
   np <- length(param_names)
   grad <- setNames(rep(NA_real_, np), param_names)
   if (!length(orders) || !all(orders %in% 1:2) ||
@@ -862,6 +893,8 @@ cumulant_loglik_grad <- function(model, compiled, dr, params, param_names,
   if (!all(is.finite(m_mod)) || !all(is.finite(Sx))) return(grad)
   delta <- as.numeric(m_emp - m_mod)
   n_mom <- length(delta)
+  wdelta <- .cumulant_score_weighted_delta(delta, T_obs, weight_matrix)
+  if (is.null(wdelta)) return(grad)
 
   sd <- solution_derivatives(model, compiled, dr, params, param_names,
                              obs_vars = endo)
@@ -888,7 +921,7 @@ cumulant_loglik_grad <- function(model, compiled, dr, params, param_names,
       dm <- c(dm, as.numeric(dSy[obs_idx, obs_idx, drop = FALSE]))
     }
     if (length(dm) != n_mom || !all(is.finite(dm))) next
-    grad[k] <- sum(delta * dm) * T_obs / n_mom
+    grad[k] <- sum(wdelta * dm)
   }
   grad
 }

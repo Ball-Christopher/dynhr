@@ -375,8 +375,7 @@
   G <- D %*% Q                   # transformed RHS for A_L Y + fp Y R = G
   Y <- matrix(0, n, m)
 
-  solveN <- function(M, b) tryCatch(solve(M, b),
-                                    error = function(e) qr.solve(M, b))
+  solveN <- function(M, b) .solve_higher_order_lu(M, b)
 
   j <- 1L
   while (j <= m) {
@@ -1498,8 +1497,7 @@ solve_perturbation_order4 <- function(model, compiled, ss, params, dr3,
       for (i in 2:length(mats)) K <- K %x% mats[[i]]
       fp %*% ghxxxx %*% K
     }
-    solveA <- function(rhs) tryCatch(solve(A_L, rhs),
-                                     error = function(e) qr.solve(A_L, rhs))
+    solveA <- function(rhs) .solve_higher_order_lu(A_L, rhs)
     ghxxxu <- solveA(-(phi_fd_obj$xxxu + fut(hx, hx, hx, hu)))
     ghxxuu <- solveA(-(phi_fd_obj$xxuu + fut(hx, hx, hu, hu)))
     ghxuuu <- solveA(-(phi_fd_obj$xuuu + fut(hx, hu, hu, hu)))

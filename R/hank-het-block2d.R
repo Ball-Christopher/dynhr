@@ -4,7 +4,7 @@
 ## P-mixed forward operator, the steady-state block constructor, and the
 ## nonlinear perfect-foresight transition carrying the (V, Vb, Va) triple.
 ## Companion to R/hank-egm2d.R (the solver) and R/hank-jacobian2d.R (the
-## fake-news Jacobian); design and gate history in briefs/19 sections 9.3-9.8.
+## fake-news Jacobian).
 ##
 ## The block's transition is a MIXTURE: a household at cell x adjusts with
 ## probability P(x) (moving to the adjust-branch policy pair) and rolls over

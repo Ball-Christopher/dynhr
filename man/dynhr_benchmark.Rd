@@ -44,7 +44,12 @@ reproducible.}
 An object of class \code{dynhr_benchmark}: a list with
   \code{$system} (one-row data.frame, see \code{\link{dynhr_system_info}}),
   \code{$problem} (workload description and \code{logpost_check}),
-  \code{$settings}, and \code{$results}, a data.frame with one row per core
+  \code{$settings} (including \code{config}: \code{use_rcpp}, the Kalman
+  \code{kf_method} and \code{lik_init} the workload runs with, and
+  \code{config_default}, \code{FALSE} -- with a warning of class
+  \code{dynhr_warning_benchmark_config} -- when they are not the package
+  defaults, making the throughputs non-comparable), and \code{$results}, a
+  data.frame with one row per core
   setting and columns \code{cores}, \code{n_draws}, \code{total_draws},
   \code{elapsed_sec}, \code{overhead_sec}, \code{draws_per_sec},
   \code{draws_per_sec_adj}, \code{us_per_draw}, \code{speedup},

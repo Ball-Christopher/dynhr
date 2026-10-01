@@ -1,6 +1,6 @@
 ## R/posterior-closure.R
 ## --------------------------------------------------------------------------
-## ONE closure builder for every log-posterior factory (review item D1).
+## ONE closure builder for every log-posterior factory.
 ##
 ## Thirteen factories -- make_log_posterior()'s gaussian and student_t
 ## branches plus make_log_posterior_{pruned,pruned3,pskf,pskf_order2,tpf,
@@ -103,6 +103,108 @@
 }
 
 
+## ---------------------------------------------------------------------------
+## One-entry structural-parameter cache
+##
+## A draw that moves only covariance-side parameters (an estimated shock
+## standard deviation or correlation, a measurement-error variance) leaves the
+## steady state, the system matrices and the decision rule exactly as they
+## were; re-solving them is most of the cost of the evaluation. The cache holds
+## the last feasible draw's solve and returns it when the parameters that CAN
+## reach the solve are bit-for-bit those of that draw.
+##
+## Which parameters those are is decided from the model, never from names:
+##   * the declared parameters the dynamic equations, the planner objective
+##     and the model-local definitions reference (model$equation_param_names),
+##     which are the only parameters the residual and Jacobian functions read;
+##   * every symbol the steady_state_model statements mention, and every name
+##     they assign (the statements evaluate in an environment holding ALL
+##     parameters, so they may read any name they spell out).
+## Everything else -- a shock standard deviation or correlation injected under
+## a shock / "corr a,b" key, a declared parameter used only by the shocks block
+## -- cannot reach the steady state or the decision rule. A model whose
+## structural set cannot be established (no equation_param_names, an
+## unparseable steady-state statement) gets no cache.
+## ---------------------------------------------------------------------------
+
+## Names whose values the steady state / decision rule can depend on, or NULL
+## when that cannot be established (caller then does not cache).
+#' @noRd
+.structural_param_names <- function(model) {
+  eqp <- model$equation_param_names
+  if (is.null(eqp)) return(NULL)
+  ssm_names <- character(0)
+  for (a in model$steady_state_model) {
+    if (!is.list(a) || is.null(a$text) || is.null(a$name)) return(NULL)
+    ex <- parse(text = a$text, keep.source = FALSE)
+    ssm_names <- c(ssm_names, all.names(ex), a$name)
+  }
+  unique(c(eqp, ssm_names))
+}
+
+## A per-closure cache environment (NULL when no cache can be built). The
+## environment is created per call, so closures never share one, and each
+## mirai daemon deserialises its own copy.
+#' @noRd
+.structural_cache_new <- function(model) {
+  nms <- .structural_param_names(model)
+  if (is.null(nms)) return(NULL)
+  cache <- new.env(parent = emptyenv())
+  cache$names <- nms
+  cache$entry <- NULL
+  cache
+}
+
+## The structural slice of a parameter vector (names absent from it give NA,
+## the same way on every call).
+#' @noRd
+.structural_cache_key <- function(cache, params) params[cache$names]
+
+## Entry for the cached solve at `key`, or NULL. A lookup that does not hit
+## DROPS the entry: it is then only ever the immediately preceding feasible
+## draw, which is what makes a hit reproduce exactly what the warm-started
+## re-solve would have returned.
+#' @noRd
+.structural_cache_lookup <- function(cache, key) {
+  e <- cache$entry
+  if (!is.null(e) && identical(key, e$key, num.eq = FALSE)) return(e)
+  cache$entry <- NULL
+  NULL
+}
+
+## Remember a feasible draw. `params_in` is the parameter vector the steady
+## state was solved at; `params_out` the one after any steady_state_model
+## re-derivation (equal to params_in when the model has none). Only the names
+## the re-derivation changed or added are kept: they are functions of the
+## structural parameters alone, so they can be written onto a later draw's own
+## parameter vector.
+#' @noRd
+.structural_cache_store <- function(cache, key, params_in, params_out,
+                                    ss_result, sol) {
+  chg <- character(0)
+  if (!identical(params_in, params_out)) {
+    common <- intersect(names(params_out), names(params_in))
+    a <- params_out[common]; b <- params_in[common]
+    same <- a == b
+    na_ab <- is.na(same)
+    same[na_ab] <- is.na(a)[na_ab] & is.na(b)[na_ab]
+    chg <- c(common[!same], setdiff(names(params_out), names(params_in)))
+    ## keep params_out's own order, so appended names land where they did
+    chg <- names(params_out)[names(params_out) %in% chg]
+  }
+  cache$entry <- list(key = key, ss_result = ss_result, sol = sol,
+                      delta = chg, delta_values = params_out[chg])
+  invisible(NULL)
+}
+
+## The draw's own parameter vector with the cached steady_state_model
+## re-derivation applied.
+#' @noRd
+.structural_cache_params <- function(entry, params) {
+  if (length(entry$delta)) params[entry$delta] <- entry$delta_values
+  params
+}
+
 #' Build a log-posterior closure from a likelihood hook
 #'
 #' The shared per-draw skeleton behind every \code{make_log_posterior_*}
@@ -180,7 +282,12 @@
                                     ## TRUE only for the Gaussian Kalman
                                     ## adapter, whose kalman_filter() call
                                     ## subtracts observation_trends.
-                                    obs_trends_ok     = FALSE) {
+                                    obs_trends_ok     = FALSE,
+                                    ## TRUE only where solve_fn is a pure
+                                    ## function of (ss, params): the draw's
+                                    ## solve is then reused while the
+                                    ## structural parameters do not move.
+                                    structural_cache  = FALSE) {
   if (!isTRUE(obs_trends_ok))
     .refuse_obs_trends(model, "this likelihood")
 
@@ -221,6 +328,14 @@
   ## own. Reset to NULL whenever a solve fails, so a misleading warm guess
   ## cannot poison every subsequent draw.
   ss_warm <- NULL
+  ## Structural-parameter cache (see .structural_cache_new): one entry, owned
+  ## by this closure.
+  ## options(dynhr.structural_cache = FALSE), read when the closure is built,
+  ## turns it off (a diagnostic switch: the cached and the re-solved draws are
+  ## bit-identical, which the cache's own tests compare against).
+  struct_cache <- if (isTRUE(structural_cache) && warm_retry &&
+                      isTRUE(getOption("dynhr.structural_cache", TRUE)))
+    .structural_cache_new(model) else NULL
   ## me-floor hazard guard: warn at most once per closure, not once per draw.
   .me_floor_checked <- FALSE
 
@@ -236,7 +351,7 @@
   ## infeasible_penalty reject) a finite optimiser penalty folded in. SMC reads
   ## the parts so it can draw stage 0 from the PARAMETER prior and temper
   ##   phi(theta) = log_sysprior + power * loglik
-  ## (brief 23 A4). An attribute rather than a field because the field set is
+  ##. An attribute rather than a field because the field set is
   ## a pinned contract (test-posterior-closure-parity.R).
   .emit <- function(logpost, loglik, logprior, extra,
                     lp_param = logprior, sp = 0) {
@@ -259,7 +374,7 @@
 
   ## Theta is read BY NAME against the prior spec (.theta_by_name(),
   ## R/posterior.R): an unnamed theta is taken in prior_spec$name order, a
-  ## mis-named one is a classed error (brief 31 A2).
+  ## mis-named one is a classed error.
   spec_names <- prior_spec$name
   inner <- function(theta, ...) {
     theta <- .theta_by_name(theta, spec_names)
@@ -268,32 +383,48 @@
 
     params <- .apply_theta_to_params(model, theta)
 
-    ## ---- Steady state -----------------------------------------------------
-    ss_result <- solve_steady_state(model, compiled, params,
-                                    y0 = if (warm_start) ss_warm else NULL,
-                                    verbose = FALSE)
-    if (is.null(ss_result) || !isTRUE(ss_result$converged)) {
-      ## The warm guess may have been misleading (a large proposal jump);
-      ## retry once from the cold initval-based guess before giving up.
-      if (warm_start && warm_retry && !is.null(ss_warm))
-        ss_result <- solve_steady_state(model, compiled, params,
-                                        verbose = FALSE)
-      if (is.null(ss_result) || !isTRUE(ss_result$converged)) {
-        if (warm_start) ss_warm <<- NULL
-        return(.reject(lp))
-      }
+    ## ---- Steady state + solve (reused when only covariance-side parameters
+    ## moved since the previous feasible draw) -------------------------------
+    hit <- NULL
+    if (!is.null(struct_cache)) {
+      key <- .structural_cache_key(struct_cache, params)
+      hit <- .structural_cache_lookup(struct_cache, key)
     }
-    if (warm_start) ss_warm <<- ss_result$ss
+    if (!is.null(hit)) {
+      ss_result <- hit$ss_result
+      params    <- .structural_cache_params(hit, params)
+      sol       <- hit$sol
+    } else {
+      params_in <- params
+      ss_result <- solve_steady_state(model, compiled, params,
+                                      y0 = if (warm_start) ss_warm else NULL,
+                                      verbose = FALSE)
+      if (is.null(ss_result) || !isTRUE(ss_result$converged)) {
+        ## The warm guess may have been misleading (a large proposal jump);
+        ## retry once from the cold initval-based guess before giving up.
+        if (warm_start && warm_retry && !is.null(ss_warm))
+          ss_result <- solve_steady_state(model, compiled, params,
+                                          verbose = FALSE)
+        if (is.null(ss_result) || !isTRUE(ss_result$converged)) {
+          if (warm_start) ss_warm <<- NULL
+          return(.reject(lp))
+        }
+      }
+      if (warm_start) ss_warm <<- ss_result$ss
 
-    ## Re-derive any steady_state_model-computed parameter so the
-    ## linearization point uses the consistent (not stale) p_c. Without this
-    ## the dynamic system is built at an invalid steady state with the wrong
-    ## p_c, silently biasing the loglik (Tier 13 #1).
-    params <- ss_result$params %||% params
+      ## Re-derive any steady_state_model-computed parameter so the
+      ## linearization point uses the consistent (not stale) p_c. Without this
+      ## the dynamic system is built at an invalid steady state with the wrong
+      ## p_c, silently biasing the loglik.
+      params <- ss_result$params %||% params
 
-    ## ---- Solve ------------------------------------------------------------
-    sol <- solve_fn(model, compiled, sys_cache, ss_result$ss, params, theta)
-    if (.is_posterior_reject(sol)) return(.reject(lp, sol))
+      ## ---- Solve ----------------------------------------------------------
+      sol <- solve_fn(model, compiled, sys_cache, ss_result$ss, params, theta)
+      if (.is_posterior_reject(sol)) return(.reject(lp, sol))
+      if (!is.null(struct_cache))
+        .structural_cache_store(struct_cache, key, params_in, params,
+                                ss_result, sol)
+    }
 
     ## ---- Likelihood -------------------------------------------------------
     res <- loglik_fn(sol = sol, params = params, ss = ss_result$ss,

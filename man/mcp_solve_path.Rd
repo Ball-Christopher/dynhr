@@ -52,12 +52,12 @@ names must match \code{varexo_names}; missing columns are zero.}
 (default TRUE).}
 
 \item{homotopy}{Continuation strategy for cold starts. \code{"auto"}
-(default) tries a direct solve first and, only if it fails, escalates
-through a ladder of continuation runs (4, 16, 64 stages) that ramp the
-shock path from zero (steady state) to its full value, warm-starting each
-stage. So easy problems are unchanged and hard cold starts are rescued
-(issue M15). An integer \code{>= 1} forces exactly that many stages;
-\code{1} is a single direct solve.}
+  (default) tries a direct solve first and, only if it fails, escalates
+  through a ladder of continuation runs (4, 16, 64 stages) that ramp the
+  shock path from zero (steady state) to its full value, warm-starting each
+  stage. So easy problems are unchanged and hard cold starts are rescued
+. An integer \code{>= 1} forces exactly that many stages;
+  \code{1} is a single direct solve.}
 
 \item{method}{Sparse-solve method: \code{"sparse"} (uses
 \code{Matrix::sparseQR}), \code{"dense"} (uses \code{solve}), or

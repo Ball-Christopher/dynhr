@@ -28,6 +28,25 @@
 ## AR(1) within Monte-Carlo error.
 ## --------------------------------------------------------------------------
 
+## Argument rules of pmmh(). PMMH is RWMH over a particle likelihood, so the
+## chain arguments in `...` are the RWMH sampler's and are judged by it; what
+## is specific to pmmh() is that the sampler is fixed (`methods` must not be
+## passed) and that a particle likelihood needs at least two particles per
+## filter. `args` is the named list of what is passed through `...` (absent =
+## default = valid); returns the problems as a character vector, character(0)
+## if fine. Called by pmmh() at entry and by validate_spec().
+#' @noRd
+.pmmh_args_problem <- function(args, n_par = NULL) {
+  p <- character(0)
+  if ("methods" %in% names(args))
+    p <- c(p, paste0("do not pass `methods` -- PMMH fixes the sampler to ",
+                     "RWMH. Use run_posterior_estimation() directly for ",
+                     "other samplers."))
+  if (!is.null(args$n_particles))
+    p <- c(p, .smc_whole_problem(args$n_particles, "n_particles", 2L))
+  p
+}
+
 #' Particle Marginal Metropolis-Hastings (PMMH)
 #'
 #' Runs Particle Marginal Metropolis-Hastings: a Random-Walk Metropolis
@@ -125,10 +144,9 @@
 #' @export
 pmmh <- function(mode_result, ...) {
   dots <- list(...)
-  if ("methods" %in% names(dots)) {
-    stop("pmmh(): do not pass `methods` -- PMMH fixes the sampler to RWMH. ",
-         "Use run_posterior_estimation() directly for other samplers.")
-  }
+  prob <- .pmmh_args_problem(dots)
+  if (length(prob))
+    stop("pmmh(): ", paste(prob, collapse = " "))
 
   ## Explicit shape checks (not a catch-all tryCatch): a non-list
   ## mode_result / ctx has no likelihood tag.

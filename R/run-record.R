@@ -21,7 +21,7 @@
 ##   result$run_record <- .dynhr_rr_finish(.rr, ...)             # before return
 ## ---------------------------------------------------------------------------
 
-## Schema 2 (E5 C2): the record also carries `spec`, the estimation spec the
+## Schema 2: the record also carries `spec`, the estimation spec the
 ## run executed (caches stripped), and `provenance$integrity` after a
 ## checkpoint resume that crossed a mismatch.
 .dynhr_run_record_schema <- 2L

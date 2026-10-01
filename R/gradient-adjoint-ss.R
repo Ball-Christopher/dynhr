@@ -136,7 +136,7 @@
 
       s_new <- as.numeric(TT %*% s) + as.numeric(K %*% v)
       P_raw <- tcrossprod(A %*% P, A) + tcrossprod(B %*% Sigma_e, B)
-      ## TRUE measurement-noise law (F3-D): P' += K me_diag K'.
+      ## TRUE measurement-noise law: P' += K me_diag K'.
       if (me_variance != 0) P_raw <- P_raw + me_variance * tcrossprod(K)
       P_new <- .sym(P_raw)
 
@@ -145,7 +145,7 @@
       ## max|P_{t+1} - P_t| < ss_tol * max|P_{t+1}|. An absolute ss_tol locked
       ## a small-scale model (P ~1e-8) at t = 2, where the forward filter keeps
       ## iterating: the gradient was then of a different (early-frozen)
-      ## likelihood than the objective (W76, 2026-09-26).
+      ## likelihood than the objective.
       if (t > 1 && max(abs(P_new - P)) < ss_tol * max(abs(P_new))) {
         ss_reached <- TRUE
         t_conv  <- t

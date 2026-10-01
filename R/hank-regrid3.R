@@ -1,6 +1,6 @@
 ## R/hank-regrid3.R
 ## --------------------------------------------------------------------------
-## W3 (calibration-safe warm starts): grid continuation for the three-asset
+## Calibration-safe warm starts: grid continuation for the three-asset
 ## household. The paper's calibration ladder moves from coarse identification
 ## grids to a fine production grid; hank_egm3_regrid_values() interpolates a
 ## solved household's Vd/Vf/Va marginal values from one (d,f,a) grid onto

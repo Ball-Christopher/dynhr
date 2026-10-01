@@ -298,7 +298,7 @@ build_static_model <- function(model, want_param_deriv = TRUE,
     )
 
     # -----------------------------------------------------------------------
-    # 6. Parameter-residual Jacobian  ∂F_static_i/∂θ_k  (Tier 11 #3)
+    # 6. Parameter-residual Jacobian  ∂F_static_i/∂θ_k
     #
     # Explicit partial of each static residual w.r.t. each parameter. Used by
     # the solution-derivative layer to solve the steady-state sensitivity
@@ -367,7 +367,7 @@ build_static_model <- function(model, want_param_deriv = TRUE,
     }
 
     # -----------------------------------------------------------------------
-    # 7. Second-order STATIC tensors  (Tier 11 #3, order-2 layer = 3b)
+    # 7. Second-order STATIC tensors  (order-2 layer = 3b)
     #
     # Three sparse symbolic tensors of the static residual F_s(ȳ,θ) needed to
     # solve the SECOND-order steady-state sensitivity d2ys = d²ȳ/(dθ_a dθ_b)

@@ -36,7 +36,7 @@
 #                                   MATLAB-translated `verbatim` blocks.
 #   * `.dynhr_safe_macro_fn_names`  + comparison/logical/membership operators.
 #                                   The `@#` macro language no longer uses it:
-#                                   since W30 (2026-09-25) macro expressions
+#                                   macro expressions
 #                                   are run by dynhr's own interpreter
 #                                   (R/parse-macro.R), which evaluates no R
 #                                   code at all.  Kept as a vetted allowlist.
@@ -347,7 +347,7 @@ extract_command <- function(txt, command) {
   ## `\b` on BOTH sides: without the trailing one, `steady` matched the start
   ## of `steady_state_model;` (and `steady_state(x)` in an equation), giving a
   ## bogus `steady` command whose var list was `_state_model`, which
-  ## write_mod() then emitted as `steady _state_model;` (review 2026-09-25).
+  ## write_mod() then emitted as `steady _state_model;` ().
   ## The option list may itself hold parenthesised lists
   ## (`instruments=(i,tau)`, `irf_shocks=(e,u)`): match balanced parentheses
   ## (PCRE recursion into group 1), not "up to the first `)`", which cut the
@@ -513,8 +513,7 @@ parse_declaration_names <- function(decl_text) {
 #' Statements are delimited by `;`, NOT by newlines, so an expression split
 #' over lines (`alpha = 0.3 +\n 0.03;`) is one assignment. The old
 #' single-line regex silently dropped such a statement and the resulting
-#' "no value" warning then blamed an external *_steadystate.m (review
-#' 2026-09-25 B13).
+#' "no value" warning then blamed an external *_steadystate.m.
 #'
 #' Within one `;`-terminated statement:
 #' 1. if its LAST line contains `IDENT = rhs`, that is the assignment (the old
@@ -574,9 +573,9 @@ parse_calibration <- function(txt, param_names, seed_env = NULL, quiet = FALSE) 
   # `seed_env` (optional) carries intermediate values computed in verbatim;
   # blocks (matrices like V, Correlation_matrix, and scalars like P0_z_bar0)
   # so that top-level assignments referencing them -- e.g.
-  # `sigma_z = sqrt(V(1,1));` -- resolve instead of erroring to NA (repl M19).
+  # `sigma_z = sqrt(V(1,1));` -- resolve instead of erroring to NA.
   # MATLAB-style indexing in such RHS expressions is translated to R below.
-  ## A2: the calibration environment is an ALLOWLIST SANDBOX parented at
+  ## The calibration environment is an ALLOWLIST SANDBOX parented at
   ## emptyenv(), not a child of baseenv() -- a .mod file must not be able to
   ## call system()/unlink()/file.remove() merely by being parsed.
   .pcal_env <- .dynhr_sandbox_env(seed_env, .dynhr_safe_matrix_fn_names)
@@ -599,7 +598,7 @@ parse_calibration <- function(txt, param_names, seed_env = NULL, quiet = FALSE) 
                                .dynhr_safe_matrix_fn_names,
                                context = "the calibration assignment")
 
-    # M19: when a verbatim seed_env is in play, the RHS may use MATLAB
+    # When a verbatim seed_env is in play, the RHS may use MATLAB
     # indexing (e.g. `sqrt(V(1,1))`).  Retry with a MATLAB->R translation.
     if (is.null(val) && !is.null(seed_env)) {
       r_expr <- .matlab_stmt_to_r(expr_text)
@@ -1198,7 +1197,7 @@ parse_osr_params_bounds_block <- function(body, param_names,
 parse_shocks_block <- function(body, param_env = NULL) {
   # If parameters available, eval expressions in that environment so
   # `var eps_a = sig_a^2;` works. Otherwise default to base env (numeric only).
-  ## A2: every one of these environments is an allowlist sandbox (parented at
+  ## Every one of these environments is an allowlist sandbox (parented at
   ## emptyenv()), so a shocks-block RHS cannot reach system() and friends.
   eval_env <- if (is.environment(param_env)) param_env
               else .dynhr_sandbox_env(param_env, .dynhr_safe_matrix_fn_names)
@@ -1394,7 +1393,7 @@ parse_shocks_block <- function(body, param_env = NULL) {
     # Both a numeric snapshot and raw expression text (skew_expr) are stored so
     # .get_shock_skewness() can re-evaluate against the current parameter vector
     # during MCMC (mirrors the stderr_expr pattern at lines 469-474).
-    # alpha can be any real number (negative allowed -- see brief Landmine 7).
+    # alpha can be any real number (negative allowed).
     m5 <- regmatches(s, regexec(
       "^\\s*skew\\s+([A-Za-z_][A-Za-z0-9_]*)\\s*=\\s*(.+)$",
       s, perl = TRUE))[[1]]
@@ -1997,7 +1996,7 @@ parse_estimated_params_block <- function(body) {
     etype  <- "parameter"
     ename  <- parts[1]
 
-    # ---- M11: bare entry (name only, no prior / bounds) ----------------
+    # ---- bare entry (name only, no prior / bounds) ----------------
     # e.g. "omega;" — treated as estimated parameter with unspecified prior.
     if (length(parts) == 1 && grepl("^[A-Za-z_][A-Za-z0-9_]*$", ename)) {
       rows[[length(rows) + 1L]] <- data.frame(
@@ -2018,8 +2017,7 @@ parse_estimated_params_block <- function(body) {
       ename <- trimws(sub("^stderr\\s+", "", ename))
     } else if (grepl("^skew\\s+", ename)) {
       ## Two-token treatment: "skew SHOCKNAME" sets the skewness shape parameter
-      ## alpha for shock SHOCKNAME (Dynare 7 convention; brief Landmine 7:
-      ## alpha can be negative, so priors on (-Inf, Inf) are natural).
+      ## alpha for shock SHOCKNAME (Dynare 7 convention: alpha can be negative, so priors on (-Inf, Inf) are natural).
       etype <- "skew"
       ename <- trimws(sub("^skew\\s+", "", ename))
     } else if (grepl("^corr\\s+", ename)) {
@@ -2223,7 +2221,7 @@ parse_occbin_constraints_block <- function(body) {
 #'
 #' Options are separated by TOP-LEVEL commas only: a comma nested in
 #' \code{()}, \code{[]}, \code{\{\}} or inside a quoted string belongs to the
-#' option value (review 2026-09-25: `discretionary_policy(instruments=(i,tau))`
+#' option value (`discretionary_policy(instruments=(i,tau))`
 #' used to split into `instruments=(i` and a bogus flag `tau)`).
 #'
 #' Values:

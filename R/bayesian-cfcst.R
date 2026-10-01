@@ -4,8 +4,6 @@
 ## posterior draws.  Mirrors the diag_bayesian_irf pattern (R/diag-bayesian-irf.R):
 ## subsample draws, re-solve perturbation per draw, call conditional_forecast
 ## per draw, return per-draw paths + quantile summaries.
-##
-## ROADMAP Tier 8 item 10, Phase 2.
 ## --------------------------------------------------------------------------
 
 
@@ -37,7 +35,9 @@
 #' @param ci_bands      Two-element numeric vector of lower/upper quantile
 #'   probabilities for the outer credible band (default \code{c(0.10, 0.90)}).
 #' @param inner_bands   Inner credible band (default \code{c(0.16, 0.84)}).
-#' @param seed          Optional integer seed for the subsample draw.
+#' @param seed          Optional integer seed for the subsample draw and the
+#'   forecast draws that follow it. The result is reproducible for a fixed
+#'   seed; the caller's global RNG stream is restored on exit.
 #' @param ...           Additional arguments forwarded to
 #'   \code{\link{conditional_forecast}} (e.g. \code{free_shocks}, \code{Q}).
 #'
@@ -77,7 +77,7 @@ bayesian_conditional_forecast <- function(
   n_total <- nrow(draws)
   n_use   <- min(as.integer(n_subsample), n_total)
 
-  if (!is.null(seed)) set.seed(seed)
+  .local_seed(seed)  # seeded, but the caller's RNG stream is restored on exit
   draw_idx <- if (n_use < n_total) sample(n_total, n_use) else seq_len(n_total)
 
   data <- as.matrix(data)

@@ -99,7 +99,7 @@ print.dynhr_estimation_result <- function(x, ...) {
   # Cache system structure and extract matrices at mode
   sys_cache <- cache_system_structure(compiled)
   ## Re-derive SSM-computed params for a consistent linearization point
-  ## (no-op for non-SSM-parameter models; Tier 13 #1).
+  ## (no-op for non-SSM-parameter models).
   params <- ss_result$params %||% params
   sys <- extract_system_matrices_fast(sys_cache, ss_result$ss, params)
 
@@ -493,7 +493,7 @@ run_full_estimation <- function(
   ## Run record (R/run-record.R): resolved args, option snapshot and RNG
   ## state at ENTRY -- before the body touches any argument or the RNG.
   .rr <- .dynhr_rr_begin("run_full_estimation", environment(), list(...))
-  ## E5 C2: a thin wrapper. The arguments become an estimation spec
+  ## A thin wrapper. The arguments become an estimation spec
   ## (validate_spec() holds the cross-field checks) and the one spec runner
   ## runs its mode stage, sampler stage and outputs -- the same code as
   ## run_mode_finding() + run_posterior_estimation().
@@ -615,6 +615,11 @@ run_estimation <- function(spec) {
     .dynhr_abort("run_estimation: spec_version ", format(spec$spec_version),
                  " is not supported (this dynhr reads version ", .spec_version,
                  ").", class = "dynhr_error_spec_version")
+  ## before any stage runs: resuming needs a checkpoint on this machine
+  resume_msg <- .spec_resume_problem(spec$compute)
+  if (!is.null(resume_msg))
+    .dynhr_abort("run_estimation: ", resume_msg,
+                 class = c("dynhr_error_resume_no_checkpoint", "dynhr_error_spec_invalid"))
   .rr <- .dynhr_rr_begin("run_estimation", environment())
   .run_estimation_impl(spec, rr = .rr)
 }
@@ -939,7 +944,7 @@ run_estimation <- function(spec) {
     for (nm in names(theta_mode)) {
       if (nm %in% names(params_mode)) params_mode[[nm]] <- theta_mode[[nm]]
     }
-    ## 0.9.4 (WS4): `ramsey_policy()` ABORTS when it can find no discount
+    ## 0.9.4: `ramsey_policy()` ABORTS when it can find no discount
     ## factor. Ramsey is an OPTIONAL extra, so resolve the discount here and
     ## skip the step with a classed warning naming the argument that fixes
     ## it, rather than losing the estimate.
@@ -998,7 +1003,7 @@ run_estimation <- function(spec) {
                   class = "dynhr_warn_diag_mode_solve")
     }
 
-    ## Provenance for the report (0.9.4): the orchestrator reads these off
+    ## Provenance for the report: the orchestrator reads these off
     ## `draws` attributes.
     draws_diag <- chains$chain
     attr(draws_diag, "sampler")  <- sampler_lbl

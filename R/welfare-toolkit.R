@@ -839,7 +839,7 @@ welfare_decompose <- function(result,
   H
 }
 
-#' Analytic order-2 conditional welfare (Tier 15 B4 option b).
+#' Analytic order-2 conditional welfare.
 #'
 #' E[W | s0] = sum_t beta^(t-1) { f(m_t) + 0.5 tr(H_f Sigma_t) }, where m_t and
 #' Sigma_t are the EXACT s0-conditional mean and covariance of the pruned

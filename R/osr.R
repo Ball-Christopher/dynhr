@@ -235,7 +235,7 @@ osr <- function(model,
 
   # Loss specification -> symmetric weight matrix W over loss_vars.
   has_parsed_w <- is.data.frame(spec$weights) && nrow(spec$weights) > 0L
-  mod_objective <- model$planner_objective$text %||% ""
+  mod_objective <- .spec_planner_objective(model)
   use_lq_planner <- FALSE
   loss_offset <- 0
   if (is.null(loss_vars) && is.null(loss_weights)) {

@@ -16,7 +16,7 @@
 \item{tol}{Numerical tolerance for non-negativity and row sums.}
 }
 \description{
-Shared input contract (adversarial review 2026-07-13, P2): \code{Pi} must
+Shared input contract: \code{Pi} must
 be a square numeric \code{n x n} matrix, finite, entrywise non-negative
 (within \code{tol}), with every row summing to 1 (within \code{tol}).
 Inner iteration loops stay validation-free; public constructors/solvers

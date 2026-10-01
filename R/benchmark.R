@@ -57,6 +57,51 @@
 }
 
 
+## The BLAS / LAPACK R is using, and whether they are R's bundled REFERENCE
+## implementations (Rblas / Rlapack, the netlib code), which are much slower on
+## dense matrices than OpenBLAS, MKL or Accelerate. `blas` / `lapack` are the
+## library paths as sessionInfo() reports them; `matprod` is
+## sessionInfo()$matprod. R on Windows ships only the reference libraries, and
+## sessionInfo() leaves the BLAS path empty there, so an empty BLAS entry on
+## Windows is read as the bundled Rblas.dll (a replacement Rblas.dll cannot be
+## told apart from the path alone). The arguments are injectable so the
+## classification is testable on any OS.
+.blas_report <- function(blas = utils::sessionInfo()$BLAS,
+                         lapack = utils::sessionInfo()$LAPACK,
+                         matprod = utils::sessionInfo()$matprod,
+                         sysname = Sys.info()[["sysname"]]) {
+  one <- function(v) if (length(v) == 1L && !is.na(v) && nzchar(v)) as.character(v) else NA_character_
+  blas <- one(blas); lapack <- one(lapack)
+  ref <- function(path, lib)
+    !is.na(path) && grepl(paste0("^(lib)?", lib, "[.]"), basename(path))
+  blas_ref <- ref(blas, "Rblas") ||
+    (is.na(blas) && identical(sysname, "Windows"))
+  lapack_ref <- ref(lapack, "Rlapack")
+  note <- NA_character_
+  if (blas_ref || lapack_ref) {
+    which_ref <- if (blas_ref && lapack_ref) "BLAS and LAPACK"
+                 else if (blas_ref) "BLAS" else "LAPACK"
+    note <- if (!blas_ref) paste0(
+      "R is using its reference LAPACK (Rlapack) with an optimised BLAS: ",
+      "matrix products are fast, but QZ and eigen decompositions use the ",
+      "unoptimised LAPACK routines.") else paste0(
+      "R is using its reference ", which_ref, " (",
+      paste(c(if (blas_ref) "Rblas", if (lapack_ref) "Rlapack"), collapse = ", "),
+      "). Dense linear algebra (QZ, eigen, Lyapunov, Kalman filtering with a ",
+      "large state vector) is then much slower than with OpenBLAS, MKL or ",
+      "Accelerate. To switch: Windows -- replace R's Rblas.dll with an ",
+      "optimised build (see the R for Windows FAQ); macOS -- link R's BLAS ",
+      "to Accelerate/vecLib or OpenBLAS; Debian/Ubuntu -- install OpenBLAS ",
+      "and select it with update-alternatives; Fedora -- FlexiBLAS (see R ",
+      "Installation and Administration, section 'BLAS').")
+  }
+  list(blas = blas, lapack = lapack,
+       lapack_version = La_version(),
+       matprod = one(matprod), blas_reference = blas_ref,
+       lapack_reference = lapack_ref, note = note)
+}
+
+
 #' System information for a benchmark record
 #'
 #' Everything needed to interpret a \code{\link{dynhr_benchmark}} result on a
@@ -69,12 +114,19 @@
 #' \code{R.version}. Two benchmark results whose \code{blas} differ are not
 #' measuring the same software stack, whatever the hardware says.
 #'
+#' \code{blas_reference} and \code{lapack_reference} are \code{TRUE} when R is
+#' using its bundled reference BLAS / LAPACK (\code{Rblas} / \code{Rlapack}),
+#' and \code{blas_note} then says what that costs and how to switch to an
+#' optimised library (otherwise \code{NA}). \code{matprod} is R's
+#' matrix-product setting as \code{sessionInfo()} reports it.
+#'
 #' @return A one-row \code{data.frame} of character/numeric fields.
 #' @examples
 #' dynhr_system_info()
 #' @export
 dynhr_system_info <- function() {
   si <- tryCatch(utils::sessionInfo(), error = function(e) NULL)
+  br <- .blas_report(si$BLAS, si$LAPACK, si$matprod)
   nm <- Sys.info()
   gc_stamp <- tryCatch({
     p <- system.file("GIT_COMMIT", package = "dynhr")
@@ -96,7 +148,11 @@ dynhr_system_info <- function() {
     r_platform     = R.version$platform,
     blas           = if (!is.null(si$BLAS)) si$BLAS else NA_character_,
     lapack         = if (!is.null(si$LAPACK)) si$LAPACK else NA_character_,
-    lapack_version = tryCatch(La_version(), error = function(e) NA_character_),
+    lapack_version = br$lapack_version,
+    matprod        = br$matprod,
+    blas_reference   = br$blas_reference,
+    lapack_reference = br$lapack_reference,
+    blas_note      = br$note,
     cxx            = .bench_sh(paste(shQuote(file.path(R.home("bin"), "R")),
                                      "CMD config CXX")),
     cxxflags       = .bench_sh(paste(shQuote(file.path(R.home("bin"), "R")),
@@ -149,6 +205,37 @@ dynhr_system_info <- function() {
        ## fingerprint would otherwise be a NAMED scalar and every comparison of
        ## it -- including across machines -- would have to remember to strip it.
        logpost0 = unname(if (is.list(lp0)) lp0$logpost else lp0))
+}
+
+
+## The speed-relevant configuration the workload actually runs with. The
+## benchmark pins nothing itself -- it inherits the package defaults, which are
+## the fastest settings -- so a session that changed one (e.g.
+## options(dynhr.use_rcpp = FALSE): the R Kalman path, ~5x slower on sw2007;
+## the setting is replayed into the mirai daemons) would silently produce a
+## slower, non-comparable result. Recorded in the result and checked against
+## the defaults.
+.bench_expected_config <- list(use_rcpp = TRUE, kf_method = "standard")
+
+.bench_config <- function(p) {
+  m  <- p$model
+  ss <- solve_steady_state(m, p$compiled, m$param_values, verbose = FALSE)$ss
+  dr <- solve_perturbation(m, p$compiled, ss, m$param_values, verbose = FALSE)
+  ## same call shape as the Gaussian posterior's filter (method / lik_init
+  ## "auto"); the method choice depends on the state dimension, the data and
+  ## the init, not on theta
+  kf <- kalman_filter(p$data, dr, m, m$param_values, p$obs)
+  list(use_rcpp  = isTRUE(getOption("dynhr.use_rcpp", TRUE)),
+       kf_method = kf$diagnostics$method_used %||% kf$method %||% NA_character_,
+       lik_init  = kf$diagnostics$lik_init_used %||% kf$lik_init %||%
+                   NA_character_)
+}
+
+## Names of the config fields that differ from .bench_expected_config.
+.bench_config_deviations <- function(cfg) {
+  exp <- .bench_expected_config
+  names(exp)[!vapply(names(exp), function(k) identical(cfg[[k]], exp[[k]]),
+                     logical(1L))]
 }
 
 
@@ -213,7 +300,12 @@ dynhr_system_info <- function() {
 #' @return An object of class \code{dynhr_benchmark}: a list with
 #'   \code{$system} (one-row data.frame, see \code{\link{dynhr_system_info}}),
 #'   \code{$problem} (workload description and \code{logpost_check}),
-#'   \code{$settings}, and \code{$results}, a data.frame with one row per core
+#'   \code{$settings} (including \code{config}: \code{use_rcpp}, the Kalman
+#'   \code{kf_method} and \code{lik_init} the workload runs with, and
+#'   \code{config_default}, \code{FALSE} -- with a warning of class
+#'   \code{dynhr_warning_benchmark_config} -- when they are not the package
+#'   defaults, making the throughputs non-comparable), and \code{$results}, a
+#'   data.frame with one row per core
 #'   setting and columns \code{cores}, \code{n_draws}, \code{total_draws},
 #'   \code{elapsed_sec}, \code{overhead_sec}, \code{draws_per_sec},
 #'   \code{draws_per_sec_adj}, \code{us_per_draw}, \code{speedup},
@@ -265,6 +357,19 @@ dynhr_benchmark <- function(cores = NULL,
   p <- .bench_problem(model)
   .dynhr_inform(sprintf("  %d parameters, %d observables, %d periods; logpost = %.6f",
                   p$n_par, p$n_obs, p$n_periods, p$logpost0))
+  cfg <- .bench_config(p)
+  dev <- .bench_config_deviations(cfg)
+  if (length(dev))
+    .dynhr_warn("dynhr_benchmark: the workload is not running with the ",
+                "default (fastest) configuration -- ",
+                paste(sprintf("%s = %s (default %s)", dev,
+                              vapply(dev, function(k) format(cfg[[k]]), ""),
+                              vapply(dev, function(k)
+                                format(.bench_expected_config[[k]]), "")),
+                      collapse = "; "),
+                ". Throughputs are not comparable with default-configuration ",
+                "runs on other machines.",
+                class = "dynhr_warning_benchmark_config")
 
   ## Pilot: a single serial chain, used ONLY to size n_draws. Timed separately
   ## from the sweep so its cost never enters a reported throughput.
@@ -406,7 +511,8 @@ dynhr_benchmark <- function(cores = NULL,
     settings = list(cores = cores, n_draws = n_draws, seed = seed,
                     seconds_per_setting = seconds_per_setting,
                     serial_ms_per_draw = per_draw * 1000,
-                    speedup_basis = basis),
+                    speedup_basis = basis,
+                    config = cfg, config_default = !length(dev)),
     results  = out,
     by_chain = bych
   ), class = "dynhr_benchmark")
@@ -424,14 +530,23 @@ print.dynhr_benchmark <- function(x, ...) {
               s$cpu_model, s$os, s$cores_logical, s$cores_physical, s$ram_gb))
   cat(sprintf("  R %s (%s) | BLAS: %s\n", s$r_version, s$r_platform,
               basename(s$blas %||% "?")))
+  if (isTRUE(s$blas_reference) || isTRUE(s$lapack_reference))
+    cat("  ** reference BLAS/LAPACK in use -- see dynhr_system_info()$blas_note **\n")
   cat(sprintf("  dynhr %s (%s) | %s\n", s$dynhr_version,
               substr(s$dynhr_commit %||% "?", 1, 8), s$timestamp))
   cat(sprintf("\n  workload: %s, %d params, %d obs, %d periods\n",
               x$problem$model, x$problem$n_par, x$problem$n_obs,
               x$problem$n_periods))
   cat(sprintf("  fingerprint (logpost): %.10f\n", x$problem$logpost_check))
-  cat(sprintf("  %d draws/chain, seed %d\n\n", x$settings$n_draws,
+  cat(sprintf("  %d draws/chain, seed %d\n", x$settings$n_draws,
               x$settings$seed))
+  cfg <- x$settings$config
+  if (!is.null(cfg))
+    cat(sprintf("  config: use_rcpp = %s, Kalman method = %s, init = %s%s\n",
+                cfg$use_rcpp, cfg$kf_method, cfg$lik_init,
+                if (isTRUE(x$settings$config_default)) " (default)"
+                else "  ** NOT the default configuration -- not comparable **"))
+  cat("\n")
   r <- x$results
   cat(sprintf("  %5s %12s %12s %10s %8s %10s\n",
               "cores", "draws/s", "draws/s adj", "us/draw", "speedup", "effic."))

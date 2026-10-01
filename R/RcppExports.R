@@ -101,8 +101,12 @@ kf_adjoint_cpp <- function(Y, TT, RR, ZZ, DD, d, Sigma_e, dTT_cube, dRR_cube, dZ
     .Call(`_dynhr_kf_adjoint_cpp`, Y, TT, RR, ZZ, DD, d, Sigma_e, dTT_cube, dRR_cube, dZZ_cube, dDD_cube, dd_mat, dSigma_cube, me_variance, ll_min, shock_scale_mat, me_extra_mat, return_bars)
 }
 
-kf_adjoint_uni_cpp <- function(Y, TT, RR, ZZ, DD, d, Sigma_e, dTT_cube, dRR_cube, dZZ_cube, dDD_cube, dd_mat, dSigma_cube, me_variance, ll_min, P0_in, p0_supplied) {
-    .Call(`_dynhr_kf_adjoint_uni_cpp`, Y, TT, RR, ZZ, DD, d, Sigma_e, dTT_cube, dRR_cube, dZZ_cube, dDD_cube, dd_mat, dSigma_cube, me_variance, ll_min, P0_in, p0_supplied)
+kf_adjoint_uni_cpp <- function(Y, TT, RR, ZZ, DD, d, Sigma_e, dTT_cube, dRR_cube, dZZ_cube, dDD_cube, dd_mat, dSigma_cube, me_variance, ll_min, P0_in, p0_supplied, shock_scale_mat, me_extra_mat, return_bars) {
+    .Call(`_dynhr_kf_adjoint_uni_cpp`, Y, TT, RR, ZZ, DD, d, Sigma_e, dTT_cube, dRR_cube, dZZ_cube, dDD_cube, dd_mat, dSigma_cube, me_variance, ll_min, P0_in, p0_supplied, shock_scale_mat, me_extra_mat, return_bars)
+}
+
+kalman_chandrasekhar_loop_cpp <- function(Y_minus_d, ZZ, TT, SS, HH_full, P0, s, ll_const, ss_tol, ll_min, return_filtered) {
+    .Call(`_dynhr_kalman_chandrasekhar_loop_cpp`, Y_minus_d, ZZ, TT, SS, HH_full, P0, s, ll_const, ss_tol, ll_min, return_filtered)
 }
 
 kalman_ss_loop_cpp <- function(Y_minus_d, ZZ, TT, K_ss, F_inv_ss, ll_ss_const, s, start_t, end_t, return_filtered) {
@@ -111,6 +115,10 @@ kalman_ss_loop_cpp <- function(Y_minus_d, ZZ, TT, K_ss, F_inv_ss, ll_ss_const, s
 
 kalman_standard_loop_cpp <- function(Y_minus_d, ZZ, TT, RR, DD, HH_full, Sigma_e, SS, P, ll_const, ss_tol, ll_min, return_filtered, me_diag_vec, kalman_tol) {
     .Call(`_dynhr_kalman_standard_loop_cpp`, Y_minus_d, ZZ, TT, RR, DD, HH_full, Sigma_e, SS, P, ll_const, ss_tol, ll_min, return_filtered, me_diag_vec, kalman_tol)
+}
+
+kalman_standard_general_loop_cpp <- function(Y_minus_d, ZZ, TT, RR, DD, HH, QQ, Sigma_e, SS, s, P, t_start, init_loglik, ll_const, ss_tol, ll_min, return_filtered, me_vec, me_extra, shock_scale, kalman_tol) {
+    .Call(`_dynhr_kalman_standard_general_loop_cpp`, Y_minus_d, ZZ, TT, RR, DD, HH, QQ, Sigma_e, SS, s, P, t_start, init_loglik, ll_const, ss_tol, ll_min, return_filtered, me_vec, me_extra, shock_scale, kalman_tol)
 }
 
 kalman_univariate_loop_cpp <- function(Y_minus_d, Zb, Tb, QQb, a, P_star, P_inf, me_variance, kalman_tol, diffuse_tol, conv_tol, max_diffuse, ll_min, return_filtered, n_state, ss_lock) {
@@ -133,6 +141,10 @@ kf_tangent_cpp <- function(Y, TT, RR, ZZ, DD, d, Sigma_e, dTT_cube, dRR_cube, dZ
     .Call(`_dynhr_kf_tangent_cpp`, Y, TT, RR, ZZ, DD, d, Sigma_e, dTT_cube, dRR_cube, dZZ_cube, dDD_cube, dd_mat, dSigma_cube, me_variance, ll_min, shock_scale_mat, me_extra_mat)
 }
 
+lyapunov_doubling_cpp <- function(A, B, max_iter, tol) {
+    .Call(`_dynhr_lyapunov_doubling_cpp`, A, B, max_iter, tol)
+}
+
 mcp_sparse_solve_cpp <- function(i_idx, j_idx, x_vals, rhs, n_dim) {
     .Call(`_dynhr_mcp_sparse_solve_cpp`, i_idx, j_idx, x_vals, rhs, n_dim)
 }
@@ -151,6 +163,14 @@ mvn_logcdf3_cpp <- function(b, C) {
 
 mvn_logcdf_dispatch_cpp <- function(x, S, miwa_qmax) {
     .Call(`_dynhr_mvn_logcdf_dispatch_cpp`, x, S, miwa_qmax)
+}
+
+o2_sylvester_kron2_cpp <- function(A, F, H, RHS, max_refine = 4L) {
+    .Call(`_dynhr_o2_sylvester_kron2_cpp`, A, F, H, RHS, max_refine)
+}
+
+o2_third_cross_bar_hx_cpp <- function(hx, c3, M) {
+    .Call(`_dynhr_o2_third_cross_bar_hx_cpp`, hx, c3, M)
 }
 
 ordered_qz_cpp <- function(E, D, critmod = 1.0000010) {
@@ -180,6 +200,14 @@ ordered_qz_cpp <- function(E, D, critmod = 1.0000010) {
 #' @keywords internal
 .hank_peak_rss <- function() {
     .Call(`_dynhr_hank_peak_rss`)
+}
+
+pskf_filter_cpp <- function(Y, TT, ZZ, mu_eta, Sigma_eta, Gamma_eta, nu_eta, Delta_eta, mu_eps, Sigma_eps, P0, cut_tol, max_q, offset_miwa_qmax, fast_solve, store_path, keep_override, store_keep) {
+    .Call(`_dynhr_pskf_filter_cpp`, Y, TT, ZZ, mu_eta, Sigma_eta, Gamma_eta, nu_eta, Delta_eta, mu_eps, Sigma_eps, P0, cut_tol, max_q, offset_miwa_qmax, fast_solve, store_path, keep_override, store_keep)
+}
+
+qr_static_transform_implicit_cpp <- function(f_static, f_minus_r, f_zero_r, f_plus_r, f_exo_r) {
+    .Call(`_dynhr_qr_static_transform_implicit_cpp`, f_static, f_minus_r, f_zero_r, f_plus_r, f_exo_r)
 }
 
 qr_static_transform_cpp <- function(f_static, f_minus_r, f_zero_r, f_plus_r, f_exo_r) {

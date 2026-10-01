@@ -474,7 +474,7 @@ hank_td2_nonlinear <- function(block, rb_path = NULL, ra_path = NULL,
 
 #' Shift a two-asset distribution along the liquid axis by delta * a
 #'
-#' The collateral coordinate re-basing (D1, brief 19 section 9.12): mass at
+#' The collateral coordinate re-basing: mass at
 #' \eqn{(e, x, a)} moves to \eqn{(e, x + \delta a, a)}, per a-slice, via the
 #' VALIDATED joint-lottery forward operator with an identity income transition
 #' (the a-component queries grid knots exactly, so only the liquid lottery is

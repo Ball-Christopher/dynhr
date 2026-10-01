@@ -71,7 +71,7 @@ sbc_draws_from_smc <- function(smc_result, L_target) {
   L_target    <- as.integer(L_target)
   if (L_target < 1L) stop("sbc_draws_from_smc: L_target must be >= 1.")
 
-  ## ESS floor: require ESS > 0.3 * n_particles (Landmines section of brief)
+  ## ESS floor: require ESS > 0.3 * n_particles 
   ess <- 1 / sum(w^2)
   if (ess < 0.3 * n_particles)
     return(list(ok = FALSE, reason = "SMC ESS too low"))
@@ -254,8 +254,7 @@ sbc_ranks <- function(theta_tilde, draws_mat, thin = 1L) {
 #' chi-squared goodness-of-fit test against the (exact, generally unequal --
 #' see "Bin-count exactness" below) expected counts under uniformity.
 #'
-#' \strong{Motivation (2026-07-02 P2c incident;
-#' \code{ORDER3_PRUNED_SS_FOLLOWUP.md} "FINAL VERDICT").} The bare chi-squared
+#' \strong{Motivation (an order-3 pruned-SS incident).} The bare chi-squared
 #' verdict both FALSE-ALARMED (a batch with p = 0.011 driven partly by rank
 #' noise) and UNDER-DETECTED (a "calibrated" batch with a one-sided top-bin
 #' excess that replicated across reruns). The decisive signal in both cases
@@ -567,7 +566,7 @@ sbc_uniformity_test <- function(ranks_mat, L = NULL, n_bins = NULL, draws = NULL
       cn <- colnames(ch)
       vapply(seq_len(d), function(j) {
         col <- if (!is.null(cn) && par_names[j] %in% cn) ch[, par_names[j]] else ch[, j]
-        ## A5: split-chain ESS via the package's single Vehtari et al. (2021)
+        ## Split-chain ESS via the package's single Vehtari et al. (2021)
         ## estimator. The old `.effective_sample_size()` counted lag 0 in the
         ## first Geyer pair, capping ESS at N/3 even for iid draws -- which
         ## made the "ranks are noise-dominated" warning fire ~3x too eagerly.
@@ -822,11 +821,11 @@ print.dynhr_sbc_uniformity <- function(x, ...) {
   Sigma_e <- .get_shock_cov(model, exo, params)
 
   ## Unit-root check, mirroring kalman_filter's lik_init = "auto" resolution.
-  tt_evals <- eigen(TT, only.values = TRUE)$values
-  is_unit_root <- any(Mod(tt_evals) > 1 - 1e-6)
+  tt_radius <- .state_radius(TT, dr)
+  is_unit_root <- tt_radius > 1 - 1e-6
   if (is_unit_root) {
     stop("dynhr_sbc: model has a unit root (max |eigenvalue(TT)| = ",
-         signif(max(Mod(tt_evals)), 6), " >= 1 - 1e-6). SBC requires a ",
+         signif(tt_radius, 6), " >= 1 - 1e-6). SBC requires a ",
          "proper (stationary) data-generating process to draw s_0 from; ",
          "the diffuse prior used by the Kalman filter for unit-root models ",
          "does not correspond to any proper simulation distribution. ",
@@ -848,7 +847,7 @@ print.dynhr_sbc_uniformity <- function(x, ...) {
   ## order = 1 (default): linear state-space simulation matching the KF.
   ## order = 2: pruned second-order simulation matching the TPF likelihood.
   ## For SBC with likelihood = "tpf", pass order = 2L so the DGP and
-  ## likelihood are at the same approximation order (brief section 6).
+  ## likelihood are at the same approximation order.
   Y <- matrix(NA_real_, nrow = n_obs, ncol = T_obs)
 
   if (as.integer(order) >= 2L) {
@@ -891,7 +890,7 @@ print.dynhr_sbc_uniformity <- function(x, ...) {
       ## shocks; Gaussian shocks would cause a DGP-likelihood mismatch and
       ## the SBC rank distribution would be degenerate.
       ##
-      ## JOINT CSN draw (Tier 10 item 3): e ~ CSN(mu_e, Sigma_e, Gamma_e, 0, I)
+      ## JOINT CSN draw: e ~ CSN(mu_e, Sigma_e, Gamma_e, 0, I)
       ## with Gamma_e = diag(alpha_i / sigma_i), seed cov = FULL Sigma_e.  This
       ## is the SAME law the likelihood builds in .get_csn_shock_params (off-
       ## diagonals carried entirely by the seed Sigma_e), so the DGP and the
@@ -936,7 +935,7 @@ print.dynhr_sbc_uniformity <- function(x, ...) {
 
   ## ---- Step 3a: measurement error -----------------------------------------
   ## Every likelihood in the package treats `me_variance` as GENUINE i.i.d.
-  ## observation noise (the multivariate Kalman filter since F3-D, 2026-09-03;
+  ## observation noise (the multivariate Kalman filter more recently;
   ## the univariate KF, pruned, TPF, PSKF, OBC and MS filters before that), so
   ## the DGP must carry the same noise or the SBC tests model mismatch rather
   ## than calibration. Before this step the harness simulated noise-free data
@@ -1009,7 +1008,7 @@ print.dynhr_sbc_uniformity <- function(x, ...) {
   }
 
   ## Explicit dispatch on sampler: adding "nuts" to match.arg without the
-  ## branch here would be a silent no-op (Landmine 5).
+  ## branch here would be a silent no-op.
   if (sampler == "rwmh") {
     mcmc <- rwmh(log_post_fn, theta0, Sigma_prop,
                  n_draws = n_draws, n_burn = n_burn,
@@ -1028,8 +1027,7 @@ print.dynhr_sbc_uniformity <- function(x, ...) {
     ## For NUTS + Whittle: build the analytic Whittle gradient inside the
     ## replication so parallel daemons need no API-surface changes.  The
     ## grad_fn captures (model, Y, prior_spec, obs_vars, compiled) which are
-    ## all present in this replication's scope.  Option (b) from sbc-refresh
-    ## brief S2: no change to dynhr_sbc() signature needed.
+    ## all present in this replication's scope.  No change to dynhr_sbc() signature needed.
     ## NOTE: any future multi-obs Whittle battery cell must use obs_vars with
     ## >= 2 entries AND correlated shocks to exercise the complex Hermitian path.
     nuts_grad_fn <- if (identical(likelihood, "whittle")) {
@@ -1224,8 +1222,9 @@ print.dynhr_sbc_uniformity <- function(x, ...) {
 #'   only to derive \code{L_target = floor(n_draws / thin)}; the ESS floor
 #'   \code{>= 0.3 * n_particles} is enforced. For \code{"dime"}, \code{n_draws}
 #'   is used as \code{n_iter} (post-burn iterations per walker). A gradient-based
-#'   sampler with a non-differentiable likelihood (\code{"tpf"}, \code{"pskf"},
-#'   \code{"student_t"}) is unsupported and raises an error.
+#'   sampler with \code{"tpf"} (stochastic) or \code{"student_t"} (no gradient
+#'   path) is unsupported and raises an error; with \code{"pskf"} it uses the
+#'   frozen-selection finite-difference gradient.
 #' @param me_variance      Measurement-error variance, forwarded to
 #'   \code{make_log_posterior} (default 0).
 #' @param lik_init         Kalman filter \code{P0} initialisation, forwarded
@@ -1349,15 +1348,14 @@ dynhr_sbc <- function(model, obs_vars, T_obs = 100L, n_replications = 50L,
 
   sampler <- match.arg(sampler)
 
-  ## Guard unsupported sampler x likelihood combinations. Gradient-based samplers
-  ## (nuts/hmc/mala/chees) require an ANALYTIC gradient; only gaussian, whittle and
-  ## cumulant expose one (see .ctx_allows_analytic_gradient). tpf is stochastic and
-  ## non-differentiable, pskf has fragile CDF-based finite differences, and student_t
-  ## has no adjoint path -- finite-difference gradients of these are noisy/unreliable
-  ## (O(sigma_noise / h) error), so the sampler's trajectories diverge. Use a
-  ## gradient-free sampler (rwmh, smc, or dime) for those likelihoods.
+  ## Guard unsupported sampler x likelihood combinations. tpf is stochastic and
+  ## non-differentiable (finite differences carry O(sigma_noise / h) error, so
+  ## trajectories diverge) and student_t has no gradient path. pskf is allowed:
+  ## its finite-difference gradient (.hmc_gradient) is taken on the pruning
+  ## selection made at the current point, so selection switches no longer
+  ## produce spurious jump / h derivatives (NUTS x pskf SBC-calibrated).
   if (sampler %in% c("nuts", "hmc", "mala", "chees") &&
-      likelihood %in% c("tpf", "pskf", "student_t"))
+      likelihood %in% c("tpf", "student_t"))
     stop("dynhr_sbc: sampler = '", sampler, "' is unsupported with likelihood = '",
          likelihood, "'. Gradient-based samplers (nuts/hmc/mala/chees) require an ",
          "analytic gradient; '", likelihood, "' exposes none (noisy/fragile finite ",
@@ -1451,7 +1449,7 @@ dynhr_sbc <- function(model, obs_vars, T_obs = 100L, n_replications = 50L,
     }
 
     ## .sbc_one_replication() re-seeds (seed + i) in this process; restore the
-    ## caller's RNG stream when dynhr_sbc() exits (C1).
+    ## caller's RNG stream when dynhr_sbc() exits.
     .local_seed(seed)
     for (i in seq_len(n_replications)) {
       rep_seed <- seed + i
@@ -1627,7 +1625,8 @@ sbc_matrix_result <- function(sbc_results = NULL, out_path = "inst/extdata/sbc_m
   static$notes[is_no_grad & static$likelihood == "tpf"] <-
     "gradient sampler x a STOCHASTIC, non-differentiable particle likelihood -- no usable gradient exists (mathematically incompatible)"
   static$notes[is_no_grad & static$likelihood == "pskf"] <-
-    "no analytic gradient implemented for pskf (CDF/orthant-based, fragile FD) -- derivable in principle, not yet coded"
+    "no analytic gradient; the finite-difference gradient is taken on the pruning selection made at the current point (frozen selection, 0.9.4.25), so the cell is runnable -- battery cell not yet run"
+  static$status[is_no_grad & static$likelihood == "pskf"] <- "to-certify"
   static$notes[is_no_grad & static$likelihood == "student_t"] <-
     "no analytic gradient implemented for student_t (= the gaussian KF adjoint + t-density derivative) -- straightforward to add"
 
@@ -1655,10 +1654,10 @@ sbc_matrix_result <- function(sbc_results = NULL, out_path = "inst/extdata/sbc_m
   static <- .set(static, "hmc",  "gaussian_kf", "certified",
        "AR(1) battery 2026-06-27 (POST dual-averaging fix, commit 2acbd67): calibrated, min p=0.290, 0/50 failed -- was 8.5e-48 (frozen chain) pre-fix (50 reps, seed 42)")
   ## Re-certification 2026-09-25..27 on the corrected mass adaptation
-  ## (0.9.3.50) and the Whittle x0.5 / 2pi fix (0.9.3.35), frozen 0.9.3.87
+  ## and the Whittle x0.5 / 2pi fix, frozen 0.9.3.87
   ## build, AR(1) rho ~ beta(0.7, 0.1), sig_x ~ inv_gamma(0.5, 0.3),
   ## n_draws 1000 / n_burn 500 / thin 4 (Whittle: 500 / 300), run by
-  ## replication/sbc_recert_2026-09-25/. chees, abandoned in 2026-06 at ~3 h,
+  ## the SBC re-certification battery. chees, abandoned in 2026-06 at ~3 h,
   ## completed in batched runs (7.6 h) and is calibrated.
   static <- .set(static, "hmc", "gaussian_kf", "certified",
        "AR(1) re-cert 2026-09-25 (0.9.3.87, post mass-adaptation fix): calibrated, min p=0.510, 0/200 failed (T=100, 200 reps, seed 9804); was min p=0.290 on 50 reps 2026-06-27")
@@ -1679,8 +1678,13 @@ sbc_matrix_result <- function(sbc_results = NULL, out_path = "inst/extdata/sbc_m
   for (s in c("hmc", "mala", "chees"))
     static <- .set(static, s, "whittle", "to-certify",
          "analytic whittle gradient wired; battery cell not yet run (whittle approximate -> characterized, not gated, once run)")
-  static <- .set(static, "rwmh", "pskf", "to-certify",
-       "AR1 estimated-alpha battery cell; 2026-06-13 local run miscalibrated (pre-existing); investigation pending")
+  ## pskf certifications 2026-10-01 (0.9.4.28 + the nuts x pskf guard lift):
+  ## AR(1) estimated-alpha cell (rho, sig_x, alpha_x; T=60, me_variance 1e-4),
+  ## 104 reps in 13 batches of 8, batch seeds spaced 1000 apart.
+  static <- .set(static, "rwmh", "pskf", "certified",
+       "AR1 estimated-alpha cell 2026-10-01 (0.9.4.28): calibrated with LONG chains (20000 draws / 10000 burn / thin 80): min p=0.056, 0/104 failed, |mean-rank z| <= 1.19. Short chains (2000 / 1000 / thin 8) mix too slowly for alpha_x (p=0.003, lumpy ranks, no directional bias) -- the 2026-06-13 miscalibration predates the 0.9.4.6 Mendell-Elston fix")
+  static <- .set(static, "nuts", "pskf", "certified",
+       "AR1 estimated-alpha cell 2026-10-01 (0.9.4.28, eta-space NUTS, frozen-selection forward-FD gradient, 1000 draws / 500 warmup / thin 5): calibrated, min p=0.026 (Bonferroni 0.0167), 0/104 failed, |mean-rank z| <= 1.53, 36 min on 8 cores")
   ## cumulant exposes an analytic gradient (cumulant_loglik_grad), so the
   ## gradient-based samplers are SUPPORTED here (not unsupported like tpf/pskf).
   for (s in grad_samplers)

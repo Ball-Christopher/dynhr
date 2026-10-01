@@ -1,8 +1,305 @@
-# dynhr 0.9.4.23
+# dynhr 0.9.4.43
 
-Hotfix release: 0.9.4.20 plus two third-cumulant fixes. **Cumulant, GMM and
-method-of-moments fits with `cumulant_orders` containing 3, and third
-cumulants / skewness of order-2 models, should be re-run.**
+**Public release: everything since 0.9.4.** This release carries all
+development since 0.9.4 (the 0.9.4.1 - 0.9.4.43 entries below). The earlier
+public hotfixes 0.9.4.8, 0.9.4.15, 0.9.4.20 and 0.9.4.23 each carried only
+the fixes listed in their own announcement; everything else below is new to
+public users. Highlights:
+
+- **Speed.** The Kalman filter stays compiled with missing observations,
+  `a0` / `P0`, `shock_scale` and `me_extra` (one NA used to cost ~6x);
+  the exact gradient is compiled for missing data with `me_extra` /
+  `shock_scale`; faster mode finding (Hessian), prior, gradient, a
+  structural-parameter cache for covariance-only moves, compiled Lyapunov /
+  Chandrasekhar / PSKF recursions. `dynhr_sitrep()` flags a reference
+  BLAS / LAPACK (e.g. Windows "Matrix products: default").
+- **Safety.** Every sampler checks its arguments up front, and the estimation
+  spec applies the same checks when it is built, so a bad setting fails
+  before the mode stage instead of after it (or silently).
+
+**Re-run if affected (changes results), beyond the earlier hotfixes:**
+- serial NUTS with `n_chains > 1` (ran one chain); parallel NUTS / DIME with
+  `sampler$extra` settings (they were ignored);
+- sampler arguments that used to run degenerate chains now error (e.g.
+  `max_treedepth = 0`, SMC `n_mh_steps = 0` now warns, non-monotone tempering
+  ladders);
+- PSKF with gradient samplers / mode finding (finite differences now hold the
+  pruning selection fixed); `pskf_cdf = "fast"` removed;
+- third / fourth cumulants on models with nearly repeated state roots;
+- gradients with missing data plus `me_extra` / `shock_scale` (were
+  finite-difference approximations); modes found with the new Hessian method
+  move by ~1e-11;
+- see each entry below for the size of the change.
+
+- **Finite-difference gradient fall-backs are announced.** Every route by
+  which `make_posterior_grad()` ends up on the FD-hybrid finite difference
+  of the log-posterior now warns once per gradient closure with class
+  `dynhr_warning_grad_fd_fallback`, naming the route and the conditions
+  (state-transition spectral radius and init in force, missing cells,
+  `me_extra`, `shock_scale`): `grad_method = "auto"` resolving to
+  `"hybrid"` at build time (a unit root together with missing data,
+  `me_extra` or `shock_scale`; `lik_init = "kappa"`), a draw no analytic
+  kernel covers, an unavailable exact-diffuse kernel, a failed kernel.
+  Fallback draws are counted in `attr(<gradient>, "kernel_stats")`. Handle
+  the class to log which estimations take the path.
+
+# dynhr 0.9.4.42
+
+- **Exact compiled gradient with missing data and time-varying variances.**
+  `make_posterior_grad()` with missing observations plus `me_extra`
+  (filter tunes) or `shock_scale` (heteroskedastic shocks) now runs the
+  compiled exact adjoint, including the reverse-through-the-solve path,
+  instead of the FD-hybrid fallback (which was ~1e-2 off) or the R reference
+  adjoint. sw2007: me_extra + NA 68 -> 9 ms, shock_scale + NA 33 -> 9 ms.
+  Missing data alone also takes the reverse path (sw2007 with NAs ~22 ->
+  8.6 ms; gradient moves ~3e-12). `grad_method = "auto"` picks
+  `"adjoint_solution"` for these data. Only a unit root combined with
+  missing data, `me_extra` or `shock_scale` still uses FD-hybrid.
+- The gradient's init check and the mode-stage / exact-Hessian init checks
+  reuse the stored spectral radius.
+
+# dynhr 0.9.4.41
+
+- The Student-t Kalman filter, SBC, method-of-moments and estimation-passport
+  unit-root / stationarity checks reuse the spectral radius stored by the
+  solve instead of recomputing `eigen()` of the state block (160 states:
+  ~4 ms per call); decisions unchanged.
+
+# dynhr 0.9.4.40
+
+**Size-dependent speed-ups, each at a measured crossover (code comments
+carry the timing tables).**
+- Lyapunov P0 by compiled doubling (`solve_lyapunov`): bit-identical, faster
+  at every size (n = 20: 0.09 -> 0.02 ms; n = 160: 2.45 -> 0.96 ms); the
+  Z11 rank test and inverse share one SVD.
+- The Chandrasekhar filter recursion is compiled (`method = "chandrasekhar"`;
+  exact to ~1e-12, ~1e-9 near unit roots, its own conditioning floor).
+  `method = "auto"` still switches to it only above 100 states (it does not
+  return `final_cov`); there the whole filter is 2.2-2.5x faster (160 states:
+  29.6 -> 13.4 ms). It is faster from about 60 states: ask for it
+  explicitly when the state hand-off is not needed.
+- Static-variable elimination applies the QR reflectors implicitly from 50
+  equations (240 equations: ~2-3x); below that the full-Q path is kept
+  (sw2007, 40 equations, is bit-unchanged); `ghx` / `ghu` agree to 1e-12.
+- The state transition's spectral radius is computed once in the solve (QZ
+  eigenvalues, exact `eigen()` within 1e-4 of the unit circle) and reused by
+  `kalman_filter()`'s initialisation check when the transition is the same
+  block (160 states: 4.4 ms per call saved).
+
+# dynhr 0.9.4.39
+
+**Faster posterior and gradient evaluation (bit-identical).**
+- The exact gradient builds the system matrices and the dynamic expansion
+  point once (they were re-extracted inside the adjoint): sw2007 8.1 -> 7.2
+  ms, nk_demo 1.75 -> 1.35, fs2000 3.85 -> 3.05.
+- Structural-parameter cache: a draw that moves only covariance-side
+  parameters (estimated shock std, correlation, measurement-error variance)
+  reuses the previous steady state and decision rule in the Gaussian
+  posterior and gradient closures. sw2007 stderr-only move 2.3 -> 1.1 ms;
+  full-block moves unchanged; seeded RWMH chains (1, 4 and 12 blocks)
+  identical with the cache on and off. `options(dynhr.structural_cache =
+  FALSE)` switches it off.
+- The shock covariance is evaluated from a plan resolved once per shocks
+  block (80 shocks: 2 -> 0.2 ms); the prior score uses the per-family
+  precomputed path.
+
+# dynhr 0.9.4.38
+
+- **Faster mode finding.** The newrat initial Hessian and the at-mode exact
+  Hessian of `run_mode_finding()` use `posterior_hessian(t2_method = "auto")`:
+  the exact adjoint solution curvature when `param_deriv = "second"` is
+  compiled, otherwise the d2X-free `"hvp_solution"` (falling back to
+  `"loop"` if a perturbed point fails to solve). sw2007 default mode run
+  5.4 -> 4.1 s (with `use_exact_hessian = TRUE` 9.9 -> 4.4 s); the mode moves
+  by ~2e-11, the proposal covariance by ~2e-8. `posterior_hessian()` gains
+  `t2_method = "auto"`; its default is unchanged.
+- **Faster prior.** `log_prior()` precomputes hyper-parameter conversions once
+  per prior spec and evaluates per distribution family: bit-identical,
+  sw2007 127 -> 10 microseconds.
+- **BLAS / LAPACK reporting.** `dynhr_system_info()`, `dynhr_sitrep()` and
+  `dynhr_benchmark()` report the BLAS / LAPACK in use and flag R's
+  reference implementations (Windows "Matrix products: default"), which
+  make dense linear algebra much slower than OpenBLAS / MKL / Accelerate.
+
+# dynhr 0.9.4.37
+
+- **Missing observations no longer slow the Kalman filter down.** Missing
+  values, a non-zero `a0`, a user or kappa `P0`, the hand-off after the
+  exact-diffuse phase, `shock_scale` and `me_extra` used to send the WHOLE
+  standard filter to the per-step R loop (sw2007: one NA anywhere, 1.3 ->
+  ~8 ms per evaluation). They now run in compiled code
+  (`kalman_standard_general_loop_cpp`): partially observed periods update
+  with the observed rows, fully missing periods predict only, and the
+  steady-state lock holds on complete stretches and re-engages after a gap.
+  sw2007 with missing cells: ~1.3 ms, the same as complete data. Results
+  match the R loop to round-off (~1e-12 relative; an independent
+  joint-density oracle agrees to 1e-10); complete data with `a0 = 0` is
+  bit-identical. `options(dynhr.use_rcpp = FALSE)` still selects the R
+  reference. The stationary P0 is no longer solved twice when the
+  measurement-error floor check already solved it.
+
+# dynhr 0.9.4.36
+
+- **Parallel NUTS and DIME honour `sampler$extra`.** With `parallel = TRUE`
+  the multi-chain NUTS and the DIME paths passed none of the sampler's extra
+  arguments to `run_nuts_mirai()` / `run_dime_mirai()`, so e.g.
+  `max_treedepth`, `target_accept`, `aimh_prob` or `rho` were silently
+  ignored. They are now passed on; an extra the parallel function cannot
+  take (e.g. NUTS `step_size`) is refused, at spec build and by the runner,
+  instead of being dropped.
+
+# dynhr 0.9.4.35
+
+- **Sampler arguments are checked when the spec is built.** `validate_spec()`
+  / `dynhr_estimation_spec()` apply each sampler's own argument checker to
+  the arguments the runner would pass (typed fields under the sampler
+  function's names, then `sampler$extra`), listing every problem. A spec
+  that would run a frozen chain, a collapsed particle cloud or a
+  non-monotone tempering ladder, or that names an unknown `sampler$extra`
+  argument (`dynhr_error_unknown_argument`), fails before the mode stage
+  instead of inside the sampler afterwards.
+- One definition each for the NUTS timeout floor, the unsupported-sampler
+  message, the Whittle `freq_band` rule, the planner-objective lookup
+  (Ramsey, discretion, OSR) and the mode-finding method list.
+
+# dynhr 0.9.4.34
+
+- Fix (0.9.4.32): the NUTS / HMC / ChEES argument checker refused the low-rank
+  metric object that pooled multi-chain NUTS (`adapt = "pooled"`,
+  `metric = "lowrank"`) passes as `M_inv` / `chol_M`, so those runs errored.
+  The checker now accepts it and checks its order.
+
+# dynhr 0.9.4.33
+
+**The estimation spec refuses at build time what used to fail after the mode
+stage (or after sampling).** `dynhr_estimation_spec()` / `validate_spec()`
+now reject: `n_draws < 1`; a NUTS `timeout` below the runner's 30 s floor;
+`outputs$ramsey` on a model without a planner objective (the sampler used to
+run to the end first, then fail with no result), a free-instrument system, or
+`ramsey_order = 2` below `max_order = 2`; a `save` `dir` that is a file or a
+`prefix` with a path separator; `pruned_order = 3` below `max_order = 2`
+(the mode stage used to "converge" at -Inf); `sampler = "smc2"`, which the
+spec runner does not run; an unknown `mode$method`, `mode$options` key or
+`likelihood$extra` / `mode$extra` name; a whittle `freq_band` outside
+[0, pi]; an `me_variance` of the wrong length; a `mode$theta_init` the mode
+stage would refuse; `likelihood$dates` not one per sample row.
+`run_estimation()` refuses `compute$resume = TRUE` on a directory without a
+checkpoint before any stage runs (a machine fact, so not a spec error: such a
+spec still loads elsewhere). The noisy-likelihood mode-stage warning now
+says what is true: the spec runner runs the mode stage on a particle filter
+likelihood; the flat `run_mode_finding()` does not accept one. The spec
+schema documents DIME `n_draws` as iterations per walker.
+
+# dynhr 0.9.4.32
+
+**Sampler arguments are checked up front (changes results where they were
+silently wrong).** Each sampler's argument rules now live in one helper
+(`.<sampler>_args_problem`), called at sampler entry (and, next, at spec
+build).
+- Values that ran silently and returned degenerate output now error:
+  NUTS `max_treedepth = 0`, HMC `step_size <= 0` / `L = 0` / `step_jitter`
+  outside [0, 1), ChEES / NUTS / MALA `target_accept` outside (0, 1), RWMH
+  `scale <= 0` / `target_rate` outside (0, 1) / `adapt_every = 0`, a
+  `Sigma_prop` or metric that is not positive (semi-)definite or has the
+  wrong dimension, `n_draws = 0`, DIME with fewer than n_par + 1 walkers;
+  SMC `n_particles < 2`, `ess_target` outside (0, 1], `mut_target` outside
+  (0, 1), `mh_scale_factor <= 0`, malformed `mixture_weights`, and a
+  `lambda_schedule` / `phi_schedule` that is not strictly increasing in
+  (0, 1] (it used to run non-monotone ladders as given and drop values
+  above 1). A strictly increasing partial ladder still continues adaptively.
+- SMC `n_mh_steps = 0` stays legal but warns
+  (`dynhr_warning_smc_no_mutation`): without mutation the cloud degenerates.
+- **Serial NUTS with `n_chains > 1` runs all the chains** (one after another;
+  it used to run one). Single-chain draws are unchanged. A chain that hits
+  the NUTS time limit raises `dynhr_warning_nuts_timeout` (was a
+  verbose-only message).
+- DIME's `n_draws` / `n_iter` is documented as iterations per walker.
+- Valid arguments give bit-identical seeded draws for every sampler.
+
+# dynhr 0.9.4.31
+
+- **DSMH cloud sizes are checked when the spec is built.** A `"dsmh"`
+  `sampler_spec()` whose `n_particles` is not a multiple of `n_groups` or
+  `n_strata` (set through `sampler$extra`; defaults 10 and 20) is now an
+  error from `validate_spec()` / `dynhr_estimation_spec()`
+  (`dynhr_error_dsmh_args`, `dynhr_error_spec_invalid`), not from the
+  sampler after the mode stage has run. `dynhr_dsmh()` itself is unchanged
+  (same rule, same messages).
+
+# dynhr 0.9.4.30
+
+- **HANK block fingerprints no longer depend on the session locale or R
+  version.** `hank_het_fingerprint()`, `hank_het2_fingerprint()` and
+  `hank_het3_fingerprint()` hashed a serialisation whose header records the
+  session's native encoding and the writing R version, so the same block got
+  a different fingerprint under `LANG=C` than under a UTF-8 locale (and
+  would have changed on an R upgrade). The header is now replaced by one
+  fixed header. Fingerprints computed in a UTF-8 session are unchanged;
+  C-locale sessions now give the same values.
+
+# dynhr 0.9.4.29
+
+- **NUTS x PSKF is SBC-certified.** `dynhr_sbc()` now accepts gradient
+  samplers with `likelihood = "pskf"` (they use the frozen-selection
+  finite-difference gradient). AR(1) estimated-skewness cell, 104
+  replications: NUTS calibrated (min p = 0.026 against Bonferroni 0.0167,
+  no directional bias); RWMH x PSKF calibrated with long chains (20000 draws,
+  thin 80; min p = 0.056). With short chains (2000 draws, thin 8) RWMH mixes
+  too slowly for the skewness parameter, which is what the earlier
+  "miscalibrated" RWMH cell showed. `sbc_matrix.rds` and the SBC-matrix
+  vignette are updated.
+
+# dynhr 0.9.4.28
+
+- **PSKF frozen selection, remaining paths.** The parallel mode-finding
+  chains' L-BFGS-B polish (`parallel = TRUE`) and the one-sided curvature
+  used at bound-active modes (Step 6) now also difference on the pruning
+  selection made at the centre. Parallel PSKF modes and proposal covariances
+  at bound-active PSKF modes can change; other likelihoods are bit-identical.
+  NUTS with the frozen gradient was checked against a long RWMH run on a
+  skewed AR(1) (all |z| < 1.6, no divergences).
+
+# dynhr 0.9.4.27
+
+- **Tensor-Lyapunov solves for third / fourth cumulants.** The eigenbasis
+  route is now used only when the state transition's eigenvector basis is
+  well conditioned (`rcond(V) >= 1e-3`, was 1e-6); otherwise the solve uses
+  doubling. Nearly repeated, non-normal state roots (rcond ~1e-5) gave third
+  cumulants off by ~3e-6 relative; now ~1e-15. Models between the two
+  thresholds move toward the exact solution by round-off amounts (rbc2shock
+  3.5e-14, rbc 3e-12 relative).
+
+# dynhr 0.9.4.26
+
+- **PSKF Hessians and mode finding.** Finite-difference Hessians
+  (`num_hessian`, the parallel mirai Hessian, the `"full"` proposal's
+  numDeriv Hessian, `mode_trust_region`) and the mode finders' numerical
+  gradients (csminwel / newrat, and a frozen-selection gradient for the
+  L-BFGS-B stage of `combined`, `nelder` and `cmaes_jade`) now difference a
+  PSKF posterior on the pruning selection made at the centre. A stencil
+  across a selection switch returned jump / h^2: Hessian errors of 3e3 to
+  1e7 were measured at switch points (the proposal covariance and Laplace
+  marginal likelihood there change). Other likelihoods are bit-identical.
+
+# dynhr 0.9.4.25
+
+- **PSKF gradients for gradient samplers.** With `likelihood = "pskf"`, NUTS,
+  HMC, ChEES and MALA take their finite-difference gradients on the pruning
+  selection chosen at the current point. A stencil that straddled a
+  selection switch used to difference the loglik jump (up to ~2e-3 nat) and
+  return a spurious derivative of about jump / h: errors of 3 to 390 at
+  measured switch points, now within 2e-5 of the branch derivative. The
+  log-likelihood itself is unchanged. Mode finding and the numerical Hessian
+  do not yet use the frozen selection.
+
+# dynhr 0.9.4.24
+
+- **`pskf_cdf = "fast"` removed** (argument, `dynhr_set_options()`,
+  `likelihood_spec()`); it now raises `dynhr_error_pskf`. It ran the PSKF
+  recursion in R, so the default `"accurate"` (C++ filter) was both faster and
+  more accurate. Default results are bit-identical.
+
+# dynhr 0.9.4.23
 
 **Third cumulants of pruned order-2 systems (changes results).**
 - `compute_third_cumulant()` omitted the order-sigma^6 contribution of
@@ -20,12 +317,36 @@ cumulants / skewness of order-2 models, should be re-run.**
   GMM and method-of-moments objective and gradient with `cumulant_orders`
   containing 3.
 
+# dynhr 0.9.4.22
+
+- **RNG hygiene.** `bayesian_conditional_forecast(seed =)`,
+  `diag_stability_map(seed =)`, `smc_model_tempered(seed_M0 =, seed_M1 =)`
+  and the TPF terminal state of `conditional_forecast(ctx = )` seed locally
+  and restore the caller's global RNG stream (they reset it, so any later
+  simulation or sampler call in the session changed). Results for a given
+  seed are unchanged. The remaining `set.seed()` sites were audited: worker
+  processes, internal helpers reached only through a restoring entry point,
+  and the documented estimation-runner seed contract are unchanged.
+- `smc_model_tempered()` documents that without `log_post_fn_M0` every
+  Stage-1 evaluation also runs the full M1 likelihood.
+
+# dynhr 0.9.4.21
+
+- **Debiased Whittle much faster.** The expected periodogram and its
+  parameter derivatives are one matrix product over the Fejer-weighted lags
+  (an FFT at T >= 512 on the Fourier grid) instead of an O(T^2) R double
+  loop. fs2000 at T = 1000: 0.66 s -> 0.012 s per log-posterior evaluation;
+  log-posterior and gradient identical to ~1e-14.
+
 # dynhr 0.9.4.20
 
-Hotfix release: 0.9.4.15 plus conditional-forecast, PSKF data orientation,
-TPF preflight RNG and tune-validation fixes. **Conditional forecasts made with
-`method = "soft"`, or with hard conditions reachable only through
-zero-variance shocks, should be re-run.**
+- `filter_tune()` and `plan_tune()` reject non-finite `values` and
+  non-integer `periods` (class `dynhr_error_bad_argument`). A missing value
+  used to become a missing data point at the tuned period, so the tune
+  silently vanished, and a fractional period was truncated (3.7 -> 3), the
+  in-sample counterpart of the conditional-forecast validation in 0.9.4.19.
+
+# dynhr 0.9.4.19
 
 **Conditional forecasts (changes results).**
 - `method = "soft"` takes the exact Gaussian conditional of the shock path:
@@ -51,6 +372,8 @@ zero-variance shocks, should be re-run.**
   used, `plan_condition()` no longer warns about it, and `dynhr_plan()`
   refuses mixed anticipated / unanticipated soft entries (as it did for hard).
 
+# dynhr 0.9.4.18
+
 - `make_log_posterior_pskf()` / `make_log_posterior_pskf_order2()` orient a
   SQUARE observation matrix (T equal to the number of observables) by its
   dimnames; a documented `n_obs x T` square input used to be transposed and
@@ -60,25 +383,58 @@ zero-variance shocks, should be re-run.**
   called `set.seed(k)` K times and left the stream at seed K, silently
   changing any later simulation or sampler run).
 
-- `filter_tune()` and `plan_tune()` reject non-finite `values` and
-  non-integer `periods` (class `dynhr_error_bad_argument`). A missing value
-  used to become a missing data point at the tuned period, so the tune
-  silently vanished, and a fractional period was truncated (3.7 -> 3), the
-  in-sample counterpart of the conditional-forecast validation in 0.9.4.20.
+# dynhr 0.9.4.17
+
+- `dynhr_benchmark()` records the speed configuration its workload runs with
+  (`$settings$config`: `use_rcpp`, the Kalman method and init) and prints it.
+  When it is not the package default -- e.g. `options(dynhr.use_rcpp =
+  FALSE)`, which the daemons inherit and which runs the sw2007 posterior ~5x
+  slower -- it warns (class `dynhr_warning_benchmark_config`) and marks the
+  result non-comparable (`$settings$config_default = FALSE`). The defaults
+  were re-checked on 0.9.4.16: `"auto"` resolves to the C++ `"standard"`
+  filter, the fastest method for this workload (1.3 ms vs 6.2 ms
+  Chandrasekhar, 18 ms reference).
+
+# dynhr 0.9.4.16
+
+- The higher-order LU solve helper (0.9.4.2) returns the empty solution for
+  a model with no states (an n x 0 right-hand side); `solve()` rejected it,
+  so static models (e.g. `y = exp(e)`) failed at order 3 and above.
 
 # dynhr 0.9.4.15
-
-Hotfix release: 0.9.4.8 plus two silent-wrong-target fixes.
 
 - **Cumulant likelihood with correlated shocks fixed (changes results).** The
   model's third and fourth cumulants (`compute_third_cumulant`,
   `compute_fourth_cumulant`, the closed-form fourth cumulant) and the
-  cumulant adjoint gradient built a diagonal shock covariance, dropping
-  `corr` entries. Cumulant, GMM and method-of-moments fits of models with
+  cumulant adjoint gradient built a DIAGONAL shock covariance, dropping
+  `corr` entries. Cumulant / GMM / method-of-moments fits of models with
   shock correlations used the wrong higher-order moments (Monte-Carlo
   z-scores up to 50 before, below 2 after), and the default exact gradient
-  for `cumulant_orders` containing 3 but not 4 was about 3% off. **Re-run
-  such fits.** Models without shock correlation are unchanged.
+  for `cumulant_orders` containing 3 but not 4 was ~3% off. Models without
+  shock correlation are unchanged (bit-identical).
+
+# dynhr 0.9.4.14
+
+- The higher-order LU solve helper (0.9.4.2) returned complex vector
+  solutions as real, dropping the imaginary part; the compact Sylvester sweep
+  of the sparse order-3 route then failed its residual check and fell back to
+  the dense Kronecker solve (finite HANK n_a = 8: minutes instead of ~30 s).
+  Results were unaffected (the fallback is exact); speed restored.
+
+# dynhr 0.9.4.13
+
+- **Order-2 exact gradients in C++.** The Kronecker `K_xx` solves in the
+  order-2 solution derivatives and the order-2 adjoint, and the third-cumulant
+  adjoint's hx contraction, run as Kronecker-structured C++ kernels (Schur
+  forms, never forming the (n ns^2)^2 matrix). Models with about 20 states no
+  longer need a multi-GB dense factorisation: the sw2007 cumulant gradient
+  (orders 1:3) takes 0.36 s per call (17.5 s before, with the dense solve
+  infeasible). Results agree with the iteratively refined dense solve to
+  3e-15; the old plain-QR reference itself sat up to 3e-10 away on
+  ill-conditioned systems.
+
+# dynhr 0.9.4.12
+
 - **Heteroskedastic shocks and filter tunes are no longer dropped silently.**
   `likelihood = "whittle"`, `"cumulant"`, `"pruned"` and `"pskf"` never
   implemented `shock_scale` (`heteroskedastic_shocks`) or `me_extra`
@@ -88,27 +444,103 @@ Hotfix release: 0.9.4.8 plus two silent-wrong-target fixes.
   class `dynhr_error_inapplicable_argument`. Use `likelihood = "gaussian"`
   for these features.
 
+# dynhr 0.9.4.11
+
+- The SV Rao-Blackwellised particle filter counts degenerate particle-steps
+  (weight-0 particles, e.g. after volatility overflow). The loglik carries the
+  count as attribute `n_degenerate`, and a run emits one classed message
+  (`dynhr_sv_rbpf_degenerate`) when it is non-zero, so a finite but
+  meaningless loglik past the overflow point is no longer silent. No
+  likelihood value changes.
+
+# dynhr 0.9.4.10
+
+- **PSKF smoother forward pass in C++.** The filter pass the smoother stores
+  (`store_path = TRUE`) now runs in the compiled recursion: 63 -> 12 ms on the
+  Reiter-HANK probe, whole smoother 134 -> 82 ms (the backward pass is still
+  R). Gaussian moments and the log-likelihood match the R recursion to 5e-12;
+  the stored skew quantities agree to within the R recursion's own
+  sensitivity to 2-ulp input perturbations (up to ~1e-7 relative on
+  rank-deficient state spaces such as Reiter-HANK).
+
+# dynhr 0.9.4.9
+
+- `run_mode_finding()` accepts optimiser options (e.g. `lbfgsb_maxit`)
+  through `...`; they used to reach the log-posterior constructor, which
+  rejected them as unknown arguments. Misspelt names are still an error.
+
 # dynhr 0.9.4.8
 
-Hotfix release: 0.9.4 plus one PSKF correctness fix. **PSKF likelihoods
-estimated with 0.9.4 or earlier should be re-run** if they use
-`pskf_cdf = "fast"`, several skewed shocks, or `max_q` above the default.
+- Version number of the public hotfix (tag `0.9.4.8`, branch
+  `hotfix-0.9.4.8`): public 0.9.4 plus the Mendell-Elston normal CDF fix and
+  the round-off coupling rule of 0.9.4.6, nothing else. No code change on this
+  line; a result made with public 0.9.4.8 lacks the 0.9.4.1-0.9.4.5 and the
+  rest of the 0.9.4.6-0.9.4.7 changes.
 
-- **PSKF: Mendell-Elston normal CDF fixed (changes results).** The
-  Mendell-Elston approximation to the multivariate normal log-CDF shifted the
-  conditional mean the wrong way and shrank each conditional covariance entry
-  twice. Per-call errors of several nats (median 1.1, max 6.5 against
-  `mvtnorm`) drop to a median of 0.016. The evaluator is used for coupled
-  blocks wider than `miwa_qmax`, when the lattice / Miwa evaluators decline a
-  block, and for the pruning compensation under `pskf_cdf = "fast"`. With
-  default settings it was reached in about 12% of random 1-3 shock test
-  systems, several of them off by more than 1 nat. `pskf_cdf = "fast"` now
-  tracks the exact likelihood closely (18.4 -> 0.002 nat off a particle-filter
-  oracle on one test model). Problems that never reach it are unchanged.
+# dynhr 0.9.4.6
+
+- **PSKF: Mendell-Elston CDF fixed (changes results).** The Mendell-Elston
+  approximation to the multivariate normal log-CDF shifted the conditional
+  mean the wrong way and shrank each conditional covariance entry twice.
+  Per-call errors of several nats (median 1.1, max 6.5 against `mvtnorm`)
+  drop to a median of 0.016. The evaluator is used for coupled blocks wider
+  than `miwa_qmax`, when the lattice / Miwa evaluators decline a block, and
+  for the pruning compensation under `pskf_cdf = "fast"`. With default
+  settings it was reached in about 12% of random 1-3 shock test systems,
+  several of them off by more than 1 nat; `pskf_cdf = "fast"` now tracks the
+  exact likelihood closely (18.4 -> 0.002 nat off a particle-filter oracle on
+  one fixture). Well-conditioned problems that never reach it, such as the
+  Reiter-HANK probe, are unchanged.
 - **PSKF: round-off couplings no longer merge CDF blocks.** Correlations below
   1e-8 inside a block of four or more are zeroed before the evaluator is
-  chosen, so round-off cannot join independent blocks into one
-  Mendell-Elston block.
+  chosen, so round-off in `Delta + Gamma Sigma Gamma'` cannot join exactly
+  evaluable blocks into one Mendell-Elston block.
+- **PSKF likelihood recursion in C++.** About 5x faster (Reiter-HANK probe
+  62 -> 13 ms per evaluation), agreeing with the R recursion to the
+  round-off floor. The R recursion remains the reference and the fallback when
+  a compiled CDF evaluator declines a block; the smoother and gradients stay
+  in R.
+
+# dynhr 0.9.4.3
+
+- **PSKF filter, cheaper per period.** The predicted-covariance inverse uses
+  a pivot-tested Cholesky inverse when the covariance is well conditioned and
+  keeps the eigen pseudoinverse for singular or near-singular periods (a
+  singular initial covariance, exactly known state directions). The
+  prediction step reuses shared products. Log-likelihoods move only at the
+  PSKF round-off floor (about 3e-12 relative). The Reiter-HANK probe runs
+  about 10% faster; its predicted covariance is rank-deficient every period,
+  so the larger speed-up awaits the compiled recursion.
+
+# dynhr 0.9.4.2
+
+- **Higher-order perturbation solves no longer fail on ill-conditioned
+  systems.** The order-2 to order-5 coefficient solves use LU with `tol = 0`,
+  as the first-order `ghu` solve does. An ill-conditioned but nonsingular
+  `A_L` used to fall back to `qr.solve()` (`tol = 1e-7`), which errored at
+  orders 3-5 and, at order 2, returned a least-squares answer with a warning.
+  An exactly singular system is an error of class
+  `dynhr_error_singular_system`. Well-conditioned models are unchanged.
+- **`smc(lambda_schedule = )` with `approx_loglik_fn`** now errors
+  (`dynhr_error_inapplicable_argument`); it was silently ignored. The model
+  tempering bridge is governed by `phi_schedule`.
+  `dynhr_smc_model_tempered()` applies `lambda_schedule` to its
+  likelihood-tempered Stage 1 only.
+- Docs: `smc()` and `make_posterior()` list the tempering schedules and the
+  per-likelihood `...` arguments.
+
+# dynhr 0.9.4.1
+
+- **Exact cumulant gradient with a weight matrix.** `make_posterior_grad(likelihood = "cumulant")`
+  gains `weight_matrix`: the exact gradient (first-order rule, order-2
+  implicit and adjoint paths, and the FD-of-moments path) supports a fixed
+  non-identity GMM weight matrix, the gradient of `-T/2 delta' W delta` (only
+  the symmetric part of W enters). The default weighting stays `"identity"`.
+- **`run_mode_finding()` with cumulant extras.** Likelihood extras passed
+  through `...` (`cumulant_orders`, `weight_matrix`, ...) were also forwarded
+  to the optimiser, which rejected them ("unused argument"); the optimiser now
+  gets only its own options. With a `weight_matrix` the mode stage uses the
+  exact gradient (it used the numerical one).
 
 # dynhr 0.9.4
 

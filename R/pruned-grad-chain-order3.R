@@ -1,10 +1,10 @@
 ## R/pruned-grad-chain-order3.R
 ## --------------------------------------------------------------------------
-## D1: semi-analytic order-3 pruned gradient (adjoint filter + FD-of-assembly).
+## Semi-analytic order-3 pruned gradient (adjoint filter + FD-of-assembly).
 ##
 ## Full analytic order-3 gradient is out of scope (no solution_derivatives_
 ## order3 sibling with d(ghxxx)/dtheta etc., and the fold (A, Cu, stationary
-## Sxi) needs a derivative-Lyapunov pass -- see the brief's scope report,
+## Sxi) needs a derivative-Lyapunov pass -- see the reference derivation's scope report,
 ## reproduced in the completion report). This file implements the
 ## SEMI-ANALYTIC middle path instead:
 ##

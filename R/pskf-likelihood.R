@@ -15,7 +15,7 @@
 ## Gamma = 0 collapses to Gaussian.  Closed under affine maps and conditioning,
 ## which enables an exact Kalman-filter analog.
 ##
-## CRITICAL CONVENTIONS (brief landmines):
+## CRITICAL CONVENTIONS:
 ##  1. ghu EXCLUDES Sigma_e (it is the loading matrix R in x_t = G x_{t-1} + R e_t).
 ##     Sigma_eta = RR Sigma_e RR'; Sigma_eps = DD Sigma_e DD' + me_variance*I.
 ##  4. Sigma_eps is assembled as ONE matrix (HH + me_variance*I).
@@ -31,13 +31,13 @@
 ## ---------------------------------------------------------------------------
 ## logcdf_ME_r(x, S) computes log Phi_q(x; 0, S).
 ##
-## Strategy, check = TRUE (pskf_cdf = "accurate", the default):
+## Strategy:
 ##   q = 1: pnorm(log.p = TRUE) -- exact.
-##   q = 2: .mvn_logcdf2() -- Genz's BVND in C++ when p >= 1e-3 (A3; <= ~1e-13
+##   q = 2: .mvn_logcdf2() -- Genz's BVND in C++ when p >= 1e-3 (0.9.4; <= ~1e-13
 ##          in log p), otherwise the conditional 1-D integral on the LOG scale
 ##          around its (log-concave) mode; relative accuracy ~1e-10 down to
 ##          log p ~ -1e3.
-##   q = 3 (A3b, 2026-09-29): mvn_logcdf3_cpp() -- Genz's (2004) exact
+##   q = 3 (0.9.4): mvn_logcdf3_cpp() -- Genz's (2004) exact
 ##          trivariate normal (Plackett reduction, adaptive Gauss-Kronrod;
 ##          |error in p| <= ~1e-15) when p >= 1e-3, det(correlation) >= 1e-8
 ##          and the adaptive rule converged; otherwise the lattice below.
@@ -48,13 +48,13 @@
 ##          on fixed rank-1 lattices with fixed shifts (no RNG), log scale,
 ##          lattice size raised until the shift-spread error estimate is
 ##          below 0.1-0.2 x max(1e-5, 1e-7 |log p|) (continuous hand-over
-##          between sizes, see mvn_cdf.cpp). W75 (2026-09-26), measured
+##          between sizes, see mvn_cdf.cpp). Since 0.9.3.122; measured
 ##          against independent 1- and 2-factor quadrature oracles (160
 ##          problems, q = 3..7, log p in [-1, -300]) and mvtnorm Genz-Bretz
 ##          (40, q = 3..5): every |error| < max(1e-5, 1e-7 |log p|), worst
 ##          0.39 of it. PSKF calls cost ~0.1 / 0.3 / 1.4 / 3 / 10 ms at
-##          q = 3 / 4 / 5 / 6 / 7 (-O2). It replaced the W73
-##          checked-Miwa / R-lattice evaluator (1e-3 to 2.5e-2 nat off in
+##          q = 3 / 4 / 5 / 6 / 7 (-O2). It replaced the
+##          checked-Miwa / R-lattice evaluator (0.9.3.118) (1e-3 to 2.5e-2 nat off in
 ##          moderate-to-deep tails) and plain Miwa(128) for q = 3 and 6-7.
 ##          Falls back to plain Miwa(128), then Mendell-Elston, only when C
 ##          is numerically singular (a Cholesky pivot <= 1e-10).
@@ -62,17 +62,14 @@
 ##   the C++ evaluator has no tiny-correlation pocket, and the 1e-3 snap of
 ##   the Miwa path costs up to |b_i b_j| * 1e-3 nat in log p in the tails.
 ##
-## check = FALSE (pskf_cdf = "fast"): the pre-W73 evaluation, bit for bit:
-##   |rho| < 1e-3 snapped to 0; q = 2 by stats::integrate() on the
-##   probability scale from a lower limit of -8 (misses mass below -8 and
-##   floors log p at log(.Machine$double.eps)); 3 <= q <= miwa_qmax plain
-##   mvtnorm Miwa(128) (0.3 / 0.9 nat off in log Phi_4 / Phi_5 in the orthant
-##   tails the PSKF produces).
-##
-##   q > miwa_qmax (either setting): Mendell-Elston (1974) sequential
+##   q > miwa_qmax: Mendell-Elston (1974) sequential
 ##          conditioning approximation. First-order moment-matching;
 ##          absolute error ~1e-3 (near-diagonal S) to ~0.05 (high
-##          correlations), several nats in deep orthant tails. See inline
+##          correlations); measured against mvtnorm (40 random 3-7 dim
+##          problems) median |log-CDF error| 0.016, max 0.86 (before 0.9.4.6:
+##          median 1.1, max 6.5, from a sign / double-shrink bug). The checked
+##          lattice / Genz evaluators above remain far more accurate (~1e-6
+##          or better), which is why they are the default. See inline
 ##          accuracy note below.
 ##
 ## Why not GenzBretz?  GenzBretz (mvtnorm default) uses randomised QMC --
@@ -82,16 +79,18 @@
 ## crashing.
 ##
 ## miwa_qmax: largest dimension evaluated with the deterministic evaluators
-## before falling back to Mendell-Elston.  The 2026-07-03 pruning-
-## bias investigation (scratchpad/pskf-*.R; memory note
-## pskf-multishock-pruning-bias) proved with an exact 2-D grid-filter oracle
-## that the entire multi-shock "pruning" bias (-7.3 nats at T=12 for
-## alpha=(+2,-2)) was Mendell-Elston evaluation error at q>5, NOT discarded
-## skew mass: swapping ME for an exact Phi_q at unchanged cut_tol=0.01
-## collapsed the gap to |0.005|.  Keeping q inside the exact range via
-## rank-capped pruning (see dim_red4_r max_q) is therefore the fix.
+## before falling back to Mendell-Elston.  An exact 2-D grid-filter oracle
+## showed that the multi-shock "pruning" bias formerly seen (-7.3 nats at
+## T=12 for alpha=(+2,-2)) was Mendell-Elston evaluation error at q>5, NOT
+## discarded skew mass: swapping ME for an exact Phi_q at unchanged
+## cut_tol=0.01 collapsed the gap to |0.005|.  (That error was mostly the
+## sign / double-shrink bug in the ME evaluator fixed in 0.9.4.6; with the
+## fix, an uncapped max_q = Inf run is 0.01-0.03 nat from the grid.)
+## Keeping q inside the exact range via rank-capped pruning (see dim_red4_r
+## max_q) remains the default, since the exact evaluators are still more
+## accurate than ME.
 #' @noRd
-logcdf_ME_r <- function(x, S, miwa_qmax = 5L, check = TRUE, use_cpp = TRUE) {
+logcdf_ME_r <- function(x, S, miwa_qmax = 5L, use_cpp = TRUE) {
   q <- length(x)
   if (q == 0L) return(0)
 
@@ -101,29 +100,29 @@ logcdf_ME_r <- function(x, S, miwa_qmax = 5L, check = TRUE, use_cpp = TRUE) {
     return(pnorm(b, log.p = TRUE))
   }
 
-  ## Accurate path in C++ (A3, 2026-09-29): mvn_logcdf_dispatch_cpp() runs
+  ## Accurate path in C++ (0.9.4): mvn_logcdf_dispatch_cpp() runs
   ## the snap / block factorisation / dispatch below operation for operation
   ## (bit-identical results) and returns NA whenever this R code would reach
   ## a fallback evaluator (bivariate quadrature below p = 1e-3, Miwa,
   ## Mendell-Elston) or meets a non-finite input -- the R path then runs
   ## unchanged. It removes the ~30 us of interpreter overhead per call.
-  ## use_cpp = FALSE skips the A3 fast paths (this one, the bivariate Genz
+  ## use_cpp = FALSE skips the C++ fast paths (this one, the bivariate Genz
   ## rule in .mvn_logcdf2 and the trivariate one in .mvn_logcdf_sov) -- the
   ## general path, for the equivalence tests
   ## (test-fix-0929-pskf-cdf-fast-path.R, test-fix-0929-pskf-tvn.R).
-  if (check && use_cpp) {
+  if (use_cpp) {
     v_cpp <- mvn_logcdf_dispatch_cpp(as.numeric(x), as.matrix(S),
                                      as.numeric(miwa_qmax))
     if (!is.na(v_cpp)) return(v_cpp)
   }
 
-  ## ---- SNAP + BLOCK FACTORIZATION (2026-07 Miwa-pocket fix) ---------------
+  ## ---- SNAP + BLOCK FACTORIZATION (Miwa-pocket fix) ---------------
   ## mvtnorm's Miwa algorithm has an instability pocket for TINY-but-nonzero
   ## correlations: measured on a well-conditioned 3x3 with mixed-sign
   ## rho ~ 1e-5..1e-3 it returned Phi_3 = 1.0856 (> 1!) at steps = 128 and was
   ## still 0.04 absolute off at steps = 512, while rho = 0, 1e-7 and 0.2 are
-  ## all ~1e-6 accurate (scratchpad m5_trace_cdf.R, Reiter-HANK PSKF
-  ## investigation -- this made the filter's likelihood IMPROPER).  Fix:
+  ## all ~1e-6 accurate (Reiter-HANK PSKF investigation -- this made the
+  ## filter's likelihood IMPROPER).  Fix:
   ## (a) standardize to correlation form and SNAP |rho| < 1e-3 to exactly 0
   ##     (error bound: |dPhi/drho| = phi_2 <= 1/(2*pi) per pair, so <= ~1.6e-4
   ##     per snapped pair in PROBABILITY -- but |d log Phi / d rho| grows like
@@ -136,7 +135,7 @@ logcdf_ME_r <- function(x, S, miwa_qmax = 5L, check = TRUE, use_cpp = TRUE) {
   sdv <- sqrt(pmax(diag(as.matrix(S)), .Machine$double.eps))
   Cm  <- as.matrix(S) / outer(sdv, sdv)
   off <- row(Cm) != col(Cm)
-  Cm[off & abs(Cm) < (if (check) 1e-12 else 1e-3)] <- 0
+  Cm[off & abs(Cm) < 1e-12] <- 0
   x <- as.numeric(x) / sdv
   S <- Cm
   adj  <- Cm != 0
@@ -161,59 +160,42 @@ logcdf_ME_r <- function(x, S, miwa_qmax = 5L, check = TRUE, use_cpp = TRUE) {
     for (cc in seq_len(n_comp)) {
       ii  <- which(comp == cc)
       out <- out + logcdf_ME_r(x[ii], Cm[ii, ii, drop = FALSE], miwa_qmax,
-                               check = check, use_cpp = use_cpp)
+                               use_cpp = use_cpp)
     }
     return(out)
   }
 
-  ## Round-off couplings: Delta + Gamma Sigma Gamma' can leave correlations of
-  ## 1e-12..1e-10 where the exact value is 0, which would join independent
-  ## blocks into one block wider than the exact evaluators handle. Inside a
-  ## block of 4 or more (lattice / Miwa / Mendell-Elston territory, whose
-  ## errors dwarf 1e-8 |b_i b_j|) couplings below 1e-8 are zeroed and the
-  ## block split again.
-  if (check && q >= 4L) {
+  ## WEAK COUPLINGS. A block of q >= 4 needs the lattice evaluator or
+  ## Mendell-Elston, whose errors (>= 1e-7 nat; median 0.016 for ME) dwarf the effect
+  ## of a correlation below 1e-8 (|d log Phi / d rho| ~ |b_i b_j|). Couplings
+  ## that weak are round-off, not structure: the covariances the PSKF passes
+  ## here are built as Delta + Gamma Sigma Gamma' with Gamma entries in the
+  ## hundreds, so cross-block entries of 1e-12 .. 1e-11 (correlation scale)
+  ## appear where the exact value is zero. One such entry above the 1e-12 snap
+  ## joins blocks that are each inside the exact range (measured: a 6-row
+  ## stack of blocks 4 + 1 + 1 became one block of 6, went to Mendell-Elston
+  ## and gave a mean-offset factor of 0.657 where the closed form for the
+  ## independent row is 0.3505; a 4-block of two independent pairs went to
+  ## the lattice, whose reordering flips with the round-off). Zero them and
+  ## split again; blocks of 2 and 3 keep the 1e-12 snap because their
+  ## evaluators are exact to 1e-13. mvn_logcdf_dispatch_cpp applies the same
+  ## rule.
+  if (q >= 4L) {
     weak <- off & S != 0 & abs(S) < 1e-8
     if (any(weak)) {
       S[weak] <- 0
-      return(logcdf_ME_r(x, S, miwa_qmax, check = check, use_cpp = use_cpp))
+      return(logcdf_ME_r(x, S, miwa_qmax, use_cpp = use_cpp))
     }
   }
 
   ## q = 2
-  if (q == 2L) {
-    if (check) return(.mvn_logcdf2(x[1], x[2], S[1, 2], use_cpp = use_cpp))
-    ## pskf_cdf = "fast": the pre-W73 evaluation (see the header)
-    ## Standardise bounds to correlation form
-    sd1  <- sqrt(S[1, 1])
-    sd2  <- sqrt(S[2, 2])
-    h1   <- x[1] / sd1
-    h2   <- x[2] / sd2
-    rho  <- S[1, 2] / (sd1 * sd2)
-    rho  <- max(-0.9999, min(0.9999, rho))   # guard |rho| = 1
-    sr   <- sqrt(1 - rho^2)
-    ## P(X1<=h1, X2<=h2) = integral_{-inf}^{h1} phi(u) Phi((h2 - rho*u)/sr) du
-    f <- function(u) dnorm(u) * pnorm((h2 - rho * u) / sr)
-    val <- tryCatch(
-      integrate(f, lower = -8, upper = h1, rel.tol = 1e-8,
-                subdivisions = 100L)$value,
-      error = function(e) {
-        ## Fallback: product approximation Phi(h1)*Phi(h2) (lower bound)
-        pnorm(h1) * pnorm(h2)
-      }
-    )
-    val <- max(val, .Machine$double.eps)
-    return(log(val))
-  }
+  if (q == 2L) return(.mvn_logcdf2(x[1], x[2], S[1, 2], use_cpp = use_cpp))
 
-  ## 3 <= q <= miwa_qmax: the C++ lattice evaluator (check = TRUE) or plain
-  ## Miwa(128) (check = FALSE). Numerically singular S (C++ NA) and Miwa's
-  ## impossible values fall through to Miwa / ME.
+  ## 3 <= q <= miwa_qmax: the C++ lattice evaluator. Numerically singular S
+  ## (C++ NA) and Miwa's impossible values fall through to Miwa / ME.
   if (q <= miwa_qmax) {
-    if (check) {
-      val <- .mvn_logcdf_sov(x, S, use_cpp = use_cpp)
-      if (!is.na(val)) return(val)
-    }
+    val <- .mvn_logcdf_sov(x, S, use_cpp = use_cpp)
+    if (!is.na(val)) return(val)
     if (requireNamespace("mvtnorm", quietly = TRUE)) {
       val <- .mvn_miwa_prob(x, S, 128L)
       if (!is.na(val)) return(log(max(val, .Machine$double.eps)))
@@ -235,13 +217,12 @@ logcdf_ME_r <- function(x, S, miwa_qmax = 5L, check = TRUE, use_cpp = TRUE) {
   ##   These translate to per-period loglik errors of O(abs_err/Phi_q) in the
   ##   CSN loglik correction terms.
   ## MEASURED against mvtnorm (40 random 3-7 dimensional cases): median
-  ## absolute log-CDF error 0.016, max 0.86 in the tails. Before 0.9.4.8 the
-  ## conditional-mean shift had the wrong sign and each conditional
-  ## covariance entry was shrunk twice, which produced errors of several nats
-  ## (median 1.1, max 6.5 on the same cases). The branch is reached with the
-  ## default max_q = 5 too: the pre-pruning stack of max_q + n_exo rows can
-  ## form a coupled block wider than miwa_qmax, and the lattice / Miwa
-  ## evaluators can decline a near-singular block.
+  ## absolute log-CDF error 0.016, max 0.86 in the tails. Before 0.9.4.6 the
+  ## conditional-mean shift had the wrong sign, which produced errors of
+  ## several nats (median 1.1, max 6.5 on the same cases). The branch is
+  ## reached with the default max_q = 5 too: the pre-pruning stack of
+  ## max_q + n_exo rows can form a coupled block wider than miwa_qmax, and
+  ## the lattice / Miwa evaluators can decline a near-singular block.
   ##
   ## Algorithm (Mendell & Elston 1974, corrected for covariance -- not correlation -- form):
   ## For j = 1 .. q-1:
@@ -250,7 +231,7 @@ logcdf_ME_r <- function(x, S, miwa_qmax = 5L, check = TRUE, use_cpp = TRUE) {
   ##   Mills ratio lambda = phi(bj)/Phi(bj)
   ##   mean shift for k > j:  b[k] += S[j,k]/sqrt(S[j,j]) * lambda
   ##     (E[X_k | X_j <= b_j] = -S[j,k]/sqrt(S[j,j]) * lambda, so the bound
-  ##     for X_k rises; the sign was flipped before 0.9.4.8)
+  ##     for X_k rises; the sign was flipped before 0.9.4.6)
   ##   variance shrinkage for k,l > j:
   ##     S[k,l] -= S[j,k]*S[j,l]/S[j,j] * lambda*(bj + lambda)
   ## Final: P_q = Phi(b[q]/sqrt(S[q,q]))
@@ -276,7 +257,7 @@ logcdf_ME_r <- function(x, S, miwa_qmax = 5L, check = TRUE, use_cpp = TRUE) {
       ## Mean shift
       b[k] <- b[k] + CS[j, k] / sj * lambda
       ## Covariance shrinkage: the upper triangle once, then mirrored (looping
-      ## l over all of idx shrank every off-diagonal twice before 0.9.4.8)
+      ## l over all of idx decremented every off-diagonal twice before 0.9.4.6)
       for (l in idx[idx >= k]) {
         CS[k, l] <- CS[k, l] - CS[j, k] * CS[j, l] / sjj * delta_factor
         CS[l, k] <- CS[k, l]
@@ -315,7 +296,7 @@ logcdf_ME_r <- function(x, S, miwa_qmax = 5L, check = TRUE, use_cpp = TRUE) {
 ## (g'' <= -1), so the mass sits within ~40 of its maximiser um on
 ## (-Inf, h1] (g <= g(um) - (u - um)^2 / 2 away from it): exp(g - g(um)) is
 ## integrated over [um - 40, min(h1, um + 40)], split at um +- 8, and g(um)
-## added back. No lower limit of -8 (the pre-W75 path lost the mass below it
+## added back. No lower limit of -8 (the pre-0.9.3.122 path lost the mass below it
 ## -- all of it for h1 = 0, h2 = -10, rho = -0.9) and no floor at
 ## log(.Machine$double.eps). |rho| is capped at 0.9999 as before.
 ## When p >= 1e-3 the quadrature is skipped for Genz's BVND
@@ -329,7 +310,7 @@ logcdf_ME_r <- function(x, S, miwa_qmax = 5L, check = TRUE, use_cpp = TRUE) {
   if (h2 == Inf) return(pnorm(h1, log.p = TRUE))
   if (h2 < h1) { tmp <- h1; h1 <- h2; h2 <- tmp }
   rho <- max(-0.9999, min(0.9999, rho))
-  ## Fast exact path (A3, 2026-09-29): Genz's BVND in C++ (mvn_logcdf2_cpp),
+  ## Fast exact path (0.9.4): Genz's BVND in C++ (mvn_logcdf2_cpp),
   ## absolute error ~1e-16 in p, returned only for p >= 1e-3 where that is
   ## <= ~1e-13 in log p -- below the quadrature's own rel.tol. NA (deeper
   ## tail) falls through to the log-scale quadrature.
@@ -388,7 +369,7 @@ logcdf_ME_r <- function(x, S, miwa_qmax = 5L, check = TRUE, use_cpp = TRUE) {
     return(.mvn_logcdf2(b[1L] / sd[1L], b[2L] / sd[2L], C[1L, 2L] / (sd[1L] * sd[2L]),
                         use_cpp = use_cpp))
   }
-  ## q = 3 (A3b, 2026-09-29): Genz's exact TVN (mvn_logcdf3_cpp) when its
+  ## q = 3 (0.9.4): Genz's exact TVN (mvn_logcdf3_cpp) when its
   ## threshold rule accepts -- p >= 1e-3, det(correlation) >= 1e-8, adaptive
   ## rule converged; NA otherwise, and the lattice runs. The C++ dispatch
   ## calls the same function on the same inputs (bit-identical).
@@ -406,45 +387,49 @@ logcdf_ME_r <- function(x, S, miwa_qmax = 5L, check = TRUE, use_cpp = TRUE) {
 ## Keeps only the rows of (Gamma, nu) whose maximum absolute correlation with
 ## any other row of Gamma Sigma Gamma' + Delta is >= cut_tol.
 ## Without pruning the skewness dimension q grows by n_exo every period;
-## pruning keeps q bounded (typically 1-3 for small DSGE, brief Landmine 2).
+## pruning keeps q bounded (typically 1-3 for small DSGE).
 ##
 ## max_q: HARD rank-based cap on the retained skew dimension.  After the
 ## cut_tol threshold filter, if more than max_q rows survive, only the max_q
 ## rows with the LARGEST skew-vs-state correlation are kept (in original
-## order).  Rationale (2026-07-03 investigation, scratchpad/pskf-*.R): the
-## Phi_q evaluator is deterministic-accurate only for q <= miwa_qmax (5 in
-## the filter's likelihood terms; the C++ lattice evaluator since W75, Miwa
-## before); beyond that
-## the Mendell-Elston approximation's error GROWS with the per-period loglik
-## contribution and accumulates (measured -7.3 nats at T=12, 2 shocks,
-## alpha=(+2,-2)).  Rank-capping q at 5 keeps every CDF call inside the
-## exact-evaluator range; the discarded low-correlation skew mass costs far
-## less (|gap| <= ~0.3 nat at T=12 on the worst measured fixture) than the
-## ME error it avoids.
+## order).  Rationale: the Phi_q evaluator is deterministic-accurate to
+## ~1e-6 only for q <= miwa_qmax (5 in the filter's likelihood terms; the C++
+## lattice evaluator since 0.9.3.122, Miwa before); beyond that the
+## Mendell-Elston approximation is used, whose per-period error (median
+## 0.016 nat after the 0.9.4.6 fix) accumulates over periods.  Rank-capping q
+## at 5 keeps every CDF call inside the exact-evaluator range; the discarded
+## low-correlation skew mass costs at most ~0.3 nat at T=12 on the worst
+## measured fixture.  Historical note: the -7.3 nat multi-shock bias
+## (T=12, 2 shocks, alpha=(+2,-2)) that motivated the cap was the ME
+## sign / double-shrink bug fixed in 0.9.4.6; uncapped (max_q = Inf) the
+## error is now 0.01-0.03 nat from an exact grid on that fixture, so the
+## cap is a precision / cost safeguard rather than a bias correction.
 ##
 ## Mean offset of a CSN(0, Sigma, Gamma, nu, Delta) relative to its Gaussian
 ## location:  E[X] - mu = Sigma Gamma' g,
 ##   g_j = phi(-nu_j; V_jj) * Phi_{q-1}(cond_j) / Phi_q(-nu; V),
 ##   V = Delta + Gamma Sigma Gamma',
 ## (gradient of the log-normaliser wrt nu; verified against rejection-sampling
-## MC, 2026-07 pruning-mean-drift investigation). miwa_qmax is the range of
+## MC). miwa_qmax is the range of
 ## the Phi evaluations (logcdf_ME_r); Mendell-Elston beyond it.
-## DEFAULT 5 since W73 (2026-09-26; it was 2, i.e. Mendell-Elston for every
-## Phi of dimension >= 3, on the argument that the errors cancel in the ratio
-## -- they do not). Measured against INDEPENDENT oracles (exact grid filter;
-## Rao-Blackwellised particle filter on the half-normal selection latents):
+## DEFAULT 5 since 0.9.3.118 (it was 2, i.e. Mendell-Elston for every Phi of
+## dimension >= 3, on the argument that the errors cancel in the ratio -- they
+## do not). Measured against INDEPENDENT oracles (exact grid filter;
+## Rao-Blackwellised particle filter on the half-normal selection latents).
+## The former ME errors below were dominated by the sign / double-shrink bug
+## fixed in 0.9.4.6; "ME" is the fixed Mendell-Elston evaluator
+## (miwa_qmax = 2), "before" the buggy one:
 ##   skewed AR(1), alpha 1.5, T = 20 (test-pskf-smoother.R fixture):
-##     ME 0.138 nat off the grid likelihood, miwa_qmax 5: 2e-4;
+##     ME 3e-4 nat off the grid likelihood (before 0.138), miwa_qmax 5: 2e-4;
 ##   2 states, 2 skew shocks alpha (3, -2), measurement-error var 1e-3,
-##     T = 100: ME -18.4 nat off the particle filter, miwa_qmax 5: 0.07 MCSE;
-##   1 state, 2 skew shocks (4, -3), T = 60: ME -2.3 nat, miwa_qmax 5 -0.07.
-## Cost (W75, C++ evaluator for every Phi of dimension 3-5, T = 200):
-## 2-state / 2-skew-shock fixture 1.1-1.3 s vs 0.29-0.36 s "fast" (W73's
-## R evaluator: 3.0 s); 3 skew shocks into 2 states 1.1 s vs 0.29 s (W73:
-## 3.35 s). The pskf_cdf = "fast" option restores miwa_qmax = 2. The
-## smoother passes 7 (dim_red4_r / .pskf_filter offset_miwa_qmax): there the
-## compensation is carried back to earlier periods (W71: ME-evaluated g put
-## t < T smoothed means up to 2.4 posterior sd off).
+##     T = 100: ME 0.002 nat off the particle filter (before -18.4),
+##     miwa_qmax 5: 0.07 MCSE;
+##   1 state, 2 skew shocks (4, -3), T = 60: before -2.3 nat, miwa_qmax 5 -0.07.
+## The accurate evaluators are used throughout: they are ~1e-6 accurate per
+## call versus ME's 0.016 median (0.86 max) log-CDF error.
+## The smoother passes 7 (dim_red4_r / .pskf_filter offset_miwa_qmax): there
+## the compensation is carried back to earlier periods (the buggy
+## ME-evaluated g put t < T smoothed means up to 2.4 posterior sd off).
 #' @noRd
 .csn_mean_offset <- function(Gamma, nu, Delta, Sigma) {
   as.numeric(Sigma %*% t(Gamma) %*% .csn_offset_g(Gamma, nu, Delta, Sigma))
@@ -452,16 +437,14 @@ logcdf_ME_r <- function(x, S, miwa_qmax = 5L, check = TRUE, use_cpp = TRUE) {
 
 ## The latent-space factor g of .csn_mean_offset (offset = Sigma Gamma' g);
 ## all zeros when any entry is non-finite (the offset is then dropped, as
-## before). check: logcdf_ME_r's accurate evaluators (FALSE = pskf_cdf
-## "fast").
+## before).
 #' @noRd
-.csn_offset_g <- function(Gamma, nu, Delta, Sigma, miwa_qmax = 5L,
-                          check = TRUE) {
+.csn_offset_g <- function(Gamma, nu, Delta, Sigma, miwa_qmax = 5L) {
   q <- nrow(Gamma)
   if (q == 0L) return(numeric(0))
   V <- Delta + Gamma %*% Sigma %*% t(Gamma)
   V <- (V + t(V)) / 2
-  logZ <- logcdf_ME_r(-nu, V, miwa_qmax = miwa_qmax, check = check)
+  logZ <- logcdf_ME_r(-nu, V, miwa_qmax = miwa_qmax)
   g <- numeric(q)
   for (j in seq_len(q)) {
     Vjj <- V[j, j]
@@ -474,8 +457,7 @@ logcdf_ME_r <- function(x, S, miwa_qmax = 5L, check = TRUE, use_cpp = TRUE) {
       Scond <- V[-j, -j, drop = FALSE] -
                V[-j, j, drop = FALSE] %*% V[j, -j, drop = FALSE] / Vjj
       Scond <- (Scond + t(Scond)) / 2
-      lcond <- logcdf_ME_r(mcond, Scond, miwa_qmax = miwa_qmax,
-                           check = check)
+      lcond <- logcdf_ME_r(mcond, Scond, miwa_qmax = miwa_qmax)
     }
     g[j] <- exp(lphi + lcond - logZ)
   }
@@ -493,9 +475,7 @@ logcdf_ME_r <- function(x, S, miwa_qmax = 5L, check = TRUE, use_cpp = TRUE) {
 ## to its birth period, lambda to carry the cut's compensation back to the
 ## periods where the dropped latents were still alive. offset_miwa_qmax is
 ## the deterministic-evaluator range of the Phi evaluations inside the
-## compensation and cdf_check selects the accurate evaluators (.csn_offset_g,
-## logcdf_ME_r; defaults 5 / TRUE since W73; 2 / FALSE = the former cheap
-## Mendell-Elston setting, pskf_cdf = "fast").
+## compensation (.csn_offset_g, logcdf_ME_r; default 5).
 ## mu_shift is the FIRST-MOMENT COMPENSATION for the cut:
 ## deleting a skew row removes that dimension's contribution to the CSN mean
 ## (first-order in its skew-state correlation), so the caller must add
@@ -504,16 +484,64 @@ logcdf_ME_r <- function(x, S, miwa_qmax = 5L, check = TRUE, use_cpp = TRUE) {
 ## persistent single-shock model with |alpha| large) accumulates a systematic
 ## state-mean drift that makes the likelihood IMPROPER (one-step predictive
 ## densities integrating to 0.03-0.97) -- caught by the alpha_z SBC on the
-## Reiter HANK state space (2026-07; coverage collapsed to 3-6%).
+## Reiter HANK state space (coverage collapsed to 3-6%).
 #' @noRd
 dim_red4_r <- function(Gamma, nu, Delta, Sigma, cut_tol = 0.01, max_q = 5L,
-                       offset_miwa_qmax = 5L, cdf_check = TRUE) {
+                       offset_miwa_qmax = 5L, keep = NULL) {
   q <- nrow(Gamma)
   no_shift <- rep(0, ncol(Gamma))
   if (q == 0L)
     return(list(Gamma = Gamma, nu = nu, Delta = Delta, mu_shift = no_shift,
                 keep = integer(0), lambda = numeric(0)))
+  ## keep (optional): the retained rows, increasing indices into the stack.
+  ## The selection below is then skipped and these rows are used as given;
+  ## the mean compensation for the cut is computed exactly as for a selected
+  ## set. This is the frozen-selection branch that finite-difference
+  ## gradients evaluate (see .pskf_filter, keep_override).
+  if (is.null(keep)) {
+    keep_idx <- .dim_red4_select(Gamma, Delta, Sigma, cut_tol, max_q)
+  } else {
+    keep_idx <- as.integer(keep)
+  }
+  if (length(keep_idx) == q) {
+    return(list(Gamma = Gamma, nu = nu, Delta = Delta, mu_shift = no_shift,
+                keep = seq_len(q), lambda = rep(0, q)))
+  }
 
+  SGt      <- Sigma %*% t(Gamma)
+  g_before <- .csn_offset_g(Gamma, nu, Delta, Sigma,
+                            miwa_qmax = offset_miwa_qmax)
+  if (length(keep_idx) == 0L) {
+    return(list(
+      Gamma    = matrix(0, nrow = 0L, ncol = ncol(Gamma)),
+      nu       = numeric(0),
+      Delta    = matrix(0, nrow = 0L, ncol = 0L),
+      mu_shift = as.numeric(SGt %*% g_before),
+      keep     = integer(0),
+      lambda   = g_before
+    ))
+  }
+  G_k <- Gamma[keep_idx, , drop = FALSE]
+  n_k <- nu[keep_idx]
+  D_k <- Delta[keep_idx, keep_idx, drop = FALSE]
+  lambda <- g_before
+  lambda[keep_idx] <- lambda[keep_idx] -
+    .csn_offset_g(G_k, n_k, D_k, Sigma, miwa_qmax = offset_miwa_qmax)
+  list(
+    Gamma    = G_k,
+    nu       = n_k,
+    Delta    = D_k,
+    mu_shift = as.numeric(SGt %*% lambda),
+    keep     = as.integer(keep_idx),
+    lambda   = lambda
+  )
+}
+
+## The kept rows of dim_red4_r's natural selection (increasing indices into
+## the stack): the cut_tol threshold, the collinearity guard, the max_q cap.
+#' @noRd
+.dim_red4_select <- function(Gamma, Delta, Sigma, cut_tol, max_q) {
+  q <- nrow(Gamma)
   ## Pruning criterion (reference dim_red4): the correlation between each
   ## skewness dimension and the STATE,
   ##   corr(skew_i, x_j) = (Gamma Sigma)[i, j] /
@@ -530,20 +558,25 @@ dim_red4_r <- function(Gamma, nu, Delta, Sigma, cut_tol = 0.01, max_q = 5L,
   d_skew   <- sqrt(pmax(diag(cov_full), .Machine$double.eps))
   d_state  <- sqrt(pmax(diag(Sigma),    .Machine$double.eps))
   corr_sx  <- abs(GS) / outer(d_skew, d_state)                   # q x n_state
-  max_corr <- apply(corr_sx, 1, max)
+  ## row maxima (max.col picks the argmax column; NaN rows are not ordered
+  ## by it, so a non-finite matrix takes the plain apply() route)
+  max_corr <- if (all(is.finite(corr_sx)) && ncol(corr_sx) > 0L)
+    corr_sx[cbind(seq_len(q), max.col(corr_sx, ties.method = "first"))]
+  else apply(corr_sx, 1, max)
 
   keep_idx <- which(max_corr >= cut_tol)
-  ## COLLINEARITY guard (2026-07, Reiter-HANK investigation): when the skew
+  ## COLLINEARITY guard (Reiter-HANK investigation): when the skew
   ## rows are propagated images of the SAME shock direction (persistent
   ## single-shock models), corr among skew dims -> 1 within a few periods.
   ## Near-singular V = Delta + G S G' breaks the Phi_q evaluators (Miwa
   ## errors -> ME fallback whose ~0.03 ABSOLUTE error on ~1e-8 tail CDFs is
-  ## tens of nats in the top-minus-bottom log difference -> IMPROPER
-  ## likelihood, one-step predictive integrals 0.04-1e14). Nearly-duplicate
+  ## large relative to the CDF itself, hence in the top-minus-bottom log
+  ## difference -> IMPROPER likelihood, one-step predictive integrals
+  ## 0.04-1e14; measured with the ME evaluator before its 0.9.4.6 sign fix). Nearly-duplicate
   ## constraints are nearly-free to drop UNDER MEAN COMPENSATION (below), so
-  ## iteratively drop the weaker row of any pair with |corr| > 0.995 -- this
+  ## iteratively drop the weaker row of any pair with |corr| > 0.9 -- this
   ## keeps V numerically nonsingular and the deterministic evaluators (the
-  ## C++ lattice rule since W75) away from their singular-C fallback.
+  ## C++ lattice rule since 0.9.3.122) away from their singular-C fallback.
   if (length(keep_idx) > 1L) {
     repeat {
       Vk <- cov_full[keep_idx, keep_idx, drop = FALSE]
@@ -564,38 +597,7 @@ dim_red4_r <- function(Gamma, nu, Delta, Sigma, cut_tol = 0.01, max_q = 5L,
                                decreasing = TRUE)[seq_len(max_q)]]
     keep_idx <- sort(keep_idx)
   }
-  if (length(keep_idx) == q) {
-    return(list(Gamma = Gamma, nu = nu, Delta = Delta, mu_shift = no_shift,
-                keep = seq_len(q), lambda = rep(0, q)))
-  }
-  SGt      <- Sigma %*% t(Gamma)
-  g_before <- .csn_offset_g(Gamma, nu, Delta, Sigma,
-                            miwa_qmax = offset_miwa_qmax, check = cdf_check)
-  if (length(keep_idx) == 0L) {
-    return(list(
-      Gamma    = matrix(0, nrow = 0L, ncol = ncol(Gamma)),
-      nu       = numeric(0),
-      Delta    = matrix(0, nrow = 0L, ncol = 0L),
-      mu_shift = as.numeric(SGt %*% g_before),
-      keep     = integer(0),
-      lambda   = g_before
-    ))
-  }
-  G_k <- Gamma[keep_idx, , drop = FALSE]
-  n_k <- nu[keep_idx]
-  D_k <- Delta[keep_idx, keep_idx, drop = FALSE]
-  lambda <- g_before
-  lambda[keep_idx] <- lambda[keep_idx] -
-    .csn_offset_g(G_k, n_k, D_k, Sigma, miwa_qmax = offset_miwa_qmax,
-                  check = cdf_check)
-  list(
-    Gamma    = G_k,
-    nu       = n_k,
-    Delta    = D_k,
-    mu_shift = as.numeric(SGt %*% lambda),
-    keep     = as.integer(keep_idx),
-    lambda   = lambda
-  )
+  keep_idx
 }
 
 
@@ -614,7 +616,7 @@ dim_red4_r <- function(Gamma, nu, Delta, Sigma, cut_tol = 0.01, max_q = 5L,
 ##   alpha     : n_exo named vector of shape parameters
 ##   TT, ZZ, chi_idx, state_pos, obs_pos : the state space to filter with
 ##
-## DERIVATION (CSN linear-transform convention, brief Landmine 1):
+## DERIVATION (CSN linear-transform convention; file-header convention 1):
 ##   The shock vector in model space is e ~ skewNormal(alpha_i, sigma_i) for
 ##   each component i.  Each scalar skew-normal can be written as:
 ##     e_i = mu_i + sigma_i * Z_i,
@@ -652,7 +654,7 @@ dim_red4_r <- function(Gamma, nu, Delta, Sigma, cut_tol = 0.01, max_q = 5L,
 ##     Gamma_eta = diag(alpha_i/sigma_i) * Sigma_e * RR' * (RR Sigma_e RR')^{-1}
 ##   which simplifies to diag(alpha_i) * (RR)^{-1} when Sigma_e = diag(sigma_i^2).
 ##
-## STATE-SPACE FORM (0.9.4, W58): the lift is applied to the CONTEMPORANEOUS
+## STATE-SPACE FORM (0.9.4): the lift is applied to the CONTEMPORANEOUS
 ## order-1 system built by .pskf_order1_statespace() -- state chi_t = the
 ## model variables [states; non-state observables] at t, RR = ghu[K, ], and a
 ## noise-free selection observation (DD = 0, so Sigma_eps = diag(me) only).
@@ -670,17 +672,17 @@ dim_red4_r <- function(Gamma, nu, Delta, Sigma, cut_tol = 0.01, max_q = 5L,
   Sigma_e <- .get_shock_cov(model, exo_names, params)  # n_exo x n_exo
   alpha   <- .get_shock_skewness(model, exo_names, params)  # n_exo named vector
 
-  ## Correlated + skewed shocks (Tier 10 item 3): the FULL joint CSN.
+  ## Correlated + skewed shocks: the FULL joint CSN.
   ##
   ## The joint shock law is  e ~ CSN(mu_e, Sigma_e, Gamma_e, 0, I_{n_exo})  with
   ##   Gamma_e = diag(alpha_i / sigma_i),   Delta_e = I,   seed cov = full Sigma_e
   ## (off-diagonals included).  This is the construction pinned numerically in
-  ## Phase 0 of the v2-csn brief.  Three properties were verified by brute force
+  ## Three properties were verified by brute force
   ## (1e6-draw CSN rejection sampler, 2-shock alpha = (+2, -2)):
   ##   (a) rho_12 = 0  collapses Sigma_e to diagonal, so the build is BIT-IDENTICAL
-  ##       to the old per-shock-independent path (A3.5; verified delta == 0).
+  ##       to the old per-shock-independent path (verified delta == 0).
   ##   (b) Delta_e = I is always PD, so the joint law is a valid CSN for any
-  ##       admissible Sigma_e (no PD trap; the brief's naive coupling
+  ##       admissible Sigma_e (no PD trap; the naive coupling
   ##       Delta_e[i,j] = alpha_i alpha_j rho_ij is NON-PD and is NOT used).
   ##   (c) the off-diagonal coupling is carried entirely by the seed Sigma_e:
   ##       the cross-shock CO-SKEWNESS  E[(e_i-Ee_i)^2 (e_j-Ee_j)]  flips sign
@@ -696,7 +698,7 @@ dim_red4_r <- function(Gamma, nu, Delta, Sigma, cut_tol = 0.01, max_q = 5L,
   ## Gamma_eta, and the Schur term Sigma_e_perp all use Sigma_e, not its
   ## diagonal), so removing the guard is sufficient.  The SBC DGP draw
   ## (validate-sbc.R) is replaced by the MATCHING joint CSN rejection sampler so
-  ## the DGP and likelihood share the same law (A3.3 consistency).
+  ## the DGP and likelihood share the same law (consistency).
 
   c(.csn_state_noise_lift(RR, DD, Sigma_e, alpha, me_variance),
     ssm[c("TT", "ZZ", "chi_idx", "state_pos", "obs_pos")])
@@ -783,7 +785,7 @@ dim_red4_r <- function(Gamma, nu, Delta, Sigma, cut_tol = 0.01, max_q = 5L,
   if (n == 0L) return(P)
   ## pmax(): a round-off-negative diagonal (-1e-20 on an exactly-known state
   ## direction) is a zero-variance coordinate, not a NaN-with-warning.
-  ## ABSOLUTE FLOOR (W73): a variance at the rounding level of the matrix's
+  ## ABSOLUTE FLOOR: a variance at the rounding level of the matrix's
   ## own scale, n * eps * max diag(S) (>= n * eps * lambda_max / n), is a
   ## known direction too. Without it a round-off residual on an exactly-known
   ## state (P - K F K' left 1e-312, or -- positive -- 1e-17 against O(1)
@@ -807,6 +809,50 @@ dim_red4_r <- function(Gamma, nu, Delta, Sigma, cut_tol = 0.01, max_q = 5L,
   if (!any(pos)) return(P)
   V <- e$vectors[, pos, drop = FALSE]
   P[keep, keep] <- (V %*% ((1 / e$values[pos]) * t(V))) / outer(ds, ds)
+  0.5 * (P + t(P))
+}
+
+## Inverse of a symmetric positive-semidefinite S: a pivoted-Cholesky inverse
+## when S is unambiguously nonsingular, .csn_sym_pinv(S) otherwise. Where the
+## Cholesky route is taken the result equals the pseudoinverse (the inverse IS
+## the pseudoinverse of a nonsingular matrix) to round-off.
+##
+## The route is decided on PIVOTS of the correlation form, never on chol()
+## merely succeeding (a garbage pivot from a matrix singular to round-off can
+## survive chol() and give a wildly wrong inverse). The Cholesky route needs
+##   1. every diagonal above .csn_sym_pinv's rounding-level floor (so no row
+##      would be dropped as a known direction),
+##   2. a full-rank PIVOTED factorisation of the correlation form C, and
+##   3. n * ||C^{-1}||_F < max_cond. Since lambda_max(C) <= tr(C) = n and
+##      1 / lambda_min(C) <= ||C^{-1}||_F, this bounds the condition number of
+##      C from above; the bound sits far below 1 / rtol, so every matrix that
+##      takes this route is also one whose eigenvalues all clear
+##      .csn_sym_pinv's rank cutoff.
+## A matrix failing any test goes to .csn_sym_pinv unchanged, so singular and
+## near-singular inputs (a singular initial covariance, exactly known state
+## directions) keep the eigen rule.
+#' @noRd
+.csn_sym_inv <- function(S, rtol = sqrt(.Machine$double.eps), fast = TRUE,
+                         max_cond = 1e5) {
+  n <- nrow(S)
+  if (!fast || n == 0L) return(.csn_sym_pinv(S, rtol))
+  dS <- diag(S)
+  if (!all(is.finite(dS)) || min(dS) <= n * .Machine$double.eps * max(dS))
+    return(.csn_sym_pinv(S, rtol))
+  d <- sqrt(dS)
+  C <- S / outer(d, d)
+  C <- 0.5 * (C + t(C))
+  if (!all(is.finite(C))) return(.csn_sym_pinv(S, rtol))
+  ## The LAPACK pivoted factorisation warns (and reports rank < n) on a
+  ## rank-deficient input; that case is exactly the fallback.
+  R <- suppressWarnings(chol(C, pivot = TRUE))
+  if (!identical(attr(R, "rank"), n)) return(.csn_sym_pinv(S, rtol))
+  piv <- attr(R, "pivot")
+  Ci  <- matrix(0, n, n)
+  Ci[piv, piv] <- chol2inv(R)
+  if (!all(is.finite(Ci)) || n * sqrt(sum(Ci^2)) >= min(max_cond, 0.25 / rtol))
+    return(.csn_sym_pinv(S, rtol))
+  P <- Ci / outer(d, d)
   0.5 * (P + t(P))
 }
 
@@ -913,16 +959,16 @@ dim_red4_r <- function(Gamma, nu, Delta, Sigma, cut_tol = 0.01, max_q = 5L,
   n_exo <- ncol(RR)
   n_obs <- nrow(DD)
 
-  ## State noise covariance (Landmine 1: ghu excludes Sigma_e)
+  ## State noise covariance (header convention 1: ghu excludes Sigma_e)
   Sigma_eta <- RR %*% Sigma_e %*% t(RR)   # n_state x n_state
 
-  ## Obs noise covariance (Landmine 4: assembled as ONE matrix). me_variance is
+  ## Obs noise covariance (header convention 4: assembled as ONE matrix). me_variance is
   ## a scalar (H = me I) or one variance per observable (H = diag(me)).
   H_me <- if (length(me_variance) == 1L) me_variance * diag(n_obs)
           else diag(as.numeric(me_variance), nrow = n_obs)
   Sigma_eps <- DD %*% Sigma_e %*% t(DD) + H_me
 
-  ## Mean correction (Landmine 6): mu_eta is chosen s.t. E[eta] = 0
+  ## Mean correction (header convention 6): mu_eta is chosen s.t. E[eta] = 0
   ## (preserves the model steady state). E[e] is the mean of the JOINT CSN
   ## law, which only equals the per-shock sigma_i delta_i sqrt(2/pi) when no
   ## skewed shock is correlated with any other shock -- see .csn_shock_mean().
@@ -1081,7 +1127,7 @@ dim_red4_r <- function(Gamma, nu, Delta, Sigma, cut_tol = 0.01, max_q = 5L,
 ## PSKF filter recursion
 ## ---------------------------------------------------------------------------
 ## Implements the CSN Kalman filter (PSKF) following skalman_filter.R /
-## the brief's recursion spec.
+## the published recursion.
 ##
 ## State space (first-order):
 ##   x_t = G x_{t-1} + eta_t,   eta_t ~ CSN(mu_eta, Sigma_eta, Gamma_eta, nu_eta, Delta_eta)
@@ -1104,31 +1150,291 @@ dim_red4_r <- function(Gamma, nu, Delta, Sigma, cut_tol = 0.01, max_q = 5L,
 ## latent-space cut compensation on that stack (mu_shift = Sigma Gamma' lambda).
 ## Linearly dependent observables (singular Omega, e.g. duplicated noise-free
 ## rows) are handled exactly: see .pskf_independent_obs.
-## offset_miwa_qmax (default 5; 2 before W73): deterministic-evaluator range
-## of the Phi evaluations in the pruning compensation (dim_red4_r);
-## pskf_smoother raises it to 7. cdf_check (default TRUE): the accurate
-## evaluators of logcdf_ME_r (log-scale bivariate quadrature, C++ lattice
-## rule for q >= 3; W75), in the likelihood's CDF terms AND the compensation.
-## offset_miwa_qmax = 2 with cdf_check = FALSE is the former evaluation
-## (pskf_cdf = "fast"): see .csn_mean_offset and logcdf_ME_r for its measured
-## errors.
+## offset_miwa_qmax (default 5): deterministic-evaluator range of the Phi
+## evaluations in the pruning compensation (dim_red4_r); pskf_smoother raises
+## it to 7. The likelihood's CDF terms and the compensation use the accurate
+## evaluators of logcdf_ME_r (log-scale bivariate quadrature, C++ lattice rule
+## for q >= 3); see .csn_mean_offset and logcdf_ME_r for their errors.
 ## max_q (default 5): hard rank-based cap on the retained skew dimension,
 ## chosen so every Phi_q call stays inside the deterministic-evaluator range
-## (q <= 5).  Verified 2026-07-03 (scratchpad/pskf-*.R + memory note
-## pskf-multishock-pruning-bias): the historical multi-shock bias
-## (-7.3 nats at T=12, alpha=(+2,-2)) was ENTIRELY Mendell-Elston Phi_q
-## evaluation error at q > 5, not discarded skew mass; capping q at 5 cuts
-## it to |gap| <= 0.14 nat on the worst measured fixture.  max_q = Inf
-## restores the old uncapped behavior (cut_tol-threshold pruning only, ME
-## for q > 5) -- NOT recommended for multi-shock skew.
+## (q <= 5).  The historical multi-shock bias (-7.3 nats at T=12,
+## alpha=(+2,-2)) was ENTIRELY Mendell-Elston Phi_q evaluation error at
+## q > 5, not discarded skew mass -- specifically the sign / double-shrink
+## bug fixed in 0.9.4.6; capping q at 5 cut it to |gap| <= 0.14 nat on the
+## worst measured fixture.  With the ME fix, max_q = Inf (cut_tol-threshold
+## pruning only, ME for q > 5) is 0.01-0.03 nat from an exact grid on the
+## uncapped multishock fixture, so the cap is now a cost / precision
+## safeguard; it stays the default because the exact evaluators are more
+## accurate than ME (~1e-6 vs 0.016 median).
+##
+## keep_override (default NULL): a FROZEN pruning selection -- a list of T
+## integer vectors, element t the rows of the period-t pre-prune stack to
+## keep (the keep_path of an earlier run). dim_red4_r then skips its
+## selection and uses those rows, still computing the mean compensation for
+## the cut. The stack at t has length(keep_override[[t - 1]]) + nrow(Gamma_eta)
+## rows whatever theta is, so a path recorded at one theta is a valid
+## selection at any other theta of the same model: the skew dimension is
+## fixed by the path, not by the data or the parameters. Supplying the path
+## the natural selection would have made changes nothing (same operations).
+## store_keep = TRUE returns the loglik with attr(, "keep_path") (only when it
+## is finite); the value itself is unchanged.
+##
+## Inside a frozen-selection scope (.pskf_fd_gradient, .pskf_freeze_wrap)
+## a call without keep_override and without store_path takes the selection
+## recorded by the scope's first evaluation, so every point of a
+## finite-difference stencil differentiates the same smooth branch.
 #' @noRd
 .pskf_filter <- function(Y, TT, ZZ, mu_eta, Sigma_eta, Gamma_eta, nu_eta,
                           Delta_eta, mu_eps, Sigma_eps,
                           cut_tol = 0.01,
                           max_q = 5L,
                           offset_miwa_qmax = 5L,
-                          cdf_check = TRUE,
-                          store_path = FALSE) {
+                          store_path = FALSE,
+                          fast_solve = TRUE,
+                          use_cpp = TRUE,
+                          keep_override = NULL,
+                          store_keep = FALSE) {
+  q_eta <- nrow(as.matrix(Gamma_eta))
+  if (!is.null(keep_override) &&
+      !.pskf_keep_override_ok(keep_override, ncol(Y), q_eta))
+    .dynhr_abort(".pskf_filter(): `keep_override` must be a list of ",
+                 ncol(Y), " increasing integer vectors, element t indexing ",
+                 "the rows of the period-t pre-prune skew stack ",
+                 "(length(keep_override[[t - 1]]) + ", q_eta, " rows).",
+                 class = "dynhr_error_bad_argument")
+  st <- .pskf_freeze_state
+  slot <- 0L
+  if (is.null(keep_override) && !store_path && !store_keep && st$active) {
+    st$i <- st$i + 1L
+    slot <- st$i
+    rec  <- if (slot <= length(st$paths)) st$paths[[slot]] else NULL
+    if (is.null(rec)) {
+      store_keep <- TRUE
+    } else if (.pskf_keep_override_ok(rec, ncol(Y), q_eta)) {
+      keep_override <- rec
+    } else {
+      slot <- 0L   # recorded for a different filter call: run unfrozen
+    }
+  }
+  ll <- .pskf_filter_run(Y, TT, ZZ, mu_eta, Sigma_eta, Gamma_eta, nu_eta,
+                         Delta_eta, mu_eps, Sigma_eps, cut_tol, max_q,
+                         offset_miwa_qmax, store_path, fast_solve, use_cpp,
+                         keep_override, store_keep)
+  if (slot > 0L && is.null(keep_override)) {
+    kp <- attr(ll, "keep_path")
+    if (!is.null(kp)) st$paths[[slot]] <- kp
+    attr(ll, "keep_path") <- NULL
+  }
+  ll
+}
+
+## A keep path that fits the recursion: T increasing integer vectors, each
+## inside the stack its predecessor leaves (length(prev) + q_eta rows).
+#' @noRd
+.pskf_keep_override_ok <- function(keep, n_T, q_eta) {
+  if (!is.list(keep) || length(keep) != n_T) return(FALSE)
+  q_prev <- 0L
+  for (t in seq_len(n_T)) {
+    k <- keep[[t]]
+    q_new <- q_prev + q_eta
+    if (!is.numeric(k) || anyNA(k) || any(k != round(k)) ||
+        any(k < 1) || any(k > q_new) || is.unsorted(k, strictly = TRUE))
+      return(FALSE)
+    q_prev <- length(k)
+  }
+  TRUE
+}
+
+## ---------------------------------------------------------------------------
+## Frozen-selection finite differences
+## ---------------------------------------------------------------------------
+## The pruning selection (dim_red4_r) is piecewise constant in theta, so the
+## PSKF loglik is piecewise smooth with jumps of up to ~2e-3 nat where the
+## kept set changes (measured on a 2-shock fixture). A finite-difference
+## stencil straddling such a switch differentiates the jump: a central
+## difference returns jump / (2h), 1-10 at h = 1e-4 and ~100 at the samplers'
+## relative step 1e-5 -- as large as, or far larger than, the gradient itself.
+## Inside a frozen-selection scope every PSKF filter call replays the
+## selection recorded by the scope's FIRST evaluation, so all stencil points
+## lie on one smooth branch and the difference is the derivative of that
+## branch (the loglik itself, where no switch lies between the points).
+##
+## State: `active`; `paths`, the recorded keep paths in filter-call order
+## (one per .pskf_filter call of an evaluation, so a posterior that filters
+## twice is frozen per call); `i`, the call counter within an evaluation.
+.pskf_freeze_state <- new.env(parent = emptyenv())
+.pskf_freeze_state$active <- FALSE
+.pskf_freeze_state$paths  <- list()
+.pskf_freeze_state$i      <- 0L
+
+## Open a scope; returns the previous state for .pskf_freeze_close (scopes
+## nest: an inner gradient records and replays its own selection). `paths`
+## seeds the scope with selections recorded elsewhere (.pskf_record_centre,
+## e.g. in the main process for a daemon's stencil): every evaluation then
+## replays them from the start instead of recording its own.
+#' @noRd
+.pskf_freeze_open <- function(paths = list()) {
+  st <- .pskf_freeze_state
+  prev <- list(active = st$active, paths = st$paths, i = st$i)
+  st$active <- TRUE
+  st$paths  <- paths
+  st$i      <- 0L
+  prev
+}
+
+## The selections a PSKF evaluation of fn at theta makes, one keep path per
+## .pskf_filter call in call order (an empty list when fn runs no PSKF filter
+## or its loglik is not finite), for seeding scopes elsewhere. The caller's
+## RNG stream is left as it was, so a stochastic fn (a particle filter)
+## evaluated here does not move anything drawn afterwards.
+#' @noRd
+.pskf_record_centre <- function(fn, theta) {
+  ge  <- globalenv()
+  had <- exists(".Random.seed", envir = ge, inherits = FALSE)
+  old <- if (had) get(".Random.seed", envir = ge, inherits = FALSE) else NULL
+  on.exit({
+    if (had) {
+      assign(".Random.seed", old, envir = ge)
+    } else if (exists(".Random.seed", envir = ge, inherits = FALSE)) {
+      rm(list = ".Random.seed", envir = ge)
+    }
+  }, add = TRUE)
+  prev <- .pskf_freeze_open()
+  on.exit(.pskf_freeze_close(prev), add = TRUE, after = FALSE)
+  .pskf_freeze_wrap(fn)(theta)
+  .pskf_freeze_state$paths
+}
+
+#' @noRd
+.pskf_freeze_close <- function(prev) {
+  st <- .pskf_freeze_state
+  st$active <- prev$active
+  st$paths  <- prev$paths
+  st$i      <- prev$i
+  invisible(NULL)
+}
+
+## f wrapped so that each call is one evaluation of the scope: the filter-call
+## counter restarts, so the k-th filter call of every evaluation replays the
+## k-th recorded path. The first evaluation in the scope records.
+#' @noRd
+.pskf_freeze_wrap <- function(f) {
+  force(f)
+  function(x, ...) {
+    .pskf_freeze_state$i <- 0L
+    f(x, ...)
+  }
+}
+
+## TRUE once the scope has recorded a selection (a PSKF filter ran to a
+## finite loglik in it).
+#' @noRd
+.pskf_freeze_recorded <- function() {
+  length(.pskf_freeze_state$paths) > 0L
+}
+
+## For a stencil whose first evaluation is not the centre (central
+## differences): when that evaluation recorded a PSKF selection, discard it
+## and record at the centre instead (one evaluation of fz, the wrapped
+## function, at theta). Returns TRUE when the centre selected differently --
+## the caller then re-evaluates its first stencil point on the centre's
+## branch (an unchanged selection means that point already is on it). A
+## function that runs no PSKF filter costs nothing extra.
+#' @noRd
+.pskf_freeze_anchor <- function(fz, theta) {
+  if (!.pskf_freeze_recorded()) return(FALSE)
+  first <- .pskf_freeze_state$paths
+  .pskf_freeze_state$paths <- list()
+  fz(theta)
+  !identical(.pskf_freeze_state$paths, first)
+}
+
+## Frozen-selection finite-difference gradient of a scalar function f (e.g. a
+## PSKF log-posterior) at theta, with the selection recorded at theta itself.
+## method "central" (2d + 1 evaluations) or "forward" (d + 1); h is the
+## absolute step (scalar or length d). lower / upper (scalar or length d):
+## a central step that would leave [lower, upper] becomes the one-sided
+## difference on the inside. A non-finite f at any stencil point gives NA
+## for that coordinate. For a function that runs no PSKF filter this is the
+## plain finite difference.
+#' @noRd
+.pskf_fd_gradient <- function(f, theta, h = 1e-4,
+                              method = c("central", "forward"),
+                              lower = -Inf, upper = Inf) {
+  method <- match.arg(method)
+  d <- length(theta)
+  h <- rep_len(h, d)
+  lower <- rep_len(lower, d)
+  upper <- rep_len(upper, d)
+  prev <- .pskf_freeze_open()
+  on.exit(.pskf_freeze_close(prev), add = TRUE)
+  fz <- .pskf_freeze_wrap(f)
+  f0 <- fz(theta)
+  g <- numeric(d)
+  for (k in seq_len(d)) {
+    e <- replace(numeric(d), k, h[k])
+    up_ok <- theta[k] + h[k] <= upper[k]
+    dn_ok <- theta[k] - h[k] >= lower[k]
+    if (method == "central" && up_ok && dn_ok) {
+      g[k] <- (fz(theta + e) - fz(theta - e)) / (2 * h[k])
+    } else if (up_ok) {
+      g[k] <- (fz(theta + e) - f0) / h[k]
+    } else {
+      g[k] <- (f0 - fz(theta - e)) / h[k]
+    }
+  }
+  g[!is.finite(g)] <- NA_real_
+  names(g) <- names(theta)
+  g
+}
+
+## Theta-space gradient closure for mode finding with a PSKF posterior: the
+## frozen-selection central difference of log_post_fn (value or list with
+## $logpost) with optim()'s default step (ndeps = 1e-3), one-sided inside
+## the prior bounds (prior_spec$lower / $upper, less the 1e-8 margin the
+## box-constrained optimisers keep). Given to the L-BFGS-B polish in place
+## of optim()'s internal finite differences, which cannot be frozen.
+#' @noRd
+.pskf_mode_grad_fn <- function(log_post_fn, prior_spec, h = 1e-3) {
+  force(log_post_fn)
+  lo <- stats::setNames(prior_spec$lower, prior_spec$name)
+  hi <- stats::setNames(prior_spec$upper, prior_spec$name)
+  lo[is.na(lo)] <- -Inf
+  hi[is.na(hi)] <- Inf
+  lo <- lo + 1e-8
+  hi <- hi - 1e-8
+  f <- function(th) {
+    r <- log_post_fn(th)
+    if (is.list(r)) r$logpost else r
+  }
+  function(theta) {
+    l <- unname(lo[names(theta)]); u <- unname(hi[names(theta)])
+    if (length(l) != length(theta)) l <- u <- NA_real_
+    l[is.na(l)] <- -Inf
+    u[is.na(u)] <- Inf
+    .pskf_fd_gradient(f, theta, h = h, lower = l, upper = u)
+  }
+}
+
+## The optimiser gradient a mode-finding run gets when it has no analytic
+## one: for likelihood = "pskf" and a method with an L-BFGS-B polish stage
+## (combined, nelder, cmaes_jade) the frozen-selection difference
+## (.pskf_mode_grad_fn), otherwise NULL (the optimiser differences
+## internally). Shared by run_mode_finding() and run_mode_mirai()'s chains.
+#' @noRd
+.pskf_mode_polish_grad <- function(likelihood, method, log_post_fn, prior_spec) {
+  if (identical(likelihood, "pskf") &&
+      length(method) == 1L && method %in% c("combined", "nelder", "cmaes_jade"))
+    .pskf_mode_grad_fn(log_post_fn, prior_spec)
+  else NULL
+}
+
+## The recursion behind .pskf_filter (arguments as there, all required).
+#' @noRd
+.pskf_filter_run <- function(Y, TT, ZZ, mu_eta, Sigma_eta, Gamma_eta, nu_eta,
+                              Delta_eta, mu_eps, Sigma_eps,
+                              cut_tol, max_q, offset_miwa_qmax, store_path,
+                              fast_solve, use_cpp, keep_override, store_keep) {
   ## Y: n_obs x T matrix
   n_obs   <- nrow(Y)
   n_T     <- ncol(Y)
@@ -1159,6 +1465,42 @@ dim_red4_r <- function(Gamma, nu, Delta, Sigma, cut_tol = 0.01, max_q = 5L,
     return(-Inf)
   }
 
+  ## The recursion in C++ (pskf_filter_cpp, src/pskf_filter.cpp): the same
+  ## operations as the loop below, no R callbacks, with or without the path
+  ## storage the smoother needs. It answers only
+  ## for the accurate CDF evaluators; wherever the loop
+  ## below would leave the code the C++ mirrors (a non-finite matrix, a CDF
+  ## the C++ evaluators decline, a failed factorisation) it reports status 1
+  ## and the R loop below runs from the start. use_cpp = FALSE is the
+  ## reference R recursion.
+  if (use_cpp &&
+      is.numeric(Y) && length(mu_eps) == n_obs &&
+      length(mu_eta) == n_state && is.matrix(Sigma_eps) &&
+      identical(dim(Sigma_eps), c(n_obs, n_obs)) &&
+      identical(dim(as.matrix(ZZ)), c(n_obs, n_state)) &&
+      identical(dim(as.matrix(Sigma_eta)), c(n_state, n_state)) &&
+      ncol(as.matrix(Gamma_eta)) == n_state &&
+      length(nu_eta) == nrow(as.matrix(Gamma_eta)) &&
+      identical(dim(as.matrix(Delta_eta)), rep(length(nu_eta), 2L))) {
+    res <- pskf_filter_cpp(
+      matrix(as.double(Y), n_obs, n_T), as.matrix(TT), as.matrix(ZZ),
+      as.numeric(mu_eta), as.matrix(Sigma_eta), as.matrix(Gamma_eta),
+      as.numeric(nu_eta), as.matrix(Delta_eta), as.numeric(mu_eps),
+      as.matrix(Sigma_eps), P0, as.numeric(cut_tol), as.numeric(max_q),
+      as.numeric(offset_miwa_qmax), isTRUE(fast_solve), isTRUE(store_path),
+      keep_override, isTRUE(store_keep))
+    if (res$status == 0L) {
+      if (!store_path) {
+        if (isTRUE(store_keep) && is.finite(res$ll))
+          return(structure(res$ll, keep_path = res$keep_path))
+        return(res$ll)
+      }
+      if (!is.finite(res$ll)) return(list(ll = res$ll))
+      res$status <- NULL
+      return(res)
+    }
+  }
+
   mu_filt    <- rep(0, n_state)
   Sigma_filt <- P0
   Gamma_filt <- matrix(0, nrow = 0L, ncol = n_state)
@@ -1167,6 +1509,11 @@ dim_red4_r <- function(Gamma, nu, Delta, Sigma, cut_tol = 0.01, max_q = 5L,
 
   ## Log-likelihood accumulator
   ll <- 0
+
+  ## Loop invariants
+  tTT   <- t(TT)
+  I_n   <- diag(n_state)
+  tGe   <- t(Gamma_eta)
 
   ## Pre-compute log(2*pi) constant
   ll_const <- -0.5 * n_obs * log(2 * pi)
@@ -1188,6 +1535,8 @@ dim_red4_r <- function(Gamma, nu, Delta, Sigma, cut_tol = 0.01, max_q = 5L,
     Delta_pred_path <- vector("list", n_T)
     keep_path       <- vector("list", n_T)
     lambda_path     <- vector("list", n_T)
+  } else if (store_keep) {
+    keep_path       <- vector("list", n_T)
   }
 
   for (t in seq_len(n_T)) {
@@ -1196,7 +1545,8 @@ dim_red4_r <- function(Gamma, nu, Delta, Sigma, cut_tol = 0.01, max_q = 5L,
     ##   mu_{t|t-1}    = TT mu_{t-1|t-1} + mu_eta
     ##   Sigma_{t|t-1} = TT Sigma_{t-1|t-1} TT' + Sigma_eta
     mu_pred    <- as.numeric(TT %*% mu_filt) + mu_eta
-    Sigma_pred <- TT %*% Sigma_filt %*% t(TT) + Sigma_eta
+    TT_Sfilt   <- TT %*% Sigma_filt
+    Sigma_pred <- TT_Sfilt %*% tTT + Sigma_eta
 
     ## CSN part: by the affine-map + sum closure of the CSN distribution.
     ## Stacking the current filtered skewness (Gamma_filt, nu_filt, Delta_filt)
@@ -1241,65 +1591,53 @@ dim_red4_r <- function(Gamma, nu, Delta, Sigma, cut_tol = 0.01, max_q = 5L,
       ## and a near-singular (but not error-raising) Sigma_pred went through
       ## solve() unregularised. Same scale-free rank rule as the lift
       ## (.csn_sym_pinv).
-      S_pred_inv <- .csn_sym_pinv(S_pred)
+      S_pred_inv <- .csn_sym_inv(S_pred, fast = fast_solve)
 
-      ## Build the stacked Gamma (q_new x n_state)
+      ## Shared projections (each computed once): with the symmetric
+      ## Sigma_filt, Sigma_filt TT' = (TT Sigma_filt)'.
+      if (q_filt > 0L) {
+        Sfilt_TT_t <- t(TT_Sfilt)                       # Sigma_filt TT'
+        M_filt     <- Sfilt_TT_t %*% S_pred_inv         # n_state x n_state
+        G_filt_block <- Gamma_filt %*% M_filt           # q_filt x n_state
+      }
+      if (q_eta > 0L) {
+        M_eta       <- Sigma_eta %*% S_pred_inv         # n_state x n_state
+        G_eta_block <- Gamma_eta %*% M_eta              # q_eta  x n_state
+      }
+
+      ## Stacked Gamma (q_new x n_state)
       if (q_filt == 0L) {
-        ## Only shock skewness
-        G_eta_block <- Gamma_eta %*% Sigma_eta %*% S_pred_inv   # q_eta x n_state
-        Gamma_pred  <- G_eta_block
+        Gamma_pred <- G_eta_block
       } else if (q_eta == 0L) {
-        ## Only filtered skewness
-        G_filt_block <- Gamma_filt %*% Sigma_filt %*% t(TT) %*% S_pred_inv
-        Gamma_pred   <- G_filt_block
+        Gamma_pred <- G_filt_block
       } else {
-        G_filt_block <- Gamma_filt %*% Sigma_filt %*% t(TT) %*% S_pred_inv  # q_filt x n_state
-        G_eta_block  <- Gamma_eta  %*% Sigma_eta  %*% S_pred_inv             # q_eta  x n_state
-        Gamma_pred   <- rbind(G_filt_block, G_eta_block)                     # q_new  x n_state
+        Gamma_pred <- rbind(G_filt_block, G_eta_block)
       }
 
       ## Stacked nu
       nu_pred <- c(nu_filt, nu_eta)
 
-      ## Delta 4-block (conditional covariance structure):
-      ## Using the general formula:
+      ## Delta 4-block (Schur complement of S_pred in the joint CSN skewness
+      ## covariance):
       ##   D11 = D_filt + G_filt (S_filt - S_filt TT' S_pred^{-1} TT S_filt) G_filt'
       ##   D22 = D_eta  + G_eta  (S_eta  - S_eta  S_pred^{-1}       S_eta)   G_eta'
       ##   D12 = -G_filt S_filt TT' S_pred^{-1} S_eta G_eta'
       ##   D21 = D12'
-      ## The block structure is the Schur complement of S_pred in the
-      ## joint CSN skewness covariance.
-
-      if (q_filt == 0L) {
-        ## Only eta block
-        Schur_eta <- Sigma_eta - Sigma_eta %*% S_pred_inv %*% Sigma_eta
-        Delta_pred <- Delta_eta + Gamma_eta %*% Schur_eta %*% t(Gamma_eta)
-      } else if (q_eta == 0L) {
-        ## Only filt block
-        TT_Sfilt <- TT %*% Sigma_filt
-        Schur_filt <- Sigma_filt %*% t(TT) %*% S_pred_inv %*% TT_Sfilt
-        D11 <- Delta_filt + Gamma_filt %*%
-               (Sigma_filt - Schur_filt) %*% t(Gamma_filt)
-        Delta_pred <- D11
-      } else {
-        ## Full 4-block
-        TT_Sfilt <- TT %*% Sigma_filt
-        ## Schur contributions:
-        ## S_filt - S_filt TT' S_pred^{-1} TT S_filt
-        Sfilt_TT_t    <- Sigma_filt %*% t(TT)   # n_state x n_state
-        Schur_filt    <- Sfilt_TT_t %*% S_pred_inv %*% TT %*% Sigma_filt
+      if (q_filt > 0L) {
+        Schur_filt <- M_filt %*% TT_Sfilt
         D11 <- Delta_filt +
                Gamma_filt %*% (Sigma_filt - Schur_filt) %*% t(Gamma_filt)
-
-        ## S_eta - S_eta S_pred^{-1} S_eta
-        Schur_eta <- Sigma_eta - Sigma_eta %*% S_pred_inv %*% Sigma_eta
-        D22 <- Delta_eta + Gamma_eta %*% Schur_eta %*% t(Gamma_eta)
-
-        ## Off-diagonal: -G_filt S_filt TT' S_pred^{-1} S_eta G_eta'
-        D12 <- -Gamma_filt %*% Sfilt_TT_t %*%
-               S_pred_inv %*% Sigma_eta %*% t(Gamma_eta)
-
-        ## Assemble block matrix
+      }
+      if (q_eta > 0L) {
+        Schur_eta <- Sigma_eta - M_eta %*% Sigma_eta
+        D22 <- Delta_eta + Gamma_eta %*% Schur_eta %*% tGe
+      }
+      if (q_filt == 0L) {
+        Delta_pred <- D22
+      } else if (q_eta == 0L) {
+        Delta_pred <- D11
+      } else {
+        D12 <- -(G_filt_block %*% Sigma_eta) %*% tGe
         Delta_pred <- rbind(
           cbind(D11, D12),
           cbind(t(D12), D22)
@@ -1308,7 +1646,7 @@ dim_red4_r <- function(Gamma, nu, Delta, Sigma, cut_tol = 0.01, max_q = 5L,
     }
 
     ## ---- PRUNE ---------------------------------------------------------------
-    ## Keep q bounded (brief Landmine 2). Pruning after prediction before update.
+    ## Keep q bounded Pruning after prediction before update.
     ## keep_t: which rows of the pre-prune stack [U_{t-1}; u_t] survive (the
     ## exact smoother tracks each retained skew latent back to its birth).
     keep_t   <- integer(0)
@@ -1317,7 +1655,7 @@ dim_red4_r <- function(Gamma, nu, Delta, Sigma, cut_tol = 0.01, max_q = 5L,
       pruned <- dim_red4_r(Gamma_pred, nu_pred, Delta_pred, Sigma_pred, cut_tol,
                            max_q = max_q,
                            offset_miwa_qmax = offset_miwa_qmax,
-                           cdf_check = cdf_check)
+                           keep = keep_override[[t]])
       Gamma_pred <- pruned$Gamma
       nu_pred    <- pruned$nu
       Delta_pred <- pruned$Delta
@@ -1328,6 +1666,7 @@ dim_red4_r <- function(Gamma, nu, Delta, Sigma, cut_tol = 0.01, max_q = 5L,
       mu_pred <- mu_pred + pruned$mu_shift
     }
     q_pred <- nrow(Gamma_pred)
+    if (store_keep) keep_path[[t]] <- keep_t
 
     ## ---- OBSERVED ROWS -------------------------------------------------------
     ## Partial observation: update only on available obs (mirrors Gaussian KF)
@@ -1421,7 +1760,7 @@ dim_red4_r <- function(Gamma, nu, Delta, Sigma, cut_tol = 0.01, max_q = 5L,
     ## the explicit-inverse form: a noise-free observation of a state then
     ## gets the exact gain 1; a sqrt-factor route leaves a 1-ulp residual
     ## variance that the scale-free pseudoinverse of the next Sigma_pred
-    ## treats as genuine -- it broke the W58 AR(2) closed-form test.)
+    ## treats as genuine -- it broke the AR(2) closed-form test.)
     Omega_chol    <- chol(Omega)
     log_det_Omega <- 2 * sum(log(diag(Omega_chol)))
     Omega_inv_v   <- backsolve(Omega_chol, forwardsolve(t(Omega_chol), v_t))
@@ -1433,7 +1772,7 @@ dim_red4_r <- function(Gamma, nu, Delta, Sigma, cut_tol = 0.01, max_q = 5L,
     ## Kalman gain (Gaussian)
     K_gauss <- Sigma_pred %*% t(ZZ_t) %*% solve(Omega, tol = 0)
 
-    ## CSN update (brief's update step):
+    ## CSN update:
     ## Gamma and Delta UNCHANGED; only nu shifts:
     ##   nu_{t|t} = nu_{t|t-1} - K_skewed * v_t
     ## where K_skewed = Gamma_pred %*% K_gauss  (q_pred x n_obs_t)
@@ -1446,7 +1785,7 @@ dim_red4_r <- function(Gamma, nu, Delta, Sigma, cut_tol = 0.01, max_q = 5L,
 
     ## Standard Gaussian state update
     mu_upd    <- mu_pred    + as.numeric(K_gauss %*% v_t)
-    I_KZ      <- diag(n_state) - K_gauss %*% ZZ_t
+    I_KZ      <- I_n - K_gauss %*% ZZ_t
     ## Joseph form. Algebraically identical to the short form
     ## `I_KZ %*% Sigma_pred` at the exact Kalman gain, but it is a sum of two
     ## explicitly symmetric PSD terms, so it stays symmetric and PSD under
@@ -1478,7 +1817,7 @@ dim_red4_r <- function(Gamma, nu, Delta, Sigma, cut_tol = 0.01, max_q = 5L,
     ## q_pred = 0 after pruning, so both Phi_q terms are log(1) = 0 and the
     ## loglik reduces exactly to the Gaussian log N term.  The two-CDF
     ## correction vanishes ALGEBRAICALLY, ensuring the zero-alpha reduction
-    ## (brief mandatory test, brief p.2) is exact.
+    ## is exact.
 
     if (q_pred > 0L) {
       ## Bottom: CSN normalisation constant of predictive distribution
@@ -1491,14 +1830,14 @@ dim_red4_r <- function(Gamma, nu, Delta, Sigma, cut_tol = 0.01, max_q = 5L,
       D_top <- 0.5 * (D_top + t(D_top))
 
       ## log Phi_q(-nu_pred; 0, D_bot) -- denominator
-      ll_cdf_bot <- logcdf_ME_r(-nu_pred, D_bot, check = cdf_check)
+      ll_cdf_bot <- logcdf_ME_r(-nu_pred, D_bot)
 
       ## log Phi_q(-nu_{t|t}; 0, D_top) -- numerator: the normalisation
       ## constant of the UPDATED (posterior) CSN is Phi_q(-nu_upd; 0, D_top),
       ## and Phi_q(K_skew v - nu_pred) == Phi_q(-nu_upd).  (Sign verified
       ## against an exact single-period quadrature oracle: with +nu_upd the
       ## skew direction inverts and the loglik is systematically wrong.)
-      ll_cdf_top <- logcdf_ME_r(-nu_upd, D_top, check = cdf_check)
+      ll_cdf_top <- logcdf_ME_r(-nu_upd, D_top)
 
       ll_skew <- ll_cdf_top - ll_cdf_bot
     } else {
@@ -1511,7 +1850,7 @@ dim_red4_r <- function(Gamma, nu, Delta, Sigma, cut_tol = 0.01, max_q = 5L,
     ## ---- Store filtered state for next period --------------------------------
     mu_filt    <- mu_upd
     Sigma_filt <- Sigma_upd
-    Gamma_filt <- Gamma_pred   # unchanged (brief update rule)
+    Gamma_filt <- Gamma_pred   # unchanged (update rule)
     nu_filt    <- nu_upd
     Delta_filt <- Delta_pred   # unchanged
 
@@ -1553,6 +1892,8 @@ dim_red4_r <- function(Gamma, nu, Delta, Sigma, cut_tol = 0.01, max_q = 5L,
       keep_path       = keep_path,
       lambda_path     = lambda_path
     )
+  } else if (store_keep && is.finite(ll)) {
+    structure(ll, keep_path = keep_path)
   } else {
     ll
   }
@@ -1610,17 +1951,18 @@ dim_red4_r <- function(Gamma, nu, Delta, Sigma, cut_tol = 0.01, max_q = 5L,
 #' @param compiled    dynhr_compiled (from compile_model())
 #' @param me_variance Measurement error variance (default 0)
 #' @param system_priors Named list of system-prior closures, or NULL
-#' @param cut_tol     Pruning tolerance (default 0.01; brief Landmine 2)
+#' @param cut_tol     Pruning tolerance (default 0.01)
 #' @param max_q       Hard cap on the retained skew dimension (default 5,
-#'   the deterministic Phi_q evaluator range; see .pskf_filter). Inf = old uncapped
-#'   behavior (Mendell-Elston for q > 5; biased under strong multi-shock skew).
+#'   the deterministic Phi_q evaluator range; see .pskf_filter). Inf = uncapped
+#'   (Mendell-Elston for q > 5; within ~0.03 nat of an exact grid on the
+#'   measured multi-shock fixture, but less accurate than the capped default).
 #' @param power       Power-posterior exponent applied to the LIKELIHOOD only
 #'   (prior and system priors stay untempered). \code{NULL} (default) resolves
 #'   the \code{power_posterior} package option ONCE, at factory time, so every
 #'   draw evaluated by the returned closure uses the same tempering -- an
 #'   option flipped mid-chain can no longer silently change the target
 #'   distribution between draws.
-#' @param pskf_cdf    "accurate" or "fast" (see .pskf_cdf_settings); NULL
+#' @param pskf_cdf    "accurate" (the only value; see .pskf_cdf_settings); NULL
 #'   (default) resolves the \code{pskf_cdf} package option once, at factory
 #'   time.
 #' @param ...         Ignored (for interface compatibility)
@@ -1695,8 +2037,7 @@ make_log_posterior_pskf <- function(model, data, prior_spec, obs_vars,
           Sigma_eps = csn$Sigma_eps,
           cut_tol   = cut_tol,
           max_q     = max_q,
-          offset_miwa_qmax = cdf$offset_miwa_qmax,
-          cdf_check        = cdf$cdf_check
+          offset_miwa_qmax = cdf$offset_miwa_qmax
         ),
         error = function(e) .dynhr_reraise_bug(e, -Inf)
       )
@@ -1712,31 +2053,37 @@ make_log_posterior_pskf <- function(model, data, prior_spec, obs_vars,
 
 
 ## The PSKF CDF-evaluation setting (package option `pskf_cdf`, resolved once
-## per factory): "accurate" (default since W73) = pruning compensation with
-## Phi evaluated up to dimension 5, every Phi of dimension 2 by log-scale
-## quadrature and of dimension 3-5 by the C++ lattice evaluator (W75; W73
-## used checked Miwa / an R lattice rule) -- see logcdf_ME_r; "fast" = the
-## pre-W73 evaluation -- Mendell-Elston for every compensation Phi of
-## dimension >= 3 and plain Miwa(128) for Phi_3 to Phi_5.
-## "fast" is ~4x cheaper under multi-shock skew (2-state fixtures, T = 200:
-## 0.29 s vs 1.1-1.3 s), and
-## reproduces the pre-W73 loglik bit for bit. It was measured up to 18 nat
-## (2 skew shocks) and 12 nat (3 skew shocks into 2 states) off an exact
-## particle-filter likelihood at T = 60-100 (see logcdf_ME_r,
-## .csn_mean_offset); on a single skew shock it was 0.14 nat off the exact
-## grid likelihood at T = 20. Returns list(offset_miwa_qmax, cdf_check).
+## per factory). The only value is "accurate": pruning compensation with Phi
+## evaluated up to dimension 5, every Phi of dimension 2 by log-scale
+## quadrature and of dimension 3-5 by the C++ lattice evaluator -- see
+## logcdf_ME_r. A cheaper Mendell-Elston / plain-Miwa setting ("fast") existed
+## up to 0.9.4.23; it ran the interpreted R filter and was slower than the C++
+## default as well as less accurate, and was removed in 0.9.4.24.
+## Returns list(offset_miwa_qmax).
 #' @noRd
 .pskf_cdf_settings <- function(pskf_cdf = NULL) {
-  pskf_cdf <- .dynhr_opt("pskf_cdf", pskf_cdf)
+  .pskf_cdf_check(.dynhr_opt("pskf_cdf", pskf_cdf))
+  list(offset_miwa_qmax = 5L)
+}
+
+## Validator for a `pskf_cdf` value (argument, package option or spec field):
+## aborts unless the value is "accurate"; NULL otherwise, so it doubles as a
+## spec-field check. "fast" gets its own message: it was accepted up to
+## 0.9.4.23 and must not be silently mapped to "accurate".
+#' @noRd
+.pskf_cdf_check <- function(pskf_cdf) {
+  if (identical(pskf_cdf, "fast"))
+    .dynhr_abort("pskf_cdf = \"fast\" was removed in dynhr 0.9.4.24. ",
+                 "Use \"accurate\" (the default): it runs the C++ PSKF filter, ",
+                 "so it is both faster and more accurate than the removed ",
+                 "Mendell-Elston / plain-Miwa setting.",
+                 class = "dynhr_error_pskf")
   if (!is.character(pskf_cdf) || length(pskf_cdf) != 1L ||
-      !pskf_cdf %in% c("accurate", "fast"))
-    .dynhr_abort("pskf_cdf must be \"accurate\" or \"fast\", not ",
+      !identical(pskf_cdf, "accurate"))
+    .dynhr_abort("pskf_cdf must be \"accurate\", not ",
                  paste(format(pskf_cdf), collapse = ", "), ".",
                  class = "dynhr_error_pskf")
-  if (identical(pskf_cdf, "fast"))
-    list(offset_miwa_qmax = 2L, cdf_check = FALSE)
-  else
-    list(offset_miwa_qmax = 5L, cdf_check = TRUE)
+  invisible(NULL)
 }
 
 
@@ -1794,7 +2141,7 @@ make_log_posterior_pskf <- function(model, data, prior_spec, obs_vars,
 ## the eps rows carry Gamma_e = diag(alpha/sigma_e) and the mean correction; the
 ## Gaussian/quadratic augmentation rows (eps(x)x1, x1(x)eps, eps(x)eps) all have
 ## alpha = 0, so their Gamma_e rows and mean corrections vanish -- exactly the
-## brief's "original shocks carry the skew, augmentation blocks are Gaussian."
+## "original shocks carry the skew, augmentation blocks are Gaussian."
 ##
 ## TIMING / DEMEANING (for exact Gaussian-limit parity with pruned_ss_loglik):
 ## .pskf_filter inits mu_filt = 0, Sigma_filt = P0 (Lyapunov fixed point of
@@ -1889,10 +2236,10 @@ make_log_posterior_pskf <- function(model, data, prior_spec, obs_vars,
 #'   option flipped mid-chain can no longer silently change the target
 #'   distribution between draws.
 #' @param pskf_cdf    Evaluation of the multivariate-normal CDFs of the filter:
-#'   \code{"accurate"} or \code{"fast"} (the pre-0.9.4 evaluation: cheaper, but
-#'   measured up to 12-18 nats off an exact likelihood under multi-shock skew;
-#'   see \code{\link{dynhr_set_options}}). \code{NULL} (default) resolves the
-#'   \code{pskf_cdf} package option once, at factory time.
+#'   only \code{"accurate"} is accepted (\code{"fast"} was removed in 0.9.4.24;
+#'   see \code{\link{dynhr_set_options}}).
+#'   \code{NULL} (default) resolves the \code{pskf_cdf} package option once,
+#'   at factory time.
 #' @param ...         Ignored (interface compatibility).
 #' @return function(theta) -> list(logpost, loglik, logprior)
 #' @export
@@ -1972,8 +2319,7 @@ make_log_posterior_pskf_order2 <- function(model, data, prior_spec, obs_vars,
           Sigma_eps = csn$Sigma_eps,
           cut_tol   = cut_tol,
           max_q     = max_q,
-          offset_miwa_qmax = cdf$offset_miwa_qmax,
-          cdf_check        = cdf$cdf_check
+          offset_miwa_qmax = cdf$offset_miwa_qmax
         ),
         error = function(e) .dynhr_reraise_bug(e, -Inf)
       )

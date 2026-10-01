@@ -282,7 +282,7 @@
 }
 
 
-## NOTE (C5): .pruned_d_ghss_sigma_channel() used to live here -- a local,
+## NOTE: .pruned_d_ghss_sigma_channel() used to live here -- a local,
 ## closed-form re-solve (solve_perturbation_order2(..., Sigma_e = dSigma_e))
 ## that supplied the Sigma_e channel of d(ghss)/dtheta_j because
 ## solution_derivatives_order2()'s own d_ghss held Sigma_e fixed while

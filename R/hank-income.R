@@ -15,7 +15,7 @@
 ## and it is the method used by the `sequence-jacobian` reference package.  The
 ## grid/scaling convention here is chosen to match that package so its published
 ## household-Jacobian goldens are reproducible (see
-## tests/testthat/test-hank-household.R and briefs/08).
+## tests/testthat/test-hank-household.R).
 ##
 ## CONVENTION (matches sequence-jacobian utilities.discretize.markov_rouwenhorst):
 ##   `sigma` is the UNCONDITIONAL standard deviation of log e, i.e.

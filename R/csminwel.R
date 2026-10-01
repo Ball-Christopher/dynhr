@@ -84,11 +84,19 @@
 ## Internal: forward-difference numerical gradient (Sims's numgrad.m).
 ## Returns list(g = gradient, badg = TRUE if any component looked unreliable).
 ## --------------------------------------------------------------------------
+## A PSKF objective is differenced on the pruning selection made at x (the
+## first evaluation, so it records; .pskf_freeze_open in
+## R/pskf-likelihood.R): a difference across a selection switch would
+## otherwise return jump / delta. Objectives that run no PSKF filter are
+## unaffected.
 .csminwel_numgrad <- function(fcn, x, ...) {
   n     <- length(x)
   delta <- 1e-6
   g     <- numeric(n)
   badg  <- FALSE
+  fr    <- .pskf_freeze_open()
+  on.exit(.pskf_freeze_close(fr), add = TRUE)
+  fcn   <- .pskf_freeze_wrap(fcn)
   f0    <- fcn(x, ...)
   for (i in seq_len(n)) {
     xi      <- x

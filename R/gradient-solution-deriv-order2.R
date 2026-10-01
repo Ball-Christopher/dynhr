@@ -120,7 +120,7 @@
       dH[t$eq, t$col2, t$col1, t$param] <- dH[t$eq, t$col2, t$col1, t$param] + v
   }
 
-  ## --- SSM-computed-parameter chain (Tier 12 #2): the total θ-derivative of the
+  ## --- SSM-computed-parameter chain: the total θ-derivative of the
   ## model Hessian also moves p_c. Capture the PURE ∂³F/∂w²∂p_c columns now (just
   ## the explicit param_hessian2 term, before the hess3 ȳ-chain), to fold into the
   ## free columns after, scaled by the total dp_c/dθ_k. ---
@@ -181,12 +181,12 @@
 ## ---------------------------------------------------------------------------
 ## Helper: d(Sigma_x)/dθ_j via a Lyapunov solve.
 ##   hx dX hx' - dX = -(dhx*Sx*hx' + hx*Sx*dhx' + dhu*Se*hu' + hu*Se*dhu' + hu*dSe*hu')
-## The dSigma_e term is the shock-covariance channel (C1/C5): for a param
+## The dSigma_e term is the shock-covariance channel: for a param
 ## that moves Sigma_e (an estimated shock std wired via stderr_expr) but
 ## leaves hx/hu unchanged (dhx = dhu = 0), Sigma_x still moves through the
 ## hu*dSigma_e*hu' innovation-covariance term -- omitting it silently zeros
 ## out d(Sigma_x)/dtheta for exactly those parameters. dSigma_e defaults to
-## a zero matrix so callers that do not pass it get the OLD (pre-C5)
+## a zero matrix so callers that do not pass it get the OLD
 ## behavior byte-identically (guarded by a regression test).
 ## ---------------------------------------------------------------------------
 .o2sd_dSigma_x <- function(hx, hu, dhx, dhu, Sigma_x, Sigma_e, dSigma_e = NULL) {
@@ -204,8 +204,8 @@
 ## ---------------------------------------------------------------------------
 ## Helper: d(Sigma_e)/d params[pnm] (all other entries held fixed).
 ##
-## W93 (2026-09-28): EXACT, via the same plan/eval pair make_posterior_grad()
-## uses since W91 (.shock_cov_deriv_plan / .shock_cov_deriv_eval,
+## EXACT, via the same plan/eval pair make_posterior_grad()
+## uses (.shock_cov_deriv_plan / .shock_cov_deriv_eval,
 ## R/posterior.R: a forward-mode walk of .get_shock_cov's priority chain with
 ## stats::D() on the shocks-block expressions). The central FD of
 ## .get_shock_cov (step h) is kept ONLY where no exact derivative exists --
@@ -288,7 +288,8 @@
 #' @noRd
 solution_derivatives_order2 <- function(model, compiled, dr2, params, param_names,
                                          h_rel   = 1e-6,
-                                         h_hess  = 1e-4) {
+                                         h_hess  = 1e-4,
+                                         use_cpp = TRUE) {
 
   if (!all(param_names %in% names(params)))
     stop("solution_derivatives_order2: unknown parameter(s): ",
@@ -342,8 +343,12 @@ solution_derivatives_order2 <- function(model, compiled, dr2, params, param_name
   ## -----------------------------------------------------------------------
   ns2   <- n_s * n_s
   hxt   <- t(hx)                                              # n_s x n_s
-  K_xx  <- kronecker(diag(ns2), A_L) + kronecker(hxt %x% hxt, fp)
-  K_xx_qr <- qr(K_xx)
+  ## K_xx vec(X) = vec(A_L X + fp X (hx (x) hx)). use_cpp = TRUE solves it in
+  ## Kronecker-structured form (complex Schur, never forming the
+  ## (n ns^2)^2 matrix); use_cpp = FALSE is the dense reference (build K_xx
+  ## once, QR-factor once).
+  kxx_solve <- .o2_kxx_solver(A_L, fp, hx, transpose = FALSE, use_cpp = use_cpp)
+  HHkron    <- if (isTRUE(use_cpp)) hx %x% hx else NULL       # hx (x) hx
 
   ## A_L factorization (reused for ghxu, ghuu)
   AL_qr <- qr(A_L)
@@ -392,7 +397,7 @@ solution_derivatives_order2 <- function(model, compiled, dr2, params, param_name
   ## We need dG_j, dH_j, dfp_j, df0_j, dfm_j, dfu_j for each j, plus the total
   ## θ-derivative of the model Hessian dH_mat (for dPhi_xx / dRHS_ss).
   ##
-  ## ANALYTIC path (Tier 11 #3): when the model is parameter-differentiable and
+  ## ANALYTIC path: when the model is parameter-differentiable and
   ## the order-2 parameter tensors are compiled, the primitive derivatives and
   ## dH_mat come from the symbolic param-Jacobian / param-Hessian2 + hess3·dys
   ## chain -- no per-parameter steady-state re-solve, no central FD of the model
@@ -430,7 +435,7 @@ solution_derivatives_order2 <- function(model, compiled, dr2, params, param_name
       ## their structural primitives are exactly zero, and their only channel
       ## is d(Sigma_e) (the dvSe term below). The analytic tensors are indexed
       ## by the model parameters only (dH_all[, , , <shock>] was a subscript
-      ## crash -- W68, the order-2 twin of solution_derivatives()' fix).
+      ## crash -- the order-2 twin of solution_derivatives()' fix).
       model_pars <- compiled$model$param_names %||% names(model$param_values)
       for (k in seq_len(np)) {
         pnm <- param_names[k]
@@ -514,7 +519,7 @@ solution_derivatives_order2 <- function(model, compiled, dr2, params, param_name
       next
     }
 
-    ## ---- Primitive derivatives: analytic (Tier 11 #3) or central FD ----
+    ## ---- Primitive derivatives: analytic or central FD ----
     if (use_analytic) {
       dp_an <- dprim_an[[pnm]]
       dfp <- dp_an$df_plus
@@ -554,14 +559,16 @@ solution_derivatives_order2 <- function(model, compiled, dr2, params, param_name
     ## ---- d(hx' ⊗ hx')_j  (note: hxt = t(hx), dhxt = t(dhx)) ----
     dhxt <- t(dhx)   # n_s x n_s
     ## d(hxt ⊗ hxt)/dθ = dhxt ⊗ hxt + hxt ⊗ dhxt
-    d_hxtkron <- kronecker(dhxt, hxt) + kronecker(hxt, dhxt)   # n_s^2 x n_s^2
+    if (!isTRUE(use_cpp)) {
+      d_hxtkron <- kronecker(dhxt, hxt) + kronecker(hxt, dhxt)   # n_s^2 x n_s^2
 
-    ## ---- dK_xx_j ----
-    dK_xx <- kronecker(diag(ns2), dA_L) +
-             kronecker(d_hxtkron, fp)   +
-             kronecker(hxt %x% hxt, dfp)   # n*n_s^2 x n*n_s^2
+      ## ---- dK_xx_j ----
+      dK_xx <- kronecker(diag(ns2), dA_L) +
+               kronecker(d_hxtkron, fp)   +
+               kronecker(hxt %x% hxt, dfp)   # n*n_s^2 x n*n_s^2
+    }
 
-    ## ---- d(model Hessian)/dθ_j: analytic (Tier 11 #3) or central FD ----
+    ## ---- d(model Hessian)/dθ_j: analytic or central FD ----
     ## dH_mat[e,c1,c2] = ∂³F_e/(∂w_c1 ∂w_c2 ∂θ) + Σ_c3 hess3[e,c1,c2,c3] dys[c3].
     ## The analytic tensor is already row-permuted (declaration order) to match
     ## H_base.  FD fallback: central difference of the model Hessian at θ±h.
@@ -685,9 +692,17 @@ solution_derivatives_order2 <- function(model, compiled, dr2, params, param_name
     }
 
     ## ---- d(ghxx)_j: solve K_xx vec(d_ghxx) = -vec(dPhi_xx) - dK_xx vec(ghxx) ----
-    rhs_ghxx <- -as.vector(dPhi_xx) - dK_xx %*% as.vector(ghxx)
-    d_ghxx_vec <- qr.solve(K_xx_qr, rhs_ghxx)
-    d_ghxx <- matrix(d_ghxx_vec, n, ns2)
+    if (isTRUE(use_cpp)) {
+      ## dK_xx vec(ghxx) = vec(dA_L ghxx + dfp ghxx (hx (x) hx)
+      ##                       + fp ghxx (dhx (x) hx + hx (x) dhx)).
+      dHHkron <- kronecker(dhx, hx) + kronecker(hx, dhx)
+      d_ghxx <- kxx_solve(-dPhi_xx - (dA_L %*% ghxx +
+                                      dfp %*% ghxx %*% HHkron +
+                                      fp %*% ghxx %*% dHHkron))
+    } else {
+      rhs_ghxx <- -as.vector(dPhi_xx) - dK_xx %*% as.vector(ghxx)
+      d_ghxx <- kxx_solve(matrix(rhs_ghxx, n, ns2))
+    }
 
     ## ---- d(ghxu)_j ----
     ## A_L d(ghxu) = -(dPhi_xu + dfp * ghxx * (hu⊗hx) + fp * d_ghxx * (hu⊗hx)
@@ -709,13 +724,13 @@ solution_derivatives_order2 <- function(model, compiled, dr2, params, param_name
                dA_L %*% ghuu
     d_ghuu <- qr.solve(AL_qr, rhs_uu)
 
-    ## ---- d(Sigma_e)_j ----  (C5: the shock-covariance channel)
-    ## Exact (W93; central FD of .get_shock_cov only where no exact
+    ## ---- d(Sigma_e)_j ----  (the shock-covariance channel)
+    ## Exact (central FD of .get_shock_cov only where no exact
     ## derivative exists -- see .o2sd_dSigma_e), same convention as
     ## .dSigma_e_d (R/analytic-gradient.R). Zero for
     ## parameters that do not enter Sigma_e (structural/persistence params),
     ## in which case every term added below vanishes and this branch is a
-    ## no-op (verified against the pre-C5 output on a literal-stderr model).
+    ## no-op (verified against the earlier output on a literal-stderr model).
     dSigma_e <- .o2sd_dSigma_e(model, params, pnm, h, n_u)
 
     ## ---- d(ghss)_j ----
@@ -798,4 +813,44 @@ solution_derivatives_order2 <- function(model, compiled, dr2, params, param_name
     dT_up[c, ] <- dH[j, ]
   }
   dT_up
+}
+
+
+## ---------------------------------------------------------------------------
+## Solver for the order-2 Kronecker system K_xx vec(X) = vec(RHS), i.e.
+##   A_L X + fp X (hx (x) hx) = RHS      (transpose = FALSE)
+##   A_L' L + fp' L (hx' (x) hx') = RHS  (transpose = TRUE, K_xx' vec(L) = vec(RHS)).
+## Returns function(rhs_matrix) -> n x ns^2 matrix.
+##
+## use_cpp = TRUE: Kronecker-structured complex-Schur solve in C++
+## (o2_sylvester_kron2_cpp), with iterative refinement; its achieved relative
+## residual is checked, and a Schur failure, a non-finite result or a
+## residual above 1e-10 is routed explicitly to the dense reference below.
+## use_cpp = FALSE: the dense reference -- K_xx is assembled and QR-factored
+## lazily, on the first call, and reused.
+## ---------------------------------------------------------------------------
+.o2_kxx_solver <- function(A_L, fp, hx, transpose = FALSE, use_cpp = TRUE) {
+  n   <- nrow(A_L)
+  ns2 <- ncol(hx)^2
+  st  <- new.env(parent = emptyenv())
+  st$qr <- NULL
+  dense_qr <- function() {
+    if (is.null(st$qr)) {
+      hxt  <- t(hx)
+      K    <- kronecker(diag(ns2), A_L) + kronecker(hxt %x% hxt, fp)
+      st$qr <- qr(if (transpose) t(K) else K)
+    }
+    st$qr
+  }
+  solve_dense <- function(rhs) matrix(qr.solve(dense_qr(), as.numeric(rhs)), n, ns2)
+  solver <- function(rhs) {
+    if (!isTRUE(use_cpp) || ncol(hx) == 0L) return(solve_dense(rhs))
+    r <- if (transpose)
+      o2_sylvester_kron2_cpp(t(A_L), t(fp), t(hx), rhs)
+    else
+      o2_sylvester_kron2_cpp(A_L, fp, hx, rhs)
+    if (isTRUE(r$ok) && r$rel_resid <= 1e-10) return(r$X)
+    solve_dense(rhs)
+  }
+  solver
 }

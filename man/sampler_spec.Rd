@@ -26,7 +26,7 @@ likelihood (see \code{\link{pmmh}}).
 \section{Fields}{
 
 \describe{
-  \item{\code{n_draws}}{Post-warmup draws to keep. Default: \code{10000L}.}
+  \item{\code{n_draws}}{Post-warmup draws to keep (>= 1; for dime: post-warmup iterations per walker, so the draws kept are n_draws x n_walkers). Default: \code{10000L}.}
   \item{\code{n_warmup}}{Warmup / burn-in draws, discarded. Default: \code{5000L}.}
   \item{\code{n_chains}}{Number of chains. Default: \code{4L}.}
   \item{\code{n_particles}}{Particle count (SMC / DSMH cloud, SMC2 outer particles, PMMH preflight). Default: \code{2000L}.}
@@ -39,7 +39,7 @@ likelihood (see \code{\link{pmmh}}).
   \item{\code{adapt_cov}}{RWMH Haario adaptive proposal covariance. Default: the \code{rwmh_adapt_cov} option (registered default \code{FALSE}).}
   \item{\code{n_blocks}}{RWMH randomized parameter blocks. Default: the \code{rwmh_n_blocks} option (registered default \code{1L}).}
   \item{\code{monge_alpha}}{Monge-metric softness alpha (metric = monge). Default: the \code{monge_alpha} option (registered default \code{1}).}
-  \item{\code{timeout}}{Serial NUTS wall-clock limit in seconds. Default: \code{300L}.}
+  \item{\code{timeout}}{Serial NUTS wall-clock limit in seconds (>= 30: the runner never uses a shorter limit). Default: \code{300L}.}
   \item{\code{Sigma_prop}}{Proposal covariance; NULL = the mode stage's. Default: \code{NULL}.}
   \item{\code{extra}}{Further arguments for the sampler function. Default: \code{list()}.}
 }

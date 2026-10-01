@@ -86,7 +86,7 @@ When \code{NULL} (default), \code{conditional_forecast()} will call
 \item{gradient_policy}{\code{"auto"} (default), \code{"analytic"}, or
 \code{"numerical"}.  Controls the gradient path used by
 \code{make_posterior_grad}; \code{me_extra} and \code{shock_scale} are
-now supported by the analytic gradient path (Tier 7, ROADMAP item 3).}
+now supported by the analytic gradient path.}
 
 \item{plan}{Optional \code{dynhr_plan} object.  When supplied the
 plan is compiled into the context: the filter-tunes and shock-scale specs

@@ -27,7 +27,7 @@ subset of \code{c("a", "c")} (asset holdings / consumption).}
 this trajectory's likelihood is evaluated under.}
 
 \item{Pi}{Numeric \code{n_e x n_e} income transition matrix (must equal
-\code{blocks_k$Pi}; passed explicitly per the brief's signature, and
+\code{blocks_k$Pi}; passed explicitly, and
 checked for consistency).}
 
 \item{aggregate_path}{\code{NULL} for the steady-state path, or a list
@@ -40,8 +40,8 @@ time-varying path (see Details).}
 \item{a0_dist}{Optional length-\code{n_e*n_a} initial distribution over
 \code{(e, a)} cells for period 1 (defaults to the type-conditional
 ergodic distribution \code{blocks_k$D}, i.e. \code{hank_mixture_dist}'s
-per-type ergodic distribution -- the correct initialization per the
-brief's "selection / initial conditions" identification point).}
+per-type ergodic distribution -- the correct initialization for the
+"selection / initial conditions" identification point).}
 }
 \value{
 A list with \code{loglik} (scalar) and \code{alpha_T} (the final

@@ -167,7 +167,7 @@ pruned_ss_moments <- function(pss, n_ar = 5L) {
 
   ## Autocovariances (lag τ ≥ 1)
   ##
-  ## A13a (0.9.4): this used to propagate Γ(τ) = ghx S_sel Γ(τ-1) from a seed
+  ## This used to propagate Γ(τ) = ghx S_sel Γ(τ-1) from a seed
   ## ghx (Σ_x + Var(x2)) ghx' -- an order-1 recursion with the contemporaneous
   ## shock term missing from the seed, so a state with AR coefficient ρ came
   ## out with autocorrelation ρ^(τ+1) (rbc-ish toy, ρ = 0.85: 0.614 at lag 1
@@ -209,7 +209,7 @@ pruned_ss_moments <- function(pss, n_ar = 5L) {
 # ============================================================================
 
 ## ---------------------------------------------------------------------------
-## Block-balanced Lyapunov solve for a pruned augmented state (W77, 2026-09-26).
+## Block-balanced Lyapunov solve for a pruned augmented state.
 ##
 ## The AFVRR augmented state stacks blocks of different ORDER in the shocks:
 ## x1 ~ sigma; x2 and x1 (x) x1 ~ sigma^2; x3, x1 (x) x2 and x1 (x) x1 (x) x1
@@ -296,7 +296,7 @@ pruned_ss_moments <- function(pss, n_ar = 5L) {
     ## Converged-to-steady-state early exit: the detector only needs the
     ## fixed-point F, and stable systems typically converge in far fewer
     ## than n_iter steps.
-    ## RELATIVE (W77): with a max(1, .) floor the test was absolute below
+    ## RELATIVE: with a max(1, .) floor the test was absolute below
     ## max|P| = 1 and a small-scale model stopped long before its steady state.
     ## Scaled by the terms' size, max(|P|, |QQ|), so a fixed point at P = 0
     ## still exits early (the DARE diagnostic's rule).
@@ -350,7 +350,7 @@ pruned_ss_moments <- function(pss, n_ar = 5L) {
 #' \eqn{\xi_t = [x^{(1)}_t;\, x^{(2)}_t;\, x^{(1)}_t \otimes x^{(1)}_t]}
 #' using STATIONARY (time-invariant) noise covariances.  This is the
 #' "cheap deterministic linear-KF on the AFVRR augmented pruned state"
-#' described in the scope brief: cheaper than TPF, richer than the
+#' described in the reference derivation: cheaper than TPF, richer than the
 #' unconditional-cumulant likelihood.
 #'
 #' The filter is initialized at the augmented stationary mean and covariance
@@ -389,7 +389,7 @@ pruned_ss_moments <- function(pss, n_ar = 5L) {
 #'   deviations from the steady state -- e.g. raw \code{simulate_model()} /
 #'   \code{simulate_model_order2()} output, which are deviations -- makes
 #'   every innovation carry the whole steady state and silently inflates
-#'   \eqn{v_t^2/F_t} by orders of magnitude (F4-C: it turned an
+#'   \eqn{v_t^2/F_t} by orders of magnitude (it turned an
 #'   \eqn{O(\sigma^2)} model difference into a \eqn{\sigma}-invariant 2.8-nat
 #'   offset against the linear Kalman filter).  Add \code{dr$ys[obs_vars]}
 #'   to simulated deviations before filtering.
@@ -512,7 +512,7 @@ pruned_ss_loglik <- function(pss, Y, obs_vars, me_variance = 0,
   ## Stationary augmented-state mean
   mu0 <- as.numeric(solve(diag(d_dim) - Tlin, c_drift))
   ## Stationary augmented-state covariance (Lyapunov fixed point), solved in
-  ## the block-balanced basis (W77; see .pruned_lyap_balanced).
+  ## the block-balanced basis (see .pruned_lyap_balanced).
   dsc0 <- if (d_dim == 2L * sys$n_s + sys$n_s^2)
     .pruned_block_scale(.pruned_order2_k(sys$n_s),
                         sqrt(max(diag(Sigma_x), 0)))

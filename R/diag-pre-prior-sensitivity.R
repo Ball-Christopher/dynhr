@@ -39,7 +39,7 @@
 #' `.prior_law()` (R/prior-density.R) -- the ONE (dist, p1..p4) -> law mapping
 #' the density `.lp_dist1()` and the prior sampler use -- so the quantile and
 #' the density cannot drift apart (they did: the shift and the generalised
-#' beta support were ignored here, brief 23 W4).
+#' beta support were ignored here).
 #'
 #' IG1 (Dynare.jl `inv_gamma`): X - s = sqrt(Y), Y ~ InvGamma(alpha, theta).
 #' IG2 (standard): X - s ~ InvGamma(shape, scale).

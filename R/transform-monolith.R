@@ -291,8 +291,7 @@
     ## potential-obs constructor, its endpoint extender, and the state-space
     ## spec builder), none of which are defined anywhere in the package.
     ## Fail loud instead of letting a "could not find function" error
-    ## surface deep in the call stack. See
-    ## .claude/orchestration/track-p-hardening/brief-A2-pathb-failloud.md.
+    ## surface deep in the call stack.
     stop("dynhr_transform: the Kalman potential-output path ",
          "(potential_params=) was never implemented (its builder ",
          "functions do not exist). Use potential_y_trend_override= or ",
@@ -771,8 +770,7 @@ dynhr_transform <- function(est,
     ## potential-obs constructor, its endpoint extender, and the state-space
     ## spec builder), none of which are defined anywhere in the package.
     ## Fail loud instead of letting a "could not find function" error
-    ## surface deep in the call stack. See
-    ## .claude/orchestration/track-p-hardening/brief-A2-pathb-failloud.md.
+    ## surface deep in the call stack.
     stop("dynhr_transform: the Kalman potential-output path ",
          "(potential_params=) was never implemented (its builder ",
          "functions do not exist). Use potential_y_trend_override= or ",

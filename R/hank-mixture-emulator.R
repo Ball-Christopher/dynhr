@@ -4,7 +4,7 @@
 ## simulation-based calibration (SBC) harness that uses it.
 ##
 ## This promotes the Wave-3 het-preferences-in-HANK research scratch
-## (`.claude/orchestration/wave3-sbc/`) into tested package API. The bespoke
+## into tested package API. The bespoke
 ## scratch hard-coded a 2-D (centre, spread) tensor grid with bilinear
 ## interpolation (`wave3_lib.R`'s `.bw`/`emu_slice`/`build_proj_grid`/
 ## `emu_sigma`). Here the same idea is generalized to an arbitrary set of
@@ -686,7 +686,7 @@ hank_emulator_level_metric <- function(emu, theta, N) {
 #'     differences out fixed cross-sectional heterogeneity) but, at a realistic
 #'     survey size and shock, it also differences most of the level's spread
 #'     signal away and is nearly uninformative about the spread; kept for
-#'     completeness and as the original brief-17 observable.}
+#'     completeness and as the original observable.}
 #' }
 #' The default \code{c("macro", "response")} reproduces the joint estimator of
 #' \code{\link{hank_mixture_joint_logpost}}; \code{c("macro", "level")} is the
@@ -714,7 +714,7 @@ hank_emulator_level_metric <- function(emu, theta, N) {
 #' the observed projected reweighting \code{m_hat = t(B_ref) (Dhat1 - Dhat0)}; (3)
 #' build ONE \code{B_ref}-basis reweighting covariance for this replication from the
 #' TRUTH \code{(D0, D1)} the DGP already computed (\code{rw_metric = "fixed_truth"}, the
-#' default and orchestrator-certified choice): \code{Sigma = (cov_D0(B_ref) +
+#' default choice): \code{Sigma = (cov_D0(B_ref) +
 #' cov_D1(B_ref)) / N}, matching the shipped
 #' \code{\link{hank_mixture_joint_logpost}}/\code{\link{hank_reweight_functional_metric}}
 #' convention of a metric fixed across candidate thetas within one evaluation.
@@ -758,13 +758,13 @@ hank_emulator_level_metric <- function(emu, theta, N) {
 #' @param rw_scale Reweighting shock-size multiplier (as in
 #'   \code{\link{hank_emulator_reweight_mean}}); also used to build the
 #'   direct-truth nonlinear snapshot's price path (\code{r_path = r + rw_scale *
-#'   rw_shock$r}). Default \code{0.005} (50bps): orchestrator-verified to calibrate
+#'   rw_shock$r}). Default \code{0.005} (50bps): verified to calibrate
 #'   (a smaller \code{0.003} leaves the reweighting channel too weak).
 #' @param T_data_seed Seed for the fixed reference measurement-error series.
 #' @param seed Base seed; replication \code{rep} uses \code{seed + rep}.
 #' @param L_ranks Integer rank resolution: ranks are integers in
 #'   \code{0..L_ranks-1}.
-#' @param rw_metric \code{"fixed_truth"} (default; orchestrator-certified: one
+#' @param rw_metric \code{"fixed_truth"} (default; one
 #'   per-replication covariance built from the DGP's own truth \code{(D0, D1)}, no
 #'   log-det term) or \code{"emulated_varying"} (theta-varying emulated covariance
 #'   WITH its log-determinant term) -- see Details.
@@ -870,7 +870,7 @@ hank_mixture_sbc <- function(emu, n_rep, prior = NULL, sampler = "grid",
                                  need_D1 = use_resp)
 
     ## ---- (2) per-channel observed data + fixed_truth metrics --------------
-    ## "fixed_truth" (default; orchestrator-certified): ONE covariance per rep
+    ## "fixed_truth" (default): ONE covariance per rep
     ## and channel, built in the B_ref basis from the TRUTH distribution(s) the
     ## DGP already computed -- matching the shipped hank_mixture_joint_logpost /
     ## hank_reweight_functional_metric convention (a metric fixed across

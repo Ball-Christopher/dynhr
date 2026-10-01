@@ -87,7 +87,7 @@ parse_filter_tunes_block <- function(body, sample_start = NULL) {
     spec <- sub(",\\s*$", "", spec)        # trailing comma tolerance (#2030)
     toks <- strsplit(spec, "[,\\s]+", perl = TRUE)[[1]]
     toks <- toks[nchar(toks) > 0]
-    ## A-SEC (0.9.4): each token is evaluated in the .mod allowlist sandbox
+    ## A-SEC: each token is evaluated in the .mod allowlist sandbox
     ## (numeric literals + elementary arithmetic only), never in the caller
     ## frame.  A disallowed call aborts with dynhr_error_unsafe_mod_expression;
     ## text that is not R, or names an unbound symbol, stays NA as before.

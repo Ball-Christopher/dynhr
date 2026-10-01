@@ -576,12 +576,7 @@ solve_perturbation_order2 <- function(model, compiled, ss, params,
     ghxu <- matrix(0, n, 0L)          # no states: the x-u block is empty
   } else {
     rhs_xu <- -(Phi_xu + fp %*% ghxx %*% (hu %x% hx))  # n x n_s*n_u
-    ghxu   <- tryCatch(
-      solve(A_L, rhs_xu),
-      error = function(e) {
-        .dynhr_warn("solve(A_L, rhs_xu) failed; using least-squares fallback.")
-        qr.solve(A_L, rhs_xu)
-      })
+    ghxu   <- .solve_higher_order_lu(A_L, rhs_xu)
   }
 
   # ----------------------------------------------------------------
@@ -590,12 +585,7 @@ solve_perturbation_order2 <- function(model, compiled, ss, params,
   # ----------------------------------------------------------------
   if (verbose) .dynhr_cat("  Solving for ghuu...\n")
   rhs_uu <- -(Phi_uu + fp %*% ghxx %*% (hu %x% hu))  # n x n_u^2
-  ghuu   <- tryCatch(
-    solve(A_L, rhs_uu),
-    error = function(e) {
-      .dynhr_warn("solve(A_L, rhs_uu) failed; using least-squares fallback.")
-      qr.solve(A_L, rhs_uu)
-    })
+  ghuu   <- .solve_higher_order_lu(A_L, rhs_uu)
 
   # ----------------------------------------------------------------
   # Shock covariance matrix
@@ -815,7 +805,7 @@ compute_irfs_order2 <- function(dr2, model, n_periods = 40L,
   n_exo     <- length(exo)
   n_s       <- length(state_idx)
 
-  ## A10 (0.9.4): use the SAME shock-scale rule as compute_irfs() --
+  ## Use the SAME shock-scale rule as compute_irfs() --
   ## .irf_shock_scale() (params wins over dr2$Sigma_e) plus the lower Cholesky
   ## factor of the FULL Sigma_e.  Previously this path rebuilt a diagonal
   ## covariance from `params` via .get_shock_stderr(), so order-1 and order-2
@@ -984,12 +974,12 @@ simulate_model_order2 <- function(dr2, n_periods = 200L, shocks = NULL,
 
   shock_stderr <- .get_shock_stderr(model, exo, params)
   if (is.null(shocks)) {
-    ## A9 (0.9.4): honour cross-shock correlations, exactly as simulate_model()
+    ## Honour cross-shock correlations, exactly as simulate_model()
     ## now does.  Diagonal Sigma_e keeps the old RNG stream byte-for-byte.
     Sigma_e_sim <- .get_shock_cov(model, exo, params)
     off_sim <- Sigma_e_sim
     diag(off_sim) <- 0
-    ## L2 follow-up (0.9.4): a `skew` alpha used to be ignored here entirely --
+    ## L2 follow-up: a `skew` alpha used to be ignored here entirely --
     ## the order-2 simulator drew GAUSSIAN shocks even for a model whose
     ## declared shocks are skewed, and whose PSKF likelihood evaluates the
     ## joint closed skew-normal.  Route those through the shared sampler
@@ -1055,7 +1045,7 @@ simulate_model_order2 <- function(dr2, n_periods = 200L, shocks = NULL,
       sim[t, ] <- y1 + y2
     }
   } else {
-    ## A9 (0.9.4): GENUINE unpruned order-2 recursion.  Before 0.9.4 this
+    ## GENUINE unpruned order-2 recursion.  Before 0.9.4 this
     ## branch simply forced x2 = 0, which is the ORDER-ONE law of motion with a
     ## second-order observation slapped on top -- not an unpruned simulation.
     ## The unpruned recursion carries ONE state x_t (no x1/x2 split) and feeds

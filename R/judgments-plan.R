@@ -1,6 +1,6 @@
 ## R/judgments-plan.R
 ## --------------------------------------------------------------------------
-## Unified judgments / plan layer — ROADMAP Tier 7 item 7.
+## Unified judgments / plan layer.
 ##
 ## A dynhr_plan bundles three kinds of model interventions in one object:
 ##
@@ -21,8 +21,6 @@
 ##   plan_to_filter_tunes(plan, sample_start)  -> filter_tunes_spec
 ##   plan_to_conditions(plan)                  -> data.frame + attributes
 ##   plan_to_shock_scale_spec(plan)            -> het_shocks_spec
-##
-## ROADMAP Tier 7 item 7 · implementation 2026-06-12
 ## --------------------------------------------------------------------------
 
 

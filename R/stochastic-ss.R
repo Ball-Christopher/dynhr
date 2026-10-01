@@ -397,7 +397,7 @@ compute_girf <- function(dr, model, n_periods = 40L, shock_size = 1,
     ## only in the impact shock (e_k vs 0 -- the MC path's convention), so one
     ## period after impact each augmented state is a known point and
     ##   GIRF_h = Dxi Tlin^(h-2) (xi_shock - xi_base),   h >= 2,
-    ## all constants cancelling.  Pre-fix bug (W43, 2026-09-25): the tail
+    ## all constants cancelling.  Pre-fix bug: the tail
     ## differenced a shocked path started at h = 2 against a baseline path
     ## started at h = 1 (one period out of step: a shock-size-independent
     ## offset equal to the baseline's own one-period drift) and dropped the

@@ -16,7 +16,7 @@
 //
 // The upstream reference for the algorithm itself is SSJ's
 // hetblocks/hh_twoasset.py; the transcription and its three deviations are
-// pinned in briefs/19-twoasset-hank-scope.md section 3. Do not change a
+// fixed here. Do not change a
 // formula here without changing R/hank-egm2.R and re-running
 // test-hank-egm2-cpp-parity.R.
 //
@@ -121,7 +121,7 @@ static inline void interp_coord_sweep(const double *x, int n_x,
 // Crossing search -- port of R .hank_lhs_eq_rhs() for ONE lhs row.
 // lhs: length n_i (decreasing net of rhs); rhs: n_i x n_j, column-major.
 // Writes 0-indexed lower index and lower weight for each j.
-// Matches the R per-column "first i with lhs - rhs < 0" form (brief 19, F5),
+// Matches the R per-column "first i with lhs - rhs < 0" form,
 // including both corners: bottom -> (0, 1) exactly a_grid[0]; no crossing by
 // the top -> (n_i-2, p) i.e. linear extrapolation above the grid.
 static inline void lhs_eq_rhs_row(const double *lhs, const double *rhs,
@@ -146,7 +146,7 @@ static inline void lhs_eq_rhs_row(const double *lhs, const double *rhs,
 //
 // Everything the backward step touches lives here so that the SOLVE loop can
 // allocate it ONCE and keep a worker pool alive across iterations (design A of
-// the threading brief). Two-asset per-step work is ~1 ms, so a spawn/join per
+// the threading design). Two-asset per-step work is ~1 ms, so a spawn/join per
 // step -- let alone per stage -- would be a large fraction of the runtime; the
 // pool is created once per solve and the workers are parked on a std::barrier
 // between phases and between iterations.

@@ -87,16 +87,19 @@ run_smc_mirai <- function(
     tpf_options     <- ctx$tpf_options     %||% list()
     gradient_policy <- ctx$gradient_policy %||% "auto"
   }
-  ## Validate and normalise the Herbst-Schorfheide mixture weights (see
-  ## dynhr_smc() for the component definitions). NULL keeps the original
-  ## single-component full-covariance random-walk mutation exactly as before.
-  if (!is.null(mixture_weights)) {
-    if (!is.numeric(mixture_weights) || length(mixture_weights) != 3L)
-      stop("mixture_weights must be NULL or a numeric vector of length 3")
-    if (any(mixture_weights < 0) || !any(mixture_weights > 0))
-      stop("mixture_weights must be non-negative with at least one positive entry")
+  ## Argument rules shared with dynhr_smc() (one helper). Then normalise the
+  ## Herbst-Schorfheide mixture weights (see dynhr_smc() for the component
+  ## definitions). NULL keeps the original single-component full-covariance
+  ## random-walk mutation exactly as before.
+  prob <- .smc_args_problem(list(
+    n_particles = n_particles, ess_target = ess_target,
+    n_mh_steps = n_mh_steps, mh_scale_factor = mh_scale_factor,
+    mut_target = mut_target, lambda_schedule = lambda_schedule,
+    mixture_weights = mixture_weights))
+  if (length(prob)) .smc_abort_problems("smc", prob, "dynhr_error_smc_args")
+  .smc_warn_no_mutation("run_smc_mirai", n_mh_steps)
+  if (!is.null(mixture_weights))
     mixture_weights <- mixture_weights / sum(mixture_weights)
-  }
   use_mixture <- !is.null(mixture_weights)
 
   n_cores <- .mirai_n_cores(n_cores, n_particles)
@@ -135,7 +138,7 @@ run_smc_mirai <- function(
   d <- ncol(theta_mat)
 
   ## theta_mat / par_names are FREE variables in eval_task -> pass via `...`.
-  ## A4: return the target's components (see .smc_particle_parts() in
+  ## Return the target's components (see .smc_particle_parts() in
   ## sampler-smc.R): SMC tempers phi = log system prior + power * loglik from
   ## the PARAMETER prior, exactly as the serial dynhr_smc() does.
   eval_task <- function(i) {
@@ -182,7 +185,7 @@ run_smc_mirai <- function(
 
   while (lambda_curr < 1) {
     stage <- stage + 1L
-    ## C2: the bisection targets the ESS of the COMBINED weights (incoming
+    ## The bisection targets the ESS of the COMBINED weights (incoming
     ## log_w x increment); see .smc_next_lambda().
     adaptive_step <- is.null(lambda_schedule) || stage > length(lambda_schedule)
     lambda_next <- if (!adaptive_step)
@@ -208,7 +211,7 @@ run_smc_mirai <- function(
     lambda_trace <- c(lambda_trace, lambda_next)
     ess_trace    <- c(ess_trace, ess)
 
-    ## C2: an adaptive step short of lambda = 1 put the combined ESS AT the
+    ## An adaptive step short of lambda = 1 put the combined ESS AT the
     ## target -- resample (see dynhr_smc()).
     if (ess < ess_target * n_particles || (adaptive_step && lambda_next < 1)) {
       idx <- .smc_systematic_resample(w_norm, n_particles)

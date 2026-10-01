@@ -173,7 +173,7 @@ List kf_score_sigma_cpp(const arma::mat& Yd,        // n_obs x T (already Y - d)
     // forward filter locks, so the score make_posterior_grad's hybrid used
     // was not the objective's (7.6e-7 relative off at state variances ~1e-8,
     // 1.4e-5 at ~1e-12), and a large enough loglik gap would have made hybrid
-    // drop it for FD (W76, 2026-09-26). Each dP_k is held to the same
+    // drop it for FD. Each dP_k is held to the same
     // relative rule against its own scale, so the lock can only come at or
     // after the forward's.
     if (t >= 1 && P_drift < ss_tol * P_scale && dP_drift < ss_tol) {

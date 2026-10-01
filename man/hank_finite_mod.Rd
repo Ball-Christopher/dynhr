@@ -82,7 +82,7 @@ A list with \code{text} (character vector, the .mod source,
   reproduction of \eqn{\Lambda' D_{ss}}; should be at machine precision).
 }
 \description{
-Direct port of the Tier-18/m5 prototype emitter. Writes the
+Writes the
 finite-state HANK's EQUILIBRIUM CONDITIONS directly (the standard way
 Reiter-style models are fed to Dynare-style parsers), rather than
 symbolically differentiating the EGM backward step (which is not

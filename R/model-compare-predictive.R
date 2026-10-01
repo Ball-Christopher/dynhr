@@ -1,6 +1,6 @@
 ## R/model-compare-predictive.R
 ## --------------------------------------------------------------------------
-## Predictive model comparison (brief 23 E6):
+## Predictive model comparison:
 ##
 ##   posterior_log_scores() -- per-period one-step-ahead log predictive
 ##                             densities averaged over posterior draws

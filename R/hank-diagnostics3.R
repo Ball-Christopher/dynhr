@@ -266,7 +266,7 @@ hank_euler3_residual <- function(hh, constraint_tol = 1e-8) {
   Y_cur <- .hank3_bcast_e(hh$y, ne, nd, nf, na)
   Psi_a_now <- .hank_psi(hh$a, A_cur, hh$ra, hh$chi0, hh$chi1, hh$chi2)$Psi
   Psi_f_now <- .hank_psi(hh$f, F_cur, hh$rf, hh$phi0, hh$phi1, hh$phi2)$Psi
-  ## World price of foreign claims (A4). Objects built before px existed do
+  ## World price of foreign claims. Objects built before px existed do
   ## not carry the field; default to 1, which is the pre-px kernel exactly.
   ## px must appear in BOTH the budget and the f-FOC, or this oracle would
   ## report a spurious violation against a correct px != 1 solve -- and would

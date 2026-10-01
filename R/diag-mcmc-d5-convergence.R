@@ -819,7 +819,7 @@ d21_kps_precision_update <- function(draws_by_T      = NULL,
 # ---------------------------------------------------------------------------
 
 # The Vehtari et al. (2021) split-R-hat / ESS estimators D5 reports used to
-# live here as `.d5_*`. 0.9.4 (ledger A5) MOVED them to R/diag-helpers.R and
+# live here as `.d5_*`. 0.9.4 MOVED them to R/diag-helpers.R and
 # DELETED the wrong shared implementations they were written to replace, so
 # there is now exactly one ESS/R-hat implementation in the package. The names
 # are unchanged (`.d5_split`, `.d5_zscale`, `.d5_degenerate`, `.d5_rhat_basic`,

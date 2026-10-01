@@ -171,11 +171,6 @@ Two calling conventions are supported:
     feasibility-seeded starts).
 }
 }
-\references{
-Referee(2) A2 correction to the pathological-DSGE weak-identification
-  case study: replication \code{10d_weakid_profile2.R} (naive mode-seeded
-  profile vs. feasibility-seeded true profile on \code{nk_small}).
-}
 \seealso{
 \code{\link{run_mode_finding}}, \code{\link{make_posterior}},
   \code{\link{robust_confidence_set}}

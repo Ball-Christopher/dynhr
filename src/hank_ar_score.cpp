@@ -13,8 +13,7 @@
 // So ONE pass over the N^2 stacked entries collapses both contractions onto
 // G-space, after which each parameter costs a ~19k dot product instead of a
 // fresh N x N gather plus an N^2 trace and an N^2 matvec. This is the
-// "compact accumulation" the paper brief (notes/dynhr_brief_seqspace_
-// gradients.md 4b, briefs/20-seqspace-gradient-scope.md 5) identified as the
+// "compact accumulation" the design notes identified as the
 // only place the real speedup lives -- and which is 3x SLOWER when written in
 // R with rowsum(), because grouping millions of entries into thousands of
 // groups is interpreter-bound there and trivial here.

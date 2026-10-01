@@ -612,7 +612,7 @@
   tc <- dyn$total_cols
   Flist <- vector("list", K)
 
-  # F1: Jacobian (n x tc)
+  # Jacobian (n x tc)
   J <- dyn$jacobian_fn(dy_ss, params, ss)
   Flist[[1L]] <- .dense_derivs_to_triplets(J, 1L, tc)
 

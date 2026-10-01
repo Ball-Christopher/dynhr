@@ -201,7 +201,7 @@ d37_komunjer_ng <- function(dr             = NULL,
                 base_result))
 
   S0_eig <- eigen(S0, symmetric = TRUE, only.values = TRUE)$values
-  ## relative to Sigma_e's own scale (no max(1, .) floor: W78)
+  ## relative to Sigma_e's own scale (no max(1, .) floor)
   if (min(S0_eig) < -1e-10 * max(abs(S0_eig)))
     return(info(sprintf("Sigma_e is not positive semi-definite (smallest eigenvalue %.3g). Skipped.",
                         min(S0_eig)), base_result))
@@ -276,8 +276,8 @@ d37_komunjer_ng <- function(dr             = NULL,
       Q <- B %*% S %*% t(B)
       H <- D %*% S %*% t(D)
       G <- B %*% S %*% t(D)
-      ## Stop RELATIVE to the size of P and Q (kalman_filter()'s DARE rule,
-      ## W77/W78): 1e-14 x max(1, |Q|, |H|) was absolute below unit scale, so
+      ## Stop RELATIVE to the size of P and Q (kalman_filter()'s DARE rule):
+      ## 1e-14 x max(1, |Q|, |H|) was absolute below unit scale, so
       ## with every shock std x 1e-4 the fixed point stopped ~1e-6-relative
       ## early and K / Sigma_a entered the finite differences with that error.
       dare <- .solve_dare(A, C, Q, H, G, tol = .LYAP_TOL,

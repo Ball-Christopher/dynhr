@@ -17,9 +17,9 @@
 ## and (optionally) `loglik_contrib`. Rather than edit that file, this
 ## diagnostic runs its own per-step Kalman recursion so it can capture v_t and
 ## F_t directly. The per-period update is the SHARED .kf_step_core() of
-## R/kf-step.R (brief 23 D1), so me_variance is true i.i.d. measurement error
+## R/kf-step.R, so me_variance is true i.i.d. measurement error
 ## entering F_t AND the Joseph term K me K' exactly as in kalman_filter()
-## (brief 23 A2: the former hand-rolled update dropped K me K', so at
+## (the former hand-rolled update dropped K me K', so at
 ## me_variance > 0 the standardized innovations drifted from kalman_filter's).
 ## It reuses the package's own model-setup helpers (.get_shock_cov,
 ## solve_lyapunov) so it always agrees with kalman_filter()'s conventions.

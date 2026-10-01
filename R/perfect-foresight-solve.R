@@ -257,7 +257,7 @@ pf_boundary_exo <- function(model, which = c("init", "terminal")) {
   R <- numeric(n_total)
 
   # Preallocate sparse triplet storage using jac_triplets NNZ budget.
-  # Falls back to growing vectors when jac_triplets is NULL (Landmine 3).
+  # Falls back to growing vectors when jac_triplets is NULL.
   jt <- dyn$jac_triplets
   if (!is.null(jt) && length(jt) > 0L) {
     nnz_est   <- T * length(jt)
@@ -368,7 +368,7 @@ pf_boundary_exo <- function(model, which = c("init", "terminal")) {
     v_triplet <- v_triplet[seq_len(ptr)]
   }
 
-  # Build sparse matrix from triplets — repr = "C" replaces deprecated giveCsparse = TRUE (Landmine 5)
+  # Build sparse matrix from triplets — repr = "C" replaces deprecated giveCsparse = TRUE
   if (length(i_triplet) == 0L) {
     J <- Matrix::sparseMatrix(i = 1L, j = 1L, x = 0,
                               dims = c(n_total, n_total),
@@ -399,7 +399,7 @@ pf_boundary_exo <- function(model, which = c("init", "terminal")) {
 #'
 #' Attempts a plain (sparse, then dense, then QR) Newton solve. If every direct
 #' solve fails or returns a non-finite step — the signature of a rank-deficient
-#' / singular stacked Jacobian (issue M15) — it falls back to the regularised
+#' / singular stacked Jacobian — it falls back to the regularised
 #' normal-equations step
 #' \deqn{(J'J + \lambda \, \mathrm{diag}(J'J)) \, \delta = -J' R,}
 #' increasing \eqn{\lambda} geometrically until a finite step is obtained. The
@@ -1007,7 +1007,7 @@ perfect_foresight_solve <- function(compiled,
         if (is.null(ls$Y_new)) {
           # No tried step reduced the merit. Do NOT take a blind half step
           # (the old behaviour blew the path up and singularised the next
-          # Jacobian — M15). Stop this Newton run cleanly; the homotopy
+          # Jacobian). Stop this Newton run cleanly; the homotopy
           # driver can retry with continuation.
           if (verbose) .dynhr_cat("  Line search found no descent; stopping run.\n")
           break

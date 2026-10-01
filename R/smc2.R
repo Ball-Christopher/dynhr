@@ -32,7 +32,7 @@
 ##     never happens).
 ## So dynhr_smc2() does not reimplement tempering/resampling/mutation; it
 ## composes the noisy-likelihood closure (this file's only new logic) and
-## forwards to dynhr_smc() unmodified, exactly per the brief's "reuse the
+## forwards to dynhr_smc() unmodified, exactly per the reference derivation's "reuse the
 ## existing machinery in R/sampler-smc.R" instruction.
 ## --------------------------------------------------------------------------
 
@@ -55,29 +55,88 @@
                       "max_stages_u", "order", "burn_in_init")
 .smc2_sv_allow  <- c("n_particles", "stochastic_volatility", "power")
 
-#' Reject `likelihood_args` keys the chosen factory does not accept.
+#' Problems with `likelihood_args` keys for the chosen factory.
 #'
 #' The allow-list used to be applied with \code{intersect()} alone, which
 #' SILENTLY DROPPED anything unrecognised -- so a typo, or a knob that had
 #' been retired (\code{mh_scale}), looked like it was tuning the filter while
 #' doing nothing at all. That is the exact failure mode this list exists to
-#' prevent, so an unknown key is now an error naming the accepted set.
-#' \code{seed} is checked separately and earlier (it has its own message).
+#' prevent, so an unknown key is an error naming the accepted set.
+#' \code{seed} is checked separately (it has its own message). Returns the
+#' problems as a character vector, character(0) if fine.
 #' @noRd
-.smc2_check_allowed <- function(args, allow, which) {
-  if (!length(args)) return(invisible(NULL))
+.smc2_allowed_problem <- function(args, allow, which) {
+  if (!length(args)) return(character(0))
   nm  <- names(args)
   bad <- setdiff(nm[nzchar(nm)], c(allow, "seed"))
+  p <- character(0)
   if (length(bad))
-    stop("dynhr_smc2: likelihood_args ",
-         paste(sQuote(bad), collapse = ", "),
-         if (length(bad) > 1L) " are not accepted" else " is not accepted",
-         " for likelihood = ", sQuote(which), ". Accepted: ",
-         paste(sQuote(allow), collapse = ", "), ".", call. = FALSE)
+    p <- paste0("likelihood_args ", paste(sQuote(bad), collapse = ", "),
+                if (length(bad) > 1L) " are not accepted" else " is not accepted",
+                " for likelihood = ", sQuote(which), ". Accepted: ",
+                paste(sQuote(allow), collapse = ", "), ".")
   if (any(!nzchar(nm)) || is.null(nm))
-    stop("dynhr_smc2: every element of likelihood_args must be named.",
-         call. = FALSE)
+    p <- c(p, "every element of likelihood_args must be named.")
+  p
+}
+
+#' Abort on `likelihood_args` keys the chosen factory does not accept.
+#' @noRd
+.smc2_check_allowed <- function(args, allow, which) {
+  p <- .smc2_allowed_problem(args, allow, which)
+  if (length(p)) stop("dynhr_smc2: ", paste(p, collapse = " "), call. = FALSE)
   invisible(NULL)
+}
+
+## Every argument rule of dynhr_smc2() that needs no likelihood evaluation: the
+## outer-SMC rules it shares with dynhr_smc() (its own n_particles counts the
+## THETA particles), the `likelihood` choice, `me_variance` for the TPF, and
+## the `likelihood_args` contract. Called by dynhr_smc2() at entry and by
+## validate_spec(); `args` is keyed by dynhr_smc2()'s argument names (absent =
+## default = valid; `me_variance` is judged only when named in `args`, since
+## the TPF needs it and the sampler default is NULL). Returns the problems as
+## a character vector, character(0) if fine.
+#' @noRd
+.smc2_args_problem <- function(args, n_par = NULL) {
+  shared <- c("n_particles", "ess_target", "n_mh_steps", "mh_scale_factor",
+              "mut_target", "mixture_weights")
+  p <- .smc_args_problem(args[intersect(names(args), shared)], n_par = n_par)
+  lik_ok <- "tpf"
+  if ("likelihood" %in% names(args)) {
+    lik <- args$likelihood
+    if (!is.character(lik) || length(lik) < 1L ||
+        !lik[1L] %in% c("tpf", "sv_rbpf")) {
+      p <- c(p, paste0("`likelihood` must be \"tpf\" or \"sv_rbpf\", got ",
+                       if (is.character(lik) && length(lik) >= 1L)
+                         sQuote(lik[1L]) else class(lik)[1L], "."))
+      lik_ok <- NA_character_
+    } else lik_ok <- lik[1L]
+  }
+  if (identical(lik_ok, "tpf") && "me_variance" %in% names(args)) {
+    mv <- args$me_variance
+    if (!is.numeric(mv) || length(mv) != 1L || !is.finite(mv) || mv <= 0)
+      p <- c(p, paste0("likelihood = \"tpf\" requires a positive scalar ",
+                       "`me_variance` (the TPF's tempering instrument); got ",
+                       if (is.null(mv)) "NULL" else paste(format(mv),
+                                                          collapse = ", "),
+                       "."))
+  }
+  la <- args$likelihood_args
+  if (length(la)) {
+    if (!is.null(la$seed))
+      p <- c(p, paste0("likelihood_args$seed must not be set. SMC^2's ",
+                       "pseudo-marginal validity requires a FRESH, ",
+                       "independent particle-filter draw at every ",
+                       "evaluation -- a fixed seed makes the loglik ",
+                       "deterministic and breaks the extended-space SMC ",
+                       "argument (the same reason pmmh() and both factories ",
+                       "require seed = NULL for MCMC/SMC use)."))
+    if (!is.na(lik_ok))
+      p <- c(p, .smc2_allowed_problem(
+        la, if (identical(lik_ok, "tpf")) .smc2_tpf_allow else .smc2_sv_allow,
+        lik_ok))
+  }
+  p
 }
 
 
@@ -99,23 +158,7 @@
 .smc2_make_loglik <- function(likelihood, model, data, prior_spec, obs_vars,
                                compiled, me_variance, system_priors,
                                likelihood_args) {
-  if (!is.null(likelihood_args$seed)) {
-    stop("dynhr_smc2: likelihood_args$seed must not be set. SMC^2's pseudo-",
-         "marginal validity requires a FRESH, independent particle-filter ",
-         "draw at every evaluation -- a fixed seed makes the loglik ",
-         "deterministic and breaks the extended-space SMC argument (the same ",
-         "reason pmmh() and both factories require seed = NULL for MCMC/SMC ",
-         "use).", call. = FALSE)
-  }
-
   if (identical(likelihood, "tpf")) {
-    if (!is.numeric(me_variance) || length(me_variance) != 1L ||
-        !is.finite(me_variance) || me_variance <= 0) {
-      stop("dynhr_smc2: likelihood = \"tpf\" requires a positive scalar ",
-           "`me_variance` (the TPF's tempering instrument); got ",
-           if (is.null(me_variance)) "NULL" else me_variance, ".",
-           call. = FALSE)
-    }
     .smc2_check_allowed(likelihood_args, .smc2_tpf_allow, "tpf")
     extra <- likelihood_args[intersect(names(likelihood_args), .smc2_tpf_allow)]
     do.call(make_log_posterior_tpf,
@@ -317,12 +360,14 @@ dynhr_smc2 <- function(
   ## inherits this epoch rather than opening a second one.
   .dynhr_run_epoch <- .dynhr_epoch("dynhr_smc2")
   on.exit(.dynhr_close_epoch(.dynhr_run_epoch), add = TRUE)
-  if (!is.character(likelihood) || length(likelihood) < 1L ||
-      !likelihood[1] %in% c("tpf", "sv_rbpf")) {
-    stop("dynhr_smc2: `likelihood` must be \"tpf\" or \"sv_rbpf\", got ",
-         if (is.character(likelihood) && length(likelihood) >= 1L)
-           sQuote(likelihood[1]) else class(likelihood)[1], ".", call. = FALSE)
-  }
+  prob <- .smc2_args_problem(list(
+    likelihood = likelihood, me_variance = me_variance,
+    likelihood_args = likelihood_args, n_particles = n_particles,
+    ess_target = ess_target, n_mh_steps = n_mh_steps,
+    mh_scale_factor = mh_scale_factor, mut_target = mut_target,
+    mixture_weights = mixture_weights))
+  if (length(prob))
+    stop("dynhr_smc2: ", paste(prob, collapse = " "), call. = FALSE)
   likelihood <- likelihood[1]
 
   loglik_fn <- .smc2_make_loglik(likelihood, model, data, prior_spec,

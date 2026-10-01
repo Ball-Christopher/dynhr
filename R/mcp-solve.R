@@ -257,7 +257,7 @@
   }
 
   # Build sparse matrix from triplets — repr = "C" replaces deprecated
-  # giveCsparse = TRUE (Landmine 5).
+  # giveCsparse = TRUE.
   if (length(i_triplet) == 0L) {
     J <- Matrix::sparseMatrix(i = 1L, j = 1L, x = 0,
                               dims = c(n_total, n_total),
@@ -318,7 +318,7 @@
 #'   through a ladder of continuation runs (4, 16, 64 stages) that ramp the
 #'   shock path from zero (steady state) to its full value, warm-starting each
 #'   stage. So easy problems are unchanged and hard cold starts are rescued
-#'   (issue M15). An integer \code{>= 1} forces exactly that many stages;
+#'. An integer \code{>= 1} forces exactly that many stages;
 #'   \code{1} is a single direct solve.
 #' @param method         Sparse-solve method: \code{"sparse"} (uses
 #'   \code{Matrix::sparseQR}), \code{"dense"} (uses \code{solve}), or
@@ -427,7 +427,7 @@ mcp_solve_path <- function(compiled,
   # Inner semi-smooth Newton solve, parameterised by the shock path + warm
   # start. Reused by the homotopy/continuation driver below. Globalised with an
   # Armijo line search, a best-vetted-point fallback on line-search failure,
-  # and a Levenberg-Marquardt step when the FB Jacobian singularises (M15).
+  # and a Levenberg-Marquardt step when the FB Jacobian singularises.
   # ==========================================================================
   .mcp_run_newton <- function(Y_start, eps_use) {
     Y_loc <- Y_start
@@ -531,7 +531,7 @@ mcp_solve_path <- function(compiled,
 
         if (is.null(ls$Y_new)) {
           # No tried step reduced the merit — do NOT take a blind half step
-          # (the old behaviour blew the path up; M15). Stop this run; the
+          # (the old behaviour blew the path up). Stop this run; the
           # homotopy driver can retry with continuation.
           break
         }

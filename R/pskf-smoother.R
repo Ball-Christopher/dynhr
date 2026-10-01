@@ -6,7 +6,7 @@
 ##   and Smoother with Application to DSGE Models," JEDC Vol. 187 (Dynare WP
 ##   #78). Reference implementation: github.com/gguljanov/pruned-skewed-kalman.
 ##
-## IMPLEMENTATION (method = "csn", W71 2026-09-26):
+## IMPLEMENTATION (method = "csn"):
 ##   Step 1 (forward): .pskf_filter(store_path = TRUE) stores the per-period
 ##     filtered / predicted CSN parameters and, per period, which rows of the
 ##     pre-prune skew stack survived dim_red4_r (keep_path).
@@ -24,10 +24,10 @@
 ##   smoother inherits the pruned filter's approximation (measured in
 ##   tests/testthat/test-fix-0926-pskf-exact-smoother.R).
 ##
-##   History: the pre-W71 backward pass shifted nu only (Gamma / Delta held
+##   History: the earlier backward pass shifted nu only (Gamma / Delta held
 ##   at their filtered values) -- first-order, ignoring latents born after t;
 ##   off an importance-sampled exact posterior by ~0.3 posterior sd at t < T
-##   on a 2-state / 2-shock fixture (W70). Its smoothed / filtered
+##   on a 2-state / 2-shock fixture. Its smoothed / filtered
 ##   covariances were the Gaussian-part covariances; they are now the exact
 ##   CSN posterior covariances.
 ##
@@ -60,7 +60,7 @@
 ##                     - sum_{k != i} (V_ki / V_ii) d2 Phi / dz_i dz_k,
 ## so Hess L = (Hess Phi) / Phi - g g'. Every Phi_m is logcdf_ME_r(), the
 ## filter's evaluator (exact pnorm / log-scale quadrature for m <= 2, the C++
-## lattice evaluator mvn_logcdf_cpp for 3 <= m <= miwa_qmax -- W75; Miwa(128)
+## lattice evaluator mvn_logcdf_cpp for 3 <= m <= miwa_qmax; Miwa(128)
 ## / checked Miwa before -- Mendell-Elston beyond).
 ## miwa_qmax defaults to 7 here
 ## (the filter's likelihood path uses 5): these calls are made once per
@@ -68,9 +68,12 @@
 ## ~10 ms at dim 7 on PSKF calls (it raises the lattice size until the error
 ## estimate meets max(1e-5, 1e-7 |log p|); Miwa(128) was ~12 ms at dim 7),
 ## and
-## Mendell-Elston is badly wrong in the orthant tails that skewed posteriors
-## live in (a q = 6 unpruned fixture put ME-based smoothed means hundreds of
-## MCSE off an exact posterior).
+## Mendell-Elston is less accurate in the orthant tails that skewed
+## posteriors live in (median |log-CDF error| 0.016, max 0.86 against
+## mvtnorm after its 0.9.4.6 sign / double-shrink fix; before the fix a
+## q = 6 unpruned fixture put ME-based smoothed means hundreds of MCSE off
+## an exact posterior). The exact evaluators (~1e-6) are used where they
+## are affordable.
 ##
 ## The former q >= 2 branch of .csn_hazard_rate was a central finite
 ## difference with an ABSOLUTE step 1e-5 (its comment claimed the step
@@ -154,7 +157,7 @@
 ## .pskf_csn_derivs_checked
 ##
 ## (g, H) of log Phi_q(z; 0, D) at z = -nu (.csn_logcdf_derivs), refusing
-## non-finite values. The pre-W70 call sites wrapped the hazard in
+## non-finite values. The earlier call sites wrapped the hazard in
 ## tryCatch(error = function(e) rep(0, q)), which would have silently dropped
 ## the whole skewness correction (returning the Gaussian-part mean) on any
 ## failure. A non-finite hazard is an explicit classed error instead.
@@ -215,7 +218,7 @@
 ##   Sigma_eps n_obs x n_obs measurement noise covariance.
 ##   cut_tol   Pruning tolerance passed to .pskf_filter (default 0.01).
 ##   max_q     Skew-dimension rank cap passed to .pskf_filter (default 5).
-##             Since the pruning mean-compensation fix (2026-07), a cut
+##             Since the pruning mean-compensation fix, a cut
 ##             shifts the Gaussian location -- pass cut_tol = 0, max_q = Inf
 ##             when an exactly-Gaussian forward mean recursion is required
 ##             (e.g. the method = "gaussian" backward-compat oracle).
@@ -268,11 +271,13 @@ pskf_smoother <- function(Y, TT, ZZ, mu_eta, Sigma_eta, Gamma_eta, nu_eta,
     ## (the pre-prune stack at the default max_q = 5 with two skew shocks;
     ## dims 3-7: the C++ lattice evaluator, see logcdf_ME_r). The backward
     ## pass carries the compensation (lambda_path) to earlier periods, where
-    ## the former likelihood-path ME evaluation (dim > 2) was measured up to
-    ## 2.4 posterior sd off (see .csn_mean_offset). Cost: ~3 ms at dim 6,
+    ## the former likelihood-path ME evaluation (dim > 2; before its 0.9.4.6
+    ## sign fix) was measured up to 2.4 posterior sd off (see
+    ## .csn_mean_offset). Cost: ~3 ms at dim 6,
     ## ~10 ms at dim 7 on PSKF calls -- hence the cap. When a connected Phi
     ## block of dimension 6-7 occurs, the returned loglik can differ slightly
-    ## from .pskf_filter()'s default (offset_miwa_qmax = 5: ME there).
+    ## from .pskf_filter()'s default (offset_miwa_qmax = 5: ME there, whose
+    ## log-CDF error is ~0.016 median).
     offset_miwa_qmax = 7L,
     store_path = TRUE
   )

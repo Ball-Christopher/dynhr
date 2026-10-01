@@ -74,7 +74,7 @@ The adjoint leg (\code{.kf_loglik_adjoint}) requires a NA-free \code{data}
 \code{\link{hank_reiter_kalman_loglik}} directly (its
 \code{.kf_univariate_dispatch} path) when \code{data} has gaps.
 }
-\section{\code{me_variance} (RESOLVED in 0.9.2.x -- F3-D)}{
+\section{\code{me_variance} (RESOLVED in 0.9.2.x)}{
 
 \code{\link{hank_reiter_kalman_loglik}} routes through
 \code{.kf_univariate_dispatch} and \code{.kf_loglik_adjoint} runs the
@@ -82,7 +82,7 @@ multivariate recursion. Up to 0.9.2.0004 these implemented DIFFERENT
 \code{me_variance} conventions -- true iid measurement noise vs. an
 \code{F}-only regulariser -- and with 2 observables at
 \code{me_variance = 1e-8} their logliks differed by ~2 nats, so their
-outputs could not be mixed. F3-D made \code{me_variance} TRUE iid diagonal
+outputs could not be mixed. This made \code{me_variance} TRUE iid diagonal
 measurement noise on the multivariate paths too (it now enters the Joseph
 covariance update as well as \code{F}), so the two agree at ANY
 \code{me_variance} (verified to ~1e-9 here) and this function's

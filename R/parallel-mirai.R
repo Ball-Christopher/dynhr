@@ -430,8 +430,8 @@
 
 #' Bind the exact log-posterior gradient on every daemon of a live pool
 #'
-#' For the parallel Step-6 Hessian from the gradient (W88,
-#' \code{grad_hessian_mirai()}): builds \code{.worker_grad} on each daemon
+#' For the parallel Step-6 Hessian from the gradient
+#' (\code{grad_hessian_mirai()}): builds \code{.worker_grad} on each daemon
 #' with \code{make_posterior_grad()} from the daemon globals
 #' \code{.mirai_pool_init} set (\code{.worker_model}, \code{.worker_cm},
 #' \code{.worker_Y}) and the P0 initialisation \code{.worker_lp} is bound
@@ -603,7 +603,7 @@ run_mcmc_mirai <- function(
   ## One task per chain. The body mirrors the sequential .run_mcmc() loop body
   ## for exact RNG parity. .worker_lp is the daemon-local log-posterior.
   ##
-  ## Per-chain seeds for TPF closures (Landmine 2):
+  ## Per-chain seeds for TPF closures:
   ## When log_post_fn is a TPF closure built with seed = NULL, the R RNG state
   ## set below drives each chain's particle paths independently -- chains are
   ## NOT identical.
@@ -909,7 +909,7 @@ run_nuts_mirai <- function(
     gradient_policy <- ctx$gradient_policy %||% "auto"
   }
   ## Guard centralised via .ctx_allows_analytic_gradient (me_extra/shock_scale
-  ## are supported by the tv-aware tangent/adjoint path since Tier 7 item 3).
+  ## are supported by the tv-aware tangent/adjoint path since then).
   if (isTRUE(analytic_grad)) {
     .tmp_ctx_nuts <- estimation_context(
       me_extra    = me_extra,
@@ -1022,13 +1022,13 @@ run_nuts_mirai <- function(
                                                     inherits = FALSE) %||% "auto",
                                  system_priors = system_priors)
         ## THETA-space gradient: dynhr_nuts(transform = transform) applies
-        ## the eta chain rule itself (make_transformed_grad). W86: this used
+        ## the eta chain rule itself (make_transformed_grad). This used
         ## to pre-wrap it too -- the chain rule fired TWICE and the eta-space
         ## closure was fed theta (the mode_task bug class, 2026-06).
-        ## W94: with the context's system prior -- the one .worker_lp carries
+        ## With the context's system prior -- the one .worker_lp carries
         ## (.mirai_pool_init) -- this is the gradient, and its fused
-        ## log-posterior (W92) the value, of the sampled target. (W92 dropped
-        ## the fused value there instead; the gradient omitted the prior.)
+        ## log-posterior the value, of the sampled target. (Previously the fused value was dropped
+        ## there and the gradient omitted the prior.)
         grad_fn <- base_grad_fn
       }
     }
@@ -1278,7 +1278,7 @@ run_mode_mirai <- function(
     }
   }
   ## The dispersion draws below run on the HOST; restore the caller's RNG
-  ## stream when run_mode_mirai() exits (C1).
+  ## stream when run_mode_mirai() exits.
   .local_seed(seed_base)
   for (ch in seq_len(n_chains)[-1L]) {
     set.seed(seed_base + ch)
@@ -1475,6 +1475,12 @@ run_mode_mirai <- function(
         }, error = function(e) .dynhr_reraise_bug(e, NULL))
       }
     }
+    ## PSKF: no analytic gradient; the L-BFGS-B polish differences with the
+    ## pruning selection frozen at each point instead of optim()'s internal
+    ## finite differences (as run_mode_finding's serial path does).
+    if (is.null(grad_fn))
+      grad_fn <- .pskf_mode_polish_grad(likelihood, cfg$method, lp_counted,
+                                        prior_spec)
 
     ## Shared H0 seed (a precomputed neg-logpost Hessian matrix from the host):
     ## seed csminwel's initial curvature for the trust-region methods. Chain 1

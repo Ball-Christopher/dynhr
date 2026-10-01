@@ -21,7 +21,7 @@
 ##
 ## 0.9.4 changes: V switched from sample HAC to model-implied (the HAC S test
 ## over-rejected badly -- ~13-37% at a nominal 5% for T ~ 200-400 in the
-## ledger's simulations, vs ~7% with the model-implied V); D29's own
+## our simulations, vs ~7% with the model-implied V); D29's own
 ## identification-strength table was DROPPED in favour of D20 with
 ## weighting = "sampling" (two divergent strength computations with
 ## inconsistent thresholds, 2 here vs 1 there); the badge became INFO.
@@ -58,7 +58,7 @@
 #' asymptotic \eqn{\chi^2} null of S under a \emph{known or consistently
 #' estimated} weight and make no finite-sample size claim; the statistic is
 #' well documented to over-reject in short, persistent samples -- in this
-#' package's own simulations (0.9.4 ledger) the sample-HAC version rejected
+#' package's own simulations the sample-HAC version rejected
 #' 13-37\% of the time at a nominal 5\% for \eqn{T \approx 200}-400, and the
 #' model-implied weight below brings that to roughly 7\%. Even at 7\% a
 #' rejection is not strong enough evidence to gate a badge on, so S is

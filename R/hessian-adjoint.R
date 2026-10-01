@@ -1,7 +1,7 @@
 ## R/hessian-adjoint.R
 ## --------------------------------------------------------------------------
 ## EXACT posterior Hessian of the Gaussian Kalman-filter log-likelihood
-## (ROADMAP Tier 6 #2). Builds on the first-order adjoint gradient
+##. Builds on the first-order adjoint gradient
 ## (.kf_loglik_adjoint) and the first/second-order solution-derivative layers
 ## (solution_derivatives / solution_derivatives_2).
 ##
@@ -248,6 +248,17 @@ kf_loglik_hessian <- function(Y, ss, dX_list, d2X_list, me_variance = 0,
 #'   second-order channel is handled exactly by the same
 #'   \code{<G_Sig, d2Sigma_e>} FD stencil the other paths use. Default
 #'   \code{"loop"} keeps existing callers byte-identical.
+#'   \code{"auto"} picks the fastest method that applies:
+#'   \code{"adjoint_solution"} when the model was compiled with
+#'   \code{param_deriv = "second"} and every non-shock entry of
+#'   \code{param_names} is a model parameter (exact and fully analytic in the
+#'   solution), otherwise \code{"hvp_solution"}. If the chosen method cannot
+#'   form the solution curvature (a perturbed parameter point fails to solve),
+#'   the call is redone with \code{"loop"}. On Smets-Wouters (2007) the
+#'   \code{"hvp_solution"} Hessian agrees with \code{"loop"} to about 1e-8
+#'   relative at the mode and is about 3.5 times faster; being a central
+#'   difference of an exact gradient, its relative error can reach about 1e-6
+#'   next to a parameter bound.
 #' @param h_t2 relative FD step for the \code{t2_method = "hvp_solution"}
 #'   solution-adjoint Jacobian (default 1e-5; the per-parameter step is
 #'   \code{h_t2 * max(abs(theta_k), 1e-4)}).
@@ -342,7 +353,8 @@ posterior_hessian <- function(model, compiled, dr, params, param_names,
                               h_rel2 = 1e-4,
                               t1_method = c("hvp", "analytic"),
                               t2_method = c("loop", "contract_once",
-                                            "hvp_solution", "adjoint_solution"),
+                                            "hvp_solution", "adjoint_solution",
+                                            "auto"),
                               check_mode = NULL,
                               mode_grad_tol = NULL,
                               require_mode = FALSE,
@@ -354,6 +366,26 @@ posterior_hessian <- function(model, compiled, dr, params, param_names,
   t1_method <- match.arg(t1_method)
   t2_method <- match.arg(t2_method)
   lik_init  <- match.arg(lik_init)
+  if (identical(t2_method, "auto")) {
+    ## Re-enter with the fastest method that applies; if its solution-curvature
+    ## step could not be formed (a perturbed point failed to solve), redo the
+    ## call with the exact materialised-d2X "loop" path.
+    self <- sys.function()
+    args <- mget(names(formals(self)))
+    args$t2_method <- .ph_auto_t2_method(
+      compiled, param_names[!(param_names %in% model$varexo_names)])
+    H <- withCallingHandlers(
+      do.call(self, args),
+      dynhr_warning_hessian_t2_failed = function(w) tryInvokeRestart("muffleWarning"))
+    if (length(attr(H, "t2_failed")) > 0L) {
+      .dynhr_inform("posterior_hessian: t2_method = \"", args$t2_method,
+                    "\" could not form the solution curvature; using \"loop\".",
+                    level = "debug")
+      args$t2_method <- "loop"
+      H <- do.call(self, args)
+    }
+    return(H)
+  }
   np  <- length(param_names)
   exo <- model$varexo_names
   ## The curvature kernels (kf_loglik_hessian / .kf_loglik_adjoint) start
@@ -365,7 +397,7 @@ posterior_hessian <- function(model, compiled, dr, params, param_names,
   init_in_force <- .grad_init_in_force(
     dr$ghx[dr$state_idx, , drop = FALSE],
     dr$ghu[dr$state_idx, , drop = FALSE],
-    .get_shock_cov(model, exo, params), lik_init)
+    .get_shock_cov(model, exo, params), lik_init, dr = dr)
   if (!identical(init_in_force, "stationary"))
     .dynhr_abort("posterior_hessian: ",
                  if (identical(init_in_force, "reject"))
@@ -377,7 +409,7 @@ posterior_hessian <- function(model, compiled, dr, params, param_names,
                  "\"", lik_init, "\") (central differences of the gradient of ",
                  "that likelihood) or a numerical Hessian.",
                  class = "dynhr_error_grad_lik_init")
-  ## Brief 23 A6: curvature of the tempered target
+  ## Curvature of the tempered target
   ## logprior + zeta * loglik + log p_sys, the one the posterior closures use.
   power <- .resolve_power_posterior(power, "posterior_hessian")
   if (!is.null(system_priors) && length(system_priors) == 0L)
@@ -413,7 +445,7 @@ posterior_hessian <- function(model, compiled, dr, params, param_names,
   }
 
   ## ------------------------------------------------------------------
-  ## Mode-critical-point guard (paper gap #1). A Hessian is only meaningful
+  ## Mode-critical-point guard. A Hessian is only meaningful
   ## AT a critical point of the posterior it is differentiating; evaluate the
   ## SAME analytic gradient machinery (make_posterior_grad, R/analytic-
   ## gradient.R) used elsewhere in the package -- no new gradient path -- and
@@ -466,7 +498,7 @@ posterior_hessian <- function(model, compiled, dr, params, param_names,
       grad_at_mode <- g_sub
       grad_norm_val <- sqrt(sum(g_sub^2))
 
-      ## Sigma_e-mismatch diagnosis (paper P2 gap #7a). The Hessian's Sigma_e
+      ## Sigma_e-mismatch diagnosis (paper). The Hessian's Sigma_e
       ## comes from `params` (.get_shock_cov below). The guard's gradient is
       ## built from `prior_spec` via make_posterior_grad, which sets Sigma_e
       ## from the shock-std entries IT sees. If a shock std is INJECTED into
@@ -776,6 +808,22 @@ posterior_hessian <- function(model, compiled, dr, params, param_names,
 }
 
 
+## The fastest t2_method that applies at `compiled` for the non-shock entries
+## `struct_names` of param_names (posterior_hessian(t2_method = "auto")):
+## the fully analytic adjoint_solution when the compiled model carries the
+## second-order parameter codegen and every entry is a model parameter (its
+## Hessian-of-solution-adjoint indexes the compiled parameter vector), else
+## the finite-difference-of-exact-gradient hvp_solution.
+#' @noRd
+.ph_auto_t2_method <- function(compiled, struct_names) {
+  analytic2 <- isTRUE(getOption("dynhr.use_analytic_primitives", TRUE)) &&
+    .can_use_analytic_primitive_deriv(compiled) &&
+    isTRUE(compiled$dynamic$param_deriv2_ok) &&
+    isTRUE(compiled$static$static_param2_built) &&
+    all(struct_names %in% compiled$model$param_names)
+  if (analytic2) "adjoint_solution" else "hvp_solution"
+}
+
 ## --------------------------------------------------------------------------
 ## .posterior_hessian_hvp_solution(): d2X-FREE loglik Hessian.
 ##
@@ -848,6 +896,7 @@ posterior_hessian <- function(model, compiled, dr, params, param_names,
   ## ---- T2 solution part: central FD of sol_grad_at over struct params -----
   n_s <- length(struct_names)
   T2_sol <- matrix(0, n_s, n_s)
+  t2_failed <- character(0)
   if (n_s > 0) {
     for (i in seq_len(n_s)) {
       nm_i <- struct_names[i]
@@ -857,9 +906,11 @@ posterior_hessian <- function(model, compiled, dr, params, param_names,
       gp <- sol_grad_at(pp)
       gm <- sol_grad_at(pm)
       if (is.null(gp) || is.null(gm)) {
+        t2_failed <- c(t2_failed, nm_i)
         .dynhr_warn(sprintf(
           "posterior_hessian(hvp_solution): re-solve failed at %s +/- h; ",
-          nm_i), "row set to 0 (T2 solution part).", call. = FALSE)
+          nm_i), "row set to 0 (T2 solution part).", call. = FALSE,
+          class = "dynhr_warning_hessian_t2_failed")
         next
       }
       row_i <- (gp[struct_names] - gm[struct_names]) / (2 * hi)
@@ -886,6 +937,7 @@ posterior_hessian <- function(model, compiled, dr, params, param_names,
   H <- 0.5 * (H + t(H))
   dimnames(H) <- list(param_names, param_names)
   attr(H, "t1_asymmetry") <- t1_asym
+  if (length(t2_failed) > 0L) attr(H, "t2_failed") <- t2_failed
   H
 }
 
@@ -934,6 +986,7 @@ posterior_hessian <- function(model, compiled, dr, params, param_names,
   ## ---- T2 solution part: ONE analytic Hessian-of-solution-adjoint call ----
   n_s <- length(struct_names)
   T2_sol <- matrix(0, n_s, n_s)
+  t2_failed <- character(0)
   if (n_s > 0) {
     res <- tryCatch(
       .solution_adjoint_hessian(model, compiled, dr, params, struct_names,
@@ -942,18 +995,22 @@ posterior_hessian <- function(model, compiled, dr, params, param_names,
       error = function(e) {
         .dynhr_warn("posterior_hessian(adjoint_solution): solution-Hessian ",
                 "failed (", conditionMessage(e), "); T2 solution part set ",
-                "to 0.", call. = FALSE)
+                "to 0.", call. = FALSE,
+                class = "dynhr_warning_hessian_t2_failed")
         NULL
       })
+    if (is.null(res)) t2_failed <- struct_names
     if (!is.null(res)) {
       T2_sol <- res$T2
       T2_sol[!is.finite(T2_sol)] <- 0
-      if (any(!res$ok))
+      if (any(!res$ok)) {
+        t2_failed <- struct_names[!res$ok]
         .dynhr_warn(sprintf(
           "posterior_hessian(adjoint_solution): primitives failed for %s; ",
           paste(struct_names[!res$ok], collapse = ", ")),
           "corresponding rows/cols set to 0 (T2 solution part).",
-          call. = FALSE)
+          call. = FALSE, class = "dynhr_warning_hessian_t2_failed")
+      }
     }
   }
 
@@ -975,13 +1032,14 @@ posterior_hessian <- function(model, compiled, dr, params, param_names,
   H <- 0.5 * (H + t(H))
   dimnames(H) <- list(param_names, param_names)
   attr(H, "t1_asymmetry") <- t1_asym
+  if (length(t2_failed) > 0L) attr(H, "t2_failed") <- t2_failed
   H
 }
 
 
 ## --------------------------------------------------------------------------
 ## .ph_system_prior_hessian(): Hessian of the system-prior log-density
-## (brief 23 A6). System priors have no analytic derivative (their features
+##. System priors have no analytic derivative (their features
 ## are arbitrary functions of the solved model), so this is a second-order
 ## central-difference stencil of the density ALONE -- 3-point on the diagonal,
 ## 4-corner off it -- each point one steady-state + first-order solve and one
@@ -1046,8 +1104,7 @@ posterior_hessian <- function(model, compiled, dr, params, param_names,
 
 
 ## --------------------------------------------------------------------------
-## posterior_hessian_fd_grad(): INDEPENDENT cross-check Hessian (paper gap #7,
-## sharpened).
+## posterior_hessian_fd_grad(): INDEPENDENT cross-check Hessian.
 ##
 ## posterior_hessian()'s own internal check (t1_asymmetry, and the
 ## t1_method = "hvp" vs "analytic" agreement) certifies only the T1

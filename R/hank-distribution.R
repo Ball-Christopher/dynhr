@@ -136,7 +136,7 @@ hank_stationary_dist <- function(Lambda, d0 = NULL, tol = 1e-13,
                                  maxit = 200000L,
                                  backend = getOption("dynhr.hank_backend", "cpp")) {
   backend <- match.arg(backend, c("R", "cpp"))
-  ## Input contract (adversarial review 2026-07-13, P1): an unvalidated d0
+  ## Input contract: an unvalidated d0
   ## previously reached the C++ kernel unchecked -- a zero-mass d0 became
   ## NaN/NaN after normalization and the kernel's NaN-swallowing max-diff
   ## test returned converged = TRUE on iteration 1; a short d0 indexed past
@@ -444,7 +444,7 @@ hank_aggregate <- function(d, x) {
 
 #' Validate a Markov transition matrix at a public HANK boundary
 #'
-#' Shared input contract (adversarial review 2026-07-13, P2): \code{Pi} must
+#' Shared input contract: \code{Pi} must
 #' be a square numeric \code{n x n} matrix, finite, entrywise non-negative
 #' (within \code{tol}), with every row summing to 1 (within \code{tol}).
 #' Inner iteration loops stay validation-free; public constructors/solvers

@@ -26,6 +26,37 @@
 # dynhr_chees() -- ChEES-HMC sampler
 # ============================================================================
 
+## --------------------------------------------------------------------------
+## ChEES-HMC argument checker
+## --------------------------------------------------------------------------
+
+#' Problems with the arguments of dynhr_chees()
+#'
+#' The step size, the initial trajectory time, the trajectory learning rate
+#' and the divergence threshold are positive; the target acceptance is a
+#' probability strictly inside (0, 1) (dual averaging drives the step size to
+#' 0 or infinity at the ends); the mass diagonal / dense metric are positive /
+#' positive definite and match the parameter count.
+#'
+#' @param args Named list of the supplied dynhr_chees() arguments.
+#' @param n_par Number of estimated parameters, or NULL when not known.
+#' @return Character vector of problems; \code{character(0)} when fine.
+#' @noRd
+.chees_args_problem <- function(args, n_par = NULL) {
+  rules <- c(list(
+    n_draws       = .mcmc_r_whole(1L),
+    n_warmup      = .mcmc_r_whole(0L),
+    step_size     = .mcmc_r_pos(),
+    T_init        = .mcmc_r_pos(),
+    target_accept = .mcmc_r_range(0, 1, TRUE, TRUE),
+    chees_lr      = .mcmc_r_pos(),
+    adapt_mass    = .mcmc_r_flag(),
+    delta_max     = .mcmc_r_pos(allow_inf = TRUE)),
+    .mcmc_metric_rules(dynhr_chees))
+  .mcmc_check_args(args, dynhr_chees, "dynhr_chees", rules, n_par)
+}
+
+
 #' ChEES-HMC sampler (Hoffman, Radul & Sountsov 2021)
 #'
 #' Runs fixed-length leapfrog HMC with trajectory-time adaptation via the
@@ -109,6 +140,12 @@ dynhr_chees <- function(
   stopifnot(is.function(log_post_fn), is.numeric(theta_init))
   d         <- length(theta_init)
   par_names <- names(theta_init)
+  .mcmc_abort_if_problems("dynhr_chees", .chees_args_problem(
+    list(n_draws = n_draws, n_warmup = n_warmup, step_size = step_size,
+         T_init = T_init, target_accept = target_accept, chees_lr = chees_lr,
+         adapt_mass = adapt_mass, grad_fn = grad_fn, delta_max = delta_max,
+         mass_diag = mass_diag, M_inv = M_inv, chol_M = chol_M),
+    n_par = d))
   n_total   <- n_draws + n_warmup
 
   # ---- Checkpoint / streaming (opt-in). When `checkpoint` is a list carrying a
@@ -151,14 +188,14 @@ dynhr_chees <- function(
   } else {
     .grad <- grad_fn
   }
-  # --- Fused value + gradient (W92, .hmc_fused_target()): one evaluation per
+  # --- Fused value + gradient (.hmc_fused_target()): one evaluation per
   # new position, the gradient carried along the trajectory; NULL = separate
   # calls exactly as before.
   fz <- .hmc_fused_target(log_post_fn, grad_fn, state_init, par_names,
                           transform = transform, verbose = verbose,
                           sampler = "ChEES")
   vg_fn <- if (is.null(fz)) NULL else fz$vg
-  ## gradient at state_init when known (fused; W94 also the separate-call
+  ## gradient at state_init when known (fused; also the separate-call
   ## path once the step-size search has taken it)
   g_init <- if (is.null(fz)) NULL else fz$g0
 
@@ -180,7 +217,7 @@ dynhr_chees <- function(
 
   # --- Initial step size ---
   if (is.null(step_size)) {
-    if (is.null(fz)) g_init <- .grad(state_init)   # W94: taken once
+    if (is.null(fz)) g_init <- .grad(state_init)   # Taken once
     eps0 <- .hmc_find_stepsize(state_init, .lp_scalar, .grad,
                                 M_inv_diag, M_diag,
                                 M_inv = M_inv, chol_M = chol_M,
@@ -229,9 +266,9 @@ dynhr_chees <- function(
   n_grad_evals  <- 0L
 
   theta   <- state_init
-  ## Fused (W92): the start value from the same function as every later one;
+  ## Fused: the start value from the same function as every later one;
   ## g_curr the gradient there.
-  ## W94: the separate-call path carries the gradient as well (NULL until
+  ## The separate-call path carries the gradient as well (NULL until
   ## first needed; the same values, half the calls).
   lp_curr <- if (is.null(fz)) .lp_scalar(theta) else fz$lp0
   g_curr  <- g_init
@@ -335,7 +372,7 @@ dynhr_chees <- function(
       }
       theta_prop <- step$theta
       r_prop     <- step$r
-      g_prop     <- step$g   # carried into the next step (W94: both paths)
+      g_prop     <- step$g   # carried into the next step (Both paths)
       lp_last    <- step$lp  # NULL on the separate-call path
     }
     n_grad_evals <- n_grad_evals + L_actual
@@ -470,7 +507,7 @@ dynhr_chees <- function(
         vars[vars < 1e-12 | !is.finite(vars)] <- 1
         ## Stan's rule: the INVERSE mass is the posterior variance. This used
         ## to set the MASS to the variance (inverted), squaring the problem's
-        ## conditioning instead of removing it (brief 23 W14 finding).
+        ## conditioning instead of removing it.
         M_inv_diag <- vars
         M_diag     <- 1 / vars
         M_mass_diag <- M_diag

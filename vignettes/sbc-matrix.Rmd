@@ -29,7 +29,7 @@ at the end of every battery run and stored in `inst/extdata/sbc_matrix.rds`.
 | **to-certify** | Dispatch wired; battery cell not yet run |
 | **characterized** | Runs but likelihood is approximate (e.g. Whittle at small T); p-values stored as provenance, not gated |
 | **incompatible** | Mathematically impossible: gradient sampler × a stochastic, non-differentiable likelihood (tpf) — no usable gradient exists |
-| **needs-gradient** | Gradient sampler × a deterministic likelihood with no analytic-gradient path implemented yet (pskf, student_t) — possible, not done |
+| **needs-gradient** | Gradient sampler × a deterministic likelihood with no gradient path implemented yet (student_t) — possible, not done |
 | **pending** | Likelihood not yet implemented in dynhr |
 
 ```{r load-matrix}
@@ -79,12 +79,13 @@ knitr::kable(
 
 The matrix spans **7 samplers** — gradient-free (`rwmh`, `smc`, `dime`) and
 gradient-based (`nuts`, `hmc`, `mala`, `chees`) — × **6 likelihoods**.
-Gradient-based samplers require an analytic gradient, which only `gaussian_kf`,
-`whittle`, and `cumulant` expose. On the other three likelihoods they're
-unavailable — for two distinct reasons: `tpf` is **incompatible** (its particle
-log-likelihood is stochastic and non-differentiable, so no usable gradient
-*exists*), while `pskf` and `student_t` are **needs-gradient** (deterministic and
-differentiable in principle, but with no analytic-gradient path implemented yet).
+`gaussian_kf`, `whittle` and `cumulant` expose an analytic gradient. `pskf`
+has none, but its finite-difference gradient is taken on the pruning selection
+made at the current point, so a difference never straddles a selection switch;
+`nuts × pskf` is certified on that gradient. `tpf` is **incompatible** (its
+particle log-likelihood is stochastic and non-differentiable, so no usable
+gradient *exists*), and `student_t` is **needs-gradient** (deterministic and
+differentiable, but with no gradient path implemented yet).
 
 - **gaussian_kf**: Linear Gaussian state space via the Kalman filter. Exact
   posterior; the benchmark column. Analytic gradient → every sampler supported.

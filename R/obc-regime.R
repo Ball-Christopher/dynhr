@@ -95,8 +95,8 @@
 #' For an upper bound (<): violation when predicted value > bound.
 #'
 #' Note: this zero-shock, one-period, slack-rule check is NOT the OccBin
-#' regime check (it ignores the shock and every later period); since W49
-#' (0.9.3.93) neither obc_guess_verify() nor the PKF uses it.
+#' regime check (it ignores the shock and every later period); since 0.9.3.93
+#' neither obc_guess_verify() nor the PKF uses it.
 #'
 #' @param state_prev Numeric vector: filtered state at t-1 (length n_state)
 #' @param dr_slack   Slack-regime DecisionRules
@@ -105,7 +105,7 @@
 #' @noRd
 obc_should_bind <- function(state_prev, dr_slack, specs) {
   ## `ghx %*% state_prev` is a DEVIATION from steady state while `s$bound` is a
-  ## LEVEL (the package convention, ledger A6) -- compare against the
+  ## LEVEL (the package convention) -- compare against the
   ## deviation-form bound.  Before 0.9.4 this used the raw level and disagreed
   ## with obc_solve_binding()/boehl whenever the steady state was non-zero.
   bnd <- .obc_bound_dev(specs, dr_slack)
@@ -284,7 +284,7 @@ obc_ensure_policy <- function(regime_idx, regime_cache, sys, dr_slack, specs, ob
 #' so a following \code{kalman_filter_obc(..., regime_path)} evaluates the
 #' same likelihood.
 #'
-#' Changed in 0.9.3.93 (W49): this was an outer loop that filtered with one
+#' Changed in 0.9.3.93: this was an outer loop that filtered with one
 #' policy per regime (next period slack), re-checked every period against
 #' the SLACK rule applied to the lagged filtered state, and locked periods in
 #' which an observed constrained variable sat at its bound (an

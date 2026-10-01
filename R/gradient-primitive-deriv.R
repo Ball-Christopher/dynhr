@@ -1,7 +1,7 @@
 ## R/gradient-primitive-deriv.R
 ## --------------------------------------------------------------------------
 ## ANALYTIC (symbolic) parameter-derivatives of the smooth model primitives
-## (Tier 11 #3). Replaces the central finite differences that the
+##. Replaces the central finite differences that the
 ## solution-derivative layers use for
 ##
 ##   dys      = dȳ/dθ_k                         (steady-state sensitivity)
@@ -60,7 +60,7 @@
     isTRUE(dyn$hessian2_built)
     ## NB: steady_state_model-derived-parameter models (.ssm_assigns_param) are
     ## handled at FIRST order by the augmented-Jacobian dys + computed-parameter
-    ## dynamic chain (Tier 12 #2). caldara_rp still falls back to FD because its
+    ## dynamic chain. caldara_rp still falls back to FD because its
     ## augmented static Jacobian is singular (runtime qr.solve -> NULL). The
     ## SECOND-order analytic paths self-guard on !.ssm_assigns_param (the order-2
     ## computed-parameter chain is not yet derived) and use FD for such models.
@@ -74,7 +74,7 @@
 #' a dependence the explicit param_resid_fn (which holds all parameters fixed)
 #' would miss, biasing the analytic dys.
 #'
-#' Tier 12 #2 closes this at FIRST order with the augmented-Jacobian chain: solve
+#' The SSM-computed-parameter chain closes this at FIRST order with the augmented-Jacobian chain: solve
 #' \eqn{J_{aug}\,dys = -rhs_{aug}} with
 #' \eqn{J_{aug} = J_{static} + \sum_{p_c}(\partial F/\partial p_c)(\partial g_{p_c}/\partial y)}
 #' and \eqn{rhs_k = \partial F/\partial\theta_k + \sum_{p_c}(\partial F/\partial p_c)(\partial g_{p_c}/\partial\theta_k)}
@@ -360,7 +360,7 @@
   ## the partition the fast/slow extractors apply after the row reorder.
   ## Memoized per compiled model (.get_sys_cache): the structure is
   ## parameter-free, and rebuilding it here cost ~0.7 ms of every NZSIM
-  ## adjoint_solution gradient (W89).
+  ## adjoint_solution gradient.
   cache <- .get_sys_cache(compiled)
 
   ## eq_to_decl: the SAME mapping extract_system_matrices() builds, including
@@ -461,7 +461,7 @@
   if (nrow(J_static) != ncol(J_static)) return(NULL)
   if (any(!is.finite(J_static)) || any(!is.finite(dF_dtheta))) return(NULL)
 
-  ## SSM-derived-parameter chain (Tier 12 #2): when the steady_state_model
+  ## SSM-derived-parameter chain: when the steady_state_model
   ## computes a parameter p_c = g(ybar, theta), perturbing a free theta also
   ## moves p_c -- a dependence param_resid_fn (which holds every parameter,
   ## p_c included, FIXED) omits. Total-differentiating F(ybar, theta, p_c)=0
@@ -504,7 +504,7 @@
 }
 
 
-#' Sparse explicit parameter-Jacobian at a point (W91).
+#' Sparse explicit parameter-Jacobian at a point.
 #'
 #' The non-zero entries \eqn{v_t = \partial^2 F_i / (\partial w_c \partial
 #' \theta_k)} from \code{param_jacobian_vals_fn}, with their linear
@@ -561,7 +561,7 @@
   endo_cols  <- which(!is.na(col_var_idx))
 
   ## Explicit channel: P[i,c,k] = ∂²F_i/(∂w_c ∂θ_k), flattened to [n_eq*tc, np].
-  ## Sparse values (W91) scattered straight into dJ_all when the compiled
+  ## Sparse values scattered straight into dJ_all when the compiled
   ## model carries them; the dense accessor otherwise (older compiled objects).
   pj <- .param_jac_sparse(dyn, dy, params, ys)
   if (!is.null(pj)) {
@@ -574,7 +574,7 @@
     dJ_all <- matrix(P, nrow = n_eq * total_cols, ncol = np)
   }
 
-  ## SSM-computed-parameter chain (Tier 12 #2): capture the PURE param-Jacobian
+  ## SSM-computed-parameter chain: capture the PURE param-Jacobian
   ## columns ∂²F/(∂w ∂p_c) for the SSM-derived parameters BEFORE the steady-state
   ## Hessian scatter-add mutates dJ_all (channel 3 is applied after that block).
   ssm_ch <- NULL; P_computed <- NULL
@@ -612,7 +612,7 @@
     }
   }
 
-  ## Channel 3 (Tier 12 #2): SSM-computed-parameter chain. p_c moves with theta,
+  ## Channel 3: SSM-computed-parameter chain. p_c moves with theta,
   ## so each free column k gains (∂²F/∂w∂p_c)·(dp_c/dtheta_k), where the cross
   ## term is the captured pure param-Jacobian p_c column and the TOTAL
   ## steady-state derivative dp_c/dtheta_k = dg_dtheta[pc,k] + Σ_y dg_dy[pc,y]·dys[y,k].
@@ -641,7 +641,7 @@
 }
 
 
-#' Reverse-mode contraction of the analytic primitive derivatives (W89).
+#' Reverse-mode contraction of the analytic primitive derivatives.
 #'
 #' Returns, for EVERY model parameter k (the columns of \code{dys}),
 #' \deqn{g_k = <B_+, df_{+,k}> + <B_0, df_{0,k}> + <B_-, df_{-,k}>
@@ -654,7 +654,7 @@
 #' channels of \code{.analytic_dprimitives()} contracts in one pass:
 #' \itemize{
 #'   \item explicit: \eqn{P' \mathrm{vec}(\bar J)}, summed over the
-#'     non-zeros of the sparse param-Jacobian only (W91; the dense array's
+#'     non-zeros of the sparse param-Jacobian only (the dense array's
 #'     crossprod for compiled objects without the sparse fields);
 #'   \item steady-state chain: the model-Hessian triplets fold \eqn{\bar J}
 #'     into a per-column weight, i.e. a length-\code{n_endo} vector that
@@ -680,20 +680,29 @@
 #' @param bar_df_exo \code{[n_eq x n_exo]} adjoint of \code{df_exo}.
 #' @param bar_ys   length-\code{n_endo} adjoint of \code{dys} (row order of
 #'   \code{dys}).
+#' @param prep     NULL, or a \code{.grad_adjoint_prep()} object built for
+#'   this same \code{(ys, params)}: its expansion point \code{dy}, finite base
+#'   Jacobian \code{J} and \code{layout} replace the three rebuilds below
+#'   (identical values).
 #' @return named numeric (names = \code{colnames(dys)}), or NULL when the
 #'   analytic primitives are unavailable (caller falls back to FD).
 #' @noRd
 .analytic_dprim_contract <- function(compiled, ys, params, dys,
                                      bar_df_plus, bar_df_zero, bar_df_minus,
-                                     bar_df_exo, bar_ys) {
+                                     bar_df_exo, bar_ys, prep = NULL) {
   if (is.null(dys)) return(NULL)
   dyn <- compiled$dynamic
   if (is.null(dyn$param_jacobian_fn)) return(NULL)
 
-  dy <- .build_dy_ss_o2(compiled, ys)
-  Jbase <- dyn$jacobian_fn(dy, params, ys)
-  if (any(!is.finite(Jbase))) return(NULL)
-  layout <- .dsys_layout(compiled, Jbase)
+  if (!is.null(prep)) {
+    dy     <- prep$dy
+    layout <- prep$layout
+  } else {
+    dy <- .build_dy_ss_o2(compiled, ys)
+    Jbase <- dyn$jacobian_fn(dy, params, ys)
+    if (any(!is.finite(Jbase))) return(NULL)
+    layout <- .dsys_layout(compiled, Jbase)
+  }
 
   n_eq       <- layout$n_eq
   total_cols <- layout$total_cols
@@ -723,7 +732,7 @@
   barJ[layout$perm, ] <- bar_decl                # .partition_dJ: dJ[perm, ]
 
   ## ---- explicit channel: P[(i,c), k] contracted with vec(barJ) -------------
-  ## W91: over the NON-ZEROS only -- g_k = sum_t v_t barJ[rc_t] over the
+  ## Over the NON-ZEROS only -- g_k = sum_t v_t barJ[rc_t] over the
   ## entries t of parameter k (NZSIM: 289 of 74 x 140 x 75). The dense
   ## accessor (build + scan of the full array) remains for compiled objects
   ## without the sparse fields.
@@ -947,7 +956,7 @@
   out  <- array(0, dim = c(n_endo, np, np))
 
   if (.ssm_assigns_param(compiled$model)) {
-    ## ---- SSM-computed-parameter branch (Tier 12 #2, second order) ----------
+    ## ---- SSM-computed-parameter branch (second order) ----------
     ## The order-2 analog of .analytic_dys' augmentation + .analytic_dprimitives'
     ## channel 3. The implicit-function operator is the SAME augmented Jacobian
     ## J_aug = J + sum_pc (dF/dp_c)(dg_pc/dy); the forcing uses TOTAL parameter

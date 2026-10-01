@@ -315,7 +315,7 @@ var_irf_bootstrap <- function(varfit, horizon = 20L, data = NULL,
 
   ## Reproducible draws; the caller's RNG stream (or its absence -- the old
   ## inline restore left a freshly created .Random.seed behind) is restored
-  ## on exit (C1).
+  ## on exit.
   .local_seed(seed)
 
   reps <- vector("list", n_boot)

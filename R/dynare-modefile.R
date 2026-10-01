@@ -1,6 +1,6 @@
 ## R/dynare-modefile.R
 ## --------------------------------------------------------------------------
-## read_dynare_mode_file() -- P2 gap #7: loader for Dynare posterior-mode
+## read_dynare_mode_file(): loader for Dynare posterior-mode
 ## .mat files (e.g. <mod_name>_mode.mat).
 ##
 ## FOOTGUN this fixes: Dynare's posterior-mode shock standard deviations live

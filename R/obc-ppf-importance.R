@@ -110,7 +110,7 @@ ppf_reweight_posterior <- function(chains, model, compiled, data,
       if (!is.null(ss_result) && ss_result$converged) {
         sys_cache_i <- cache_system_structure(compiled)
         ## Re-derive SSM-computed params for a consistent linearization point
-        ## (no-op for non-SSM-parameter models; Tier 13 #1).
+        ## (no-op for non-SSM-parameter models).
         params      <- ss_result$params %||% params
         sys_i       <- extract_system_matrices_fast(sys_cache_i, ss_result$ss, params)
         dr_i        <- .solve_from_system(sys_i, model, compiled, ss_result$ss, params, FALSE)

@@ -115,7 +115,7 @@
 #' COMBINED weights -- the incoming weights \code{log_w_prev} times the
 #' incremental weights -- give ESS = ess_target * N.
 #'
-#' C2 (brief 23, 2026-09-25): this used to target the ESS of the INCREMENTAL
+#' This used to target the ESS of the INCREMENTAL
 #' weights alone. After a stage that did not resample, the incoming weights
 #' are already non-uniform, so the combined ESS fell to roughly
 #' ess_target^2 * N (0.25 N at the default 0.5) before the resample fired.
@@ -165,7 +165,7 @@
 
 #' What SMC tempers, for one log-posterior evaluation
 #'
-#' A4 (brief 23, 2026-09-25). SMC draws stage 0 from the PARAMETER prior
+#' A4. SMC draws stage 0 from the PARAMETER prior
 #' (\code{.smc_make_prior_sampler()}) with uniform weights, so the only
 #' consistent tempered path is
 #' \deqn{\pi_\lambda(\theta) \propto p(\theta)\,\exp\{\lambda\,\phi(\theta)\},
@@ -219,7 +219,7 @@
 #' Model-tempering M0 score: log system prior + log L_M0, floored
 #'
 #' Vectorised. A floored M0 likelihood, or a non-finite sum (system prior
-#' -Inf), gives \code{ll_floor} -- B7: never -Inf, so \code{(1 - 1) * phi0}
+#' -Inf), gives \code{ll_floor} -- never -Inf, so \code{(1 - 1) * phi0}
 #' at the last bridge stage is 0 rather than NaN.
 #' @noRd
 .smc_phi0 <- function(sp, ll0, ll_floor = -1e300) {
@@ -231,7 +231,7 @@
 
 #' Equally-weighted SMC result with every per-particle field re-indexed
 #'
-#' B5 (brief 23, 2026-09-25). The estimation drivers resampled \code{$chain}
+#' B5. The estimation drivers resampled \code{$chain}
 #' to equal weights but left \code{$post_logpost} (and the other per-particle
 #' vectors) in the original particle order, so THAMES paired draw i with the
 #' log-posterior of some other particle. The resampling indices are drawn
@@ -269,7 +269,7 @@
 #' prior sampler, which draws EXACTLY the law `log_prior()` scores: the
 #' `.lp_dist1()` density (incl. Dynare's generalised beta on [p3, p4] and the
 #' gamma / inverse-gamma shift p3) truncated to `[lower, upper]` by inverse
-#' CDF. A5/D2 (2026-09-25): this used to carry its own switch, which drew a
+#' CDF. This used to carry its own switch, which drew a
 #' bounded beta as a GENERALISED beta rescaled to [lower, upper] (with a silent
 #' `max(v, 2)` shape clamp) while `log_prior()` scored a TRUNCATED standard
 #' beta, and dispatched on `tolower()` instead of `.normalize_dist()`, so
@@ -348,6 +348,136 @@
 }
 
 
+## ---- Argument checks for the SMC family -----------------------------------
+## One rule set per sampler, called by the sampler at entry and by
+## validate_spec(), so a bad spec fails when it is built and the two cannot
+## drift. Each helper takes a named list keyed by the sampler function's own
+## argument names (absent = the sampler's default, which is valid) and returns
+## the problems as a character vector (character(0) when fine). A message may
+## carry a condition class in names(); an empty name means the sampler's
+## default class.
+
+## A scalar whole number >= min, or NULL if it is one; else the message.
+#' @noRd
+.smc_whole_problem <- function(x, nm, min = 1L) {
+  if (is.numeric(x) && length(x) == 1L && is.finite(x) && x == round(x) &&
+      x >= min) return(NULL)
+  paste0("`", nm, "` must be a whole number >= ", min, " (got ",
+         paste(format(x), collapse = ", "), ").")
+}
+
+## A scalar number strictly inside (lo, hi), with the upper end optionally
+## closed. NULL if it is one; else the message.
+#' @noRd
+.smc_unit_problem <- function(x, nm, lo, hi, hi_closed = FALSE) {
+  ok <- is.numeric(x) && length(x) == 1L && is.finite(x) && x > lo &&
+    (if (hi_closed) x <= hi else x < hi)
+  if (ok) return(NULL)
+  paste0("`", nm, "` must be a single number in (", lo, ", ", hi,
+         if (hi_closed) "]" else ")", " (got ",
+         paste(format(x), collapse = ", "), ").")
+}
+
+## The tempering-ladder rule shared by dynhr_smc(), run_smc_mirai() and
+## dynhr_dsmh(): a fixed schedule is finite and strictly increasing in (0, 1].
+## `end_at_one` additionally requires the last rung to be 1 (dynhr_dsmh() runs
+## exactly the supplied ladder); dynhr_smc() continues adaptively after a
+## shorter ladder, so it does not. Returns the message or NULL.
+#' @noRd
+.smc_schedule_problem <- function(x, nm, end_at_one = FALSE) {
+  lam <- if (is.numeric(x)) as.numeric(x) else NA_real_
+  if (length(lam) >= 1L && all(is.finite(lam)) && all(lam > 0) &&
+      all(lam <= 1) && all(diff(lam) > 0) &&
+      (!end_at_one || lam[length(lam)] == 1)) return(NULL)
+  paste0("`", nm, "` must be strictly increasing in (0, 1]",
+         if (end_at_one) " and end at 1" else "", " (got ",
+         paste(format(x), collapse = ", "), ").")
+}
+
+#' @noRd
+.smc_args_problem <- function(args, n_par = NULL) {
+  acc <- new.env(parent = emptyenv())
+  acc$p <- character(0)
+  add <- function(msg, cls = "") {
+    if (!is.null(msg)) acc$p <- c(acc$p, stats::setNames(msg, cls))
+    invisible(NULL)
+  }
+  has <- function(nm) !is.null(args[[nm]])
+  if (has("n_particles"))
+    add(.smc_whole_problem(args$n_particles, "n_particles", 2L))
+  if (has("ess_target"))
+    add(.smc_unit_problem(args$ess_target, "ess_target", 0, 1, hi_closed = TRUE))
+  if (has("n_mh_steps"))
+    add(.smc_whole_problem(args$n_mh_steps, "n_mh_steps", 0L))
+  if (has("mut_target"))
+    add(.smc_unit_problem(args$mut_target, "mut_target", 0, 1))
+  if (has("mh_scale_factor")) {
+    s <- args$mh_scale_factor
+    if (!(is.numeric(s) && length(s) == 1L && is.finite(s) && s > 0))
+      add(paste0("`mh_scale_factor` must be a single positive number (got ",
+                 paste(format(s), collapse = ", "), ")."))
+  }
+  if (has("mixture_weights")) {
+    w <- args$mixture_weights
+    if (!is.numeric(w) || length(w) != 3L || any(!is.finite(w)))
+      add(paste0("`mixture_weights` must be NULL or a finite numeric vector ",
+                 "of length 3 (got ", paste(format(w), collapse = ", "), ")."))
+    else if (any(w < 0) || !any(w > 0))
+      add(paste0("`mixture_weights` must be non-negative with at least one ",
+                 "positive entry (got ", paste(format(w), collapse = ", "),
+                 ")."))
+  }
+
+  ## Fixed tempering ladders. Under model tempering (approx_loglik_fn) the
+  ## bridge is governed by phi_schedule and a lambda_schedule has no stage to
+  ## govern; under likelihood tempering phi_schedule is an alias for
+  ## lambda_schedule, so two different ladders are ambiguous.
+  model_temp <- has("approx_loglik_fn")
+  if (model_temp && has("lambda_schedule"))
+    add(paste0("lambda_schedule is not supported with approx_loglik_fn (model ",
+               "tempering): the bridge from the approximating model is ",
+               "governed by phi_schedule. Pass phi_schedule instead, or drop ",
+               "approx_loglik_fn to use lambda_schedule with likelihood ",
+               "tempering."), "dynhr_error_inapplicable_argument")
+  else if (!model_temp && has("lambda_schedule") && has("phi_schedule") &&
+           !identical(as.numeric(args$lambda_schedule),
+                      as.numeric(args$phi_schedule)))
+    add(paste0("both lambda_schedule and phi_schedule were supplied and they ",
+               "differ. Without approx_loglik_fn (likelihood tempering) ",
+               "phi_schedule is an alias for lambda_schedule; pass one of ",
+               "them."), "dynhr_error_schedule_conflict")
+  else {
+    if (!model_temp && has("lambda_schedule"))
+      add(.smc_schedule_problem(args$lambda_schedule, "lambda_schedule"))
+    if (has("phi_schedule"))
+      add(.smc_schedule_problem(args$phi_schedule, "phi_schedule"))
+  }
+  acc$p
+}
+
+## n_mh_steps = 0 is legal (a no-mutation run reweights and resamples the
+## prior cloud only, which some diagnostics use on purpose) but as a
+## posterior sampler the cloud degenerates to copies of a few prior draws,
+## so say so instead of returning it silently.
+#' @noRd
+.smc_warn_no_mutation <- function(fn, n_mh_steps) {
+  if (identical(as.numeric(n_mh_steps), 0))
+    .dynhr_warn(fn, ": n_mh_steps = 0 runs no mutation step: the particles ",
+                "are only reweighted and resampled, so the cloud degenerates ",
+                "to copies of a few prior draws. Use n_mh_steps >= 1 to ",
+                "sample the posterior.", class = "dynhr_warning_smc_no_mutation")
+  invisible(NULL)
+}
+
+## Abort with the helper's problems; a classed message sets the class.
+#' @noRd
+.smc_abort_problems <- function(fn, p, default_class) {
+  cls <- names(p)[nzchar(names(p))]
+  .dynhr_abort(fn, ": ", paste(p, collapse = " "),
+               class = if (length(cls)) cls[1L] else default_class)
+}
+
+
 # ============================================================================
 # dynhr_smc() -- Sequential Monte Carlo with likelihood tempering
 # ============================================================================
@@ -360,7 +490,9 @@
 #' @param ess_target Target ESS ratio for adaptive tempering (0.5-0.99)
 #' @param n_mh_steps RWMH mutation steps per tempering stage
 #' @param mh_scale_factor Proposal scale = mh_scale_factor / sqrt(d)
-#' @param lambda_schedule Fixed tempering schedule (NULL = adaptive)
+#' @param lambda_schedule Fixed likelihood-tempering schedule (NULL = adaptive).
+#'   Not supported with approx_loglik_fn (error class
+#'   dynhr_error_inapplicable_argument): use phi_schedule there.
 #' @param approx_loglik_fn Optional: function(theta) -> scalar; log L_{M0}(theta).
 #'   When non-NULL, enables Mlikota & Schorfheide (2024) model tempering:
 #'   the bridge pi_phi ∝ p(theta) * L_{M0}^{1-phi} * L_{M1}^{phi} is used
@@ -368,7 +500,7 @@
 #'   weight is dphi * (phi_M1 - phi_M0), where phi_M1 = log s + zeta * log L_M1
 #'   (see the Target section) and phi_M0 = log s + log L_M0: M0 shares M1's
 #'   parameter AND system prior and is not power-tempered. A non-finite
-#'   L_M0 is floored like L_M1 (B7), and a particle at the floor under either
+#'   L_M0 is floored like L_M1, and a particle at the floor under either
 #'   model is given zero weight. When NULL (default), likelihood tempering.
 #' @param phi_schedule Fixed phi schedule (NULL = adaptive, same bisection as
 #'   lambda_schedule). With approx_loglik_fn it is the model-tempering bridge
@@ -410,7 +542,7 @@
 #' @param verbose Print progress
 #' @param progressor progressr callback or NULL
 #'
-#' @section Target (A4, 2026-09-25):
+#' @section Target:
 #'   Stage 0 draws from the PARAMETER prior p(theta) and the tempered path is
 #'   pi_lambda ∝ p(theta) * exp(lambda * phi(theta)) with
 #'   phi = log s(theta) + zeta * log L(theta): s is the system prior and zeta
@@ -462,15 +594,19 @@ dynhr_smc <- function(
   if (is.null(prior_sampler) && is.null(prior_spec))
     stop("Must provide either prior_sampler or prior_spec")
 
-  ## Validate and normalise the Herbst-Schorfheide mixture weights. NULL keeps
-  ## the original single-component random-walk mutation exactly as before.
-  if (!is.null(mixture_weights)) {
-    if (!is.numeric(mixture_weights) || length(mixture_weights) != 3L)
-      stop("mixture_weights must be NULL or a numeric vector of length 3")
-    if (any(mixture_weights < 0) || !any(mixture_weights > 0))
-      stop("mixture_weights must be non-negative with at least one positive entry")
+  ## Argument rules (one helper, shared with validate_spec()). Normalise the
+  ## Herbst-Schorfheide mixture weights afterwards; NULL keeps the original
+  ## single-component random-walk mutation exactly as before.
+  prob <- .smc_args_problem(list(
+    n_particles = n_particles, ess_target = ess_target,
+    n_mh_steps = n_mh_steps, mh_scale_factor = mh_scale_factor,
+    mut_target = mut_target, lambda_schedule = lambda_schedule,
+    phi_schedule = phi_schedule, mixture_weights = mixture_weights,
+    approx_loglik_fn = approx_loglik_fn))
+  if (length(prob)) .smc_abort_problems("smc", prob, "dynhr_error_smc_args")
+  .smc_warn_no_mutation("smc", n_mh_steps)
+  if (!is.null(mixture_weights))
     mixture_weights <- mixture_weights / sum(mixture_weights)
-  }
   use_mixture <- !is.null(mixture_weights)
 
   ## Model tempering (Mlikota & Schorfheide 2024): bridge M0 -> M1 via
@@ -479,19 +615,17 @@ dynhr_smc <- function(
   ## (approx_loglik_fn = NULL) is bit-identical to the previous behaviour.
   use_model_tempering <- !is.null(approx_loglik_fn)
 
-  ## phi_schedule under LIKELIHOOD tempering (brief 32 P2): an alias for
+  ## (.smc_args_problem() above refuses a lambda_schedule here: it is the
+  ## LIKELIHOOD-tempering ladder and a model-tempering run has no stage for it.
+  ## dynhr_smc_model_tempered() honours it on its likelihood-tempered Stage 1
+  ## and withholds it from this bridge run.)
+
+  ## phi_schedule under LIKELIHOOD tempering: an alias for
   ## lambda_schedule. Every release since 0.8.1 read phi_schedule only on the
   ## model-tempering branch, so smc(..., phi_schedule = phi) without
   ## approx_loglik_fn ran ADAPTIVE tempering and said nothing. It is what the
   ## caller meant, so honour it; two DIFFERENT fixed schedules are ambiguous.
   if (!use_model_tempering && !is.null(phi_schedule)) {
-    if (!is.null(lambda_schedule) &&
-          !identical(as.numeric(lambda_schedule), as.numeric(phi_schedule)))
-      .dynhr_abort(
-        "smc: both lambda_schedule and phi_schedule were supplied and they ",
-        "differ. Without approx_loglik_fn (likelihood tempering) ",
-        "phi_schedule is an alias for lambda_schedule; pass one of them.",
-        class = "dynhr_error_schedule_conflict")
     .dynhr_inform(
       "smc: phi_schedule is used as lambda_schedule (likelihood tempering; ",
       "phi_schedule names the model-tempering schedule when approx_loglik_fn ",
@@ -606,7 +740,7 @@ dynhr_smc <- function(
     ## field is handled inside .smc_particle_parts() (loglik -> floor,
     ## logprior -> 0) rather than erroring with "replacement has length zero".
     pp <- .smc_particle_parts(res, ll_floor, missing_prior = 0)
-    ## Model tempering: evaluate M0 alongside M1. B7: a non-finite M0 is
+    ## Model tempering: evaluate M0 alongside M1. A non-finite M0 is
     ## FLOORED exactly like M1 (it used to be -Inf, which gave an Inf
     ## increment and, at phi = 1, 0 * -Inf = NaN).
     ll0_i <- if (use_model_tempering) {
@@ -630,7 +764,7 @@ dynhr_smc <- function(
   ## log_liks0: M0 log-likelihoods; only allocated when model tempering active.
   ## Maintained in parallel with log_liks through resample and mutation.
   log_liks0 <- if (use_model_tempering) numeric(n_particles) else NULL
-  ## A4: log_phi is what is TEMPERED (log system prior + power * loglik, see
+  ## `log_phi` is what is TEMPERED (log system prior + power * loglik, see
   ## .smc_particle_parts()); log_liks keeps the RAW likelihood for consumers,
   ## log_pris the PARAMETER prior, log_sys the system prior. All four (and
   ## log_liks0) move together through resampling and mutation.
@@ -696,7 +830,7 @@ dynhr_smc <- function(
     ## The phi_schedule argument plays the same role as lambda_schedule.
     ## Score whose increment reweights the cloud. Likelihood tempering: phi.
     ## Model tempering: phi_M1 - phi_M0 with phi_M0 = log_sys + logL_M0 (M0
-    ## shares the prior side, incl. the system prior, with M1). B7: a particle
+    ## shares the prior side, incl. the system prior, with M1). A particle
     ## at the floor under EITHER model has zero target density for phi < 1,
     ## so its score is the floor (it dies at the first positive increment)
     ## rather than floor - floor = 0 or finite + 1e300.
@@ -759,7 +893,7 @@ dynhr_smc <- function(
     }
 
     # --- Resample if ESS below threshold ---
-    ## C2: an adaptive step that stopped short of lambda = 1 was chosen to put
+    ## An adaptive step that stopped short of lambda = 1 was chosen to put
     ## the COMBINED ESS exactly at the target, so the cloud has reached the
     ## resampling threshold: resample. (Not resampling would leave the next
     ## stage's bisection starting AT the target with no room to move.)
@@ -803,12 +937,12 @@ dynhr_smc <- function(
       chol_Dg <- scale * t(chol(Dg))
     }
 
-    ## Tempered log-target (A4: `phi` is the tempered score, `lp` the
+    ## Tempered log-target (`phi` is the tempered score, `lp` the
     ## PARAMETER prior -- see .smc_particle_parts()).
     ## Likelihood tempering: log pi_lambda = lp + lambda * phi
     ## Model tempering:      log pi_phi    = lp + (1-phi) * (sp + ll0) + phi * phi1
     ## The ll0/sp arguments are only used when use_model_tempering = TRUE; ll0
-    ## is FLOORED (B7), so (1 - 1) * ll0 is 0 at phi = 1, never 0 * -Inf = NaN.
+    ## is FLOORED, so (1 - 1) * ll0 is 0 at phi = 1, never 0 * -Inf = NaN.
     .tempered_lp <- function(theta, phi, lp, ll0 = ll_floor, sp = 0) {
       if (use_model_tempering)
         lp + (1 - lambda_next) * .smc_phi0(sp, ll0, ll_floor) +
@@ -1014,7 +1148,7 @@ dynhr_smc <- function(
 }
 
 
-#' Prior-support box of an SMC run, for THAMES's support correction (B6)
+#' Prior-support box of an SMC run, for THAMES's support correction
 #'
 #' @param prior_spec The prior specification (data.frame or list) or NULL.
 #' @param par_names Parameter names, in column order.
@@ -1092,6 +1226,15 @@ dynhr_smc <- function(
 #'     when you want to provide an already-evaluated M0 posterior.}
 #' }
 #'
+#' \strong{Cost.} Without \code{log_post_fn_M0} the Stage-1 M0 log-posterior
+#' is built from \code{log_post_fn_M1} itself: every Stage-1 evaluation calls
+#' \code{log_post_fn_M1(theta)} (which runs the full Kalman filter, or the
+#' full likelihood, of M1) to obtain the prior and system-prior terms, and
+#' then \code{approx_loglik_fn(theta)}. Stage 1 therefore costs at least as
+#' much per evaluation as Stage 2, and the cheap approximating likelihood
+#' saves nothing there. Supply \code{log_post_fn_M0} (prior plus cheap
+#' likelihood only) to make Stage 1 cheap.
+#'
 #' @param log_post_fn_M1 function(theta) -> list(logpost, loglik, logprior).
 #'   The M1 log-posterior.  Same interface as \code{\link{dynhr_smc}}'s
 #'   \code{log_post_fn}.
@@ -1111,13 +1254,17 @@ dynhr_smc <- function(
 #' @param n_mh_steps RWMH mutation steps per stage.
 #' @param seed_M0 Integer seed for Stage 1 (M0 run).  Default 1L.
 #' @param seed_M1 Integer seed for Stage 2 (M1 bridge run).  Default 2L.
+#'   Both stages are seeded locally (results are reproducible for fixed
+#'   seeds) and the caller's global RNG stream is restored on exit.
 #' @param verbose Print progress messages.
 #' @param ... Additional arguments forwarded to BOTH \code{dynhr_smc} calls
 #'   (e.g. \code{mh_scale_factor}, \code{mixture_weights}, \code{parallel},
 #'   \code{backend}, \code{n_mh_steps}, \code{ess_target} -- note that the
 #'   last two are also explicit arguments above and take precedence when
 #'   supplied directly), except \code{phi_schedule}, which is the Stage-2
-#'   bridge schedule and is withheld from Stage 1.
+#'   bridge schedule and is withheld from Stage 1, and \code{lambda_schedule},
+#'   which is the Stage-1 likelihood-tempering ladder and is withheld from
+#'   Stage 2.
 #'
 #' @return A list with:
 #' \describe{
@@ -1125,9 +1272,9 @@ dynhr_smc <- function(
 #'     of M1, NOT just the ratio).  Equals Stage-2 log(Z_M1/Z_M0) +
 #'     log Z_M0 from Stage 1.}
 #'   \item{\code{chain}, \code{particles}, \code{smc_weights}, ...}{
-#'     All fields from the Stage-2 (M1) SMC result, for compatibility with
+#'     All fields from the Stage-2 SMC result, for compatibility with
 #'     \code{new_dynhr_chains()}.}
-#'   \item{\code{stage1}}{Full Stage-1 (M0) SMC result for inspection.}
+#'   \item{\code{stage1}}{Full Stage-1 SMC result for inspection.}
 #'   \item{\code{log_Z_M0}}{log Z_M0 from Stage 1.}
 #'   \item{\code{log_ratio}}{log(Z_M1/Z_M0) from Stage 2 (before adding
 #'     log Z_M0).}
@@ -1170,7 +1317,7 @@ dynhr_smc_model_tempered <- function(
   ## then swap in the M0 loglik.  This avoids reimplementing a prior-density
   ## evaluator and is exact as long as M0 and M1 share the same prior.
   if (is.null(log_post_fn_M0)) {
-    ## A4: the M0 target shares M1's PRIOR SIDE -- parameter prior and system
+    ## The M0 target shares M1's PRIOR SIDE -- parameter prior and system
     ## prior -- and swaps only the likelihood (untempered). The components are
     ## passed on as "posterior_parts" so stage 1 samples p * s * L_M0 from the
     ## parameter prior, the same M0 the stage-2 bridge assumes
@@ -1193,10 +1340,10 @@ dynhr_smc_model_tempered <- function(
   }
 
   if (verbose) .dynhr_inform("SMC model tempering: Stage 1 -- M0 run")
-  set.seed(seed_M0)
+  .local_seed(seed_M0)  # the caller's RNG stream is restored on exit
   ## phi_schedule is the Stage-2 BRIDGE schedule. Stage 1 is likelihood
   ## tempering, where dynhr_smc() now reads phi_schedule as an alias for
-  ## lambda_schedule (brief 32 P2) -- so it must not reach Stage 1.
+  ## lambda_schedule -- so it must not reach Stage 1.
   dots1 <- list(...)
   dots1$phi_schedule <- NULL
   stage1 <- do.call(dynhr_smc, c(list(
@@ -1219,8 +1366,12 @@ dynhr_smc_model_tempered <- function(
       log_Z_M0
     ))
   }
-  set.seed(seed_M1)
-  stage2 <- dynhr_smc(
+  .local_seed(seed_M1)
+  ## lambda_schedule governs the likelihood-tempered Stage 1 only; the bridge
+  ## is governed by phi_schedule, so lambda_schedule is withheld here.
+  dots2 <- list(...)
+  dots2$lambda_schedule <- NULL
+  stage2 <- do.call(dynhr_smc, c(list(
     log_post_fn      = log_post_fn_M1,
     prior_sampler    = prior_sampler,
     prior_spec       = prior_spec,
@@ -1231,9 +1382,7 @@ dynhr_smc_model_tempered <- function(
     init_particles   = init_cloud,
     log_Z_approx     = log_Z_M0,
     seed_base        = seed_M1,
-    verbose          = verbose,
-    ...
-  )
+    verbose          = verbose), dots2))
 
   ## ── Assemble output ─────────────────────────────────────────────────────
   ## Expose log_ratio (the bridge accumulation before adding log_Z_M0)

@@ -25,6 +25,18 @@
   #                   conservation is essentially identical to central. Default.
   #   "central"    -- 2d evals; O(h^2) accuracy. Use if forward looks too noisy.
   #   "Richardson" -- numDeriv extrapolation, ~4-6 evals/param; most accurate.
+  #
+  # PSKF likelihoods: every stencil point replays the pruning selection
+  # recorded at theta (.pskf_freeze_open / .pskf_freeze_wrap,
+  # R/pskf-likelihood.R). The selection is piecewise constant in theta and
+  # the loglik jumps by up to ~2e-3 nat where it changes, which a difference
+  # across the switch turns into a spurious derivative of jump / h. The
+  # forward and Richardson stencils evaluate theta first, so it records
+  # there; the central stencil re-anchors after its first point. Functions
+  # that run no PSKF filter are unaffected.
+  fr <- .pskf_freeze_open()
+  on.exit(.pskf_freeze_close(fr), add = TRUE)
+  f <- .pskf_freeze_wrap(f)
   if (identical(method, "Richardson") &&
       requireNamespace("numDeriv", quietly = TRUE)) {
     g <- numDeriv::grad(func = f, x = theta, method = "Richardson")
@@ -36,6 +48,7 @@
       theta_p[i] <- theta[i] + h
       theta_m[i] <- theta[i] - h
       fp <- f(theta_p)
+      if (i == 1L && .pskf_freeze_anchor(f, theta)) fp <- f(theta_p)
       fm <- f(theta_m)
       g[i] <- if (is.finite(fp) && is.finite(fm)) (fp - fm) / (2 * h) else 0
     }
@@ -59,7 +72,7 @@
 
 
 ## ---------------------------------------------------------------------------
-## W92: fused log-posterior + gradient.
+## Fused log-posterior + gradient.
 ##
 ## make_posterior_grad()'s Gaussian closures carry attr(grad_fn, "logpost_grad"),
 ## function(theta) -> list(logpost, grad), which returns the log-posterior the
@@ -84,7 +97,7 @@
 ## In sampler space (eta under `transform`) the value and gradient are
 ## assembled exactly as make_transformed_logpost() and make_transformed_grad()
 ## assemble them (Jacobian added once to a finite value; ONE chain-rule
-## application, W86), and a non-finite value is floored to -1e300 as the
+## application), and a non-finite value is floored to -1e300 as the
 ## samplers' .lp_scalar() floors it.
 ##
 ## Returns NULL or list(vg = function(state) -> list(lp, grad), lp0, g0), with
@@ -155,9 +168,9 @@
 #' @param M_inv_diag Inverse mass matrix diagonal (numeric vector; diagonal path)
 #' @param M_inv Dense inverse mass matrix (d×d matrix; dense path)
 #' @param g0 The gradient at \code{theta}, carried from the evaluation that
-#'   produced it (W92 fused path; W94 the separate-call path too -- the start
+#'   produced it (fused path; the separate-call path too -- the start
 #'   of a step is the previous step's end); NULL: computed with \code{grad_fn}.
-#' @param vg_fn Fused path (W92): \code{function(theta) -> list(lp, grad)};
+#' @param vg_fn Fused path: \code{function(theta) -> list(lp, grad)};
 #'   when supplied the end point is evaluated with it (one call for value and
 #'   gradient) and the result carries \code{lp}.
 #' @return list(theta, r, g, lp) after one leapfrog step (\code{g} the
@@ -256,11 +269,11 @@
 #'
 #' Searches for eps such that acceptance probability ~ 0.5.
 #' Supports diagonal (M_inv_diag / M_diag) and dense (M_inv / chol_M) paths.
-#' Fused path (W92): with \code{vg_fn} (see \code{.hmc_fused_target()}) every
+#' Fused path: with \code{vg_fn} (see \code{.hmc_fused_target()}) every
 #' trial point is ONE value-and-gradient evaluation, and \code{lp0}/\code{g0}
 #' (the value and gradient at \code{theta}, already known to the caller) are
 #' not recomputed. On either path the gradient at \code{theta} (\code{g0},
-#' or one \code{grad_fn} call) serves every trial (W94).
+#' or one \code{grad_fn} call) serves every trial.
 #' @noRd
 .hmc_find_stepsize <- function(theta, lp_fn, grad_fn, M_inv_diag, M_diag,
                                 M_inv = NULL, chol_M = NULL,
@@ -275,7 +288,7 @@
     g0  <- e0$grad
   }
   if (is.null(vg_fn)) lp0 <- lp_fn(theta)
-  ## W94: every trial below starts at theta -- the gradient there is taken
+  ## Every trial below starts at theta -- the gradient there is taken
   ## ONCE (on the separate-call path too), not once per trial.
   if (is.null(g0)) g0 <- grad_fn(theta)
   H0 <- -lp0 + .hmc_kinetic(r, M_inv_diag, M_inv = M_inv)
@@ -318,6 +331,39 @@
 # ============================================================================
 # dynhr_hmc() -- Basic HMC with fixed trajectory length
 # ============================================================================
+
+## HMC ----------------------------------------------------------------------
+## --------------------------------------------------------------------------
+## HMC argument checker
+## --------------------------------------------------------------------------
+
+#' Problems with the arguments of dynhr_hmc()
+#'
+#' \code{L} is a leapfrog count (zero steps never move the chain); the step
+#' size is positive; \code{step_jitter} is a relative width, so it must keep
+#' the jittered step positive (in [0, 1)); the dense metric must be positive
+#' definite and match the parameter count.
+#'
+#' @param args Named list of the supplied dynhr_hmc() arguments.
+#' @param n_par Number of estimated parameters, or NULL when not known.
+#' @return Character vector of problems; \code{character(0)} when fine.
+#' @noRd
+.hmc_args_problem <- function(args, n_par = NULL) {
+  rules <- c(list(
+    n_draws     = .mcmc_r_whole(1L),
+    n_warmup    = .mcmc_r_whole(0L),
+    L           = .mcmc_r_whole(1L),
+    step_size   = .mcmc_r_pos(),
+    adapt_mass  = .mcmc_r_flag(),
+    metric      = .mcmc_r_choice(c("diagonal", "warmup_dense")),
+    step_jitter = function(v, nm, n_par) {
+      if (.mcmc_scalar(v) && is.finite(v) && v >= 0 && v < 1) return(NULL)
+      "`step_jitter` must be a single number in [0, 1)."
+    }),
+    .mcmc_metric_rules(dynhr_hmc))
+  .mcmc_check_args(args, dynhr_hmc, "dynhr_hmc", rules, n_par)
+}
+
 
 #' @param log_post_fn function(theta) -> list(logpost, loglik, logprior)
 #' @param theta_init Named numeric vector of starting parameter values
@@ -387,12 +433,12 @@ dynhr_hmc <- function(
     step_jitter = 0.2
 ) {
   stopifnot(is.function(log_post_fn), is.numeric(theta_init))
+  .mcmc_abort_if_problems("dynhr_hmc", .hmc_args_problem(
+    list(n_draws = n_draws, n_warmup = n_warmup, L = L, step_size = step_size,
+         grad_fn = grad_fn, adapt_mass = adapt_mass, metric = metric,
+         M_inv = M_inv, chol_M = chol_M, step_jitter = step_jitter),
+    n_par = length(theta_init)))
   metric <- match.arg(metric)
-  if (!is.numeric(step_jitter) || length(step_jitter) != 1L ||
-      !is.finite(step_jitter) || step_jitter < 0 || step_jitter >= 1) {
-    .dynhr_abort("`step_jitter` must be a single number in [0, 1).",
-                 class = "dynhr_error_invalid_argument")
-  }
   d <- length(theta_init)
   par_names <- names(theta_init)
   n_total <- n_draws + n_warmup
@@ -416,7 +462,7 @@ dynhr_hmc <- function(
   }
 
   # --- Gradient function ---
-  # kernel_stats (F5): capture make_posterior_grad()'s fallback-usage
+  # kernel_stats: capture make_posterior_grad()'s fallback-usage
   # counters (attr(grad_fn, "kernel_stats")) from the caller-supplied
   # grad_fn BEFORE any transform-wrapping (which would drop the attribute).
   grad_fn_kernel_stats <- attr(grad_fn, "kernel_stats")
@@ -427,13 +473,13 @@ dynhr_hmc <- function(
   } else {
     grad <- grad_fn
   }
-  # --- Fused value + gradient (W92): one evaluation per new position, the
+  # --- Fused value + gradient: one evaluation per new position, the
   # gradient carried along the trajectory; NULL = separate calls as before.
   fz <- .hmc_fused_target(log_post_fn, grad_fn, state_init, par_names,
                           transform = transform, verbose = verbose,
                           sampler = "HMC")
   vg_fn <- if (is.null(fz)) NULL else fz$vg
-  ## gradient at state_init when known (fused; W94 also the separate-call
+  ## gradient at state_init when known (fused; also the separate-call
   ## path once the step-size search has taken it)
   g_init <- if (is.null(fz)) NULL else fz$g0
 
@@ -457,7 +503,7 @@ dynhr_hmc <- function(
 
   # --- Find initial step size ---
   if (is.null(step_size)) {
-    if (is.null(fz)) g_init <- grad(state_init)   # W94: taken once
+    if (is.null(fz)) g_init <- grad(state_init)   # Taken once
     step_size <- .hmc_find_stepsize(state_init, lp_scalar, grad,
                                     M_inv_diag, M_diag,
                                     M_inv = M_inv, chol_M = chol_M,
@@ -494,10 +540,10 @@ dynhr_hmc <- function(
   n_grad_evals  <- 0L
 
   state   <- state_init
-  ## Fused (W92): the start point's value comes from the same function as
+  ## Fused: the start point's value comes from the same function as
   ## every later one; g_curr is the gradient there, carried into the first
   ## leapfrog step of each trajectory.
-  ## W94: on the separate-call path too the gradient at the current state is
+  ## On the separate-call path too the gradient at the current state is
   ## carried (NULL until first needed): the start point of a trajectory's
   ## first leapfrog step is the previous accepted end point, whose gradient
   ## the step that reached it already computed. Same values, half the calls.
@@ -539,7 +585,7 @@ dynhr_hmc <- function(
       }
       state_prop <- step$theta
       r_prop     <- step$r
-      g_prop     <- step$g   # carried into the next step (W94: both paths)
+      g_prop     <- step$g   # carried into the next step (Both paths)
       lp_last    <- step$lp  # NULL on the separate-call path
     }
     n_grad_evals <- n_grad_evals + L  # one new-point gradient per leapfrog step
@@ -634,7 +680,7 @@ dynhr_hmc <- function(
           vars[vars < 1e-12 | !is.finite(vars)] <- 1
           ## Stan's rule: the INVERSE mass is the posterior variance. This used
           ## to set the MASS to the variance (inverted), squaring the problem's
-          ## conditioning instead of removing it (brief 23 W14 finding).
+          ## conditioning instead of removing it.
           M_inv_diag <- vars
           M_diag     <- 1 / vars
           eps0_new   <- .hmc_find_stepsize(state, lp_scalar, grad,
@@ -656,7 +702,7 @@ dynhr_hmc <- function(
         vars[vars < 1e-12 | !is.finite(vars)] <- 1
         ## Stan's rule: the INVERSE mass is the posterior variance. This used
         ## to set the MASS to the variance (inverted), squaring the problem's
-        ## conditioning instead of removing it (brief 23 W14 finding).
+        ## conditioning instead of removing it.
         M_inv_diag <- vars
         M_diag     <- 1 / vars
         eps0_new   <- .hmc_find_stepsize(state, lp_scalar, grad,

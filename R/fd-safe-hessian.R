@@ -1,8 +1,8 @@
 ## R/fd-safe-hessian.R
 ## --------------------------------------------------------------------------
-## P2 paper gap #4: feasibility-aware finite-difference Hessian.
+## Feasibility-aware finite-difference Hessian.
 ##
-## The pathological-DSGE paper's central finding is that a *default* FD step
+## The central problem is that a *default* FD step
 ## (numDeriv's default, or any fixed-fraction central-difference step) can
 ## overshoot a near-unit-root/determinacy boundary. Points just beyond the
 ## boundary return non-finite objective values (or a large-penalty stand-in,

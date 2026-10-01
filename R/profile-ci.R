@@ -1,8 +1,7 @@
 ## R/profile-ci.R
 ## --------------------------------------------------------------------------
 ## profile_ci() -- profile-likelihood/posterior confidence intervals with
-## FEASIBILITY-SEEDED nuisance re-optimization (pathological-DSGE paper,
-## DYNHR_GAPS.md gap #5, referee(2) A2).
+## FEASIBILITY-SEEDED nuisance re-optimization.
 ##
 ## THE MODE-SEEDING TRAP: a naive profile re-optimizes the nuisance
 ## parameters at each grid value of the profiled parameter, starting FROM
@@ -10,8 +9,8 @@
 ## (indeterminate) at the fixed grid value even though it was feasible at
 ## the mode itself -- the model's determinacy region is generally curved in
 ## parameter space (e.g. the "generalized Taylor principle" is not simply
-## psi1 >= 1; see replication/R/10d_weakid_profile2.R in the
-## pathological-dsge-paper repo). A local optimizer seeded there either
+## psi1 >= 1; see the weak-identification
+## case study for the profile). A local optimizer seeded there either
 ## fails outright or converges to the nearest feasible point, silently
 ## reporting the WRONG bound of the profile confidence set -- often
 ## overstating identification strength.
@@ -325,10 +324,6 @@
 #'
 #' @seealso \code{\link{run_mode_finding}}, \code{\link{make_posterior}},
 #'   \code{\link{robust_confidence_set}}
-#' @references
-#'   Referee(2) A2 correction to the pathological-DSGE weak-identification
-#'   case study: replication \code{10d_weakid_profile2.R} (naive mode-seeded
-#'   profile vs. feasibility-seeded true profile on \code{nk_small}).
 #' @export
 profile_ci <- function(param,
                        model = NULL, data = NULL, prior_spec = NULL,

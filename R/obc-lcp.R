@@ -11,7 +11,7 @@
 ##   lcp_lemke()          -- Lemke's complementarity pivoting
 ##   solve_obc_lcp()      -- Lemke (default) or Newton regime search
 ##
-## THE STACKED LCP (Holden 2016 / DynareOBC; fixed 2026-09-25, W48)
+## THE STACKED LCP (Holden 2016 / DynareOBC)
 ##
 ##   Keep every tagged equation and add a multiplier z_jt >= 0 to it,
 ##   F_j(t) = sign_j * z_jt, known from period 1 (a "news" shock).  The model
@@ -21,7 +21,7 @@
 ##
 ##   q from the all-slack path and M[:, (j,t)] the response to z_jt = 1.
 ##   M is NOT lower-triangular: a multiplier in period t moves every earlier
-##   period through expectations.  (Before W48 M was built by simulating
+##   period through expectations.  (Previously M was built by simulating
 ##   one-period binding policies that assumed the next period slack, which
 ##   is block-lower-triangular but not the model: a spell of 2+ periods was
 ##   solved with the wrong expectation.)  Its solution is the exact
@@ -80,7 +80,7 @@ lcp_comp_residual <- function(sim, shock_seq, regime_cache, regime_path,
 #' every binding period has a multiplier of the right sign up to the
 #' round-off band rtol RELATIVE to |x| + |b| and to the tagged equation's
 #' term magnitudes (.obc_gap_binds() / .obc_mult_keeps()).  This replaces an
-#' absolute test on the norm of $res (W79): a mismatch norm below 1e-8 in
+#' absolute test on the norm of $res: a mismatch norm below 1e-8 in
 #' level units passed at every size of the violation relative to the path.
 #' @noRd
 .lcp_comp_eval <- function(sim, shock_seq, regime_cache, regime_path,
@@ -293,7 +293,7 @@ lcp_build_system <- function(shock_seq, dr_slack, sys, specs, obs_idx,
 #' count is not bounded by n; a ray termination is reported as
 #' converged = FALSE.
 #'
-#' Scale-free (W79, 2026-09): the pivots run on the equivalent LCP
+#' Scale-free: the pivots run on the equivalent LCP
 #' (q / s_q, M / s_M) with s_q, s_M the powers of two nearest max|q| and
 #' max|M| (z = z_n s_q / s_M, w = w_n s_q), so every tolerance below is
 #' RELATIVE to the problem's scale.  Scaling by a power of two is exact in
@@ -462,7 +462,7 @@ lcp_lemke <- function(q, M, d = NULL, max_iter = NULL, tol = 1e-10) {
 #' Given the z solution of LCP(q, M) built by lcp_build_system(), maps z back
 #' to a binary integer regime path: z_k > tol * max|z| means constraint k
 #' binds (relative, so the classification does not depend on the units of
-#' the model; an absolute threshold before W79).
+#' the model; an absolute threshold previously).
 #' Then forward-simulates the model under that regime path.
 #'
 #' @param z        Numeric vector (length T*n_spec): Lemke primal solution
@@ -536,7 +536,7 @@ lcp_regime_from_z <- function(z, shock_seq, dr_slack, sys, specs, obs_idx,
 #'                         \code{tol} times its equation's term magnitudes
 #'                         (\code{max(tol, 1e-6)} for the \code{converged}
 #'                         flag), so the solution does not depend on the
-#'                         units of the model (absolute before W79)
+#'                         units of the model (absolute previously)
 #' @param regime_path_init Integer vector (length T) for warm-starting the
 #'                         Newton solver; ignored for method = "lemke"
 #' @param state_init       Numeric vector (length n_state) initial model state;
@@ -576,7 +576,7 @@ solve_obc_lcp <- function(shock_seq, dr_slack, sys, specs,
 
   ## One re-solve: a shock in the first column of `e` only, from state `s`.
   ## Returns the list shape of .obc_pwl_solve() plus the mismatch matrix.
-  ## Every test is RELATIVE to the scale of the problem (W79): the
+  ## Every test is RELATIVE to the scale of the problem: the
   ## equilibrium check is .lcp_comp_eval()'s round-off band (|x| + |b| and the
   ## tagged equation's term magnitudes), a Lemke multiplier is positive above
   ## tol times its natural scale.  (Absolute before: a mismatch norm below

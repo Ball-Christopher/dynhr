@@ -76,11 +76,13 @@ estimation. The pruned, pskf, and student_t paths are all deterministic
 fallback); pruned additionally runs the multi-start step via the
 closure-shipped parallel path. \code{"tpf"}/\code{"ppf"}/\code{"copf"}
 (particle-filter likelihoods with a noisy unbiased loglik estimate) are
-deliberately NOT accepted here -- their estimation noise breaks
-deterministic optimizers (Nelder-Mead/CMA-ES/newrat all assume a fixed
-objective at repeated evaluations of the same point); use
+deliberately NOT accepted by this function -- their estimation noise
+breaks deterministic optimizers (Nelder-Mead/CMA-ES/newrat all assume a
+fixed objective at repeated evaluations of the same point); use
 \code{\link{run_full_estimation}} or particle MCMC (PMMH) via
-\code{\link{run_posterior_estimation}} instead.}
+\code{\link{run_posterior_estimation}} instead. (An estimation spec run
+by \code{\link{run_estimation}} does accept them and, when its mode
+stage runs, warns that the optimiser works on a noisy objective.)}
 
 \item{pruned_order}{Integer, \code{2L} (default) or \code{3L}: AFVRR
 pruned state-space order used when \code{likelihood = "pruned"}

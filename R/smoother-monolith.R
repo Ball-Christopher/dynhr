@@ -1888,7 +1888,7 @@ historical_decomposition <- function(smoothed_shocks, ss, s0 = NULL,
     colnames(smoothed)     <- ss$endo_names
     out$smoothed           <- smoothed
     resid                  <- max(abs(total - smoothed))
-    ## Scales RELATIVE to the path (W77): a max(1, .) floor made both checks
+    ## Scales RELATIVE to the path: a max(1, .) floor made both checks
     ## absolute for paths below 1, so at small scale (a model in small units,
     ## or every shock std x 1e-4) an incoherence of 1e-4 of the path passed.
     ## (1 only for an all-zero path, where the residual is zero too.)

@@ -81,7 +81,8 @@
 #'                   point marked on the map.
 #' @param unit_tol   Unit-circle tolerance for the \code{unit_root} class
 #'                   (default \code{1e-6}, the solver's QZ threshold).
-#' @param seed       Optional integer random seed.
+#' @param seed       Optional integer random seed. The result is reproducible
+#'   for a fixed seed; the caller's global RNG stream is restored on exit.
 #' @param verbose    Logical; report progress (default \code{FALSE}).
 #' @param ...        Passed to \code{compile_model()} if compiling internally.
 #'
@@ -128,7 +129,7 @@ diag_stability_map <- function(model,
                                verbose    = FALSE,
                                ...) {
 
-  if (!is.null(seed)) set.seed(seed)
+  .local_seed(seed)  # seeded, but the caller's RNG stream is restored on exit
 
   base_params <- if (is.null(params)) model$param_values else params
   if (is.null(base_params)) base_params <- numeric(0)

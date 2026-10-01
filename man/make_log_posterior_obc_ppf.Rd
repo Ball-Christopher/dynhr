@@ -68,7 +68,7 @@ solved by guess-and-verify (as \code{kalman_filter_obc_pkf} does for the
 filtered state) and the period's time-varying rule is applied.
 }
 \details{
-Changed in W50 (2026-09-25): the particles used to check the current
+Changed in The particles used to check the current
 period only, against the slack rule, and to apply the one-period binding
 policy (next period slack), which is wrong for spells of two or more
 periods; and a period with no observation was skipped instead of

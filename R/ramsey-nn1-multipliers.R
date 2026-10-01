@@ -1,6 +1,6 @@
 ## R/ramsey-nn1-multipliers.R
 ## --------------------------------------------------------------------------
-## E1: Steady-state Lagrange multiplier computation for the (n, n+1)
+## Steady-state Lagrange multiplier computation for the (n, n+1)
 ## approximation (Gross & Hansen 2021).
 ##
 ## Given a model and planner objective, computes the steady-state values

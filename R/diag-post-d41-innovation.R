@@ -149,7 +149,7 @@ d41_innovation_whiteness <- function(data, dr, model, params, obs_vars,
       RR <- dr$ghu[dr$state_idx, , drop = FALSE]
       QQ <- tcrossprod(RR %*% .get_shock_cov(model, dr$exo_names, params), RR)
       P0 <- solve_lyapunov(TT, QQ)
-      ## kalman_filter()'s own rule, RELATIVE to P0's scale (W78): the
+      ## kalman_filter()'s own rule, RELATIVE to P0's scale: the
       ## absolute min eig > -1e-8 flipped with the units of the model.
       if (!.kf_stationary_P0_ok(P0))
         return(.info(sprintf(paste0(

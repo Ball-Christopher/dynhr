@@ -1,7 +1,6 @@
 ## R/bk-distance.R
 ## --------------------------------------------------------------------------
-## Differentiating the Blanchard-Kahn criterion (P2 gap #12 / pathological-DSGE
-## RESEARCH_AGENDA Thread 4b). At any parameter point theta the reduced
+## Differentiating the Blanchard-Kahn criterion. At any parameter point theta the reduced
 ## companion-form pencil (D, E) has generalized eigenvalues lambda solving
 ##   E x = lambda D x,
 ## and BK determinacy flips exactly when an eigenvalue crosses the unit circle
@@ -334,7 +333,7 @@ bk_collision_prob <- function(bk, Sigma) {
 #' half of differentiating the generalized Schur / QZ solve (Tier-18 A2
 #' research remainder): the eigenVALUE Jacobian is exact and cheap; the
 #' eigenVECTOR / stable-subspace (Schur-vector) Jacobian -- the genuinely hard
-#' and, per the pathological-DSGE RESEARCH_AGENDA, DEMOTED half -- is not
+#' and DEMOTED half -- is not
 #' needed for the first-order solution adjoint (\code{.solution_adjoint},
 #' which reverses the generalized-Sylvester fixed point directly).
 #'

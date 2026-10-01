@@ -30,6 +30,12 @@
 // the .Call boundary is skipped (a stale .Random.seed, leaked buffers) --
 // precisely on the runs a user asked to be strict. The kernel therefore only
 // REPORTS the period; R/sv-rbpf.R raises the warning after the call returns.
+//
+// DEGENERACY COUNT: $n_degenerate is the number of particle-steps (summed over
+// all periods and particles) that took a weight-0 path -- non-finite forecast
+// covariance (volatility overflow), non-PD / non-invertible forecast
+// covariance, or a non-finite log-likelihood. It is visibility only: no
+// weight, resampling decision or likelihood value depends on it.
 // ---------------------------------------------------------------------------
 
 #include <RcppArmadillo.h>
@@ -88,6 +94,7 @@ Rcpp::List sv_rbpf_loglik_cpp(const arma::mat& Y,        // n_obs x T
   arma::uvec idx(N);
 
   double loglik = 0.0;
+  double n_degenerate = 0.0;   // weight-0 particle-steps (visibility only)
 
   for (int t = 0; t < n_T; ++t) {
     // -- propagate volatility (bootstrap proposal), R draw order ------------
@@ -128,13 +135,13 @@ Rcpp::List sv_rbpf_loglik_cpp(const arma::mat& Y,        // n_obs x T
       // positive"), so R/C++ parity is unchanged.
       arma::mat Fc;
       if (!Ft.is_finite()) {                   // NaN/Inf: weight 0, carry state
-        ll_t(i) = neg_inf;
+        ll_t(i) = neg_inf; ++n_degenerate;
         s_new.col(i) = s.col(i);
         P_new.slice(i) = Pi;
         continue;
       }
       if (!arma::chol(Fc, Ft)) {               // non-PD: weight 0, carry state
-        ll_t(i) = neg_inf;
+        ll_t(i) = neg_inf; ++n_degenerate;
         s_new.col(i) = s.col(i);
         P_new.slice(i) = Pi;
         continue;
@@ -151,7 +158,7 @@ Rcpp::List sv_rbpf_loglik_cpp(const arma::mat& Y,        // n_obs x T
       if (!arma::inv_sympd(Fi, Ft)) {
         arma::mat Rinv;
         if (!arma::inv(Rinv, arma::trimatu(Fc))) {
-          ll_t(i) = neg_inf;
+          ll_t(i) = neg_inf; ++n_degenerate;
           s_new.col(i) = s.col(i);
           P_new.slice(i) = Pi;
           continue;
@@ -164,7 +171,7 @@ Rcpp::List sv_rbpf_loglik_cpp(const arma::mat& Y,        // n_obs x T
       arma::vec Fiv = Fi * v;
       double ll = ll_const - 0.5 * (ldf + arma::dot(v, Fiv));
       if (!std::isfinite(ll)) {
-        ll_t(i) = neg_inf;
+        ll_t(i) = neg_inf; ++n_degenerate;
         s_new.col(i) = s.col(i);
         P_new.slice(i) = Pi;
         continue;
@@ -220,8 +227,9 @@ Rcpp::List sv_rbpf_loglik_cpp(const arma::mat& Y,        // n_obs x T
     if (!std::isfinite(m)) {
       // Every particle infeasible: report the period and stop. The R wrapper
       // turns fail_period > 0 into the warning this used to raise here.
-      return Rcpp::List::create(Rcpp::_["loglik"]      = neg_inf,
-                                Rcpp::_["fail_period"] = t + 1);
+      return Rcpp::List::create(Rcpp::_["loglik"]       = neg_inf,
+                                Rcpp::_["fail_period"]  = t + 1,
+                                Rcpp::_["n_degenerate"] = n_degenerate);
     }
     arma::vec w_un = arma::exp(ll_t - m);
     loglik += m + std::log(arma::mean(w_un));
@@ -245,6 +253,7 @@ Rcpp::List sv_rbpf_loglik_cpp(const arma::mat& Y,        // n_obs x T
     h = h_res;
   }
 
-  return Rcpp::List::create(Rcpp::_["loglik"]      = loglik,
-                            Rcpp::_["fail_period"] = 0);
+  return Rcpp::List::create(Rcpp::_["loglik"]       = loglik,
+                            Rcpp::_["fail_period"]  = 0,
+                            Rcpp::_["n_degenerate"] = n_degenerate);
 }

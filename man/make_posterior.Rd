@@ -36,11 +36,25 @@ default) or \code{"cumulant"} (cumulant-matching, Mutschler 2015).
 The cumulant likelihood works with any perturbation order >= 1;
 orders >= 2 provide skewness/kurtosis content.}
 
-\item{...}{Additional arguments forwarded to the internal
-likelihood constructor. For \code{likelihood = "cumulant"}, supports
-\code{order} (perturbation order, default 2), \code{cumulant_orders}
-(which orders to match, default 1:4), and \code{cumulant_weight}
-("identity" or "precision").}
+\item{...}{Additional arguments forwarded to
+\code{\link{make_log_posterior}}, which validates them against the
+chosen likelihood. The names each likelihood accepts here:
+\itemize{
+  \item \code{"gaussian"}: none beyond the \code{make_log_posterior}
+    formals \code{lik_init}, \code{me_extra}, \code{shock_scale},
+    \code{system_priors}, \code{infeasible_penalty} and \code{power}.
+  \item \code{"cumulant"}: \code{order} (perturbation order, default 2),
+    \code{cumulant_orders} (which orders to match, default 1:4),
+    \code{cumulant_weight} (\code{"identity"} or \code{"precision"}),
+    \code{weight_matrix} and \code{h}.
+  \item \code{"pruned"}: none beyond \code{pruned_order} (2 or 3).
+}
+A name that no likelihood takes is an error of class
+\code{dynhr_error_unknown_argument}; a name that another likelihood takes
+is ignored with a warning of class
+\code{dynhr_warning_inapplicable_argument}. The other likelihood types of
+\code{make_log_posterior} (e.g. \code{"pskf"}, \code{"whittle"},
+\code{"tpf"}) and their arguments are available by calling it directly.}
 }
 \value{
 A function \code{function(theta)} returning a named list

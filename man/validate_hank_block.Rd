@@ -26,7 +26,7 @@ A data frame with one row per check: \code{check}, \code{value}
 \description{
 One cheap, interpretable gate to run BEFORE spending a costly likelihood,
 Jacobian, or posterior evaluation on a \code{\link{hank_het_block}}
-(adversarial review 2026-07-13, extension #3). Reports -- rather than
+. Reports -- rather than
 silently assumes -- the invariants every downstream consumer relies on:
 grid monotonicity, the Markov contract on \code{Pi}, forward-operator
 row-stochasticity, distribution mass/positivity/stationarity, policy

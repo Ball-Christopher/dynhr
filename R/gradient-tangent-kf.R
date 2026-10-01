@@ -111,7 +111,7 @@
 
   has_me_extra    <- !is.null(me_extra)
   ## Any TRUE observation noise (base me_variance or per-period me_extra):
-  ## both feed F AND the Joseph covariance term (F3-D).
+  ## both feed F AND the Joseph covariance term.
   has_me_true     <- has_me_extra || me_variance != 0
   has_shock_scale <- !is.null(shock_scale)
 

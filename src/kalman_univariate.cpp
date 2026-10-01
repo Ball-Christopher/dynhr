@@ -156,7 +156,7 @@ List kalman_univariate_loop_cpp(const arma::mat& Y_minus_d,
         K_inf = P_inf * Zi.t();
         const double F_inf = arma::dot(Zi, K_inf);
         // F_inf is unit-free (P_inf = A_inf A_inf'): tested on its own, as in
-        // the R loop (W77; a max(1, F_star) scale grew with the data's units).
+        // the R loop (a max(1, F_star) scale grew with the data's units).
         if (F_inf > diffuse_tol) {
           // Diffuse update (DK 2012 sec. 7.2.5). No 2*pi and no quadratic
           // term: same renormalization convention as the multivariate
@@ -229,7 +229,7 @@ List kalman_univariate_loop_cpp(const arma::mat& Y_minus_d,
       P_inf.zeros();
       P_inf.submat(0, 0, ns - 1, ns - 1) = Mi;
       P_inf = 0.5 * (P_inf + P_inf.t());
-      if (arma::abs(P_inf).max() < conv_tol) {    // unit-free (W77)
+      if (arma::abs(P_inf).max() < conv_tol) {    // unit-free
         diffuse   = false;
         d_diffuse = static_cast<int>(t) + 1;  // 1-based, as in R
       }
@@ -248,7 +248,7 @@ List kalman_univariate_loop_cpp(const arma::mat& Y_minus_d,
         // covariance, so an absolute test never converges (cf. the
         // solve_lyapunov relative-tol fix). Purely relative -- no max(1, .)
         // floor, which made it absolute for max|P| < 1 and froze a
-        // small-scale model's gains early (W76, 2026-09-26; the multivariate
+        // small-scale model's gains early (the multivariate
         // lock in kalman_standard_loop_cpp is relative the same way).
         ss_capture = true;            // capture the gain sequence next period
       }

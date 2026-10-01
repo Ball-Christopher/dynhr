@@ -57,7 +57,7 @@ A list with \code{loglik} (the marginal log-likelihood estimate),
   particle weights, in \code{[1, n_particles]}), and \code{n_particles}.
 }
 \description{
-The P1 panel brief's deliverable 3: the full-panel likelihood
+The full-panel likelihood
 \deqn{L(\eta) = E_\Theta\left[\prod_i L_i(\eta \mid \Theta)\right]}
 with the common latent aggregate price path \eqn{\Theta = \{r_t, w_t\}}
 integrated out by simple Monte Carlo over path particles: each particle is

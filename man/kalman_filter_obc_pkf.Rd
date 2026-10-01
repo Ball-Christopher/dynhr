@@ -111,7 +111,7 @@ log-likelihood \code{-Inf} (Dynare rejects the draw); \code{$failed_period}
 records it.
 }
 \details{
-Changed in 0.9.3.93 (W49): the previous filter used ONE policy per
+Changed in 0.9.3.93: the previous filter used ONE policy per
 regime (the next period assumed slack) and checked only period t against
 the slack rule, which is wrong for spells of two or more periods.
 \code{regime_path_init} now plays the role of Dynare's

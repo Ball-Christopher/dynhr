@@ -41,7 +41,8 @@ point marked on the map.}
 \item{unit_tol}{Unit-circle tolerance for the \code{unit_root} class
 (default \code{1e-6}, the solver's QZ threshold).}
 
-\item{seed}{Optional integer random seed.}
+\item{seed}{Optional integer random seed. The result is reproducible
+for a fixed seed; the caller's global RNG stream is restored on exit.}
 
 \item{verbose}{Logical; report progress (default \code{FALSE}).}
 

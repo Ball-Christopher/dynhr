@@ -184,7 +184,7 @@
   P0_list <- .kf_diffuse_P0(TT, QQ, ur_tol)
   nunit    <- P0_list$nunit
 
-  ## Regime-boundary detection (Tier 11 #4) -- reuse pre-computed eigenvalues.
+  ## Regime-boundary detection -- reuse pre-computed eigenvalues.
   rb_info_r       <- .check_regime_boundary(nunit)
   min_eig_margin  <- rb_info_r$min_eig_margin
   near_regime_boundary <- rb_info_r$near_regime_boundary
@@ -216,7 +216,7 @@
     B   <- RR - K %*% DD
     s_n <- as.numeric(TT %*% s_in) + as.numeric(K %*% v_in)
     P_raw <- tcrossprod(A %*% P_in, A) + tcrossprod(B %*% Sigma_e, B)
-    ## TRUE measurement-noise law (F3-D): P' += K me_diag K'.
+    ## TRUE measurement-noise law: P' += K me_diag K'.
     if (me_variance != 0) P_raw <- P_raw + me_variance * tcrossprod(K)
     P_n <- .sym(P_raw)
     list(ll = ll, s = s_n, P = P_n, K = K, Fi = Fi, A = A, B = B, Fiv = Fiv)
@@ -237,7 +237,7 @@
     if (in_diffuse) {
       F_inf  <- .sym(ZZ %*% P_inf  %*% tZZ)
       F_star <- .sym(ZZ %*% P_star %*% tZZ + HHme)
-      ## F_inf / P_inf are unit-free: the forward filter's rule (W77).
+      ## F_inf / P_inf are unit-free: the forward filter's rule.
       if (max(abs(F_inf)) < diffuse_tol) {
         ## -- Case A -----------------------------------------------------------
         step <- .do_stat_step(s, P_star, v)

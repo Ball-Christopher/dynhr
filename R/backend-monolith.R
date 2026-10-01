@@ -13,7 +13,7 @@
 
 .sym <- function(X) (X + t(X)) / 2
 
-## NOTE (D2, 2026-09-02): .solve_lyapunov() used to be a SECOND, direct-
+## NOTE: .solve_lyapunov() used to be a SECOND, direct-
 ## kronecker Lyapunov solver defined here.  It is now a one-line alias of the
 ## package's single solve_lyapunov() (R/solve-helpers.R), which keeps the same
 ## NaN-on-nonstationary contract but also converges on highly non-normal but
@@ -62,7 +62,7 @@
   P <- diag(1, n)
   for (iter in 1:500) {
     P_new <- F_mat %*% P %*% t(F_mat) + GQG
-    ## RELATIVE convergence (W76, 2026-09-26): an absolute `tol` stopped a
+    ## RELATIVE convergence: an absolute `tol` stopped a
     ## small-scale model (P ~1e-9) with P0 wrong in its leading digits and
     ## never let a large-scale one converge. Relative to max|P_new|, as in
     ## solve_lyapunov() and the Kalman steady-state lock.

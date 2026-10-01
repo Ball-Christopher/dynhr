@@ -13,7 +13,7 @@
 ## optimizer core (.run_mode_finding, R/mode-orchestrate.R) and the same
 ## samplers, not a new branch inside the DSGE one.
 ##
-## THE DESIGN REQUIREMENT (0.9.0.0024, briefs/21 sections 10-11). The exact-AR
+## THE DESIGN REQUIREMENT (0.9.0.0024). The exact-AR
 ## structural gradient is 21x an FD gradient ONLY when three things are true
 ## across calls, and a naive runner breaks all three:
 ##

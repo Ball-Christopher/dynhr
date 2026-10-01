@@ -20,7 +20,7 @@
 ## involves M FOUR times, and M = Mc (contemporaneous ghxx/ghxu/ghuu quadratic
 ## in (x1_{t-1}, e_t)) + Mx (the ghx-weighted x2-accumulation across all past
 ## lags). Profiling shows this window sum is ~99.8% of compute_fourth_cumulant's
-## cost (see .claude memory: wave-2026-07-08-hvp-solution-t2.md).
+## cost.
 ##
 ## SCOPE OF THIS FILE (READ BEFORE USE): expanding tr((MS)^4) with M = Mc + Mx
 ## by multilinearity of the trace gives 6 distinct necklace terms (grouping
@@ -35,12 +35,9 @@
 ## form requires a further tensor-Lyapunov closure whose RHS recurses into a
 ## GENUINELY NONZERO 5th-order object cum(x2,x2,x2,x1,x1) (three quadratic-in-
 ## Gaussian x2 "necklace" factors do not Wick-cancel the way the 2-quadratic
-## C2211 RHS does). This was investigated previously (2026-07-01, orchestrator
-## + a delegated agent) and assessed as a genuinely large, error-prone,
-## multi-tensor research build -- NOT attempted here (see .claude memory:
-## cumulant-third-cumulant-skewness-bug.md, "the FULL Andreasen-FV-RR 4th-
-## moment hierarchy... genuinely a major standalone build, NOT one more
-## tensor").
+## C2211 RHS does). This was investigated previously and assessed as a genuinely large, error-prone,
+## multi-tensor research build (the full Andreasen-FV-RR 4th-moment hierarchy)
+## -- NOT attempted here.
 ##
 ## WHAT THIS FILE SHIPS: the CHAIN term (delegated, exact, unchanged) plus a
 ## CONTEMPORANEOUS-ONLY closed form for TRACE, i.e. just the "[0 Mx]" term

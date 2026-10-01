@@ -98,7 +98,7 @@ historical_decomposition_obc <- function(smoothed_shocks, regime_path,
 
   # Per-period piecewise-linear rules: the PKF's (kalman_filter_obc_pkf()
   # stores them in the cache) or perfect foresight of regime_path.  Before
-  # W49 (0.9.3.93) every binding period used the one-period policy of
+  # 0.9.3.93 every binding period used the one-period policy of
   # obc_ensure_policy() (next period slack).
   si    <- dr_slack$state_idx
   rules <- .obc_path_rules(regime_cache, regime_path)

@@ -3,7 +3,7 @@
 ## Global (projection) solution for DSGE models via Chebyshev polynomial
 ## collocation and Coleman time iteration.
 ##
-## Algorithm: SIMULTANEOUS-NEWTON approach (brief §3.6 "Alternative").
+## Algorithm: SIMULTANEOUS-NEWTON approach.
 ## At each collocation node (s_lag = state at t-1), we solve for ALL
 ## current-period endogenous variables y_t = (c_t, k_t, z_t, ...) by
 ## finding the root of the expected model residuals, where:

@@ -8,7 +8,7 @@
 ## available by central-differencing the whole model builder -- two model
 ## rebuilds per parameter -- and that is what dominates: measured end to end,
 ## the FD route is worth ~1.1x over plain finite differences of the likelihood,
-## while an EXACT dTheta_z/dtheta_k gives 5.2x-7.7x (briefs/21 7). So the
+## while an EXACT dTheta_z/dtheta_k gives 5.2x-7.7x. So the
 ## exact route is where the speedup lives, and this file is how a caller gets
 ## it WITHOUT hand-constructing T_h*n x T_h*n dH_U/dtheta matrices (a packing
 ## error there yields a plausible-but-wrong gradient, which is exactly the

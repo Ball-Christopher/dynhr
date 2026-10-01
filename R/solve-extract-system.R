@@ -326,7 +326,7 @@ extract_system_matrices <- function(compiled, ss, params, center = NULL) {
       # left at placeholder values, or solve_steady did not truly converge).
       # Zeroing would feed a corrupt Jacobian into the order-2/3 Kronecker /
       # Sylvester solves, which then either error confusingly ("system is
-      # exactly singular") or run effectively unbounded (M25, the
+      # exactly singular") or run effectively unbounded (the
       # Basu_Bundick_2017 order-3 "hang"). Fail loudly and early instead.
       stop(sprintf(
         paste0("Dynamic Jacobian is non-finite at the steady state in %d ",

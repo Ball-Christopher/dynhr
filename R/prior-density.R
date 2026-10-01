@@ -31,7 +31,7 @@
 
 #' \code{alpha - 1} for the IG1 prior with mean \code{mu} and std \code{sig}
 #'
-#' A12, two fixes over the old \code{.ig1_alpha()}:
+#' Two fixes over the old \code{.ig1_alpha()}:
 #'
 #'  * The root is solved in \code{u = log(alpha - 1)} rather than in \code{alpha}. The
 #'    old solve bracketed \code{alpha} on \code{[1 + 1e-9, 1e4]}, but a large \code{sig}
@@ -73,7 +73,7 @@
 
 #' (alpha, theta) of the IG1 prior with mean \code{mu} and std \code{sig}
 #'
-#' A12: the ONE mapping. \code{theta = (alpha - 1) * (sig^2 + mu^2)} is 0 * Inf at
+#' The ONE mapping. \code{theta = (alpha - 1) * (sig^2 + mu^2)} is 0 * Inf at
 #' sig = Inf, so the limit is taken in closed form. With alpha -> 1 the mean is
 #' \code{sqrt(theta) * Gamma(alpha - 1/2)/Gamma(alpha) -> sqrt(theta * pi)}, so
 #' matching the mean gives \code{theta = mu^2 / pi} -- the continuous limit of the
@@ -97,7 +97,7 @@
 
 #' (shape, scale) of the IG2 prior with mean \code{mu} and std \code{sig}
 #'
-#' A12: the ONE mapping. \code{shape = (mu/sig)^2 + 2}, \code{scale = mu*(shape - 1)},
+#' The ONE mapping. \code{shape = (mu/sig)^2 + 2}, \code{scale = mu*(shape - 1)},
 #' which for sig = Inf is simply \code{shape = 2}, \code{scale = mu} -- a PROPER inverse
 #' gamma with mean \code{mu} and infinite variance (sd finite requires shape > 2, so
 #' sd = Inf pins shape = 2). No special case is needed, and the two old ones
@@ -192,7 +192,7 @@
 
 #' Log-density of ONE prior at ONE point, given an ALREADY-NORMALISED name
 #'
-#' A12: \code{log_prior_density()} and \code{log_prior()} used to carry two independent
+#' \code{log_prior_density()} and \code{log_prior()} used to carry two independent
 #' switch statements that disagreed (inv_gamma2 with sd = Inf most visibly).
 #' Both now call this, so there is exactly one density per (dist, p1..p4).
 #' Truncation bounds (\code{lower}/\code{upper}) are applied by the callers; \code{p3}/\code{p4}
@@ -342,7 +342,7 @@
 
 #' Draw \code{n} values from EXACTLY the prior \code{.lp_dist1()} scores
 #'
-#' A5/D2 (2026-09-25): the ONE prior sampler. SMC, SBC, the prior predictive,
+#' The ONE prior sampler. SMC, SBC, the prior predictive,
 #' prior sensitivity, DIME, SMC^2 and profile-CI seeds all reach it through
 #' \code{.smc_make_prior_sampler()}. It draws from the law of \code{.lp_dist1(x, dist,
 #' p1, p2, p3, p4)} restricted to \code{[lower, upper]} -- the distribution
@@ -407,7 +407,7 @@
 #' @noRd
 log_prior_density <- function(x, dist, p1, p2, p3 = -Inf, p4 = Inf,
                               gen_p3 = NA_real_, gen_p4 = NA_real_) {
-  ## A12: NA bounds are what `extract_prior_spec()` writes for an unbounded
+  ## NA bounds are what `extract_prior_spec()` writes for an unbounded
   ## side. `x < NA` is NA, and `if (NA)` ERRORS -- this function used to abort
   ## on any spec row with an NA bound. Treat NA as -Inf / Inf, exactly as
   ## `log_prior()` already did.
@@ -436,55 +436,230 @@ log_prior_density <- function(x, dist, p1, p2, p3 = -Inf, p4 = Inf,
 #' @return Scalar log-prior (finite, or -Inf if any parameter is out of bounds)
 #' @export
 log_prior <- function(theta, prior_spec) {
-  ## Hoist the data.frame column extractions and the distribution-name
-  ## normalization out of the per-parameter loop: this function runs once
-  ## per posterior evaluation, so per-row `$` dispatch and (especially)
-  ## per-row .normalize_dist() are hot -- the latter's old trimws() cost
-  ## ~200us/call on some Windows builds and dominated dynhr_benchmark()
-  ## there (2026-08-05 diagnosis; see .normalize_dist's hot-path note).
-  spec_name  <- prior_spec$name
-  spec_dist  <- .normalize_dist(prior_spec$distribution)
-  spec_p1    <- prior_spec$p1
-  spec_p2    <- prior_spec$p2
-  spec_lower <- prior_spec$lower
-  spec_upper <- prior_spec$upper
+  ## The hyper-parameter conversions (beta shapes, inverse-gamma parameters,
+  ## the uniform support, ...) depend only on the prior spec, so they are done
+  ## once per spec (.prior_plan) and the density is evaluated per distribution
+  ## family, vectorised over the parameters of that family.
+  plan <- .prior_plan(prior_spec, names(theta))
+  x <- as.numeric(theta)[plan$pos]
+  ## Non-finite parameter values (NA/NaN/Inf, e.g. from a diverged HMC
+  ## trajectory or a failed gradient) are outside every prior's support:
+  ## return -Inf rather than letting `x < lo` evaluate to NA and crash.
+  if (!all(is.finite(x))) return(-Inf)
+  if (any(x < plan$lower, na.rm = TRUE) || any(x > plan$upper, na.rm = TRUE))
+    return(-Inf)
+  ll <- numeric(length(x))
+  for (g in plan$groups) ll[g$k] <- .lp_group(g, x[g$k])
+  if (!all(is.finite(ll))) return(-Inf)
+  ## Accumulate in prior-spec order, exactly as the one-parameter-at-a-time
+  ## evaluation did (sum() would add in extended precision and differ in the
+  ## last bit).
+  lp <- 0
+  for (v in ll) lp <- lp + v
+  lp
+}
+
+## --------------------------------------------------------------------------
+## Prior plan: per-spec precomputation shared by log_prior() and
+## .dlog_prior_grouped().
+## --------------------------------------------------------------------------
+
+## Small FIFO cache of plans: a posterior closure calls log_prior() with the
+## SAME prior_spec and parameter names on every evaluation, so the plan is
+## built once. A hit costs one identical() per slot (pointer-equal when the
+## closure holds the spec object).
+.prior_plan_cache <- new.env(parent = emptyenv())
+.prior_plan_cache$slots <- list()
+
+.prior_plan <- function(prior_spec, theta_names) {
+  slots <- .prior_plan_cache$slots
+  for (s in slots)
+    if (identical(s$names, theta_names) && identical(s$spec, prior_spec))
+      return(s$plan)
+  plan <- .prior_plan_build(prior_spec, theta_names)
+  slots <- c(list(list(spec = prior_spec, names = theta_names, plan = plan)),
+             slots)
+  .prior_plan_cache$slots <- slots[seq_len(min(length(slots), 8L))]
+  plan
+}
+
+## Rows of the spec that name an entry of theta (a row that does not is
+## skipped, as before), grouped by canonical distribution. `pos` is the
+## position of each kept row in theta; `lower`/`upper` the truncation bounds
+## (NA = none).
+.prior_plan_build <- function(prior_spec, theta_names) {
+  n_spec <- length(prior_spec$name)
+  pos_all <- match(prior_spec$name, theta_names)
+  rows <- which(!is.na(pos_all))
+  dist <- .normalize_dist(prior_spec$distribution)[rows]
+  p1 <- prior_spec$p1[rows]
+  p2 <- prior_spec$p2[rows]
   ## Dynare generalisation parameters (beta support / gamma + IG shift); a
   ## hand-built spec without the columns gets the ungeneralised laws.
-  n_spec     <- length(spec_name)
-  spec_p3    <- prior_spec$p3 %||% rep(NA_real_, n_spec)
-  spec_p4    <- prior_spec$p4 %||% rep(NA_real_, n_spec)
-  theta_nms  <- names(theta)
-
-  lp <- 0
-  for (i in seq_along(spec_name)) {
-    nm <- spec_name[i]
-    if (!(nm %in% theta_nms)) next
-    ## `[[`, not `[`: with `[` the element keeps its NAME and the accumulator
-    ## `lp` ends up a NAMED scalar carrying the last parameter's name, which
-    ## then trips every `expect_equal()` against a plain number.
-    x  <- theta[[nm]]
-
-    ## Non-finite parameter values (NA/NaN/Inf, e.g. from a diverged HMC
-    ## trajectory or a failed gradient) are outside every prior's support:
-    ## return -Inf rather than letting `x < lo` evaluate to NA and crash.
-    if (!is.finite(x)) return(-Inf)
-
-    lo <- spec_lower[i]
-    hi <- spec_upper[i]
-    if (!is.na(lo) && x < lo) return(-Inf)
-    if (!is.na(hi) && x > hi) return(-Inf)
-
-    dist <- spec_dist[i]
-    p1   <- spec_p1[i]
-    p2   <- spec_p2[i]
-
-    ## A12: ONE density. This used to be a second switch that disagreed with
-    ## `log_prior_density()` for inv_gamma2 with sd = Inf (improper -log(x)
-    ## here vs a near-flat proper density there).
-    ll <- .lp_dist1(x, dist, p1, p2, spec_p3[i], spec_p4[i])
-
-    if (!is.finite(ll)) return(-Inf)
-    lp <- lp + ll
+  p3 <- (prior_spec$p3 %||% rep(NA_real_, n_spec))[rows]
+  p4 <- (prior_spec$p4 %||% rep(NA_real_, n_spec))[rows]
+  groups <- list()
+  for (d in unique(dist)) {
+    k <- which(dist == d)
+    groups[[d]] <- .prior_group(d, k, p1[k], p2[k], p3[k], p4[k])
   }
-  lp
+  list(pos = pos_all[rows], lower = prior_spec$lower[rows],
+       upper = prior_spec$upper[rows], groups = groups)
+}
+
+## Precomputed constants of one distribution family over its rows `k`.
+.prior_group <- function(d, k, p1, p2, p3, p4) {
+  s <- ifelse(is.na(p3), 0, p3)
+  switch(d,
+    "normal" = list(d = d, k = k, p1 = p1, p2 = p2),
+    "beta" = {
+      a <- ifelse(is.na(p3), 0, p3)
+      b <- ifelse(is.na(p4), 1, p4)
+      len <- b - a
+      sh1 <- sh2 <- numeric(length(k))
+      for (i in seq_along(k)) {
+        sh <- .beta_shapes(p1[i], p2[i], a[i], b[i])
+        sh1[i] <- sh[1]; sh2[i] <- sh[2]
+      }
+      ## A degenerate implied shape is an INVALID beta, not a flat prior.
+      valid <- is.finite(sh1) & is.finite(sh2) & sh1 > 0 & sh2 > 0
+      list(d = d, k = k, a = a, b = b, len = len, loglen = log(len),
+           sh1 = sh1, sh2 = sh2, valid = valid)
+    },
+    "gamma" = {
+      m <- p1 - s
+      list(d = d, k = k, s = s, shape = (m / p2)^2, rate = m / p2^2)
+    },
+    "inv_gamma" =, "inv_gamma1" = {
+      alpha <- theta <- numeric(length(k))
+      for (i in seq_along(k)) {
+        ps <- .ig1_params(p1[i] - s[i], p2[i])
+        alpha[i] <- ps$alpha; theta[i] <- ps$theta
+      }
+      ## c0 is the leading part of the IG1 log density, summed in the same
+      ## left-to-right order as .lp_ig1().
+      list(d = "inv_gamma", k = k, s = s, alpha = alpha, theta = theta,
+           c0 = log(2) + alpha * log(theta) - lgamma(alpha),
+           a2 = 2 * alpha + 1, th2 = 2 * theta, ok = !is.na(alpha))
+    },
+    "inv_gamma2" = {
+      shape <- scale <- numeric(length(k))
+      for (i in seq_along(k)) {
+        ps <- .ig2_params(p1[i] - s[i], p2[i])
+        shape[i] <- ps$shape; scale[i] <- ps$scale
+      }
+      list(d = d, k = k, s = s, shape = shape, scale = scale,
+           c0 = shape * log(scale) - lgamma(shape), sh1 = shape + 1)
+    },
+    "uniform" = {
+      lo <- hi <- numeric(length(k))
+      for (i in seq_along(k)) {
+        ab <- .uniform_ab(p1[i], p2[i], p3[i], p4[i])
+        lo[i] <- ab[1]; hi[i] <- ab[2]
+      }
+      valid <- !is.na(lo < hi) & lo < hi & is.finite(hi - lo)
+      list(d = d, k = k, lo = lo, hi = hi, valid = valid,
+           nlen = -log(hi - lo))
+    },
+    ## Fail loud on an unrecognised distribution (a misspelled name would
+    ## otherwise be given a silent flat prior): .lp_dist1() raises the error.
+    .lp_dist1(0, d, 1, 1)
+  )
+}
+
+## Log density of one family's parameters at x (same length as g$k).
+.lp_group <- function(g, x) {
+  switch(g$d,
+    "normal" = dnorm(x, mean = g$p1, sd = g$p2, log = TRUE),
+    "beta" = {
+      ll <- rep(-Inf, length(x))
+      ok <- g$valid & x > g$a & x < g$b
+      if (any(ok))
+        ll[ok] <- dbeta(((x - g$a) / g$len)[ok], g$sh1[ok], g$sh2[ok],
+                        log = TRUE) - g$loglen[ok]
+      ll
+    },
+    "gamma" = {
+      y <- x - g$s
+      ll <- rep(-Inf, length(x))
+      ok <- y > 0
+      if (any(ok))
+        ll[ok] <- dgamma(y[ok], shape = g$shape[ok], rate = g$rate[ok],
+                         log = TRUE)
+      ll
+    },
+    "inv_gamma" = {
+      y <- x - g$s
+      ll <- rep(-Inf, length(x))
+      ok <- y > 0 & g$ok
+      if (any(ok))
+        ll[ok] <- g$c0[ok] - g$a2[ok] * log(y[ok]) - g$theta[ok] / y[ok]^2
+      ll
+    },
+    "inv_gamma2" = {
+      y <- x - g$s
+      ll <- rep(-Inf, length(x))
+      ok <- y > 0
+      if (any(ok))
+        ll[ok] <- g$c0[ok] - g$sh1[ok] * log(y[ok]) - g$scale[ok] / y[ok]
+      ll
+    },
+    "uniform" = ifelse(g$valid & x >= g$lo & x <= g$hi, g$nlen, -Inf)
+  )
+}
+
+#' Analytic gradient of the total log-prior, grouped by distribution
+#'
+#' Same value as looping \code{.dlog_prior_density1()} over the spec rows
+#' (zero for a parameter not in the spec, zero outside a prior's support),
+#' with the hyper-parameter conversions taken from the cached prior plan and
+#' the arithmetic vectorised over each distribution family.
+#' @noRd
+.dlog_prior_grouped <- function(theta, prior_spec) {
+  g <- numeric(length(theta))
+  names(g) <- names(theta)
+  plan <- .prior_plan(prior_spec, names(theta))
+  x <- as.numeric(theta)[plan$pos]
+  d <- numeric(length(x))
+  for (gr in plan$groups) d[gr$k] <- .dlp_group(gr, x[gr$k])
+  g[plan$pos] <- d
+  g
+}
+
+.dlp_group <- function(g, x) {
+  out <- numeric(length(x))
+  switch(g$d,
+    "normal" = -(x - g$p1) / g$p2^2,
+    "uniform" = out,
+    "beta" = {
+      ok <- g$valid & !(x <= g$a | x >= g$b)
+      if (any(ok)) {
+        y <- ((x - g$a) / g$len)[ok]
+        out[ok] <- (((g$sh1[ok] - 1) / y - (g$sh2[ok] - 1) / (1 - y)) /
+                      g$len[ok])
+      }
+      out
+    },
+    "gamma" = {
+      y <- x - g$s
+      ok <- !(y <= 0)
+      if (any(ok))
+        out[ok] <- (g$shape[ok] - 1) / y[ok] - g$rate[ok]
+      out
+    },
+    "inv_gamma" = {
+      y <- x - g$s
+      ok <- !(y <= 0)
+      if (any(ok))
+        out[ok] <- -g$a2[ok] / y[ok] + g$th2[ok] / y[ok]^3
+      out
+    },
+    "inv_gamma2" = {
+      y <- x - g$s
+      ok <- !(y <= 0)
+      if (any(ok))
+        out[ok] <- -g$sh1[ok] / y[ok] + g$scale[ok] / y[ok]^2
+      out
+    }
+  )
 }

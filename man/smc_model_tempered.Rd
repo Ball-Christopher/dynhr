@@ -36,7 +36,12 @@ Alternative to \code{prior_sampler}; forwarded to both stages.}
 
 \item{log_post_fn_M0}{Optional.  Full M0 log-posterior function (same
 interface as \code{log_post_fn_M1}).  When \code{NULL} (default), built
-automatically from \code{approx_loglik_fn} + the shared prior.}
+automatically from \code{approx_loglik_fn} + the shared prior -- but the
+prior terms are then read from \code{log_post_fn_M1(theta)}, so EVERY
+Stage-1 evaluation also runs the full M1 likelihood and Stage 1 costs at
+least as much per evaluation as Stage 2: the cheap approximating
+likelihood saves nothing there. Supply \code{log_post_fn_M0} (prior plus
+cheap likelihood only) to make Stage 1 cheap.}
 
 \item{n_particles}{Number of particles (same for both stages).}
 
@@ -44,7 +49,9 @@ automatically from \code{approx_loglik_fn} + the shared prior.}
 
 \item{n_mh_steps}{RWMH mutation steps per tempering stage.}
 
-\item{seed_M0}{RNG seed for Stage 1 (M0 run).  Default \code{1L}.}
+\item{seed_M0}{RNG seed for Stage 1 (M0 run).  Default \code{1L}. Each
+stage is seeded locally: the caller's global RNG stream is restored on
+exit.}
 
 \item{seed_M1}{RNG seed for Stage 2 (M1 bridge run).  Default \code{2L}.}
 
@@ -52,7 +59,10 @@ automatically from \code{approx_loglik_fn} + the shared prior.}
 
 \item{...}{Additional arguments forwarded to both internal
 \code{dynhr_smc()} calls: e.g. \code{mh_scale_factor},
-\code{mixture_weights}, \code{parallel}, \code{backend}.}
+\code{mixture_weights}, \code{parallel}, \code{backend}. A
+\code{lambda_schedule} fixes the Stage-1 (M0) likelihood-tempering ladder
+and is not passed to Stage 2; a \code{phi_schedule} fixes the Stage-2
+bridge and is not passed to Stage 1.}
 }
 \value{
 A \code{\link{dynhr_chains}} object (M1 posterior) with extra

@@ -24,7 +24,7 @@
 ##
 ## A correlation is estimated for an unordered PAIR of shocks, so it cannot be
 ## carried under a single shock's name (doing so made the likelihood read the
-## correlation draw as shock e_a's STDERR -- 0.9.4 latent item L3, the same
+## correlation draw as shock e_a's STDERR --, the same
 ## silent mis-mapping class as the P0 estimated-stderr bug).  The canonical key
 ## is `"corr <a>,<b>"`.  `.corr_pair()` accepts every spelling the prior parser
 ## or a hand-written `prior_spec` can produce -- `corr a,b`, `corr a, b`,
@@ -90,6 +90,21 @@
 ## Returns a zero-row data.frame when there are none (the common case), after a
 ## single vectorised `grepl(",")` so the per-draw cost is one regex.
 .corr_params_index <- function(params, exo_names) {
+  ## A pure function of the parameter NAMES and the shock names, which are the
+  ## same on every draw of a posterior closure: remember the last answer and
+  ## skip the per-draw regex when both are unchanged.
+  pn <- names(params)
+  memo <- .corr_index_memo$last
+  if (!is.null(memo) && identical(memo$pn, pn) && identical(memo$exo, exo_names))
+    return(memo$out)
+  out <- .corr_params_index_scan(params, exo_names)
+  .corr_index_memo$last <- list(pn = pn, exo = exo_names, out = out)
+  out
+}
+
+.corr_index_memo <- new.env(parent = emptyenv())
+
+.corr_params_index_scan <- function(params, exo_names) {
   none <- data.frame(k = integer(0), i = integer(0), j = integer(0))
   if (is.null(params) || length(params) == 0L) return(none)
   pn <- names(params)
@@ -108,7 +123,26 @@
   do.call(rbind, out)
 }
 
-.get_shock_cov <- function(model, exo_names, params) {
+## Shock covariance at `params`. The shocks block is re-read against `params`
+## on every call (its *_expr strings track estimated parameters). Everything
+## about it that does not depend on `params` -- which row feeds which shock,
+## which expression strings are plain numbers or bare parameter names -- is
+## resolved once per shocks block (.shock_cov_plan) and only the parameter-
+## dependent part is evaluated per call. `use_plan = FALSE` evaluates the
+## block directly, row by row: the same values, kept as the reference the
+## planned path is tested against.
+.get_shock_cov <- function(model, exo_names, params, use_plan = TRUE) {
+  if (use_plan && !is.null(params)) {
+    plan <- .shock_cov_plan(model$shocks, exo_names)
+    if (!is.null(plan)) {
+      out <- .shock_cov_from_plan(plan, model, exo_names, params)
+      if (!is.null(out)) return(out)
+    }
+  }
+  .get_shock_cov_eval(model, exo_names, params)
+}
+
+.get_shock_cov_eval <- function(model, exo_names, params) {
   n_exo   <- length(exo_names)
   stderr  <- .get_shock_stderr(model, exo_names, params)
   Sigma_e <- diag(stderr^2, nrow = n_exo)
@@ -186,7 +220,218 @@
 }
 
 ## ---------------------------------------------------------------------------
-## Exact d Sigma_e / d params[nm]  (W91, 2026-09-28)
+## Planned shock-covariance evaluation
+##
+## .get_shock_cov() used to re-derive, on every call, facts that depend only
+## on the shocks block: the row of the variances table for each shock (a
+## data-frame row extraction per shock), the order of the fallback columns,
+## whether an expression string is a plain number (parsed and evaluated 80
+## times for an 80-shock model), the correlation rows. A "plan" holds them,
+## computed once per (shocks block, shock names); a call then only reads the
+## parameter vector.
+##
+## What a call may still need from the original evaluation:
+##   * a shock whose chain reaches an expression that is neither a number nor
+##     a bare parameter name (sqrt(s1), s1 * 2, ...) is evaluated by
+##     .get_shock_stderr() itself, for those shocks only;
+##   * a correlation / covariance row with such an expression -- or naming a
+##     parameter absent from `params` -- makes the call use the direct
+##     evaluation (.get_shock_cov_eval) as a whole.
+## Both are the unplanned code, so a planned call and a direct one agree
+## exactly; test-t20-perf-grad-cache.R compares them on every shape of shocks
+## block the package builds.
+## ---------------------------------------------------------------------------
+.shock_cov_plan_memo <- new.env(parent = emptyenv())
+
+## A plain decimal literal (what a parsed numeric stderr / variance prints as).
+.SHOCK_NUM_LITERAL <- "^[-+]?([0-9]+[.]?[0-9]*|[.][0-9]+)([eE][-+]?[0-9]+)?$"
+## A bare identifier: evaluates to the parameter of that name when `params`
+## has one.
+.SHOCK_SYMBOL <- "^[A-Za-z.][A-Za-z0-9._]*$"
+
+## One expression string -> list(kind = "const", value) / list(kind = "sym",
+## sym) / list(kind = "expr").
+.shock_expr_kind <- function(txt) {
+  s <- trimws(txt)
+  if (length(s) != 1L || is.na(s)) return(list(kind = "expr"))
+  if (grepl(.SHOCK_NUM_LITERAL, s))
+    return(list(kind = "const",
+                value = eval(parse(text = s, keep.source = FALSE)[[1L]],
+                             baseenv())))
+  if (grepl(.SHOCK_SYMBOL, s)) return(list(kind = "sym", sym = s))
+  list(kind = "expr")
+}
+
+## The plan for a shocks block, or NULL when a correlation/covariance row
+## carries an expression the plan cannot evaluate without the original code.
+## Remembers the last few blocks it was asked about.
+.shock_cov_plan <- function(shocks, exo_names) {
+  entries <- .shock_cov_plan_memo$entries
+  for (e in entries)
+    if (identical(e$shocks, shocks) && identical(e$exo, exo_names))
+      return(e$plan)
+  plan <- .shock_cov_plan_build(shocks, exo_names)
+  entries <- c(list(list(shocks = shocks, exo = exo_names, plan = plan)),
+               entries)
+  .shock_cov_plan_memo$entries <- entries[seq_len(min(length(entries), 4L))]
+  plan
+}
+
+.shock_cov_plan_build <- function(shocks, exo_names) {
+  n_exo <- length(exo_names)
+  sv <- if (!is.null(shocks) && is.data.frame(shocks$variances))
+    shocks$variances else NULL
+
+  ## ---- per-shock fallback chains (the order .get_shock_stderr walks) ------
+  se_const <- rep(0, n_exo)          # value when the chain resolves on constants
+  dyn      <- vector("list", n_exo)  # remaining steps when it does not
+  for (i in seq_len(n_exo)) {
+    if (is.null(sv)) next
+    idx <- which(sv$name == exo_names[i])
+    if (length(idx) == 0L) next
+    row <- sv[idx[1L], ]
+    cols <- names(row)
+    raw <- list(
+      list(col = "stderr_expr", type = "se"),
+      list(col = "variance_expr", type = "var"),
+      list(col = "stderr", type = "se"),
+      list(col = "variance", type = "var"))
+    steps <- list()
+    for (r in raw) {
+      if (!(r$col %in% cols)) next
+      v <- row[[r$col]]
+      if (is.na(v)) next
+      st <- .shock_expr_kind(as.character(v))
+      st$type <- r$type
+      steps[[length(steps) + 1L]] <- st
+    }
+    se <- NA_real_
+    for (k in seq_along(steps)) {
+      st <- steps[[k]]
+      if (st$kind != "const") { dyn[[i]] <- steps[k:length(steps)]; break }
+      se <- .shock_step_apply(se, st$type, st$value)
+      if (!(is.na(se) || !is.finite(se))) break
+    }
+    if (is.null(dyn[[i]]))
+      se_const[i] <- if (is.na(se) || !is.finite(se)) 0 else se
+  }
+
+  ## ---- correlation / covariance rows ---------------------------------------
+  rows <- list()
+  corr_df <- shocks$correlations
+  if (!is.null(corr_df) && nrow(corr_df) > 0) {
+    for (k in seq_len(nrow(corr_df))) {
+      r <- corr_df[k, ]
+      i <- match(r$var1, exo_names)
+      j <- match(r$var2, exo_names)
+      if (is.na(i) || is.na(j)) next
+      has_cov_expr <- "cov_expr" %in% names(r) && !is.na(r$cov_expr) &&
+                      nzchar(as.character(r$cov_expr))
+      has_cov_val  <- "cov" %in% names(r) && !is.na(r$cov)
+      cov_type <- has_cov_expr || has_cov_val
+      ex <- NULL
+      if (cov_type) {
+        if (has_cov_expr) ex <- .shock_expr_kind(as.character(r$cov_expr))
+        fb <- r$cov
+      } else {
+        if ("corr_expr" %in% names(r) && !is.na(r$corr_expr) &&
+            nzchar(r$corr_expr))
+          ex <- .shock_expr_kind(as.character(r$corr_expr))
+        fb <- r$corr
+      }
+      if (!is.null(ex) && identical(ex$kind, "expr")) return(NULL)
+      rows[[length(rows) + 1L]] <- list(i = i, j = j, cov_type = cov_type,
+                                        ex = ex, fb = fb)
+    }
+  }
+  list(se_const = se_const, dyn = dyn,
+       dyn_idx = which(!vapply(dyn, is.null, logical(1))), rows = rows)
+}
+
+## One step of the stderr chain: `type` "se" takes the value as the std,
+## "var" takes sqrt of a usable variance and otherwise leaves `se` as it was.
+.shock_step_apply <- function(se, type, v) {
+  if (identical(type, "se")) return(v)
+  if (!is.na(v) && is.finite(v) && v >= 0) sqrt(v) else se
+}
+
+## The shock stds at `params` from a plan.
+.shock_stderr_from_plan <- function(plan, model, exo_names, params) {
+  n_exo <- length(exo_names)
+  stderr <- plan$se_const
+  pv <- params[exo_names]
+  p0 <- is.finite(pv)
+  stderr[p0] <- pv[p0]                      # Priority 0: shock-named parameter
+  dyn_idx <- plan$dyn_idx
+  if (length(dyn_idx)) {
+    pn <- names(params)
+    fb <- integer(0)
+    for (i in dyn_idx[!p0[dyn_idx]]) {
+      se <- NA_real_
+      use_orig <- FALSE
+      for (st in plan$dyn[[i]]) {
+        if (!(is.na(se) || !is.finite(se))) break
+        if (st$kind == "const") {
+          v <- st$value
+        } else {
+          m <- if (st$kind == "sym") match(st$sym, pn) else NA_integer_
+          if (is.na(m)) { use_orig <- TRUE; break }
+          v <- params[[m]]
+        }
+        se <- .shock_step_apply(se, st$type, v)
+      }
+      if (use_orig) fb <- c(fb, i)
+      else stderr[i] <- if (is.na(se) || !is.finite(se)) 0 else se
+    }
+    if (length(fb))
+      stderr[fb] <- unname(.get_shock_stderr(model, exo_names[fb], params))
+  }
+  names(stderr) <- exo_names
+  stderr
+}
+
+## .get_shock_cov_eval() from a plan; NULL when a row needs a parameter that
+## `params` does not carry (the caller then evaluates the block directly).
+.shock_cov_from_plan <- function(plan, model, exo_names, params) {
+  n_exo  <- length(exo_names)
+  stderr <- .shock_stderr_from_plan(plan, model, exo_names, params)
+  Sigma_e <- diag(stderr^2, nrow = n_exo)
+  rownames(Sigma_e) <- colnames(Sigma_e) <- exo_names
+
+  pn <- names(params)
+  for (r in plan$rows) {
+    val <- NA_real_
+    ex <- r$ex
+    if (!is.null(ex)) {
+      if (ex$kind == "const") {
+        val <- ex$value
+      } else {
+        m <- match(ex$sym, pn)
+        if (is.na(m)) return(NULL)
+        val <- params[[m]]
+      }
+    }
+    if (is.na(val) || !is.finite(val)) val <- r$fb
+    if (r$cov_type) {
+      if (is.finite(val)) Sigma_e[r$i, r$j] <- Sigma_e[r$j, r$i] <- val
+    } else if (is.finite(val)) {
+      Sigma_e[r$i, r$j] <- Sigma_e[r$j, r$i] <-
+        val * stderr[r$i] * stderr[r$j]
+    }
+  }
+
+  cidx <- .corr_params_index(params, exo_names)
+  for (k in seq_len(nrow(cidx))) {
+    rho <- params[[cidx$k[k]]]
+    if (!is.finite(rho)) next
+    i <- cidx$i[k]; j <- cidx$j[k]
+    Sigma_e[i, j] <- Sigma_e[j, i] <- rho * stderr[i] * stderr[j]
+  }
+  Sigma_e
+}
+
+## ---------------------------------------------------------------------------
+## Exact d Sigma_e / d params[nm]
 ##
 ## The gradient layer needs, per estimated parameter, the partial derivative
 ## of .get_shock_cov(model, exo, params) w.r.t. the params entry of that name
@@ -245,8 +490,10 @@
   ## Evaluating Sigma_e once at the reference point parses (and allowlist-
   ## checks) every reachable expression into the shared .dynhr_expr_cache; a
   ## text that is not in the cache afterwards was never parseable there, and
-  ## a draw that reaches it returns NULL from the evaluator (-> FD).
-  .get_shock_cov(model, exo_names, params)
+  ## a draw that reaches it returns NULL from the evaluator (-> FD). Only the
+  ## direct evaluation fills that cache (the planned one never parses the
+  ## strings it resolves up front), so it is the one called here.
+  .get_shock_cov(model, exo_names, params, use_plan = FALSE)
   texts <- character(0)
   sv <- model$shocks$variances
   if (is.data.frame(sv) && nrow(sv) > 0L) {
@@ -298,7 +545,7 @@
 ##   entry is NULL where no exact derivative exists at this point (the caller
 ##   takes the FD for that name). NULL overall when the plan does not apply at
 ##   this draw (unbound symbol, unparsed branch reached, value mismatch) or
-##   when Sigma_ref or the walk's own value is not finite (W94: an overflowing
+##   when Sigma_ref or the walk's own value is not finite (An overflowing
 ##   std, s = 4e154 -> s^2 = Inf, has no exact derivative; the drift guard
 ##   below used to compare Inf - Inf = NaN and ERROR, crashing every caller --
 ##   make_posterior_grad(), the order-2 layer, the Whittle FIM -- instead of
@@ -461,7 +708,7 @@
 #' honouring \code{stderr}, \code{var a,b = cov}, and \code{corr a,b}
 #' (including expression-valued entries re-evaluated against \code{params}).
 #' This is the same matrix the Kalman filter, Whittle likelihood, and the
-#' spectral/identification diagnostics (D13, D15, D23, D24) use internally, so
+#' spectral/identification diagnostics use internally, so
 #' it is the correct value to pass as their \code{sigma_e=} argument.
 #'
 #' @param model A parsed model object (from \code{\link{parse_mod}}).
@@ -614,7 +861,7 @@ apply_theta_to_params <- function(model, theta, params = NULL) {
 ## implementations could drift.
 .apply_theta_to_params <- apply_theta_to_params
 
-## Put a parameter vector into `par_names` order, by NAME (brief 31 A2).
+## Put a parameter vector into `par_names` order, by NAME.
 ##
 ## Every theta-taking closure (the make_log_posterior* family through
 ## .make_posterior_closure(), make_posterior_grad() and its "logpost_grad"
@@ -642,7 +889,7 @@ apply_theta_to_params <- function(model, theta, params = NULL) {
   if (identical(nm, par_names) || is.null(par_names)) return(theta)
   ## A length-0 theta is the explicit "evaluate at the calibrated parameter
   ## values" call (no estimated parameter overridden; the prior contributes
-  ## 0) -- deliberate and unambiguous, so it passes through (0.9.4).
+  ## 0) -- deliberate and unambiguous, so it passes through.
   if (length(theta) == 0L) return(theta)
   n <- length(par_names)
   if (is.null(nm) || all(!is.na(nm) & !nzchar(nm))) {
@@ -737,7 +984,7 @@ apply_theta_to_params <- function(model, theta, params = NULL) {
 ## @param model, compiled, sys_cache As in make_log_posterior.
 ## @param theta      Named numeric draw.
 ## @param state      environment with a `ss_warm` field (mutable cache).
-## @param shock_scale No longer consulted (W65): a unit-root draw with a
+## @param shock_scale No longer consulted: a unit-root draw with a
 ##   heteroskedastic shock_scale is filterable (kalman_filter runs the exact
 ##   diffuse phase on the sequential filter), so -- exactly like
 ##   make_log_posterior's guard -- only the stationary init rejects it. Kept
@@ -767,7 +1014,7 @@ apply_theta_to_params <- function(model, theta, params = NULL) {
   }
   state$ss_warm <- ss_result$ss
 
-  ## Re-derive any steady_state_model-computed parameter (Tier 13 #1 fix).
+  ## Re-derive any steady_state_model-computed parameter.
   params <- ss_result$params %||% params
   sys <- extract_system_matrices_fast(sys_cache, ss_result$ss, params)
   dr  <- .solve_from_system(sys, model, compiled, ss_result$ss, params, FALSE)
@@ -792,7 +1039,7 @@ apply_theta_to_params <- function(model, theta, params = NULL) {
 }
 
 ## ---------------------------------------------------------------------------
-## .mod blocks a direct make_log_posterior() call does not apply (brief 28 D1)
+## .mod blocks a direct make_log_posterior() call does not apply
 ## ---------------------------------------------------------------------------
 ## The spec runner applies a model's filter_tunes / heteroskedastic_shocks
 ## (as me_extra / shock_scale), stochastic_volatility (likelihood "sv_rbpf")
@@ -842,9 +1089,8 @@ apply_theta_to_params <- function(model, theta, params = NULL) {
   invisible(miss)
 }
 
-## The `...` names make_log_posterior() forwards, per likelihood (brief 32
-## P3b). Every other branch ignores `...`, so an argument meant for another
-## likelihood (make_posterior(order = 99L) with the Gaussian one) or a typo
+## The `...` names make_log_posterior() forwards, per likelihood. Every other branch ignores `...`, so an argument meant for
+## another likelihood (make_posterior(order = 99L) with the Gaussian one) or a typo
 ## used to be dropped without a word. tpf / cumulant forward `...` to their
 ## factory, so their names are read off its formals.
 .mlp_dots_by_likelihood <- function() {
@@ -1093,7 +1339,7 @@ make_log_posterior <- function(model, data, prior_spec, obs_vars = NULL,
     infeasible_penalty <- ctx$infeasible_penalty %||% infeasible_penalty
     ms_spec_ctx        <- ctx$ms_spec        # shock-variance MS path
     ms_struct_spec_ctx <- ctx$ms_struct_spec # structural MS path (new)
-    ## GPB collapse depth for the Kim filters (F3-C).  Older contexts predate
+    ## GPB collapse depth for the Kim filters.  Older contexts predate
     ## the field, so a missing entry means the historical GPB(2).
     if (!is.null(ctx$ms_collapse)) ms_collapse_ctx <- ctx$ms_collapse
     student_df         <- ctx$student_df %||% student_df
@@ -1103,13 +1349,13 @@ make_log_posterior <- function(model, data, prior_spec, obs_vars = NULL,
   likelihood <- match.arg(likelihood)
   if (!pruned_order %in% c(2L, 3L))
     stop("make_log_posterior: `pruned_order` must be 2 or 3.")
-  ## Brief 32 P3b: unknown `...` names are an error; an argument that does not
+  ## Unknown `...` names are an error; an argument that does not
   ## apply to this likelihood warns (it used to be dropped silently).
   .mlp_check_arguments(likelihood, ...names(), freq_band = freq_band,
                        pruned_order = pruned_order, student_df = student_df,
                        lik_init = lik_init)
 
-  ## Brief 28 D1: .mod blocks this call does not apply (the spec runner does).
+  ## .mod blocks this call does not apply (the spec runner does).
   .warn_mod_blocks_ignored(model, likelihood, me_extra, shock_scale,
                            "make_log_posterior")
 
@@ -1163,7 +1409,7 @@ make_log_posterior <- function(model, data, prior_spec, obs_vars = NULL,
   }
 
   ## Default obs_vars from the model's varobs declaration (parse_mod also
-  ## exposes it as model$obs_vars) — pathological-DSGE paper gap #4.
+  ## exposes it as model$obs_vars).
   if (is.null(obs_vars) || length(obs_vars) == 0L) {
     obs_vars <- model$obs_vars %||% model$varobs_names
     if (is.null(obs_vars) || length(obs_vars) == 0L)
@@ -1177,7 +1423,7 @@ make_log_posterior <- function(model, data, prior_spec, obs_vars = NULL,
   ## H = diag(me). Checked here rather than inside the closure: every
   ## per-draw likelihood call is wrapped in a tryCatch that maps errors to
   ## loglik = -Inf, so an unusable me_variance used to surface as a posterior
-  ## that is -Inf at EVERY theta instead of as an error (0.9.4 W53). The
+  ## that is -Inf at EVERY theta instead of as an error (0.9.4). The
   ## Markov-switching Kim filters and every non-Kalman likelihood implement
   ## H = me I only and refuse a genuine vector with a classed error.
   me_variance <- .kf_me_variance(
@@ -1268,7 +1514,7 @@ make_log_posterior <- function(model, data, prior_spec, obs_vars = NULL,
 
   if (likelihood == "tpf") {
     ## Hard stop on me_variance <= 0: the TPF requires positive measurement
-    ## error variance as its tempering instrument (Landmine 1).
+    ## error variance as its tempering instrument.
     if (!is.numeric(me_variance) || length(me_variance) != 1L ||
         !is.finite(me_variance) || me_variance <= 0) {
       stop(
@@ -1439,7 +1685,7 @@ make_log_posterior <- function(model, data, prior_spec, obs_vars = NULL,
 
   if (likelihood == "pskf") {
     ## Pruned Skewed Kalman Filter. Deterministic likelihood (no particles);
-    ## analytic gradient not supported (brief: .ctx_allows_analytic_gradient
+    ## analytic gradient not supported (.ctx_allows_analytic_gradient
     ## returns FALSE for pskf since likelihood != "gaussian").
     ## Merge any cut_tol from ... for exposed pruning parameter.
     pskf_dots <- list(...)
@@ -1762,6 +2008,7 @@ make_log_posterior <- function(model, data, prior_spec, obs_vars = NULL,
   .make_posterior_closure(
     model, data, prior_spec, obs_vars, compiled,
     obs_trends_ok = TRUE,
+    structural_cache = TRUE,
     solve_fn = .gaussian_solve,
     loglik_fn = function(sol, params, ss, theta, me_floor_check, ...) {
       ## MS-DSGE path: use the Kim-Nelson filter when ms_spec is present.
@@ -1891,7 +2138,7 @@ make_loglik_contrib <- function(model, data, prior_spec = NULL, obs_vars = NULL,
          "approximate one.", call. = FALSE)
 
   ## Default obs_vars from the model's varobs declaration, identical to
-  ## make_log_posterior (pathological-DSGE paper gap #4 / v9024).
+  ## make_log_posterior.
   if (is.null(obs_vars) || length(obs_vars) == 0L) {
     obs_vars <- model$obs_vars %||% model$varobs_names
     if (is.null(obs_vars) || length(obs_vars) == 0L)

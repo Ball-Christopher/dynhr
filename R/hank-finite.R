@@ -1,14 +1,8 @@
 ## R/hank-finite.R
 ## --------------------------------------------------------------------------
-## Promotion of the finite-HANK .mod emitter (Tier 18, milestone m5, orders
-## 2/3 scope) into the package proper. Scratch derivation, GO/verification
-## numbers, and the full design rationale:
-##   .claude/orchestration/truncation/m5_orders23_SCOPE.md  (spec + ladder)
-##   .claude/orchestration/truncation/m5_mod_emit.R          (working emitter)
-##   .claude/orchestration/truncation/m5_o23_verify.R        (PF-asymmetry
-##     oracle for orders 2/3)
-## This file is a faithful PORT of m5_mod_emit.R's `emit_hank_mod()` and
-## driver into two exported entry points; it does not redesign the emission.
+## Finite-HANK .mod emitter (orders 1-3) and driver: `hank_finite_mod()`
+## and `hank_finite_solve()`. The emission is verified against a
+## PF-asymmetry oracle for orders 2/3.
 ##
 ## Family caveat (IMPORTANT for callers): the direct-Euler finite model
 ## emitted here is a DIFFERENT member of the coarse-grid family than the
@@ -44,7 +38,7 @@
 
 #' Emit the anchored coarse-grid finite-state HANK as a dynhr .mod
 #'
-#' Direct port of the Tier-18/m5 prototype emitter. Writes the
+#' Writes the
 #' finite-state HANK's EQUILIBRIUM CONDITIONS directly (the standard way
 #' Reiter-style models are fed to Dynare-style parsers), rather than
 #' symbolically differentiating the EGM backward step (which is not

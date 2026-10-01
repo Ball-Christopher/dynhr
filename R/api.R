@@ -160,11 +160,25 @@ prior_spec <- function(model) extract_prior_spec(model)
 #'   default) or \code{"cumulant"} (cumulant-matching, Mutschler 2015).
 #'   The cumulant likelihood works with any perturbation order >= 1;
 #'   orders >= 2 provide skewness/kurtosis content.
-#' @param ...         Additional arguments forwarded to the internal
-#'   likelihood constructor. For \code{likelihood = "cumulant"}, supports
-#'   \code{order} (perturbation order, default 2), \code{cumulant_orders}
-#'   (which orders to match, default 1:4), and \code{cumulant_weight}
-#'   ("identity" or "precision").
+#' @param ...         Additional arguments forwarded to
+#'   \code{\link{make_log_posterior}}, which validates them against the
+#'   chosen likelihood. The names each likelihood accepts here:
+#'   \itemize{
+#'     \item \code{"gaussian"}: none beyond the \code{make_log_posterior}
+#'       formals \code{lik_init}, \code{me_extra}, \code{shock_scale},
+#'       \code{system_priors}, \code{infeasible_penalty} and \code{power}.
+#'     \item \code{"cumulant"}: \code{order} (perturbation order, default 2),
+#'       \code{cumulant_orders} (which orders to match, default 1:4),
+#'       \code{cumulant_weight} (\code{"identity"} or \code{"precision"}),
+#'       \code{weight_matrix} and \code{h}.
+#'     \item \code{"pruned"}: none beyond \code{pruned_order} (2 or 3).
+#'   }
+#'   A name that no likelihood takes is an error of class
+#'   \code{dynhr_error_unknown_argument}; a name that another likelihood takes
+#'   is ignored with a warning of class
+#'   \code{dynhr_warning_inapplicable_argument}. The other likelihood types of
+#'   \code{make_log_posterior} (e.g. \code{"pskf"}, \code{"whittle"},
+#'   \code{"tpf"}) and their arguments are available by calling it directly.
 #' @return A function \code{function(theta)} returning a named list
 #'   \code{list(logpost, loglik, logprior)}
 #' @seealso \code{\link{prior_spec}}, \code{\link{find_mode}}, \code{\link{dynhr_mcmc}},
@@ -385,7 +399,25 @@ dynhr_mcmc <- function(log_post_fn, theta0, Sigma_prop,
 #'   production runs)
 #' @param ...         Additional arguments forwarded to the internal sampler:
 #'   \code{ess_target}, \code{n_mh_steps}, \code{mh_scale_factor},
-#'   \code{parallel}, \code{verbose}
+#'   \code{mut_target}, \code{mixture_weights}, \code{parallel},
+#'   \code{backend}, \code{seed_base}, \code{verbose}, and the tempering
+#'   arguments below.
+#'   \itemize{
+#'     \item \code{lambda_schedule}: a fixed likelihood-tempering ladder
+#'       ending at 1 (default \code{NULL}: adaptive, chosen by bisection on
+#'       \code{ess_target}). Stages beyond the supplied ladder are adaptive. A ladder that is not strictly increasing, or has a value outside (0, 1] or a non-finite value, is an error.
+#'     \item \code{phi_schedule}: without \code{approx_loglik_fn} an alias for
+#'       \code{lambda_schedule} (supplying both with different values is an
+#'       error of class \code{dynhr_error_schedule_conflict}); with
+#'       \code{approx_loglik_fn} it is the fixed schedule of the model-tempering
+#'       bridge from the approximating model to \code{log_post_fn}.
+#'     \item \code{approx_loglik_fn}, \code{init_particles},
+#'       \code{log_Z_approx}: enable model tempering (Mlikota and Schorfheide
+#'       2024); see \code{\link{smc_model_tempered}} for the two-stage
+#'       workflow. \code{lambda_schedule} is not supported together with
+#'       \code{approx_loglik_fn} and is an error of class
+#'       \code{dynhr_error_inapplicable_argument}.
+#'   }
 #' @return A \code{\link{dynhr_chains}} object.  The \code{$log_marginal_lik}
 #'   slot contains the log marginal likelihood estimate
 #'   \eqn{\log p(Y | \mathcal{M})}
@@ -624,16 +656,26 @@ run_diagnostics <- function(...) run_all_diagnostics(...)
 #'   Alternative to \code{prior_sampler}; forwarded to both stages.
 #' @param log_post_fn_M0 Optional.  Full M0 log-posterior function (same
 #'   interface as \code{log_post_fn_M1}).  When \code{NULL} (default), built
-#'   automatically from \code{approx_loglik_fn} + the shared prior.
+#'   automatically from \code{approx_loglik_fn} + the shared prior -- but the
+#'   prior terms are then read from \code{log_post_fn_M1(theta)}, so EVERY
+#'   Stage-1 evaluation also runs the full M1 likelihood and Stage 1 costs at
+#'   least as much per evaluation as Stage 2: the cheap approximating
+#'   likelihood saves nothing there. Supply \code{log_post_fn_M0} (prior plus
+#'   cheap likelihood only) to make Stage 1 cheap.
 #' @param n_particles Number of particles (same for both stages).
 #' @param ess_target ESS ratio target for adaptive tempering.
 #' @param n_mh_steps RWMH mutation steps per tempering stage.
-#' @param seed_M0 RNG seed for Stage 1 (M0 run).  Default \code{1L}.
+#' @param seed_M0 RNG seed for Stage 1 (M0 run).  Default \code{1L}. Each
+#'   stage is seeded locally: the caller's global RNG stream is restored on
+#'   exit.
 #' @param seed_M1 RNG seed for Stage 2 (M1 bridge run).  Default \code{2L}.
 #' @param verbose Print progress messages.
 #' @param ... Additional arguments forwarded to both internal
 #'   \code{dynhr_smc()} calls: e.g. \code{mh_scale_factor},
-#'   \code{mixture_weights}, \code{parallel}, \code{backend}.
+#'   \code{mixture_weights}, \code{parallel}, \code{backend}. A
+#'   \code{lambda_schedule} fixes the Stage-1 (M0) likelihood-tempering ladder
+#'   and is not passed to Stage 2; a \code{phi_schedule} fixes the Stage-2
+#'   bridge and is not passed to Stage 1.
 #'
 #' @return A \code{\link{dynhr_chains}} object (M1 posterior) with extra
 #'   slots \code{log_Z_M0}, \code{log_ratio}, and \code{stage1}.

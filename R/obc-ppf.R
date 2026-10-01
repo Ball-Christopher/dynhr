@@ -3,7 +3,7 @@
 ## OBC Piecewise Particle Filter (PPF): bootstrap and conditionally-optimal
 ## (COPF) proposals for OccBin piecewise-linear models.
 ##
-## TRANSITION (W50, 2026-09-25).  A particle carries s_{t-1}.  In period t it
+## TRANSITION.  A particle carries s_{t-1}.  In period t it
 ## draws eps_t and follows the OccBin rule of the regime SEQUENCE expected
 ## from ITS OWN (s_{t-1}, eps_t): the guess-and-verify solve of Dynare's
 ## OccBin (shock eps_t in period t, no shock after, check-ahead horizon 200,
@@ -25,7 +25,7 @@
 ## tail of .obc_pkf_prep()).  An all-slack solution -- the common case -- is
 ## one product for the whole cloud.
 ##
-## Before W50 each particle checked period t only, against the SLACK rule
+## Previously each particle checked period t only, against the SLACK rule
 ## (pkf_check_binding()), and a binding period used the one-period policy of
 ## obc_ensure_policy() (next period slack): exact for one-period spells only.
 ##
@@ -588,7 +588,7 @@
 #'   5. Systematically resamples and propagates the state
 #' A period with no observation propagates the cloud (weights equal).
 #'
-#' Changed in W50 (2026-09-25): step 2 used to check period t only against
+#' Changed in Step 2 used to check period t only against
 #' the slack rule and apply the one-period binding policy (next period
 #' slack), which is wrong for spells of two or more periods.
 #'
@@ -637,15 +637,7 @@ ppf_likelihood <- function(Y, dr_slack, regime_cache, sys,
     ## Local seed: deterministic in theta but leaves the CALLER's RNG stream
     ## untouched (an outer sampler must not replay the same proposals; see
     ## .with_local_seed in tpf-likelihood.R and NEWS 0.9.2.0003).
-    .ge_ <- globalenv()
-    .had_ <- exists(".Random.seed", envir = .ge_, inherits = FALSE)
-    .old_ <- if (.had_) get(".Random.seed", envir = .ge_, inherits = FALSE) else NULL
-    on.exit({
-      if (.had_) assign(".Random.seed", .old_, envir = .ge_)
-      else if (exists(".Random.seed", envir = .ge_, inherits = FALSE))
-        rm(list = ".Random.seed", envir = .ge_)
-    }, add = TRUE)
-    set.seed(seed)
+    .local_seed(seed)
   }
 
   endo    <- dr_slack$endo_names
@@ -682,7 +674,7 @@ ppf_likelihood <- function(Y, dr_slack, regime_cache, sys,
 
   ## ---- Initialise particles from slack-policy stationary distribution -----
   pol_s <- eng$pk$slack
-  ## Both fallbacks are in the model's units (W79): P_0 scales as Sigma_e.
+  ## Both fallbacks are in the model's units: P_0 scales as Sigma_e.
   ## They used to be diag(1e-6) (no stationary P_0) and a factor diag(1e-3)
   ## (chol failure) -- absolute, behind tryCatch: with every shock std and
   ## the data x 1e-4 a PSD-singular P_0 (an exact linear dependence among
@@ -786,7 +778,7 @@ ppf_likelihood <- function(Y, dr_slack, regime_cache, sys,
 #' solved by guess-and-verify (as \code{kalman_filter_obc_pkf} does for the
 #' filtered state) and the period's time-varying rule is applied.
 #'
-#' Changed in W50 (2026-09-25): the particles used to check the current
+#' Changed in The particles used to check the current
 #' period only, against the slack rule, and to apply the one-period binding
 #' policy (next period slack), which is wrong for spells of two or more
 #' periods; and a period with no observation was skipped instead of

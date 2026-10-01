@@ -93,7 +93,7 @@
 #' Preallocate triplet index vectors for the sparse stacked Jacobian
 #'
 #' Uses dyn$jac_triplets to estimate NNZ budget. Falls back to growable
-#' vectors when jac_triplets is NULL or empty (Landmine 3).
+#' vectors when jac_triplets is NULL or empty.
 #'
 #' @param dyn   compiled$dynamic
 #' @param T     Integer: horizon
@@ -126,8 +126,7 @@
 #'
 #' Assembles the T*n_eq x T*n_endo block-tridiagonal Jacobian and the
 #' stacked residual for the current path Y with the given OBC regime.
-#' OBC row modifications are applied to Rt/Jt BEFORE the triplet scatter
-#' (Landmine 2).
+#' OBC row modifications are applied to Rt/Jt BEFORE the triplet scatter.
 #'
 #' @param Y          T x n_endo numeric matrix
 #' @param y0_num     Length-n_endo initial state
@@ -179,7 +178,7 @@
     Jt <- dyn$jacobian_fn(dy, params, y_ss)
     Mt <- .pf_term_mag(Jt, dy)
 
-    # OBC: replace binding equations in Rt/Jt BEFORE scatter (Landmine 2)
+    # OBC: replace binding equations in Rt/Jt BEFORE scatter
     if (n_spec > 0L) {
       for (s in seq_len(n_spec)) {
         if (!regime[s, t]) next
@@ -243,7 +242,7 @@
     v_t <- v_t[seq_len(ptr)]
   }
 
-  # Build dgCMatrix — repr = "C" replaces deprecated giveCsparse = TRUE (Landmine 5)
+  # Build dgCMatrix — repr = "C" replaces deprecated giveCsparse = TRUE
   if (length(i_t) == 0L) {
     J <- Matrix::sparseMatrix(i = 1L, j = 1L, x = 0,
                               dims = c(n_total, n_total),
@@ -261,7 +260,7 @@
 }
 
 
-## Newton stop (W80).  RELATIVE part, as occbin_solve_path() since W79: every
+## Newton stop.  RELATIVE part, as occbin_solve_path() since Every
 ## stacked equation's residual within tol times the magnitude of its own
 ## terms (.pf_term_mag()), plus a round-off floor relative to the largest one
 ## (an equation whose terms are all round-off).  Without it, in small units
@@ -275,7 +274,7 @@
 ## 444 stop decisions of the perfect-foresight / Ramsey-OBC suites (and
 ## their results, at 1e-10) -- with both, none moved.  The price: in units
 ## so large that the round-off of the biggest terms exceeds tol (terms
-## ~ 1e5 at tol = 1e-10) the absolute part cannot pass, as before W80.
+## ~ 1e5 at tol = 1e-10) the absolute part cannot pass, as before.
 .pf_newton_stop <- function(R, mag, tol) {
   max(abs(R)) < tol &&
     all(abs(R) <= tol * mag + 64 * .Machine$double.eps * max(mag))
@@ -431,7 +430,7 @@ pf_newton_solve <- function(compiled,
     }, integer(1))
   } else integer(0)
 
-  # Resolve auto method: sparse when T*n_endo >= 100 (Landmine 6)
+  # Resolve auto method: sparse when T*n_endo >= 100
   use_sparse <- switch(method,
     auto   = (T * n_endo >= 100L),
     sparse = TRUE,
@@ -489,7 +488,7 @@ pf_newton_solve <- function(compiled,
     n_iter_final     <- 0L
 
     # LU factor cache: computed at iter==1, reused on subsequent iters,
-    # invalidated on regime change (Landmine 1).
+    # invalidated on regime change.
     lu_cache <- NULL
     lu_valid <- FALSE
 
@@ -523,7 +522,7 @@ pf_newton_solve <- function(compiled,
         }
 
         # Compute (or reuse) LU factorisation.
-        # Always recompute on iter == 1 (start of each Newton loop) — Landmine 1.
+        # Always recompute on iter == 1 (start of each Newton loop).
         if (iter == 1L || !lu_valid) {
           lu_cache <- Matrix::lu(J_sparse)
           lu_valid <- TRUE
@@ -676,7 +675,7 @@ pf_newton_solve <- function(compiled,
       break
     }
 
-    # Regime changed: invalidate LU cache (Landmine 1)
+    # Regime changed: invalidate LU cache
     lu_cache <- NULL
     lu_valid <- FALSE
     regime <- new_regime
@@ -707,8 +706,8 @@ pf_newton_solve <- function(compiled,
 ## Complementarity update of the OBC regime path after a Newton solve.
 ## Both decisions take Dynare's plain inequalities up to a round-off band
 ## RELATIVE to the magnitude of the quantities compared (.obc_gap_binds() /
-## .obc_mult_keeps(), R/obc-binding.R, as the OccBin guess-and-verify since
-## W78), so the regimes do not depend on the units of the model.  (Before W80
+## .obc_mult_keeps(), R/obc-binding.R, as the OccBin guess-and-verify),
+## so the regimes do not depend on the units of the model.  (Previously
 ## the band was an absolute tol in level units: with the shocks and the bound
 ## scaled by 1e-4, a violation smaller than 1e4 * tol was ignored.)
 ##

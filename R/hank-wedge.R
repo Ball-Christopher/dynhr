@@ -1,6 +1,6 @@
 ## R/hank-wedge.R
 ## --------------------------------------------------------------------------
-## D3 (briefs/19 section 9.7): the BORROWING WEDGE on the one-asset household.
+## The BORROWING WEDGE on the one-asset household.
 ## The liquid return becomes state-dependent -- r_plus on savings (b >= 0),
 ## r_minus on debt (b < 0) -- and r_minus is a SECOND AGGREGATE INPUT, not a
 ## parameter, so the DAG can compose the NZ chain

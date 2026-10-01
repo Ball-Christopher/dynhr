@@ -127,21 +127,17 @@ Registered options (default in parentheses):
     log-likelihood; only \code{$logpost} is tempered. Default \code{1} is
     bit-identical to the standard Bayesian posterior and is compatible with
     every existing sampler without any changes.}
-  \item{\code{pskf_cdf}}{\code{"accurate"} (default) or \code{"fast"};
-    how the skew-normal (PSKF) likelihood, \code{likelihood = "pskf"} and
+  \item{\code{pskf_cdf}}{\code{"accurate"} (the default and only accepted
+    value; \code{"fast"} was removed in 0.9.4.24 and now raises an error, as
+    it ran the slower R filter and was less accurate); how the skew-normal
+    (PSKF) likelihood, \code{likelihood = "pskf"} and
     \code{make_log_posterior_pskf_order2()}, evaluates its multivariate-normal
     CDFs. \code{"accurate"} evaluates the pruning compensation with the
     deterministic CDF up to dimension 5, and every 3- to 7-dimensional CDF
     with a deterministic C++ separation-of-variables lattice rule (Genz
     reordering, minimax tilting, log scale) whose error is below
     max(1e-5, 1e-7 |log p|); 2-dimensional CDFs are computed on the log
-    scale. \code{"fast"} is the evaluation before dynhr 0.9.4
-    (Mendell-Elston for the compensation, plain Miwa): about 3 to 4 times cheaper under
-    multi-shock skew and approximate: measured 3e-4 nat off an exact
-    likelihood with one skewed shock (T = 20), 0.002 nat with two skewed
-    shocks (T = 100) and 0.3 nat with three (T = 60). (Before dynhr 0.9.4.8
-    a Mendell-Elston sign error put it 0.14 to 18 nats off.) Resolved once
-    when the log-posterior is built.}
+    scale. Resolved once when the log-posterior is built.}
   \item{\code{allow_monge_metric}}{\code{FALSE} (default); the experimental
     \code{metric = "monge"} MALA option in \code{run_posterior_estimation()}
     errors unless this is \code{TRUE}, because the Monge metric collapses the

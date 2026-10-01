@@ -9,8 +9,8 @@
 ## and store the solved paths in two orientations (n_endo x T vs T x n_endo).
 ##
 ## This module provides ONE canonical object and adapters onto it.  It is
-## ADDITIVE: it does not modify any solver (item A1a).  Later increments (A1b)
-## may migrate solvers to emit it natively; a shared cache (A1c) can key on its
+## ADDITIVE: it does not modify any solver.  Later increments
+## may migrate solvers to emit it natively; a shared cache can key on its
 ## \code{path_hash}.
 ## --------------------------------------------------------------------------
 

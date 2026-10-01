@@ -50,9 +50,9 @@
 #'   divergence detection: \code{joint0 - joint1 > delta_max} is divergent)
 #' @param delta_max Maximum energy error before flagging divergence (default 1000)
 #' @param g The gradient at \code{theta}, carried from the evaluation that
-#'   produced it (W92 fused path; W94 the separate-call path too); NULL:
+#'   produced it (fused path; the separate-call path too); NULL:
 #'   computed with \code{grad_fn}.
-#' @param vg_fn Fused path (W92): \code{function(theta) -> list(lp, grad)}
+#' @param vg_fn Fused path: \code{function(theta) -> list(lp, grad)}
 #'   (\code{.hmc_fused_target()}); NULL = separate \code{lp_fn} /
 #'   \code{grad_fn} calls.
 #'
@@ -90,7 +90,7 @@
     names(theta1) <- par_names
 
     ## Fused: the leapfrog's end-point evaluation already carries the value.
-    ## Either path: its gradient is carried to the next step from here (W94).
+    ## Either path: its gradient is carried to the next step from here.
     lp1    <- if (is.null(vg_fn)) lp_fn(theta1) else step$lp
     g1     <- step$g
     joint1 <- lp1 - .hmc_kinetic(r1, M_inv_diag, M_inv = M_inv)
@@ -338,8 +338,8 @@
 #' @param max_treedepth,delta_max As in \code{dynhr_nuts()}.
 #' @param g_curr The gradient at \code{theta} when already known (NULL: one
 #'   \code{grad_fn} call here); carried along the trajectory on both paths
-#'   (W92 fused, W94 separate-call).
-#' @param vg_fn Fused path (W92): the value-and-gradient function
+#'.
+#' @param vg_fn Fused path: the value-and-gradient function
 #'   (\code{.hmc_fused_target()}); NULL = separate \code{lp_fn} /
 #'   \code{grad_fn} calls.
 #' @return list(theta, joint0, depth, divergent, alpha_sum, n_alpha, n_leaves,
@@ -356,7 +356,7 @@
   d <- length(theta)
   # --- Sample momentum ---
   r0 <- .hmc_sample_momentum(d, M_diag, chol_M = chol_M)
-  ## W94: the gradient at the start point, once for both directions (the
+  ## The gradient at the start point, once for both directions (the
   ## separate-call path used to recompute it at the first leaf of each).
   if (is.null(g_curr) && max_treedepth > 0L) g_curr <- grad_fn(theta)
 
@@ -464,6 +464,49 @@
 # ============================================================================
 # dynhr_nuts() -- NUTS with dual averaging + windowed mass adaptation
 # ============================================================================
+
+## --------------------------------------------------------------------------
+## NUTS argument checker
+## --------------------------------------------------------------------------
+
+#' Problems with the arguments of dynhr_nuts()
+#'
+#' Rules and why: the tree depth, the warmup window sizes and the draw counts
+#' are counts (a depth of 0 never moves the chain; a zero-width slow window
+#' never advances the warmup schedule); the step size and the divergence
+#' threshold are positive; the target acceptance is a probability strictly
+#' inside (0, 1) (dual averaging drives the step size to 0 or infinity at the
+#' ends); the mass diagonal / dense metric are positive / positive definite
+#' and match the parameter count.
+#'
+#' @param args Named list of the supplied dynhr_nuts() arguments.
+#' @param n_par Number of estimated parameters, or NULL when not known.
+#' @return Character vector of problems; \code{character(0)} when fine.
+#' @noRd
+.nuts_args_problem <- function(args, n_par = NULL) {
+  lr_names <- c("cutoff", "max_rank", "gamma")
+  rules <- c(list(
+    n_draws       = .mcmc_r_whole(1L),
+    n_warmup      = .mcmc_r_whole(0L),
+    step_size     = .mcmc_r_pos(),
+    max_treedepth = .mcmc_r_whole(1L),
+    target_accept = .mcmc_r_range(0, 1, TRUE, TRUE),
+    adapt_mass    = .mcmc_r_flag(),
+    init_buffer   = .mcmc_r_whole(0L),
+    base_window   = .mcmc_r_whole(1L),
+    term_buffer   = .mcmc_r_whole(0L),
+    delta_max     = .mcmc_r_pos(allow_inf = TRUE),
+    metric        = .mcmc_r_choice(c("diagonal", "warmup_dense", "lowrank", "fisher_diag")),
+    lowrank_control = function(v, nm, n_par) {
+      if (is.list(v) && (length(v) == 0L || !is.null(names(v))) &&
+          all(names(v) %in% lr_names)) return(NULL)
+      paste0("`lowrank_control` must be a named list with elements in: ",
+             paste(lr_names, collapse = ", "), ".")
+    }),
+    .mcmc_metric_rules(dynhr_nuts))
+  .mcmc_check_args(args, dynhr_nuts, "dynhr_nuts", rules, n_par)
+}
+
 
 #' @param log_post_fn function(theta) -> list(logpost, loglik, logprior)
 #' @param theta_init Named numeric vector of starting parameter values
@@ -610,18 +653,19 @@ dynhr_nuts <- function(
     lowrank_control = NULL
 ) {
   stopifnot(is.function(log_post_fn), is.numeric(theta_init))
+  .mcmc_abort_if_problems("dynhr_nuts", .nuts_args_problem(
+    list(n_draws = n_draws, n_warmup = n_warmup, step_size = step_size,
+         max_treedepth = max_treedepth, target_accept = target_accept,
+         adapt_mass = adapt_mass, init_buffer = init_buffer,
+         base_window = base_window, term_buffer = term_buffer,
+         grad_fn = grad_fn, delta_max = delta_max, mass_diag = mass_diag,
+         metric = metric, M_inv = M_inv, chol_M = chol_M,
+         lowrank_control = lowrank_control),
+    n_par = length(theta_init)))
   metric <- match.arg(metric)
   lr_ctrl <- list(cutoff = 2, max_rank = NULL, gamma = 1e-5)
-  if (!is.null(lowrank_control)) {
-    if (!is.list(lowrank_control) ||
-        (length(lowrank_control) > 0L && is.null(names(lowrank_control))) ||
-        !all(names(lowrank_control) %in% names(lr_ctrl))) {
-      .dynhr_abort(paste0("`lowrank_control` must be a named list with elements in: ",
-                          paste(names(lr_ctrl), collapse = ", "), "."),
-                   class = "dynhr_error_invalid_argument")
-    }
+  if (!is.null(lowrank_control))
     lr_ctrl[names(lowrank_control)] <- lowrank_control
-  }
   d <- length(theta_init)
   par_names <- names(theta_init)
   n_total <- n_draws + n_warmup
@@ -657,7 +701,7 @@ dynhr_nuts <- function(
   }
 
   # --- Gradient function ---
-  # kernel_stats (F5): make_posterior_grad()'s "implicit"/"adjoint"/
+  # kernel_stats: make_posterior_grad()'s "implicit"/"adjoint"/
   # "adjoint_solution" closures attach fallback-usage counters as
   # attr(grad_fn, "kernel_stats") -- captured from the caller-supplied
   # grad_fn BEFORE any transform-wrapping (which would drop the attribute)
@@ -670,7 +714,7 @@ dynhr_nuts <- function(
   } else {
     .grad <- grad_fn
   }
-  # --- Fused value + gradient (W92): one evaluation per new leaf, gradients
+  # --- Fused value + gradient: one evaluation per new leaf, gradients
   # carried along the trajectory; NULL = separate calls exactly as before.
   # (A checkpoint resume keeps its saved lp_curr; the gradient at the saved
   # position is re-evaluated once below.)
@@ -678,7 +722,7 @@ dynhr_nuts <- function(
                           transform = transform, verbose = verbose,
                           sampler = "NUTS")
   vg_fn <- if (is.null(fz)) NULL else fz$vg
-  ## gradient at state_init when known (fused; W94 also the separate-call
+  ## gradient at state_init when known (fused; also the separate-call
   ## path once the step-size search has taken it)
   g_init <- if (is.null(fz)) NULL else fz$g0
 
@@ -708,7 +752,7 @@ dynhr_nuts <- function(
   if (ckpt_resume) {
     eps0 <- 1  # placeholder; overwritten from saved state before the loop
   } else if (is.null(step_size)) {
-    ## W94: the separate-call path takes the start gradient once, for the
+    ## The separate-call path takes the start gradient once, for the
     ## search and the first transition alike
     if (is.null(fz)) g_init <- .grad(state_init)
     eps0 <- .hmc_find_stepsize(state_init, .lp_scalar, .grad,
@@ -821,10 +865,10 @@ dynhr_nuts <- function(
   n_grad_evals  <- 0L
 
   theta   <- state_init
-  ## Fused (W92): the start point's value comes from the same function as
+  ## Fused: the start point's value comes from the same function as
   ## every leaf's; g_curr is the gradient there.
   lp_curr <- if (is.null(fz)) .lp_scalar(theta) else fz$lp0
-  g_curr  <- g_init   # W94: carried on the separate-call path too
+  g_curr  <- g_init   # Carried on the separate-call path too
   trace_lp_curr <- if (!is.null(transform)) {
     lp_curr - transform$log_jacobian(theta)
   } else {
@@ -887,7 +931,7 @@ dynhr_nuts <- function(
     state_chain[1, ]  <- theta
     treedepths[1]     <- 0L
     divergences[1]    <- FALSE
-    # Fix Landmine 6: energy_trace[1] uses r=0 (kinetic=0)
+    # energy_trace[1] uses r=0 (kinetic=0)
     energy_trace[1]   <- if (!is.null(transform)) {
       lp_curr - transform$log_jacobian(theta)
     } else {
@@ -929,7 +973,7 @@ dynhr_nuts <- function(
     theta   <- theta_m
     ## Fused: the selected point's value and gradient came with it (the leaf
     ## evaluation, or the unchanged start point's); no re-evaluation.
-    ## W94: the separate-call path carries the gradient too (same values).
+    ## The separate-call path carries the gradient too (same values).
     lp_curr <- if (is.null(vg_fn)) .lp_scalar(theta) else tr$lp
     g_curr  <- tr$g
     trace_lp_curr <- if (!is.null(transform)) {
@@ -1083,7 +1127,7 @@ dynhr_nuts <- function(
               vars[!is.finite(vars) | vars < 1e-12] <- 1
               ## Stan's rule: the INVERSE mass is the posterior variance. This used
               ## to set the MASS to the variance (inverted), squaring the problem's
-              ## conditioning instead of removing it (brief 23 W14 finding).
+              ## conditioning instead of removing it.
               M_inv_diag <- vars
               M_diag     <- 1 / vars
               eps0 <- .hmc_find_stepsize(theta, .lp_scalar, .grad, M_inv_diag, M_diag,
@@ -1103,7 +1147,7 @@ dynhr_nuts <- function(
             vars[!is.finite(vars) | vars < 1e-12] <- 1
             ## Stan's rule: the INVERSE mass is the posterior variance. This used
             ## to set the MASS to the variance (inverted), squaring the problem's
-            ## conditioning instead of removing it (brief 23 W14 finding).
+            ## conditioning instead of removing it.
             M_inv_diag <- vars
             M_diag     <- 1 / vars
             eps0 <- .hmc_find_stepsize(theta, .lp_scalar, .grad, M_inv_diag, M_diag,
@@ -1137,7 +1181,7 @@ dynhr_nuts <- function(
           vars[!is.finite(vars) | vars < 1e-12] <- 1
           ## Stan's rule: the INVERSE mass is the posterior variance. This used
           ## to set the MASS to the variance (inverted), squaring the problem's
-          ## conditioning instead of removing it (brief 23 W14 finding).
+          ## conditioning instead of removing it.
           M_inv_diag <- vars
           M_diag     <- 1 / vars
           # Re-find step size and reset dual averaging

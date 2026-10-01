@@ -11,7 +11,7 @@
 ## what the fake-news Jacobian pipeline requires. sigma_taste -> 0 is the
 ## deterministic-inaction limit.
 ##
-## WHY THIS EXISTS (briefs/19 section 9, F21/F22): the smooth convex cost
+## WHY THIS EXISTS: the smooth convex cost
 ## structurally cannot generate empirical wealthy hand-to-mouth shares --
 ## stiffening it REDUCES inaction, because a convex cost leaves small
 ## continuous rebalancing cheap. Inaction requires a non-convexity at zero
@@ -118,7 +118,7 @@
   ## sweep (.hank2_interp_coord_rows) degrades gracefully exactly as the
   ## smooth two-asset kernel does. Same EGM algebra, tolerant inversion.
   ##
-  ## KIWISAVER CONTRIBUTION (briefs/19 sections 9.5-9.7): a fraction
+  ## KIWISAVER CONTRIBUTION: a fraction
   ## phi_contrib of labor income flows into the locked account regardless of
   ## the adjustment choice -- the F26 participation-trap fix, and the NZ
   ## default-enrolment institution. The no-adjust rollover becomes

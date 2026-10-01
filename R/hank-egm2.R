@@ -19,10 +19,10 @@
 ## PORTED FROM, and validated against, the reference implementation:
 ## shade-econ/sequence-jacobian, src/sequence_jacobian/hetblocks/hh_twoasset.py
 ## (pinned 2026-07-15; the transcription, the deviations below, and the
-## reference calibration are recorded in briefs/19-twoasset-hank-scope.md
-## section 3 -- READ THAT BEFORE CHANGING ANY FORMULA HERE).
+## reference calibration are documented in this file -- READ THE NOTES BEFORE
+## CHANGING ANY FORMULA HERE).
 ##
-## THREE DELIBERATE DEVIATIONS from the reference (brief section 3.3):
+## THREE DELIBERATE DEVIATIONS from the reference:
 ##   F1 was a reference SUBTLETY, not a deviation: k_grid must be DECREASING
 ##      (SSJ builds it as agrid(...)[::-1]).  b_endo is decreasing in the
 ##      multiplier kappa, so a decreasing kappa grid makes b_endo INCREASING
@@ -187,7 +187,7 @@ tiny_floor <- function() 1e-12
 #' \code{colSums(D >= 0) + 1}, which is how this vectorizes.  SSJ instead
 #' carries \code{i} ACROSS \code{j} as a monotone sweep; the two agree whenever
 #' the documented assumption holds, and the per-column form used here is
-#' strictly more robust when it does not (brief 19, finding F5).  SSJ also
+#' strictly more robust when it does not.  SSJ also
 #' bounds its scan with \code{nj} where \code{ni} is meant (F4) -- invisible
 #' there because \eqn{\Psi_1} is square; the correct bound is used here.
 #'
@@ -220,7 +220,7 @@ tiny_floor <- function() 1e-12
 ##
 ## BUT IT IS NOT UNIFORMLY FASTER, and shipping it unconditionally would have
 ## been a large regression on big grids. Measured speedup vs the loop, by the
-## per-row matrix size n_i*n_j (briefs/21 section 14):
+## per-row matrix size n_i*n_j:
 ##
 ##     n_i*n_j     144    256     625    1024     1600    2500    4096
 ##     speedup    8.0x   2-7x   2.5-3x   1.5x   1.0-1.2x  0.8x   0.67x
@@ -311,7 +311,7 @@ tiny_floor <- function() 1e-12
 #' One two-asset EGM backward step
 #'
 #' The two-stage EGM of SSJ's \code{hh_twoasset.hh} (steps 2-7; see the file
-#' header and brief 19 section 3.2).  Given next-period marginal values, returns
+#' header).  Given next-period marginal values, returns
 #' updated marginal values and this period's liquid/illiquid/consumption
 #' policies.
 #'
@@ -333,7 +333,7 @@ tiny_floor <- function() 1e-12
 #'   pass it once.
 #'
 #' @param theta_coll Scalar LTV in \eqn{[0, 1)} on end-of-period illiquid
-#'   collateral (D1, brief 19 section 9.12).  When positive, the liquid AXIS of
+#'   collateral.  When positive, the liquid AXIS of
 #'   every array is reinterpreted as the GAP COORDINATE \eqn{x = b + \theta a}
 #'   (liquid wealth plus collateral capacity), in which the collateral
 #'   constraint \eqn{b' \ge b_{grid}[1] - \theta a'} is the CONSTANT floor
@@ -474,7 +474,7 @@ tiny_floor <- function() 1e-12
   ## --- Step 7: combine, then consumption from the budget residual -----------
   ## Take the constrained branch wherever the unconstrained one would violate
   ## the liquid floor.  (SSJ clamps only b; a' is left unclamped and the Young
-  ## lottery handles any overshoot downstream -- brief 19, F2.)
+  ## lottery handles any overshoot downstream.)
   a_pol <- a_unc; b_pol <- b_unc
   con <- b_unc <= b_grid[1L]
   b_pol[con] <- b_grid[1L]
@@ -598,7 +598,7 @@ hank_euler2_residual <- function(hh, constraint_tol = 1e-8) {
          "(from hank_egm2_solve) or a hank_het2_block.")
   n_e <- dim(hh$c)[1L]; n_b <- dim(hh$c)[2L]; n_a <- dim(hh$c)[3L]
 
-  ## COLLATERAL (D1, brief 19 section 9.12): under theta_coll > 0 the object's
+  ## COLLATERAL: under theta_coll > 0 the object's
   ## policies live in gap coordinates x = b + theta*a, in which the FOCs keep
   ## their constant-floor FORM with two re-weighted coefficients: the illiquid
   ## arrival envelope carries rho_a = (1+ra) - theta(1+rb), and the illiquid
@@ -695,8 +695,8 @@ hank_euler2_residual <- function(hh, constraint_tol = 1e-8) {
 #'   capacity, floor = the unsecured limit), the returned \code{b}/\code{Vb}
 #'   policies live in \eqn{x}, and the TRUE liquid position is the additional
 #'   returned array \code{b_liq = b - theta_coll * a}.  Collateral runs on the
-#'   R reference path only (the compiled kernel is roadmap).  See brief 19
-#'   section 9.12 for why the naive \eqn{b}-coordinate implementation is
+#'   R reference path only (the compiled kernel is roadmap).  The
+#'   naive \eqn{b}-coordinate implementation is
 #'   unsound (the binding boundary must be a grid line).
 #' @param threads Worker threads for the COMPILED backend's backward step, or
 #'   \code{NULL} (default) to resolve from

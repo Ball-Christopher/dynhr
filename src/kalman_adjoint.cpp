@@ -33,7 +33,7 @@
 //   -> list(ok, loglik, grad[, bars])
 // With return_bars = true the raw adjoint (bar) matrices wrt the state-space
 // system are appended as bars = list(G_TT, G_RR, G_ZZ, G_DD, g_d, G_Sig) --
-// the inputs .solution_adjoint() (Tier 18 A2) contracts against the analytic
+// the inputs .solution_adjoint() contracts against the analytic
 // primitive derivatives. Failure returns carry no bars (same as the R kernel).
 
 #include <RcppArmadillo.h>
@@ -49,7 +49,7 @@ inline arma::mat sym(const arma::mat& X) {
 }
 
 // Doubling: the PRIMARY solver for the two stationary Lyapunov solves below
-// (X = A X A' + B), tried before the O(n^6) kron vec-solve (W59: the kron
+// (X = A X A' + B), tried before the O(n^6) kron vec-solve (the kron
 // solves dominated this kernel). It is also the recovery path the kron-first
 // order used to need: the kron vec-solve's rcond gate fires on HIGHLY NON-NORMAL stable A
 // (e.g. Reiter-HANK transition matrices), where rcond(I - A (x) A) underflows
@@ -67,7 +67,7 @@ bool lyap_doubling(const arma::mat& A, const arma::mat& B, arma::mat& X) {
     arma::mat Xn = X + Apow * X * Apow.t();
     if (!Xn.is_finite()) return false;
     const double diff  = arma::abs(Xn - X).max();
-    // Purely RELATIVE, as R solve_lyapunov() (W76, 2026-09-26): a max(1, .)
+    // Purely RELATIVE, as R solve_lyapunov(): a max(1, .)
     // floor made the test absolute for max|X| < 1, so a small-scale model's
     // P0 stopped early and this kernel's likelihood left the forward's.
     const double scale = arma::abs(Xn).max();

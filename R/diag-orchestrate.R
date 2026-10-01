@@ -1114,7 +1114,7 @@ run_model_diagnostics <- function(model, dr = NULL, ss = NULL, verbose = TRUE) {
   params     <- posterior$posterior_mean
   priors     <- mode_res$prior_spec
 
-  ## ---- ONE point: the posterior-mean re-solve (0.9.4, ledger A1) ---------
+  ## ---- ONE point: the posterior-mean re-solve (0.9.4) ---------
   ## Until 0.9.4 this wrapper mixed two points: `dr` and `ss` were the
   ## CALIBRATION / mode-time solution off `solved`, while `params` was the
   ## posterior mean. Every diagnostic that took `dr`, `ss` and `params`
@@ -1292,7 +1292,7 @@ run_model_diagnostics <- function(model, dr = NULL, ss = NULL, verbose = TRUE) {
 
   # Build a model_solve_fn from the compiled model.
   #
-  # 0.9.4 (ledger A1): this used to close over the FIXED `dr` and only pass
+  # 0.9.4: this used to close over the FIXED `dr` and only pass
   # `theta` down to compute_moments(), which rescales shocks but cannot move
   # ghx/ghu. Every structural column of the Jacobian was therefore EXACTLY
   # zero, and D1 reported "identified", D3 "negligible", D4 degenerate, D22
@@ -1330,7 +1330,7 @@ run_model_diagnostics <- function(model, dr = NULL, ss = NULL, verbose = TRUE) {
     }
   }
 
-  ## D3 bounds from the prior support (0.9.4, ledger A1(d)): the posterior
+  ## D3 bounds from the prior support (0.9.4): the posterior
   ## path never built `param_bounds`, so D3 was ALWAYS skipped there. Morris
   ## screening needs a finite box; take the prior's own [lower, upper] where
   ## finite and fall back to a +/- 3 sd interval around the prior mean. If any

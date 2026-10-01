@@ -10,14 +10,12 @@
 ## "adjoint_solution"). hank_loglik_ar() -- the sequence-space exact-AR
 ## likelihood -- has none: every reference to hank_loglik_ar/autocov_slab/
 ## stacked/H_U across the whole stack is zero (verified by grep, not
-## assumed). Raised from the NZ HANK paper
-## (notes/dynhr_brief_seqspace_gradients.md in the paper repo); this file is
-## the package-side port of that brief's validated prototype
-## (paper repo: replication/R/hank_abrs_grad.R, hank_abrs_score() -- checked
+## assumed). Raised from the NZ HANK paper; this file is
+## the package-side port of a validated prototype (hank_abrs_score(), checked
 ## against numerical differentiation there to 3.3e-9 relative error on a
 ## synthetic fixture sized to the paper's own model).
 ##
-## WHY make_posterior_grad() ISN'T extended instead (see briefs/20).
+## WHY make_posterior_grad() ISN'T extended instead.
 ## make_posterior_grad() is built entirely around a PERTURBATION DECISION
 ## RULE (cache_system_structure(), .solve_dr(), an is_sigma classification by
 ## diffing ghx/ghu across a param move) -- none of that applies to a
@@ -43,7 +41,7 @@
 ##   rho_z   : dA_z/drho_z has three channels (Theta_z's own geometric driving
 ##             path, the quasi-difference Psi = Th - rho*lag(Th), and the
 ##             weight kernels Wp/Wm). A fully analytic form is derivable but
-##             error-prone (see the brief), so SEMI-ANALYTIC: central-
+##             error-prone, so SEMI-ANALYTIC: central-
 ##             difference the SLAB ONLY via the existing (uncached, so FD taps
 ##             never evict a real cache entry) .hank_ar_autocov_kernel(), and
 ##             keep the expensive S-level algebra (Cholesky, inverse, traces)
@@ -60,7 +58,7 @@
 ## gather path and 0.424 s for numerical central differences (7.6x); whole
 ## shock block incl. the slab-bound rho FDs, 0.241 s vs 1.119 s (4.6x). The
 ## R-level rowsum() fallback lands in between (0.129 s) -- it is kept only as
-## the parity reference (`use_cpp = FALSE`), matching the paper brief's
+## the parity reference (`use_cpp = FALSE`), matching the paper's
 ## finding that this win is contingent on the accumulation being compiled.
 ##
 ## THE KERNEL ADJOINT (rho_method = "adjoint", wrt = "theta").
@@ -76,7 +74,7 @@
 ## which every STRUCTURAL parameter needs -- with it, a structural gradient
 ## costs one adjoint pass plus one linear-map application per parameter,
 ## instead of two cold likelihood evaluations (0.28 s) plus two model rebuilds
-## PER PARAMETER. See briefs/21-structural-score-api-scope.md.
+## PER PARAMETER.
 ##
 ## Regenerating Theta_z at a perturbed rho needs a full sequence-space IRF
 ## (Theta_z's OWN definition is the response to the driving path rho_z^t), so
@@ -109,7 +107,7 @@
 ## parameter is a ~19k dot product (.hank_ar_dterm_compact) instead of a fresh
 ## N x N gather + N^2 trace + N^2 matvec. The R fallback below (rowsum) is the
 ## parity reference and is what the paper measured as slower than the naive
-## gather -- the win is contingent on the compiled pass (briefs/20 5).
+## gather -- the win is contingent on the compiled pass.
 .hank_ar_score_weights <- function(Sinv, v, Sidx, n_g, use_cpp = TRUE) {
   if (isTRUE(use_cpp))
     return(hank_ar_score_weights_cpp(Sidx, Sinv, as.numeric(v),

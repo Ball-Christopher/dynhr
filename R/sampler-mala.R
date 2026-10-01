@@ -123,7 +123,7 @@
 #' @return Numeric vector (proposal mean) or NULL if non-finite gradient
 #' @noRd
 .mala_proposal_mean <- function(theta, grad_fn, G_inv, eps, g = NULL) {
-  ## g: the gradient at theta when already known (the fused path, W92)
+  ## g: the gradient at theta when already known (the fused path)
   if (is.null(g)) g <- grad_fn(theta)
   if (any(!is.finite(g))) return(NULL)
   theta + (eps^2 / 2) * as.numeric(G_inv %*% g)
@@ -133,6 +133,47 @@
 # ============================================================================
 # dynhr_mala() -- MALA sampler with dual-averaging step-size adaptation
 # ============================================================================
+
+## --------------------------------------------------------------------------
+## MALA argument checker
+## --------------------------------------------------------------------------
+
+#' Problems with the arguments of dynhr_mala()
+#'
+#' The step size is positive; the target acceptance is a probability strictly
+#' inside (0, 1); a supplied metric \code{G} / \code{G_inv} is factored and
+#' inverted by the sampler, so it must be symmetric positive definite (clear
+#' of numerical rank deficiency) and match the parameter count. The two
+#' supplied together must also be inverses of each other: the proposal uses
+#' \code{G_inv} while the acceptance ratio uses \code{G}, so an inconsistent
+#' pair silently samples the wrong distribution.
+#'
+#' @param args Named list of the supplied dynhr_mala() arguments.
+#' @param n_par Number of estimated parameters, or NULL when not known.
+#' @return Character vector of problems; \code{character(0)} when fine.
+#' @noRd
+.mala_args_problem <- function(args, n_par = NULL) {
+  rules <- list(
+    n_draws       = .mcmc_r_whole(1L),
+    n_warmup      = .mcmc_r_whole(0L),
+    eps           = .mcmc_r_pos(),
+    adapt_step    = .mcmc_r_flag(),
+    target_accept = .mcmc_r_range(0, 1, TRUE, TRUE),
+    G             = .mcmc_r_spd(strict = TRUE),
+    G_inv         = .mcmc_r_spd(strict = TRUE),
+    grad_fn       = .mcmc_r_fun(),
+    metric_fn     = .mcmc_r_fun())
+  p <- .mcmc_check_args(args, dynhr_mala, "dynhr_mala", rules, n_par)
+  G <- args[["G"]]; Gi <- args[["G_inv"]]
+  if (is.matrix(G) && is.matrix(Gi) && !length(p) && nrow(G) == nrow(Gi)) {
+    err <- max(abs(G %*% Gi - diag(nrow(G))))
+    if (err > 1e-6 * max(1, kappa(G, exact = FALSE)))
+      p <- c(p, sprintf("`G` and `G_inv` must be inverses of each other (max |G %%*%% G_inv - I| = %s).",
+                        format(err, digits = 3)))
+  }
+  p
+}
+
 
 #' MALA (Metropolis-Adjusted Langevin Algorithm) with constant or position-dependent metric
 #'
@@ -206,6 +247,11 @@ dynhr_mala <- function(
   stopifnot(is.function(log_post_fn), is.numeric(theta_init))
   d         <- length(theta_init)
   par_names <- names(theta_init)
+  .mcmc_abort_if_problems("dynhr_mala", .mala_args_problem(
+    list(n_draws = n_draws, n_warmup = n_warmup, grad_fn = grad_fn, G = G,
+         G_inv = G_inv, metric_fn = metric_fn, eps = eps,
+         adapt_step = adapt_step, target_accept = target_accept),
+    n_par = d))
   n_total   <- n_draws + n_warmup
 
   # ---- Checkpoint / streaming (opt-in). When `checkpoint` is a list carrying
@@ -230,20 +276,13 @@ dynhr_mala <- function(
     G     <- diag(d)
     G_inv <- diag(d)
   } else if (is.null(G_inv)) {
-    G_inv <- tryCatch(solve(G), error = function(e) {
-      stop("dynhr_mala: supplied G is not invertible: ", conditionMessage(e), call. = FALSE)
-    })
+    G_inv <- solve(G)    # G is symmetric positive definite (checked at entry)
   } else if (is.null(G)) {
-    G <- tryCatch(solve(G_inv), error = function(e) {
-      stop("dynhr_mala: supplied G_inv is not invertible: ", conditionMessage(e), call. = FALSE)
-    })
+    G <- solve(G_inv)    # G_inv is symmetric positive definite (checked at entry)
   }
 
   # Constant Cholesky (used when metric_fn is NULL, or as fallback)
-  chol_Ginv <- tryCatch(chol(G_inv), error = function(e) {
-    stop("dynhr_mala: G_inv is not positive definite (Cholesky failed): ",
-         conditionMessage(e), call. = FALSE)
-  })
+  chol_Ginv <- chol(G_inv)
   logdet_G_const <- sum(log(diag(chol(G))))   # log|G| for constant path
 
   # ---- Transform (eta-space) opt-in  ------------------------------------
@@ -273,14 +312,14 @@ dynhr_mala <- function(
   } else {
     .grad <- grad_fn
   }
-  # ---- Fused value + gradient (W92, .hmc_fused_target()): the proposal's
+  # ---- Fused value + gradient (.hmc_fused_target()): the proposal's
   # log-posterior and gradient from ONE evaluation, the gradient carried with
   # the state; NULL = separate calls exactly as before.
   fz <- .hmc_fused_target(log_post_fn, grad_fn, state_init, par_names,
                           transform = transform, verbose = verbose,
                           sampler = "MALA")
   vg_fn <- if (is.null(fz)) NULL else fz$vg
-  ## gradient at state_init when known (fused; W94 also the separate-call
+  ## gradient at state_init when known (fused; also the separate-call
   ## path once the step-size search has taken it)
   g_init <- if (is.null(fz)) NULL else fz$g0
 
@@ -318,7 +357,7 @@ dynhr_mala <- function(
 
   # ---- Initial step size -----------------------------------------------
   if (is.null(eps)) {
-    if (is.null(fz)) g_init <- .grad(state_init)   # W94: taken once
+    if (is.null(fz)) g_init <- .grad(state_init)   # Taken once
     eps <- .mala_find_stepsize(state_init, .lp_scalar, .grad, G_inv, G, chol_Ginv,
                                vg_fn = vg_fn, lp0 = fz$lp0, g0 = g_init)
     if (verbose) .dynhr_inform(sprintf("MALA: initial step_size = %.4e", eps))
@@ -350,8 +389,8 @@ dynhr_mala <- function(
   accepted <- logical(n_total)
 
   theta   <- state_init
-  ## Fused (W92): the start value from the same function as every proposal's;
-  ## g_curr the gradient there. W94: the separate-call path carries it too
+  ## Fused: the start value from the same function as every proposal's;
+  ## g_curr the gradient there. The separate-call path carries it too
   ## (the proposal's gradient, needed for the reverse density, becomes the
   ## current one on acceptance) -- the same values, one gradient per step.
   lp_curr <- if (is.null(fz)) .lp_scalar(theta) else fz$lp0
@@ -639,7 +678,7 @@ dynhr_mala <- function(
     on.exit(assign(".Random.seed", .rng0, envir = .GlobalEnv), add = TRUE)
   }
 
-  # Fused path (W92): value and gradient at theta already known, and each
+  # Fused path: value and gradient at theta already known, and each
   # trial proposal is ONE value-and-gradient evaluation.
   if (!is.null(vg_fn) && (is.null(lp0) || is.null(g0))) {
     e0  <- vg_fn(theta)
@@ -647,7 +686,7 @@ dynhr_mala <- function(
     g0  <- e0$grad
   }
 
-  # Compute gradient once (reused across iterations; W94 on both paths)
+  # Compute gradient once (reused across iterations; on both paths)
   if (is.null(g0)) g0 <- grad_fn(theta)
   mu0 <- .mala_proposal_mean(theta, grad_fn, G_inv, eps, g = g0)
   if (is.null(mu0)) return(0.01)  # non-finite gradient at init

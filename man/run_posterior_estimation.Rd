@@ -49,17 +49,22 @@ Default \code{c("RWMH")}.}
 \code{length(methods)}.  Default \code{5000}.}
 
 \item{n_draws}{Post-warmup draws to retain per method. Recycled.
-Default \code{20000}.}
+Default \code{20000}. For \code{"DIME"} it is the number of post-warmup
+iterations PER WALKER, so the kept draws number \code{n_draws} times
+the number of walkers.}
 
-\item{n_chains}{Number of MCMC chains per method (for RWMH). Recycled.
-Default \code{4}.}
+\item{n_chains}{Number of MCMC chains per method (for RWMH and NUTS).
+Recycled. Default \code{4}. Several NUTS chains run on a worker pool when
+\code{parallel = TRUE} and in sequence otherwise (chain \code{k} is
+seeded \code{seed + k}, as on the pool).}
 
 \item{n_particles}{Number of SMC particles (only for \code{"SMC"}), or
 the DSMH cloud size \eqn{N G} (only for \code{"DSMH"}).
 Recycled.  Default \code{2000}.}
 
 \item{n_walkers}{Number of ensemble walkers for the DIME sampler
-(\code{NULL} = \code{max(5 * n_par, 20)}).  Ignored for all other
+(\code{NULL} = \code{max(5 * n_par, 20)}; at least \code{n_par + 1},
+below which the ensemble is rank-deficient).  Ignored for all other
 samplers.}
 
 \item{parallel}{Run multi-chain \code{"RWMH"}/\code{"NUTS"} batches and

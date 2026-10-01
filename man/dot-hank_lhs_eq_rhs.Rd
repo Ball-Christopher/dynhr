@@ -34,7 +34,7 @@ Under that monotonicity, "first \code{i} with \code{lhs - rhs < 0}" equals
 \code{colSums(D >= 0) + 1}, which is how this vectorizes.  SSJ instead
 carries \code{i} ACROSS \code{j} as a monotone sweep; the two agree whenever
 the documented assumption holds, and the per-column form used here is
-strictly more robust when it does not (brief 19, finding F5).  SSJ also
+strictly more robust when it does not.  SSJ also
 bounds its scan with \code{nj} where \code{ni} is meant (F4) -- invisible
 there because \eqn{\Psi_1} is square; the correct bound is used here.
 

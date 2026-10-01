@@ -91,7 +91,7 @@
 }
 
 ## Dense [n_eq x total_cols x n_params] parameter-Jacobian accessor over the
-## sparse value function (W91): scatters vals_fn()'s entries to their linear
+## sparse value function: scatters vals_fn()'s entries to their linear
 ## indices `lin`. Built here, not inside build_dynamic_model(), so the closure
 ## captures only its three arguments -- not the (large) build frame, which
 ## would bloat every compiled model in memory and in the compile cache.
@@ -240,7 +240,7 @@ build_dynamic_model <- function(model, max_order = 1L,
     }
 
     # -----------------------------------------------------------------------
-    # 3a. Symbolic parameter-Jacobian  ∂²F_i/(∂w_c ∂θ_k)  (Tier 11 #3)
+    # 3a. Symbolic parameter-Jacobian  ∂²F_i/(∂w_c ∂θ_k)
     #
     # Explicit partial of each dynamic-Jacobian entry w.r.t. each structural
     # parameter, obtained by differentiating the already-computed first-order
@@ -318,7 +318,7 @@ build_dynamic_model <- function(model, max_order = 1L,
     # Build the symbolic second-order model Hessian (hess2) when EITHER the
     # perturbation order needs it (max_order >= 2) OR analytic parameter
     # derivatives are requested. The first-order solution-derivative gradient
-    # (Tier 11 #3) contracts this model Hessian with dys for the steady-state
+    # contracts this model Hessian with dys for the steady-state
     # chain rule, so it is needed even at max_order = 1 -- without it the
     # analytic gradient would silently drop the chain term.
     # When want_param_deriv = FALSE the caller has explicitly opted out of the
@@ -358,7 +358,7 @@ build_dynamic_model <- function(model, max_order = 1L,
                         col1 = c1,
                         col2 = c2,
                         ast  = d2   # CSE builds hessian2_fn from $ast; also used
-                                    # for Tier 11 #3 param_hess2 codegen
+                                    # for param_hess2 codegen
                     )))
 
                     # Third-order: differentiate d2 again, with c3 >= c2 to
@@ -394,7 +394,7 @@ build_dynamic_model <- function(model, max_order = 1L,
 
     # -----------------------------------------------------------------------
     # 3a-2. Symbolic third-order parameter tensor  ∂³F/(∂w_c1 ∂w_c2 ∂θ_k)
-    #       (Tier 11 #3, order-2 layer = param_hess2).
+    #       (order-2 layer = param_hess2).
     #
     # Differentiates each second-order model-Hessian AST a third time in the
     # parameter direction.  Together with the steady-state chain term (hess3
@@ -433,7 +433,7 @@ build_dynamic_model <- function(model, max_order = 1L,
 
     # -----------------------------------------------------------------------
     # 3a-3. Symbolic var-param-param tensor  ∂³F/(∂w_c ∂θ_a ∂θ_b)
-    #       (Tier 11 #3, order-2 layer = param2_jac, used by 3b only).
+    #       (order-2 layer = param2_jac, used by 3b only).
     #
     # Differentiates each FIRST-order dynamic-Jacobian AST twice in the
     # parameter direction (canonical a <= b; the tensor is symmetric in
@@ -605,9 +605,9 @@ build_dynamic_model <- function(model, max_order = 1L,
         local_vars = local_vars)
 
     # -----------------------------------------------------------------------
-    # 5a. Build the parameter-Jacobian function (Tier 11 #3)
+    # 5a. Build the parameter-Jacobian function
     #
-    # SPARSE (W91), in the model-Hessian convention: param_jacobian_vals_fn
+    # SPARSE, in the model-Hessian convention: param_jacobian_vals_fn
     # returns the numeric vector of the non-zero entries
     #   v[t] = ∂²F_i/(∂w_c ∂θ_k)   (explicit, ss held fixed)
     # parallel to param_jac_triplets (row i, col c, param k); param_jac_rc is
@@ -645,7 +645,7 @@ build_dynamic_model <- function(model, max_order = 1L,
     else NULL
 
     # -----------------------------------------------------------------------
-    # 5a-2. Build the param-Hessian2 function (Tier 11 #3, order-2 layer)
+    # 5a-2. Build the param-Hessian2 function (order-2 layer)
     #
     # Returns a numeric vector of length n_param_hess2 with the values of the
     # non-zero ∂³F_i/(∂w_c1 ∂w_c2 ∂θ_k) entries at (dy, params, ss).  Indices
@@ -668,7 +668,7 @@ build_dynamic_model <- function(model, max_order = 1L,
     }
 
     # -----------------------------------------------------------------------
-    # 5a-3. Build the param2-Jacobian function (Tier 11 #3, order-2 layer)
+    # 5a-3. Build the param2-Jacobian function (order-2 layer)
     #
     # Returns a numeric vector of length n_param2_jac with the values of the
     # non-zero ∂³F_i/(∂w_c ∂θ_a ∂θ_b) entries at (dy, params, ss).  Indices are

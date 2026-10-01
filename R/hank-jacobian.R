@@ -20,10 +20,9 @@
 ## all three validate against the same brute-force numerical-differentiation
 ## reference, which is the mandatory oracle in test-hank-jacobian.R).
 ##
-## IF YOU ARE HERE TO MAKE THIS FASTER, OR TO MAKE IT EXACT, READ FIRST:
-## ROADMAP.md Tier 19.1 ("Exact het-block structural derivatives: the TANGENT
-## SWEEP"), with the measurements in briefs/21-structural-score-api-scope.md
-## sec. 11. Short version, so the wrong thing does not get built again:
+## IF YOU ARE HERE TO MAKE THIS FASTER, OR TO MAKE IT EXACT, READ FIRST.
+## Short version of the measurements, so the wrong thing does not get built
+## again:
 ##   * the het STEADY STATE is 0.4% of a structural FD tap -- a differentiable
 ##     EGM/steady-state adjoint buys nothing here; this sweep is 85-93% of it;
 ##   * the directional / IRF-form route to an exact derivative is MEASURED-DEAD
@@ -33,7 +32,7 @@
 ##     a tangent in a structural parameter needs MIXED SECOND derivatives of
 ##     .hank_block_step. Its prerequisite -- analytic within-step derivatives,
 ##     as in the paragraph above -- is worth doing on its own and flips that
-##     cost accounting; Tier 19.1 lists the trigger conditions.
+##     cost accounting.
 ## Since 0.9.0.0025 the distributional half of this sweep is matrix-free
 ## (.hank_forward_push, R/hank-distribution.R); .hank_block_step is now the
 ## largest single piece of an iteration (57%, was 12%).

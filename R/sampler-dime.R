@@ -103,6 +103,52 @@
 ## Core serial sampler
 ## --------------------------------------------------------------------------
 
+## --------------------------------------------------------------------------
+## DIME argument checker
+## --------------------------------------------------------------------------
+
+#' Problems with the arguments of run_dime() / run_dime_mirai()
+#'
+#' Keyed by the sampler's own names (\code{n_chain} = walkers, \code{n_iter}
+#' = post-burn iterations PER WALKER, so the kept draws number
+#' \code{n_iter * n_chain}). The differential-evolution move proposes along
+#' differences of two other walkers, so the ensemble can only span as many
+#' directions as it has walkers minus one: with fewer than \code{n_par + 1}
+#' walkers the ensemble is rank-deficient and cannot move in every
+#' direction (and the independence proposal's covariance is singular) -- an
+#' error when \code{n_par} is known. The independence proposal needs a
+#' probability, the memory decay \code{rho} lies in (0, 1] (its log enters the
+#' running weights), the DE noise \code{sigma} is non-negative and the
+#' Student-t degrees of freedom are positive.
+#'
+#' @param args Named list of the supplied run_dime() arguments.
+#' @param n_par Number of estimated parameters, or NULL when not known.
+#' @return Character vector of problems; \code{character(0)} when fine.
+#' @noRd
+.dime_args_problem <- function(args, n_par = NULL) {
+  rules <- list(
+    n_chain   = function(v, nm, n_par) {
+      if (!.mcmc_whole_ok(v) || v < 3)
+        return(sprintf("`n_chain` must be a whole number >= 3 (got %s).", .mcmc_fmt(v)))
+      if (!is.null(n_par) && v < n_par + 1)
+        return(sprintf(paste0("`n_chain` (the number of walkers) must be at least n_par + 1 = %d ",
+                              "(got %d): the differential-evolution moves span only as many ",
+                              "directions as the ensemble has walkers minus one, so fewer ",
+                              "walkers leave the ensemble rank-deficient and unable to ",
+                              "explore every parameter direction."),
+                       as.integer(n_par + 1), as.integer(v)))
+      NULL
+    },
+    n_iter    = .mcmc_r_whole(1L),
+    n_burn    = .mcmc_r_whole(0L),
+    aimh_prob = .mcmc_r_range(0, 1, FALSE, FALSE),
+    sigma     = .mcmc_r_range(0, Inf, FALSE, TRUE),
+    rho       = .mcmc_r_range(0, 1, TRUE, FALSE),
+    df        = .mcmc_r_pos())
+  .mcmc_check_args(args, run_dime, "run_dime", rules, n_par)
+}
+
+
 #' DIME MCMC ensemble sampler (serial)
 #'
 #' Differential-Independence Mixture Ensemble MCMC (Boehl 2022/2024).
@@ -114,7 +160,8 @@
 #'   function via \code{prior_sampler} argument.
 #' @param n_chain      Number of ensemble walkers. Recommended: >= 5 * n_par.
 #'   Minimum: 3. Default: NULL (set to max(5 * n_par, 20)).
-#' @param n_iter       Post-warmup iterations (per-walker). Default 1000.
+#' @param n_iter       Post-warmup iterations PER WALKER, so the kept draws
+#'   number `n_iter * n_chain` (one row per walker per iteration). Default 1000.
 #' @param n_burn       Burn-in (warm-up) iterations. Default 500.
 #' @param aimh_prob    Probability of the AIMH independence move. Default 0.1.
 #' @param sigma        DE noise standard deviation. Default 1e-5.
@@ -153,8 +200,6 @@ run_dime <- function(log_post_fn,
                      checkpoint   = NULL) {
 
   stopifnot(is.function(log_post_fn))
-  n_iter <- as.integer(n_iter)
-  n_burn <- as.integer(n_burn)
 
   ## ---- Checkpoint / streaming setup (opt-in) ------------------------------
   ## When checkpoint is a list, draws are streamed to disk in flush-sized chunks
@@ -178,8 +223,13 @@ run_dime <- function(log_post_fn,
   par_names <- names(theta0)
 
   if (is.null(n_chain)) n_chain <- max(5L * n_par, 20L)
+  .mcmc_abort_if_problems("run_dime", .dime_args_problem(
+    list(n_chain = n_chain, n_iter = n_iter, n_burn = n_burn,
+         aimh_prob = aimh_prob, sigma = sigma, rho = rho, df = df),
+    n_par = n_par))
   n_chain <- as.integer(n_chain)
-  if (n_chain < 3L) stop("run_dime: n_chain must be >= 3.")
+  n_iter  <- as.integer(n_iter)
+  n_burn  <- as.integer(n_burn)
 
   gamma <- 2.38 / sqrt(2 * n_par)
 
@@ -755,7 +805,8 @@ run_dime <- function(log_post_fn,
 #' @param prior_spec prior specification data.frame.
 #' @param obs_names observed variable names (NULL for closure-only path).
 #' @param n_chain number of ensemble walkers.
-#' @param n_iter  post-burn iterations.
+#' @param n_iter  post-burn iterations PER WALKER (the kept draws number
+#'   `n_iter * n_chain`).
 #' @param n_burn  burn-in iterations.
 #' @param aimh_prob,sigma,rho,df sampler hyperparameters.
 #' @param seed_base base RNG seed.
@@ -804,6 +855,10 @@ run_dime_mirai <- function(
   theta_probe   <- prior_sampler()
   n_par         <- length(theta_probe)
   if (is.null(n_chain)) n_chain <- max(5L * n_par, 20L)
+  .mcmc_abort_if_problems("run_dime_mirai", .dime_args_problem(
+    list(n_chain = n_chain, n_iter = n_iter, n_burn = n_burn,
+         aimh_prob = aimh_prob, sigma = sigma, rho = rho, df = df),
+    n_par = n_par))
   n_chain <- as.integer(n_chain)
 
   ## Cap daemons at n_chain (can't usefully have more daemons than walkers)

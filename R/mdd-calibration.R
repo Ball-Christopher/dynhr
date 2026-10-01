@@ -1,6 +1,6 @@
 ## R/mdd-calibration.R
 ## --------------------------------------------------------------------------
-## E3: marginal-likelihood (model-evidence) calibration harness.
+## Marginal-likelihood (model-evidence) calibration harness.
 ##
 ## SBC validates POSTERIOR SHAPE; it says nothing about whether an evidence
 ## estimator (THAMES, SMC, Laplace) recovers the right NORMALIZING CONSTANT.
@@ -626,7 +626,7 @@ mdd_calibration <- function(case = c("conjugate_regression", "local_level", "dsg
     stop("mdd_calibration: n_reps must be a positive integer scalar.")
   n_reps <- as.integer(n_reps)
   ## The builders and .mdd_run_estimator() re-seed internally; this frame owns
-  ## all of it, so restore the caller's RNG stream when it exits (C1).
+  ## all of it, so restore the caller's RNG stream when it exits.
   .local_seed(seed)
 
   problem <- switch(case,

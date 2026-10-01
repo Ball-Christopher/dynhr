@@ -1,7 +1,7 @@
 ## R/hank-bond-block.R
 ## --------------------------------------------------------------------------
 ## The geometric (delta-coupon) bond: the package's DURATION PRIMITIVE and the
-## cleanest asset-price revaluation instrument (briefs/19 sections 9.6-9.7).
+## cleanest asset-price revaluation instrument.
 ##
 ## A geometric bond pays 1 this period, delta next period, delta^2 after, ...
 ## Under perfect foresight and a required-return path r_t, no-arbitrage prices
@@ -23,7 +23,7 @@
 ##     the revaluation channel is KILLED by a single parameter, giving a
 ##     built-in no-revaluation counterfactual;
 ##   - a delta-coupon LIABILITY is a mortgage-like long-duration debt, so the
-##     same primitive carries the debt-side items D2/D6 in briefs/19 9.7.
+##     same primitive carries the debt-side items (staggered repricing, mortgage-like debt).
 ## --------------------------------------------------------------------------
 
 

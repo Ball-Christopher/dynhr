@@ -12,8 +12,8 @@
 ##   pkf_extract_shock()     -- eps_{t|t} from KF quantities (GPR eq. 6)
 ##   pkf_backward_one_step() -- s_{t-1|t} (GPR eq. 7, one step)
 ##   pkf_check_binding()     -- slack-rule regime check at t only (no longer
-##                              used by any filter: the PKF since W49, the
-##                              particle filters since W50)
+##                              used by any filter: the PKF since 0.9.3.93, the
+##                              particle filters since 0.9.3.93)
 ##
 ## STATE SPACE (dynhr's lag-1 timing).  In period t the model follows the
 ## TIME-VARYING piecewise-linear rule of the regime sequence expected at t
@@ -26,7 +26,7 @@
 ## period of a spell), so the filter carries, per period, the regime sequence
 ## expected at t over a check-ahead horizon (Dynare: 200 periods).
 ##
-## W49 (2026-09-25) replaced the pre-0.9.3.93 filters, which applied ONE
+## Version 0.9.3.93 replaced the earlier filters, which applied ONE
 ## policy per regime (next period assumed slack) and checked the regime of
 ## period t only against the SLACK rule -- wrong for every spell of 2+
 ## periods and for any period that anticipates a later binding period.
@@ -56,7 +56,7 @@
 #'   \item otherwise agents are taken to foresee the given path: the
 #'     expected sequence at t is \code{regime_path[t:T]} (slack after T).
 #' }
-#' Before W49 (0.9.3.93) every binding period used the one-period policy of
+#' Before 0.9.3.93 every binding period used the one-period policy of
 #' \code{obc_ensure_policy()} (next period slack).
 #'
 #' @param Y             Observation matrix (n_obs x T); columns = time periods
@@ -150,8 +150,8 @@ kalman_filter_obc <- function(Y, dr_slack, regime_cache,
 # helpers; .obc_pkf_kf_step() computes the same two quantities inline.
 # pkf_check_binding() (period t against the SLACK rule) is no longer used by
 # kalman_filter_obc_pkf(), which solves the whole expected regime sequence
-# (W49), nor by the particle filters in R/obc-ppf.R, which solve it per
-# particle with .obc_pkf_solve()'s algorithm (W50).
+# nor by the particle filters in R/obc-ppf.R, which solve it per
+# particle with .obc_pkf_solve()'s algorithm.
 #
 # The "inversion" label: eq. 6 inverts the innovation to recover the
 # underlying shock eps_{t|t}, which is then used (together with the
@@ -222,7 +222,7 @@ pkf_backward_one_step <- function(s_prev, P_prev, ZZ, F_inv, v) {
 #' @return logical vector (length k): TRUE where constraint j binds
 #' @noRd
 pkf_check_binding <- function(s_backward, eps_hat, specs, dr_slack) {
-  # The MCP bound is a LEVEL (package convention, 0.9.4 ledger A6) while
+  # The MCP bound is a LEVEL (package convention, 0.9.4) while
   # ghx/ghu produce DEVIATIONS.  Convert the bound once, through the SAME
   # shared helper every other regime/binding check uses
   # (obc_solve_binding, obc-boehl, obc-regime, obc-lcp), so the
@@ -636,7 +636,7 @@ pkf_check_binding <- function(s_backward, eps_hat, specs, dr_slack) {
 #' log-likelihood \code{-Inf} (Dynare rejects the draw); \code{$failed_period}
 #' records it.
 #'
-#' Changed in 0.9.3.93 (W49): the previous filter used ONE policy per
+#' Changed in 0.9.3.93: the previous filter used ONE policy per
 #' regime (the next period assumed slack) and checked only period t against
 #' the slack rule, which is wrong for spells of two or more periods.
 #' \code{regime_path_init} now plays the role of Dynare's

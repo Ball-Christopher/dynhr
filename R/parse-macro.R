@@ -1,7 +1,6 @@
 ## R/parse-macro.R
 ## --------------------------------------------------------------------------
-## Dynare macro-language preprocessor (M18; Dynare 6/7 language, review
-## 2026-09-25 E3).
+## Dynare macro-language preprocessor (Dynare 6/7 language).
 ##
 ## A line-oriented expander for Dynare's `@#` macro directives:
 ##
@@ -24,7 +23,7 @@
 ##
 ## MACRO EXPRESSIONS are parsed and evaluated by a small interpreter written
 ## here -- no R code is ever evaluated, so a .mod file cannot reach anything
-## outside the macro language (review 2026-09-25 A2 sandbox contract; a call
+## outside the macro language (the sandbox contract: a call
 ## to a function that is neither built in nor `@#define`d is a
 ## `dynhr_error_unsafe_mod_expression`).  The language follows the Dynare 7.1
 ## macro processor, checked against its `savemacro` output:
@@ -163,7 +162,7 @@
         return(format(as.integer(round(val)), trim = TRUE))
       # Shortest text that reads back as the SAME double (up to 17 significant
       # digits). format()'s default of 7 digits silently rounded e.g. 1/3 to
-      # 0.3333333 (review 2026-09-25 C8).
+      # 0.3333333.
       if (is.finite(val)) return(.wm_num(val, "macro value"))
       if (is.nan(val)) return("nan")
       if (val > 0) "inf" else "-inf"
@@ -688,7 +687,7 @@
         .macro_abort("a range increment of 0 (", label, ").",
                      class = "dynhr_error_macro_type")
       # Dynare ranges are EMPTY when they run the wrong way: `1:0` is
-      # zero iterations (seq() would give 1, 0; review 2026-09-25 A14).
+      # zero iterations (seq() would give 1, 0).
       if ((by > 0 && hi < lo) || (by < 0 && hi > lo)) return(list())
       as.list(as.numeric(seq(lo, hi, by = by)))
     },
@@ -1087,7 +1086,7 @@
 expand_macros <- function(txt, mod_dir = NULL) {
   if (!.macro_has_directives(txt)) return(txt)
   lines <- strsplit(txt, "\n", fixed = TRUE)[[1]]
-  ## A2: macro expressions are evaluated by the interpreter above, never by
+  ## Macro expressions are evaluated by the interpreter above, never by
   ## R's eval(); the macro environment only holds macro VALUES and is parented
   ## at emptyenv(), so name lookup cannot leave it.
   env <- new.env(parent = emptyenv())

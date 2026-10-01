@@ -1,7 +1,6 @@
 ## R/dynhr-model.R
 ## --------------------------------------------------------------------------
-## `dynhr_model`: a pipeline OBJECT holding an estimation spec (W82, brief 28
-## option (b)).
+## `dynhr_model`: a pipeline OBJECT holding an estimation spec.
 ##
 ## The object is list(spec, params, caches). `spec` is a
 ## `dynhr_estimation_spec` -- the SINGLE source of truth for model, compiled
@@ -542,7 +541,7 @@ dynhr_model <- function(model, data = NULL, obs_vars = NULL, compiled = NULL,
 
   ## ---- the likelihood component --------------------------------------------
   ## me_variance NULL: the field's default rule (the option), as every other
-  ## entry point resolves it (brief 28 S2). `...` keys that name a typed field
+  ## entry point resolves it. `...` keys that name a typed field
   ## (power, ...) are moved to that field by .spec_route_extras() below.
   lik <- if (is.character(likelihood) && length(likelihood) == 1L)
     likelihood_spec(likelihood) else .spec_as_sub(likelihood, "likelihood")

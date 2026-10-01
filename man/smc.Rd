@@ -16,7 +16,25 @@ production runs)}
 
 \item{...}{Additional arguments forwarded to the internal sampler:
 \code{ess_target}, \code{n_mh_steps}, \code{mh_scale_factor},
-\code{parallel}, \code{verbose}}
+\code{mut_target}, \code{mixture_weights}, \code{parallel},
+\code{backend}, \code{seed_base}, \code{verbose}, and the tempering
+arguments below.
+\itemize{
+  \item \code{lambda_schedule}: a fixed likelihood-tempering ladder
+    ending at 1 (default \code{NULL}: adaptive, chosen by bisection on
+    \code{ess_target}). Stages beyond the supplied ladder are adaptive. A ladder that is not strictly increasing, or has a value outside (0, 1] or a non-finite value, is an error.
+  \item \code{phi_schedule}: without \code{approx_loglik_fn} an alias for
+    \code{lambda_schedule} (supplying both with different values is an
+    error of class \code{dynhr_error_schedule_conflict}); with
+    \code{approx_loglik_fn} it is the fixed schedule of the model-tempering
+    bridge from the approximating model to \code{log_post_fn}.
+  \item \code{approx_loglik_fn}, \code{init_particles},
+    \code{log_Z_approx}: enable model tempering (Mlikota and Schorfheide
+    2024); see \code{\link{smc_model_tempered}} for the two-stage
+    workflow. \code{lambda_schedule} is not supported together with
+    \code{approx_loglik_fn} and is an error of class
+    \code{dynhr_error_inapplicable_argument}.
+}}
 }
 \value{
 A \code{\link{dynhr_chains}} object.  The \code{$log_marginal_lik}

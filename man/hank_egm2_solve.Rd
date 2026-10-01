@@ -74,8 +74,8 @@ COORDINATE \eqn{x = b + \theta a}: when \code{theta_coll > 0},
 capacity, floor = the unsecured limit), the returned \code{b}/\code{Vb}
 policies live in \eqn{x}, and the TRUE liquid position is the additional
 returned array \code{b_liq = b - theta_coll * a}.  Collateral runs on the
-R reference path only (the compiled kernel is roadmap).  See brief 19
-section 9.12 for why the naive \eqn{b}-coordinate implementation is
+R reference path only (the compiled kernel is roadmap).  The
+naive \eqn{b}-coordinate implementation is
 unsound (the binding boundary must be a grid line).}
 
 \item{threads}{Worker threads for the COMPILED backend's backward step, or

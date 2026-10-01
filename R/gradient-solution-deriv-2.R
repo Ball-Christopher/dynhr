@@ -1,7 +1,7 @@
 ## R/gradient-solution-deriv-2.R
 ## --------------------------------------------------------------------------
 ## SECOND-ORDER solution-derivative layer (Foundation A for the exact
-## posterior Hessian, ROADMAP Tier 6 #2).
+## posterior Hessian).
 ##
 ## Computes the second total derivatives of the first-order decision rule
 ##   d2G/dtheta_i dtheta_j,  d2H/dtheta_i dtheta_j,  d2ys/dtheta_i dtheta_j
@@ -62,7 +62,7 @@
 
 
 ## ---------------------------------------------------------------------------
-## Analytic second-total primitive context + per-pair builder (Tier 11 #3, 3b).
+## Analytic second-total primitive context + per-pair builder.
 ##
 ## .sd2_build_ctx evaluates, ONCE at the base point, the four sparse symbolic
 ## tensors the analytic second total derivative of the dynamic Jacobian needs:
@@ -111,7 +111,7 @@
   if (any(!is.finite(ph2)) || any(!is.finite(h2)) || any(!is.finite(h3)) ||
       any(!is.finite(p2j))) return(NULL)
 
-  ## SSM-computed-parameter chain data (Tier 12 #2, second order). The second
+  ## SSM-computed-parameter chain data (second order). The second
   ## total derivative of the dynamic Jacobian for such models uses TOTAL
   ## parameter directions W[,a] = e_a + Σ_pc (dp_c/dθ_a) e_pc in the param-tensor
   ## contractions (T1 param2_jac, T2/T3 param_hess2) and adds a new term
@@ -184,7 +184,7 @@
       }
     }
   } else {
-    ## --- SSM: TOTAL parameter directions W[,a], W[,b] (Tier 12 #2) ---
+    ## --- SSM: TOTAL parameter directions W[,a], W[,b] ---
     W <- ssm$W
     ## T1: Σ_{p,q} param2_jac[:,:,p,q] W[p,a] W[q,b] (canonical pa<=pb, symmetric).
     for (k in seq_along(ctx$p2j_trip)) {
@@ -433,7 +433,7 @@ solution_derivatives_2 <- function(model, compiled, dr, params, param_names,
 
   list(first = first, d2 = d2, param_names = param_names,
        ## Which second-primitive path produced d2f: "analytic" (param_deriv =
-       ## "second" codegen, Tier 11 #3) or "fd" (the stencil fallback). Both
+       ## "second" codegen) or "fd" (the stencil fallback). Both
        ## are certified to agree on regular models (nk_small: identical eigen
        ## spectra); callers surface this so a Hessian consumer can tell which
        ## path it got without re-deriving the compile-time gating.

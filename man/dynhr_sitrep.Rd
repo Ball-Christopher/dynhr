@@ -23,7 +23,9 @@ comparison before you start one.
 Reported: the loaded dynhr version, its \code{GIT_COMMIT} stamp, whether it was
 loaded via pkgload (\code{devtools::load_all()}), the version and stamp of the
 installed copy that workers would load (flagged when it differs), the BLAS
-and LAPACK R is linked against, the core count, and the mirai daemon status.
+and LAPACK R is linked against (flagged, with how to switch, when they are
+R's slow reference implementations), the core count, and the mirai daemon
+status.
 }
 \examples{
 dynhr_sitrep()

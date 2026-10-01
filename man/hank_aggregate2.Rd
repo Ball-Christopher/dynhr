@@ -19,7 +19,7 @@ The scalar aggregate.
 \eqn{\sum_x d(x)\, g(x)} over \code{(e, b, a)} cells.  The two-asset sibling
 of \code{\link{hank_aggregate}}, and it inherits that function's contract:
 shapes must match cell-for-cell, and mismatches are an ERROR rather than a
-silent recycle (adversarial review 2026-07-13, P2).
+silent recycle.
 }
 \seealso{
 \code{\link{hank_aggregate}} (one-asset),

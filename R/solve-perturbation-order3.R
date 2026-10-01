@@ -723,8 +723,7 @@ solve_perturbation_order3 <- function(model, compiled, ss, params, dr2,
     prop_xxu_p[e, ] <- as.vector(aperm(A, c(3L, 2L, 1L)))
   }
   rhs_xxu <- -(Phi_xxu + fp %*% prop_xxu_p)
-  ghxxu   <- tryCatch(solve(A_L, rhs_xxu),
-                      error = function(e) qr.solve(A_L, rhs_xxu))
+  ghxxu   <- .solve_higher_order_lu(A_L, rhs_xxu)
   ghxxu <- .symmetrize_xxu_cols(ghxxu, n_s, n_u)
 
   # x-u-u: cols indexed (s1, k1, k2) in Kronecker (s1 slow, k2 fast),
@@ -783,8 +782,7 @@ solve_perturbation_order3 <- function(model, compiled, ss, params, dr2,
     prop_xuu_p[e, ] <- as.vector(aperm(A, c(3L, 2L, 1L)))
   }
   rhs_xuu <- -(Phi_xuu + fp %*% prop_xuu_p)
-  ghxuu   <- tryCatch(solve(A_L, rhs_xuu),
-                      error = function(e) qr.solve(A_L, rhs_xuu))
+  ghxuu   <- .solve_higher_order_lu(A_L, rhs_xuu)
   ghxuu <- .symmetrize_xuu_cols(ghxuu, n_s, n_u)
 
   # u-u-u: 3 pair-singleton arrangements with (W_uu, T_u).
@@ -833,8 +831,7 @@ solve_perturbation_order3 <- function(model, compiled, ss, params, dr2,
     prop_uuu_p[e, ] <- as.vector(aperm(A, c(3L, 2L, 1L)))
   }
   rhs_uuu <- -(Phi_uuu + fp %*% prop_uuu_p)
-  ghuuu   <- tryCatch(solve(A_L, rhs_uuu),
-                      error = function(e) qr.solve(A_L, rhs_uuu))
+  ghuuu   <- .solve_higher_order_lu(A_L, rhs_uuu)
   ghuuu <- .symmetrize_uuu_cols(ghuuu, n_u)
 
   # ----------------------------------------------------------------
@@ -1250,7 +1247,7 @@ simulate_model_order3 <- function(dr3, n_periods = 200L, shocks = NULL,
 
   shock_stderr <- .get_shock_stderr(model, exo, params)
   if (is.null(shocks)) {
-    ## L2 follow-up (0.9.4): a `skew` alpha used to be ignored here entirely --
+    ## L2 follow-up: a `skew` alpha used to be ignored here entirely --
     ## the order-3 simulator drew GAUSSIAN shocks even for a model whose
     ## declared shocks are skewed.  Route those through the shared joint-CSN
     ## sampler (R/stochsimul-monolith.R), which is the law the PSKF likelihood
@@ -1371,10 +1368,10 @@ simulate_model_order3 <- function(dr3, n_periods = 200L, shocks = NULL,
       sim[t, ] <- y1 + y2 + y3_val
     }
   } else {
-    ## 0.9.4 (WS4, follow-up to WS2's A9): GENUINE unpruned order-3 recursion.
+    ## 0.9.4 : GENUINE unpruned order-3 recursion.
     ## Before 0.9.4 this branch forced x^s = x^rd = 0 every period, which is the
     ## ORDER-ONE law of motion with a second/third-order observation equation
-    ## bolted on -- not an unpruned simulation (WS2 fixed the identical bug at
+    ## bolted on -- not an unpruned simulation(the identical bug was fixed at
     ## order 2 in R/solve-perturbation-order2.R).
     ##
     ## The unpruned recursion carries ONE state x_t (no x^f/x^s/x^rd split) and
@@ -1449,4 +1446,29 @@ simulate_model_order3 <- function(dr3, n_periods = 200L, shocks = NULL,
   }
   attr(sim, "levels") <- sim_levels
   sim
+}
+
+
+## Solve M x = rhs for the higher-order perturbation coefficient systems
+## (A_L, or a shifted A_L + r * fp) by LU with tol = 0, the rule
+## .solve_ghu_lu uses at order 1. Base solve()'s default tol refuses any M
+## with rcond below 2.2e-16, and the old qr.solve() fallback (tol = 1e-7) then
+## errored on an ill-conditioned but NONSINGULAR M -- a false failure, since
+## partial-pivot LU is backward stable there. A non-finite or EXACTLY singular
+## M (LAPACK meets a zero pivot) has no coefficient tensor: that is a classed
+## error. A vector rhs returns a vector (complex stays complex: the compact
+## Sylvester sweep solves complex systems column by column).
+.solve_higher_order_lu <- function(M, rhs) {
+  M <- as.matrix(M)
+  ## an empty system (no states: rhs is n x 0) has the empty solution
+  if (is.matrix(rhs) && (ncol(rhs) == 0L || nrow(M) == 0L))
+    return(matrix(if (is.complex(rhs) || is.complex(M)) 0i else 0,
+                  ncol(M), ncol(rhs)))
+  if (!all(is.finite(M)) || !all(is.finite(rhs)) || !isTRUE(rcond(M) > 0))
+    .dynhr_abort("higher-order perturbation: the coefficient system matrix ",
+                 "is singular or non-finite, so the higher-order decision-rule ",
+                 "tensors are not determined.",
+                 class = "dynhr_error_singular_system")
+  x <- solve(M, rhs, tol = 0)
+  if (is.matrix(rhs)) x else as.vector(x)   # keeps a complex solution complex
 }

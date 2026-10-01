@@ -15,35 +15,31 @@
 ## thorough "can I trust the posterior I already have?" verdict once a full
 ## diagnostic suite exists. See @seealso on both functions.
 ##
-## THE SEVEN CHECKS (pathological-dsge-paper, DYNHR_GAPS.md gap #6, section
-## "The Estimation Passport" @sec-passport; thresholds cited per-check below)
+## THE SEVEN CHECKS (thresholds cited per-check below)
 ## --------------------------------------------------------------------------
 ##   1. eigen        -- near-unit-root top eigenvalue of the solved TT at the
-##                       mode (@sec-bk-nur; threshold 0.95, paper.qmd line 851
-##                       "Above ~0.95, route the filter through lik_init=auto").
+##                       mode (threshold 0.95: above ~0.95, route the
+##                       filter through lik_init=auto).
 ##   2. hessian       -- exact posterior-Hessian condition number + spectrum at
-##                       the mode (@sec-aniso; paper.qmd lines 852-857: a
-##                       correctly measured 1e5-1e8 is amber/expected and calls
+##                       the mode (a correctly measured 1e5-1e8 is amber/expected and calls
 ##                       for a full inverse-Hessian proposal; ~1e11 (the FD
 ##                       artifact regime) is red).
 ##   3. bk_share      -- BK-feasible share of the prior with a Clopper-Pearson
-##                       95% CI (replication/00_diagnose_nk_small.R part (1);
-##                       14_mc_error.R's `cp()` helper for the exact CI).
+##                       95% CI.
 ##   4. collision     -- proposal/parameter collision rate at the mode (BK-
-##                       infeasible tuned-proposal share; 00_diagnose_nk_small.R
-##                       part (4); paper.qmd tbl-pathologies: nk_small ~11-16%
+##                       infeasible tuned-proposal share; nk_small ~11-16%
 ##                       is the "binding" regime, sw2007-class ~0.05% is
 ##                       "benign").
-##   5. contraction   -- prior-to-posterior contraction table (@sec-weakid-
-##                       contract; posterior-sd / prior-sd per parameter;
-##                       paper.qmd line 641: ratios near 1 mean "the data have
+##   5. contraction   -- prior-to-posterior contraction table
+##                       (posterior-sd / prior-sd per parameter;
+##                       ratios near 1 mean "the data have
 ##                       not moved the parameter").
-##   6. multistart    -- seeded-multistart log-posterior spread (@sec-mode;
-##                       reuses d7_mode_robustness(), R/diag-mcmc-d7-mode-
+##   6. multistart    -- seeded-multistart log-posterior spread
+##                       (reuses d7_mode_robustness(), R/diag-mcmc-d7-mode-
 ##                       robustness.R, tol=3 nats "same basin" / gap_warn=50).
 ##   7. sbc_lite      -- an SBC smoke check (NOT a certification): a handful of
 ##                       replications/draws via dynhr_sbc(), reporting its own
-##                       uniformity verdict (@sec-sbc). Deliberately small by
+##                       uniformity verdict. Deliberately small by
 ##                       design (see sbc_full_enabled()/DYNHR_SBC_FULL
 ##                       convention in tests/testthat/helper-tolerances.R for
 ##                       the "keep it fast, it's a smoke check" precedent).
@@ -101,7 +97,7 @@
   if (bk && length(sol$state_idx)) {
     TT <- sol$ghx[sol$state_idx, , drop = FALSE]
     if (nrow(TT) > 0L)
-      te <- max(Mod(eigen(TT, only.values = TRUE)$values))
+      te <- .state_radius(TT, sol)
   }
   list(bk = bk, top_eig = te)
 }
@@ -128,7 +124,7 @@
 # ---------------------------------------------------------------------------
 #' Run the estimation passport's seven pre-flight diagnostics
 #'
-#' The paper's "estimation passport" (pathological-dsge-paper, @sec-passport)
+#' The "estimation passport"
 #' bundles seven cheap-but-decisive checks that should be run BEFORE
 #' committing to a long estimation. This function computes all seven directly
 #' from \code{(model, data)} -- no pre-existing diagnostic suite or mode-find
@@ -233,7 +229,7 @@ run_estimation_passport <- function(model, data,
   checks <- match.arg(checks, all_checks, several.ok = TRUE)
   run_check <- function(nm) nm %in% checks
   ## Each check below re-seeds (seed + offset) inside this frame; restore the
-  ## caller's RNG stream when the run exits (C1).
+  ## caller's RNG stream when the run exits.
   .local_seed(seed)
 
   compiled <- compile_model(model, verbose = FALSE)
@@ -305,8 +301,7 @@ run_estimation_passport <- function(model, data,
         g <- .passport_grade(cond, "condition_number")
         ## posterior_hessian() returns the Hessian of the LOG-POSTERIOR
         ## (unnegated); at a converged maximum it should be negative
-        ## semi-definite, so a "wrong-sign" eigenvalue (paper.qmd
-        ## "Limitations", 1 of 9 / 2 of 29 / 2 of 34 across the three models)
+        ## semi-definite, so a "wrong-sign" eigenvalue
         ## is a POSITIVE eigenvalue here. Condition number is a ratio of
         ## |eigenvalues| either way, so it is unaffected by this convention.
         out$hessian <- list(status = g$status, value = cond,
@@ -383,7 +378,7 @@ run_estimation_passport <- function(model, data,
         x <- sum(v$coll)
         bt <- stats::binom.test(x, v$n)
         rate <- x / v$n
-        ## Thresholds from tbl-pathologies / @sec-bk: collisions near 0
+        ## Thresholds: collisions near 0
         ## ( <1%, sw2007/micro-class) are benign; the nk_small-class binding
         ## regime is 11-16%. Amber at >5%, red at >10% (inside the paper's
         ## observed binding band) -- collisions signal weak identification,
@@ -424,7 +419,7 @@ run_estimation_passport <- function(model, data,
       })
       if (isTRUE(r$ok)) {
         tbl <- r$value
-        ## Ratios near 1 flag uninformed parameters (paper.qmd line 641).
+        ## Ratios near 1 flag uninformed parameters.
         ## amber at >= 0.7 (paper's kappa example, "barely moves"), red at
         ## >= 0.95 (essentially unmoved, e.g. gammaQ at 1.00).
         worst <- if (nrow(tbl)) tbl$param[which.max(tbl$ratio)] else NA_character_
@@ -497,7 +492,7 @@ run_estimation_passport <- function(model, data,
         spread <- diff(range(d7$result$logposts))
         ## Red when the spread crosses the paper's own gap_warn convention
         ## (50 nats, R/diag-mcmc-d7-mode-robustness.R): "a large spread means
-        ## the mode is a ridge" (paper.qmd line 865).
+        ## the mode is a ridge" (a large spread is not a benign multimodality).
         if (identical(status, "amber") && is.finite(spread) && spread > 50)
           status <- "red"
         out$multistart <- list(status = status, value = spread,
@@ -538,8 +533,8 @@ run_estimation_passport <- function(model, data,
       succ <- s$n_replications - s$n_failed
       ## dynhr_sbc()'s own uniformity verdict (sbc_uniformity_test(), R/
       ## validate-sbc.R) is one of "calibrated" / "suspect" / "miscalibrated"
-      ## / "insufficient" -- read verbatim (never re-derived), per the
-      ## paper's @sec-sbc "report the package's own uniformity verdict".
+      ## / "insufficient" -- read verbatim (never re-derived), so
+      ## the package's own uniformity verdict is reported.
       ## "insufficient" (no usable rank spread/GOF signal, e.g. every
       ## replication landed on the same rank) is a degraded-input report,
       ## not a miscalibration finding -- route it to not_assessed like the

@@ -67,8 +67,8 @@ Kalman filter, no steady-state shortcut), \code{"chandrasekhar"}
 (Morf--Sidhu--Kailath low-rank increment recursion; requires
 \code{lik_init = "stationary"}, a fully observed panel and no
 \code{me_extra} / \code{shock_scale}, and errors otherwise --
-\code{"auto"} selects it only when \code{n_state > 100}, the measured
-crossover against the C++ \code{"standard"} loop),
+\code{"auto"} selects it only when \code{n_state > 100}: it is faster
+from about 60 states but does not return \code{final_cov}),
 \code{"standard"} (per-step Riccati with steady-state
 lock), \code{"reference"} (alias for \code{"dare"}), or
 \code{"univariate"} (Koopman--Durbin 2000 sequential filter on the
@@ -93,10 +93,10 @@ covariance \code{F_t} AND the Joseph-form state-covariance update
 Intended for \code{filter_tunes} soft tunes: the expanded
 observable's column carries \code{stderr^2} at the tune periods and 0
 elsewhere.  When \code{me_extra} is non-\code{NULL} and has any nonzero
-entry the filter is forced onto the per-period R loop (\code{method =
-"standard"}, \code{"dare"}, or \code{"univariate"} in R); the C++
-standard fast path, the Chandrasekhar recursion, and the steady-state
-lock are all bypassed
+entry the filter is forced onto a per-period recursion (\code{method =
+"standard"}, run by its general compiled kernel, \code{"dare"}, or
+\code{"univariate"} in R); the complete-data C++ kernel, the
+Chandrasekhar recursion, and the steady-state lock are all bypassed
 because they bake a time-invariant \code{H} into the gain/covariance
 update.  Concretely: \code{method = "auto"} routes to
 \code{"standard"}; explicit \code{method = "chandrasekhar"} with
@@ -352,7 +352,7 @@ filter \strong{only when the two paths evaluate the SAME likelihood},
 namely when all of
 \itemize{
   \item \code{me_variance == 0} (a conservative gate retained from the
-    pre-F3-D regulariser convention: the two paths now evaluate the same
+    former regulariser convention: the two paths now evaluate the same
     likelihood at any \code{me_variance}, but the gate still refuses to
     switch estimator mid-chain),
   \item \code{me_extra} is \code{NULL} or all zero,

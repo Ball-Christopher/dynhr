@@ -135,7 +135,7 @@
 
   has_me_extra    <- !is.null(me_extra)
   ## Any TRUE observation noise at all (base me_variance or per-period
-  ## me_extra): both feed F AND the Joseph covariance term (F3-D).
+  ## me_extra): both feed F AND the Joseph covariance term.
   has_me_true     <- has_me_extra || me_variance != 0
   has_shock_scale <- !is.null(shock_scale)
 
@@ -248,7 +248,7 @@
       Se_t <- Sigma_e; HH_t <- HH; SS_t <- SS
     }
     ## Full ME diagonal for this period as a VECTOR: base me_variance plus
-    ## this period's me_extra. Both are TRUE observation noise (F3-D), so both
+    ## this period's me_extra. Both are TRUE observation noise, so both
     ## enter F AND the Joseph covariance update.
     me_vec_t <- if (has_me_extra) me_variance + me_extra[, t]
                 else rep(me_variance, n_obs)

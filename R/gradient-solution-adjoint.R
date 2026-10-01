@@ -1,7 +1,7 @@
 ## R/gradient-solution-adjoint.R
 ## --------------------------------------------------------------------------
 ## ADJOINT (reverse-mode) of the first-order perturbation solve + steady-state
-## fixed point (Tier 18 A2, phase 1).
+## fixed point.
 ##
 ## The forward implicit layer (gradient-solution-deriv.R) solves, for EVERY
 ## structural parameter j, one generalized Sylvester equation
@@ -66,7 +66,7 @@
 ## solve); make_posterior_grad routes it separately.
 ##
 ## Phase-1 scope note: second-order solution derivatives (posterior_hessian's
-## T2; P2 gap #3) still use the forward layer + FD second primitives --
+## T2) still use the forward layer + FD second primitives --
 ## the adjoint-of-adjoint and analytic d2f primitives are the remaining A2
 ## phase-2 items, along with the Rcpp port and the make_posterior_grad
 ## default flip.
@@ -96,12 +96,17 @@
 #'   layer's default)
 #' @param use_analytic NULL (option-driven, default TRUE) / TRUE / FALSE --
 #'   same contract as \code{solution_derivatives}.
+#' @param prep       NULL, or the \code{.grad_adjoint_prep()} object the
+#'   caller already built for this \code{(dr, params)}: the declaration-order
+#'   system matrices, the dynamic expansion point and the equation-to-
+#'   declaration layout. Supplying it skips re-extracting them (same values,
+#'   built once per gradient evaluation instead of three times).
 #' @return list(grad = named numeric (NA where a parameter's primitives
 #'   failed), ok = named logical, used_analytic = logical)
 #' @noRd
 .solution_adjoint <- function(model, compiled, dr, params, param_names,
                               obs_vars, bars, h_rel = 1e-6,
-                              use_analytic = NULL) {
+                              use_analytic = NULL, prep = NULL) {
 
   if (!all(param_names %in% names(params))) {
     missing_p <- param_names[!param_names %in% names(params)]
@@ -129,7 +134,8 @@
   ## the parity test pins the two layers against each other).
   S <- matrix(0, nrow = n_state, ncol = n_endo)
   if (n_state > 0) S[cbind(seq_len(n_state), state_idx)] <- 1
-  sys0 <- extract_system_matrices(compiled, ys, params)
+  sys0 <- if (!is.null(prep)) prep$sys0
+          else extract_system_matrices(compiled, ys, params)
   f_plus <- sys0$f_plus; f_zero <- sys0$f_zero
   f_minus <- sys0$f_minus; f_u <- sys0$f_exo
   SG <- if (n_state > 0) S %*% G else matrix(0, nrow = 0, ncol = 0)
@@ -179,7 +185,7 @@
     ## ONE right-hand side: skip the factor's fixed-RHS self-test (a second
     ## full back-substitution) and gate the actual solve with the same 1e-9
     ## residual rule instead; a failure takes the .solve_kron_compact
-    ## fallback exactly as a failed self-test did (W89).
+    ## fallback exactly as a failed self-test did.
     sylv_fac_T <- .gen_sylvester_k1_factor(tA, tfp, tSG, self_test = FALSE)
     L <- NULL
     if (!is.null(sylv_fac_T)) {
@@ -206,7 +212,7 @@
   if (is.null(use_analytic))
     use_analytic <- isTRUE(getOption("dynhr.use_analytic_primitives", TRUE))
   ## Analytic primitives: contract the bars against ALL parameters' total
-  ## primitive derivatives in one reverse pass (.analytic_dprim_contract, W89)
+  ## primitive derivatives in one reverse pass (.analytic_dprim_contract)
   ## instead of materializing every parameter's df blocks via
   ## .analytic_dprimitives() and contracting them one by one -- the same
   ## Frobenius sum (3), summed in a different order (agrees to rounding).
@@ -226,7 +232,7 @@
         compiled, ys, params, dys_all,
         bar_df_plus = bar_df_plus, bar_df_zero = bar_df_zero,
         bar_df_minus = bar_df_minus, bar_df_exo = bar_df_u,
-        bar_ys = bys)
+        bar_ys = bys, prep = prep)
     }
   }
 
@@ -241,7 +247,7 @@
   ## channel is the caller's (the filter adjoint's G_Sig, the cumulant
   ## bar_Sigma_e contraction). The analytic layer has no column for such a name
   ## (.analytic_dys() is indexed by compiled$model$param_names), so indexing it
-  ## was a subscript-out-of-bounds crash (ls2003 cumulant, W65).
+  ## was a subscript-out-of-bounds crash (ls2003 cumulant).
   model_pars <- compiled$model$param_names %||% names(model$param_values)
 
   for (pname in param_names) {

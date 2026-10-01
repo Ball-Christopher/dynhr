@@ -322,8 +322,7 @@
     list(i = ridx, x = rval)
   }
 
-  solveN <- function(M, b) tryCatch(solve(M, b),
-                                    error = function(e) qr.solve(M, b))
+  solveN <- function(M, b) .solve_higher_order_lu(M, b)
 
   # Solve A_L·X + fp·X·hx^{⊗k} = B for a real n × m B; returns real n × m X.
   solve_once <- function(B) {

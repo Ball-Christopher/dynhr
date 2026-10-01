@@ -272,7 +272,7 @@ List kf_adjoint_diffuse_cpp(const arma::mat& Y,
     if (in_diffuse) {
       arma::mat F_inf  = sym(ZZ * P_inf  * tZZ);
       arma::mat F_star = sym(ZZ * P_star * tZZ + HHme);
-      // F_inf / P_inf are unit-free: the forward filter's rule (W77).
+      // F_inf / P_inf are unit-free: the forward filter's rule.
       double max_Finf = arma::abs(F_inf).max();
 
       if (max_Finf < diffuse_tol) {

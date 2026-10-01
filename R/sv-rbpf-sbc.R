@@ -180,7 +180,7 @@ sv_rbpf_sbc <- function(n_repl = 100L, T_obs = 60L, n_particles = 500L,
   }
 
   ## run_one() re-seeds (seed + r) in THIS process on the serial path; restore
-  ## the caller's RNG stream when this function exits (C1).
+  ## the caller's RNG stream when this function exits.
   .local_seed(seed)
   reps <- if (cores > 1L) {
     parallel::mclapply(seq_len(n_repl), run_one, mc.cores = cores,

@@ -26,7 +26,7 @@ covariance matrix \eqn{\Sigma_e} from a model's \code{shocks} block,
 honouring \code{stderr}, \code{var a,b = cov}, and \code{corr a,b}
 (including expression-valued entries re-evaluated against \code{params}).
 This is the same matrix the Kalman filter, Whittle likelihood, and the
-spectral/identification diagnostics (D13, D15, D23, D24) use internally, so
+spectral/identification diagnostics use internally, so
 it is the correct value to pass as their \code{sigma_e=} argument.
 }
 \examples{

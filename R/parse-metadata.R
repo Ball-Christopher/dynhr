@@ -9,7 +9,7 @@
 
 #' Resolve a .mod argument that may be a PATH or already a vector of LINES
 #'
-#' A13b: `extract_mod_metadata()` has always documented both forms, but
+#' `extract_mod_metadata()` has always documented both forms, but
 #' `.extract_narratives()` called `readLines()` on the raw argument, so the
 #' lines form died with "invalid 'description' argument" -- and the caller in
 #' `parse_mod()` swallowed that error, silently returning EMPTY metadata (not
@@ -183,7 +183,7 @@ extract_mod_metadata <- function(mod_file_or_lines) {
 #'         sign=SIGN, min_sd=N, description="TEXT"
 #'
 #' @param mod_file  Path to a .mod file, a character vector of .mod lines, or a
-#'   single string holding the whole file. A13b: all three are accepted -- this
+#'   single string holding the whole file. All three are accepted -- this
 #'   used to be `readLines()` on the raw argument, which ERRORED on the lines
 #'   form that `extract_mod_metadata()` documents and accepts.
 #' @return list of narrative episode specs
@@ -358,7 +358,7 @@ extract_mod_metadata <- function(mod_file_or_lines) {
 # @dynhr:deep block parser  (deep-parameter taxonomy)
 #
 # Declares the structural class and (optionally) the reduced-form image of each
-# model parameter, so the deep-parameter diagnostics (D33/D34/D35) and the
+# model parameter, so the deep-parameter diagnostics and the
 # Deep-Parameter Passport can (a) tell deep primitives from auxiliary shock
 # parameters and (b) partition policy vs private parameters for the Lucas-
 # critique invariance test.

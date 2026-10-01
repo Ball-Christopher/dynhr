@@ -29,9 +29,8 @@
 ## back to the legacy re-solving FD via .resolve_order2().
 ##
 ## A fully closed-form analytic sensitivity of the CHAIN term (differentiating
-## the C211/C2211 Lyapunov tensors -- d_C211/d_C2211 are derived+validated in
-## .claude/orchestration/cumulant-oracle/{dC211_dev,dC2211_dev}.R -- and the
-## chain assembly) was scoped and DELIBERATELY NOT IMPLEMENTED: profiling
+## the C211/C2211 Lyapunov tensors -- d_C211/d_C2211 were derived and validated
+## against finite differences, as was the chain assembly) was scoped and DELIBERATELY NOT IMPLEMENTED: profiling
 ## (2026-07-01) shows the order-4 forward cost is 99.8% the trace q-form and
 ## only 0.2% the closed-form chain, so a symbolic chain derivative removes ~0%
 ## of the gradient runtime while adding a large, error-prone tensor
@@ -303,7 +302,7 @@ cumulant_moment_derivs_3_4 <- function(dr2, model, params, o2d, obs_idx,
 
     ## Subset d_c3_obs to observable rows AND (j,k) columns, exactly the
     ## projection `.cumulant_loglik()` / `.build_moment_vector()` apply to the
-    ## forward c3 (E4-B: this used to be a for(a)/for(b) loop that kept only
+    ## forward c3 (this used to be a for(a)/for(b) loop that kept only
     ## the (i,i,k) slice, so d(moment)/d(theta) was zero off that slice).
     d_c3_obs_sub <- .project_c3_obs(d_c3_obs_full, obs_idx, n_endo)
 
@@ -379,7 +378,8 @@ cumulant_moment_derivs_3_4 <- function(dr2, model, params, o2d, obs_idx,
 #' @param bar_c3  n_s x n_s^2 cotangent dL/dC3.
 #' @return list(bar_rhs = n_s x n_s^2, bar_hx = n_s x n_s).
 #' @noRd
-.solve_third_cross_cumulant_adjoint <- function(hx, c3, bar_c3) {
+.solve_third_cross_cumulant_adjoint <- function(hx, c3, bar_c3,
+                                                use_cpp = TRUE) {
   n_s <- nrow(hx)
   if (n_s == 0L)
     return(list(bar_rhs = matrix(0, 0, 0), bar_hx = matrix(0, 0, 0)))
@@ -427,6 +427,12 @@ cumulant_moment_derivs_3_4 <- function(dr2, model, params, o2d, obs_idx,
   ## the implicit-function reverse (bar_hx = - d r/d hx contracted with M via
   ## the standard adjoint sign for A(hx) C3 = b => bar_hx = -M (dA/dhx) C3).
   ## dA/dhx acts only through -hx^{⊗3}; the three modes each contribute.
+  if (isTRUE(use_cpp)) {
+    ## Three mode contractions as ns x ns sandwiches hx S hx' (O(ns^4)); the
+    ## scalar loops below are the parity reference (use_cpp = FALSE).
+    return(list(bar_rhs = bar_rhs,
+                bar_hx  = o2_third_cross_bar_hx_cpp(hx, c3, Re(M))))
+  }
   bar_hx <- matrix(0, n_s, n_s)
   ## Reshape helpers: T3[i,j,k] flattened as c3[i, (k-1)*n_s + j]? The n_s x n_s^2
   ## layout stores row i as as.numeric(matrix(n_s,n_s)) = column-major over (j,k)

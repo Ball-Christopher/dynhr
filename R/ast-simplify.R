@@ -60,7 +60,7 @@ ast_contains_variable <- function(node) {
             # Both spellings are a steady-state CONSTANT (ast_differentiate
             # treats them alike). Matching only the upper-case one sent
             # `x^steady_state(y)` down the general power rule, whose
-            # 0 * log(x) term is NaN for x <= 0 (review 2026-09-25 C8).
+            # 0 * log(x) term is NaN for x <= 0.
             if (node$name %in% c("STEADY_STATE", "steady_state")) return(FALSE)
             any(vapply(node$args, ast_contains_variable, logical(1)))
         },

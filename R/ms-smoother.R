@@ -21,12 +21,12 @@
 ## a hand-copied forward pass silently drifts from the likelihood it is
 ## supposed to decompose the moment the filter is edited.)
 ##
-## WHY DURBIN-KOOPMAN AND NOT RAUCH-TUNG-STRIEBEL (2026-09-03).
+## WHY DURBIN-KOOPMAN AND NOT RAUCH-TUNG-STRIEBEL.
 ## RTS assumes y_{t+1} is conditionally independent of s_t given s_{t+1}.
 ## Under dynhr's lag-1 observation timing that is FALSE:
 ##     y_{t+1} = Z s_t + D eps_{t+1}
 ## loads s_t DIRECTLY, so an RTS state pass is not exact here.  This was first
-## established for the single-regime smoother (E4-A, R/smoother-monolith.R,
+## established for the single-regime smoother (R/smoother-monolith.R,
 ## tests/testthat/test-kalman-smoother-exact.R, which pins it against a
 ## brute-force joint-Gaussian projection oracle); the same argument applies
 ## verbatim to every regime path of the Kim smoother, since each path is an
@@ -35,7 +35,7 @@
 ## states and 5.1e-8 on the covariances under P = I -- small, but a genuine
 ## specification error, not round-off.  With the DK pass both agree to ~1e-13.
 ##
-## THE REGIME PASS: WHY "joint" AND NOT KIM'S (F2-A, 2026-09-03).
+## THE REGIME PASS: WHY "joint" AND NOT KIM'S.
 ##
 ## Kim (1994, eq. 10) builds the smoothed joint by
 ##     Pr[s_t=i, s_{t+1}=j | y_{1:T}]
@@ -116,7 +116,7 @@
 ## R' - D'K' = (R - K D)'.)
 ##
 ## --------------------------------------------------------------------------
-## THE GPB(3) BACKWARD PASS (F4-D, 2026-09-04): PAIR-INDEXED, TRIPLE JOINT.
+## THE GPB(3) BACKWARD PASS: PAIR-INDEXED, TRIPLE JOINT.
 ##
 ## ms_kim_filter(collapse = "gpb3") keeps h^2 Gaussian components indexed by
 ## the PAIR (s_{t-1}, s_t) and collapses h^3 -> h^2 each period.  Its backward
@@ -144,7 +144,7 @@
 ##   whose numerator is the filter's own per-cell posterior (`cell_filt`, the
 ##   per-triple filtered joint) and whose denominator is its group mass
 ##   (`joint_filt`).  Nothing new is computed -- the filter simply stops
-##   throwing the uncollapsed cells away, exactly as F2-A did one level down.
+##   throwing the uncollapsed cells away, exactly as the joint regime pass does one level down.
 ##   Marginalising k gives the pair distribution one period back,
 ##     Pr[s_{t-2}=i, s_{t-1}=j | y_{1:T}] = sum_k Pr[i, j, k | y_{1:T}],
 ##   which is the recursion; it starts from Pr[s_{T-1}, s_T | y_{1:T}] =
@@ -189,7 +189,7 @@
 ## they index, not in a parameter, and merging them would put the release path
 ## at the mercy of an edit meant for the other.
 ## --------------------------------------------------------------------------
-## THE IMM BACKWARD PASS (W22, 2026-09-25).
+## THE IMM BACKWARD PASS.
 ##
 ## ms_kim_filter(collapse = "imm") keeps h components indexed by s_t, exactly
 ## as gpb2 does, but builds each period's update from ONE mixed prior per
@@ -384,7 +384,7 @@ ms_kim_smoother <- function(data, dr, model, params, obs_vars, ms_spec,
   regime_pass <- match.arg(regime_pass)
   collapse    <- match.arg(collapse)
 
-  ## GPB(3): a DIFFERENT backward recursion, not a re-indexing (F4-D).
+  ## GPB(3): a DIFFERENT backward recursion, not a re-indexing.
   ## The gpb2 core carries one Durbin-Koopman adjoint per REGIME and collapses
   ## with the h x h smoothed joint; the gpb3 forward pass returns h^2
   ## PAIR-indexed components, so its backward twin carries an adjoint per PAIR
@@ -462,7 +462,7 @@ ms_kim_smoother <- function(data, dr, model, params, obs_vars, ms_spec,
 ## Shared by both backward passes so the message is written once; `what`/`how`
 ## name the collapse that produced the covariance (the GPB(2) h^2 -> h one, or
 ## the GPB(3) h^3 -> h^2 one), and the wording is otherwise identical to the
-## pre-F4-D warning.  See the call site in .ms_smoother_core() for the measured
+## earlier warning.  See the call site in .ms_smoother_core() for the measured
 ## magnitudes and why this is reported rather than swallowed.
 ##
 ## @param cov_avg  n_state x n_state x T regime-averaged smoothed covariances.
@@ -499,7 +499,7 @@ ms_kim_smoother <- function(data, dr, model, params, obs_vars, ms_spec,
 
 
 ## Internal: prior mean of s_0 for initial component i -- the structural
-## filter's `b0_list` (W47: nonzero when the regimes' steady states differ),
+## filter's `b0_list` (Nonzero when the regimes' steady states differ),
 ## zero for the reduced-form filter, whose law has no state intercept.
 ## @noRd
 .ms_fwd_s0 <- function(fwd, i, n_state) {
@@ -604,7 +604,7 @@ ms_kim_smoother <- function(data, dr, model, params, obs_vars, ms_spec,
   ## LAGGED state (component i's filtered pair plus P r^{(i,j)}), collapsed over
   ## i with the SAME weights as eps_s.  Consumed by ms_smoothed_fit_struct(),
   ## whose observation equation y_t = d_j + Z_j s_{t-1} + D_j eps_t pairs the
-  ## lagged state with the regime in force at t (W39b).
+  ## lagged state with the regime in force at t.
   lag_s   <- array(0, c(n_state, h, n_T))
   ## r_cur[, j] = r_t^{(j)} ; N_cur[, , j] = N_t^{(j)}. Terminal: both zero,
   ## which is what makes the smoothed pair at t = T the FILTERED pair (no
@@ -1181,7 +1181,7 @@ ms_kim_smoother <- function(data, dr, model, params, obs_vars, ms_spec,
 ## STRUCTURAL PATH
 ## --------------------------------------------------------------------------
 ##
-## WHICH STEADY STATE ARE THE SMOOTHED STATES DEVIATIONS FROM? (2026-09-03)
+## WHICH STEADY STATE ARE THE SMOOTHED STATES DEVIATIONS FROM?
 ##
 ## In the structural path every regime has its OWN steady state ys_s, so
 ## d_s = ys_s[obs_vars] differs across regimes and the question is real: Kim's
@@ -1194,7 +1194,7 @@ ms_kim_smoother <- function(data, dr, model, params, obs_vars, ms_spec,
 ## s_t = x_t[state] - ref with ref = ys_1[state], and the regime steady states
 ## (and the solver's regime constant c_const) enter as INTERCEPTS
 ##     s_t = c_j + TT_j s_{t-1} + RR_j eps_t ,
-##     y_t = d_j + ZZ_j s_{t-1} + DD_j eps_t     (j = s_t, W39b / W47) .
+##     y_t = d_j + ZZ_j s_{t-1} + DD_j eps_t     (j = s_t) .
 ## So the filtered state vector is, by construction, one single coordinate
 ## system shared by all regimes, and Kim's collapse (in the filter) and the
 ## collapses in the backward pass are therefore mixtures of quantities
@@ -1212,7 +1212,7 @@ ms_kim_smoother <- function(data, dr, model, params, obs_vars, ms_spec,
 ##     ref).  `ss_states_by_regime` ships the ys_j[state_vars] columns and
 ##     `state_ref` the reference.
 ##
-## (Before W47, 2026-09-25, the filter had no state intercept and ignored
+## (Previously 2026-09-25, the filter had no state intercept and ignored
 ## c_const, which was exact only for a shared steady state, and the level
 ## output added each regime's OWN ys_j to deviations that were in fact
 ## measured from a common origin.)
@@ -1340,7 +1340,7 @@ ms_kim_smoother_struct <- function(data, ms_dr, model, params, obs_vars,
   regime_pass <- match.arg(regime_pass)
   collapse    <- match.arg(collapse)
 
-  ## GPB(3): routed to the PAIR-INDEXED backward pass (F4-D); see the note in
+  ## GPB(3): routed to the PAIR-INDEXED backward pass; see the note in
   ## ms_kim_smoother() and the derivation in this file's header.
   gpb3 <- identical(collapse, "gpb3")
   if (gpb3 && identical(regime_pass, "kim"))
@@ -1386,8 +1386,8 @@ ms_kim_smoother_struct <- function(data, ms_dr, model, params, obs_vars,
                      dimnames = list(st_names, rn))
 
   ## Every regime's smoothed state is a deviation from the SAME reference
-  ## (W47: fwd$state_ref = ys_1[state]), so the level is that reference plus
-  ## the mixed deviation.  (Before W47 each regime's deviation was added to
+  ## (Fwd$state_ref = ys_1[state]), so the level is that reference plus
+  ## the mixed deviation.  (Previously each regime's deviation was added to
   ## its OWN ys_j, which read the common coordinates as if they were
   ## regime-specific ones.)
   ref <- fwd$state_ref
@@ -1461,7 +1461,7 @@ ms_smoothed_fit_struct <- function(sm, data) {
 
   ZZ <- lapply(ms_dr$dr, function(d) d$ghx[obs_idx, , drop = FALSE])
   DD <- lapply(ms_dr$dr, function(d) d$ghu[obs_idx, , drop = FALSE])
-  ## The filter's own observation intercepts (W47: they carry the regime
+  ## The filter's own observation intercepts (They carry the regime
   ## steady states and c_const in the common state coordinates).
   dd <- lapply(.ms_struct_intercepts(ms_dr, obs_var)$d_list, as.numeric)
 
@@ -1473,7 +1473,7 @@ ms_smoothed_fit_struct <- function(sm, data) {
          "smoothed_lag_states_by_regime; re-run ms_kim_smoother_struct().",
          call. = FALSE)
 
-  ## y_t = d_j + Z_j s_{t-1} + D_j eps_t (+ u_t), j = s_t (W39b): every term
+  ## y_t = d_j + Z_j s_{t-1} + D_j eps_t (+ u_t), j = s_t: every term
   ## is conditioned on the regime in force at t, with the lagged state taken
   ## as E[s_{t-1} | s_t = j, y_T] (the core collapses it with the SAME weights
   ## as the shock, so each forward cell's identity carries through).

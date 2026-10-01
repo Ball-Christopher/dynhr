@@ -26,6 +26,22 @@
          inherits = FALSE, mode = "function")
 }
 
+### The Chandrasekhar increment recursion (kalman_chandrasekhar_loop_cpp) sits
+### behind the same switch; the per-step R loop stays as the reference.
+.HAS_RCPP_KALMAN_CHAND <- function() {
+  if (!isTRUE(getOption("dynhr.use_rcpp", TRUE))) return(FALSE)
+  exists("kalman_chandrasekhar_loop_cpp", envir = asNamespace("dynhr"),
+         inherits = FALSE, mode = "function")
+}
+
+### The general standard-filter kernel (missing data, a0 / P0, shock_scale,
+### me_extra) sits behind the same switch.
+.HAS_RCPP_KALMAN_GENERAL <- function() {
+  if (!isTRUE(getOption("dynhr.use_rcpp", TRUE))) return(FALSE)
+  exists("kalman_standard_general_loop_cpp", envir = asNamespace("dynhr"),
+         inherits = FALSE, mode = "function")
+}
+
 .kf_ss_dispatch <- function(Y_minus_d, ZZ, TT, K_ss, F_inv_ss,
                             ll_ss_const, s, start_t, end_t,
                             filtered = NULL) {
@@ -116,7 +132,7 @@
 ### call; .kf_univariate_loop_R is the bit-mirroring fallback (same
 ### options(dynhr.use_rcpp) switch as the standard filter).
 ###
-### DIFFUSE-PHASE TOLERANCES (W77, 2026-09-26). P_inf is the unit-free
+### DIFFUSE-PHASE TOLERANCES. P_inf is the unit-free
 ### diffuse direction (A_inf A_inf' from .kf_diffuse_P0), so F_inf = Z P_inf Z'
 ### and P_inf itself carry NO units of the data, while F_star / P_star carry
 ### the data's squared units. The diffuse update / diffuse-exit tests are
@@ -270,7 +286,7 @@
       if (diffuse) {
         K_inf <- drop(P_inf %*% Zi)
         F_inf <- sum(Zi * K_inf)
-        if (F_inf > diffuse_tol) {         # unit-free (see header, W77)
+        if (F_inf > diffuse_tol) {         # unit-free (see header)
           ## Diffuse update (DK 2012 sec. 7.2.5); same renormalization
           ## convention as the multivariate Case B in .kf_diffuse_phase.
           ll_t   <- ll_t - 0.5 * log(F_inf)
@@ -312,7 +328,7 @@
     if (diffuse) {
       P_inf <- Tb %*% P_inf %*% t(Tb)
       P_inf <- (P_inf + t(P_inf)) * 0.5
-      if (max(abs(P_inf)) < conv_tol) {  # P_inf is unit-free (W77)
+      if (max(abs(P_inf)) < conv_tol) {  # P_inf is unit-free
         diffuse   <- FALSE
         d_diffuse <- t
       }
@@ -636,7 +652,7 @@
 ### so kappa's round-off lands directly in the initial state and s_1 no longer
 ### equals T s_0. Give the model a `shocks;` block and the same case balances
 ### to 1.1e-10 (kappa) or 1.7e-16 (the exact-diffuse/stationary default).
-### (Since the 2026-09-25 fix wave a singular F restarts kalman_smoother on the
+### (Now a singular F restarts kalman_smoother on the
 ### univariate recursion, which never forms that product, so the reported
 ### case itself now balances to ~1e-17; the warning stays, because the model
 ### is still degenerate.)
@@ -893,7 +909,7 @@
 }
 
 ### Is a Lyapunov solution a usable STATIONARY initial covariance? Finite, and
-### positive semi-definite up to round-off RELATIVE to its own scale (W77).
+### positive semi-definite up to round-off RELATIVE to its own scale.
 ### lik_init = "auto" (kalman_filter, kalman_filter_student_t, the Kim filters)
 ### and the gradient kernels' init choice (.grad_needs_diffuse_init) all ask
 ### this on a near-unit-root TT. The test used to be ABSOLUTE,
@@ -927,7 +943,7 @@
            call. = FALSE)
     P0 <- P0[state_names, state_names, drop = FALSE]
   }
-  ## Both checks RELATIVE to the matrix's own scale (W77): with a max(1, .)
+  ## Both checks RELATIVE to the matrix's own scale: with a max(1, .)
   ## floor they were absolute below max|P0| = 1, so a small-scale P0 (a model
   ## in small units, or every std x 1e-4) passed with an asymmetry or a
   ## negative eigenvalue of 1e-9 -- i.e. 10% of its size.
@@ -956,7 +972,7 @@
 ### test is kept for the one caller that
 ### scales `tol` itself (diag-pre-d37-komunjer-ng.R). kalman_filter's drift
 ### diagnostic uses the relative form at the steady-state lock's 1e-12
-### (.LYAP_TOL; W77): with an absolute 1e-14 the fixed point was unreachable
+### (.LYAP_TOL): with an absolute 1e-14 the fixed point was unreachable
 ### once P ~ 1e4 (round-off alone is ~1e-12), so method = "dare" warned "did
 ### not converge" whenever every shock std and the data were scaled by
 ### >= 100, and stopped ~1e-6-relative early at 1e-4. (1e-14 RELATIVE is
@@ -1066,7 +1082,7 @@
 ###   F_star = ZZ P_star ZZ' + HH + me_diag
 ###
 ### Case A (F_inf ~= 0, i.e. max|F_inf| < diffuse_tol; F_inf is unit-free --
-###   W77, see above .HAS_RCPP_KALMAN_UNI):
+###   see above .HAS_RCPP_KALMAN_UNI):
 ###   the diffuse part of the state has nothing left to learn from this
 ###   observation; run a STANDARD exact .kf_step on (s, P_star) (with its
 ###   usual likelihood contribution) and propagate P_inf <- TT P_inf TT'.
@@ -1131,7 +1147,7 @@
     F_star <- ZZ %*% P_star %*% t(ZZ) + HH + me_diag
     F_star <- (F_star + t(F_star)) * 0.5
 
-    ## F_inf is unit-free: tested on its own (W77; see the note above
+    ## F_inf is unit-free: tested on its own (see the note above
     ## .HAS_RCPP_KALMAN_UNI -- a max(1, max|F_star|) scale grew with the data's
     ## units and ended the diffuse phase early at large scale).
     if (max(abs(F_inf)) < diffuse_tol) {
@@ -1196,7 +1212,7 @@
       s <- s_new; P_inf <- P_inf_new; P_star <- P_star_new
     }
 
-    if (max(abs(P_inf)) < conv_tol) {    # P_inf is unit-free (W77)
+    if (max(abs(P_inf)) < conv_tol) {    # P_inf is unit-free
       return(list(s = s, P = P_star, loglik = loglik, t_next = t + 1L,
                   ok = TRUE, d_diffuse = t, fallback = FALSE,
                   P_inf_final = P_inf))
@@ -1250,8 +1266,8 @@
 #'   (Morf--Sidhu--Kailath low-rank increment recursion; requires
 #'   \code{lik_init = "stationary"}, a fully observed panel and no
 #'   \code{me_extra} / \code{shock_scale}, and errors otherwise --
-#'   \code{"auto"} selects it only when \code{n_state > 100}, the measured
-#'   crossover against the C++ \code{"standard"} loop),
+#'   \code{"auto"} selects it only when \code{n_state > 100}: it is faster
+#'   from about 60 states but does not return \code{final_cov}),
 #'   \code{"standard"} (per-step Riccati with steady-state
 #'   lock), \code{"reference"} (alias for \code{"dare"}), or
 #'   \code{"univariate"} (Koopman--Durbin 2000 sequential filter on the
@@ -1290,10 +1306,10 @@
 #'   Intended for \code{filter_tunes} soft tunes: the expanded
 #'   observable's column carries \code{stderr^2} at the tune periods and 0
 #'   elsewhere.  When \code{me_extra} is non-\code{NULL} and has any nonzero
-#'   entry the filter is forced onto the per-period R loop (\code{method =
-#'   "standard"}, \code{"dare"}, or \code{"univariate"} in R); the C++
-#'   standard fast path, the Chandrasekhar recursion, and the steady-state
-#'   lock are all bypassed
+#'   entry the filter is forced onto a per-period recursion (\code{method =
+#'   "standard"}, run by its general compiled kernel, \code{"dare"}, or
+#'   \code{"univariate"} in R); the complete-data C++ kernel, the
+#'   Chandrasekhar recursion, and the steady-state lock are all bypassed
 #'   because they bake a time-invariant \code{H} into the gain/covariance
 #'   update.  Concretely: \code{method = "auto"} routes to
 #'   \code{"standard"}; explicit \code{method = "chandrasekhar"} with
@@ -1476,7 +1492,7 @@
 #' namely when all of
 #' \itemize{
 #'   \item \code{me_variance == 0} (a conservative gate retained from the
-#'     pre-F3-D regulariser convention: the two paths now evaluate the same
+#'     former regulariser convention: the two paths now evaluate the same
 #'     likelihood at any \code{me_variance}, but the gate still refuses to
 #'     switch estimator mid-chain),
 #'   \item \code{me_extra} is \code{NULL} or all zero,
@@ -1855,9 +1871,14 @@ kalman_filter <- function(data, dr, model, params, obs_vars,
   ## A per-observable vector is checked at its LARGEST entry: the inflation
   ## of the smallest eigenvalue by diag(me) is at most 1 + max(me) / e_min, so
   ## this is the conservative (warn-if-possibly-dominant) bound.
+  ## The Lyapunov solve is kept (P0_lyap) and reused as the stationary initial
+  ## covariance below -- it is the same solve_lyapunov(TT, QQ), so the filter
+  ## no longer pays for it twice on a call that runs this check.
+  P0_lyap <- NULL
   if (any(me_vec > 0) && isTRUE(me_floor_check)) {
     me_chk   <- if (me_scalar) me_variance else max(me_vec)
     Sxi0_chk <- tryCatch(solve_lyapunov(TT, QQ), error = function(e) NULL)
+    P0_lyap  <- Sxi0_chk
     if (!is.null(Sxi0_chk) && all(is.finite(Sxi0_chk))) {
       .warn_me_floor_lock(
         .pruned_me_floor_ratio(TT, ZZ, QQ, HH, SS, Sxi0_chk, me_chk),
@@ -1919,9 +1940,10 @@ kalman_filter <- function(data, dr, model, params, obs_vars,
     has_me_extra <- any(me_extra != 0)
   }
   if (has_me_extra) {
-    ## C++ standard fast path bakes a time-invariant H into the gain / update.
-    ## Chandrasekhar likewise assumes a constant innovation structure.
-    ## Neither can handle per-period me_extra: force R paths only.
+    ## The complete-data C++ kernel bakes a time-invariant H into the gain /
+    ## update, and Chandrasekhar assumes a constant innovation structure.
+    ## Neither can handle per-period me_extra: the standard filter's general
+    ## (per-period) kernel does.
     if (method == "chandrasekhar")
       stop("kalman_filter: method = 'chandrasekhar' is incompatible with ",
            "nonzero me_extra (time-varying ME variances require a per-period ",
@@ -1931,10 +1953,10 @@ kalman_filter <- function(data, dr, model, params, obs_vars,
       method <- "standard"
       route_log[[length(route_log) + 1L]] <-
         c(from = "auto", to = "standard",
-          reason = "me_extra (per-period measurement error) needs the R loop")
+          reason = "me_extra (per-period measurement error) needs the per-period standard filter")
     }
     ## has_missing is already TRUE whenever me_extra introduces NA rows; if
-    ## not, mark it so the C++ dispatch inside METHOD 3 is also bypassed.
+    ## not, mark it so METHOD 3 bypasses the complete-data kernel.
     has_missing <- TRUE
   }
 
@@ -1957,14 +1979,14 @@ kalman_filter <- function(data, dr, model, params, obs_vars,
       stop("kalman_filter: method = 'chandrasekhar' is incompatible with ",
            "shock_scale (time-varying shock variances require a per-period R loop); ",
            "use method = 'auto', 'standard', or 'dare'.", call. = FALSE)
-    ## C++ univariate bakes QQb once; force the R standard path.
+    ## C++ univariate bakes QQb once; use the per-period standard filter.
     if (method %in% c("univariate", "auto")) {
       route_log[[length(route_log) + 1L]] <-
         c(from = method, to = "standard",
-          reason = "shock_scale (per-period shock variances) needs the R loop")
+          reason = "shock_scale (per-period shock variances) needs the per-period standard filter")
       method <- "standard"
     }
-    ## C++ standard fast path bakes HH/Sigma_e -- bypass it.
+    ## The complete-data C++ kernel bakes HH/Sigma_e -- bypass it.
     has_missing <- TRUE
   }
   ## Exact-diffuse init with non-unity scales runs on the SEQUENTIAL filter
@@ -2053,9 +2075,13 @@ kalman_filter <- function(data, dr, model, params, obs_vars,
     ## symmetric = FALSE skips R's isSymmetric()/all.equal() probe (TT is the
     ## non-symmetric state transition); only Mod() of the eigenvalues is used,
     ## so the result is identical. Profiled at ~6-8% of an RWMH draw.
-    tt_evals <- eigen(TT, symmetric = FALSE, only.values = TRUE)$values
-    if (any(Mod(tt_evals) > 1 - 1e-6)) {
-      P0_auto <- tryCatch(solve_lyapunov(TT, QQ), error = function(e) NULL)
+    ## The solve that produced `dr` already knows the radius of exactly this
+    ## block (kept on the rule, validated by identity); .state_radius() only
+    ## runs the eigen() when it does not, e.g. a hand-built or augmented TT.
+    tt_radius <- .state_radius(TT, dr)
+    if (tt_radius > 1 - 1e-6) {
+      P0_auto <- if (!is.null(P0_lyap)) P0_lyap
+                 else tryCatch(solve_lyapunov(TT, QQ), error = function(e) NULL)
       ## Accept the stationary init only if P0 is finite AND a valid covariance
       ## (PSD). A genuine unit root => NaN P0; an explosive root (|lambda| > 1,
       ## which a BK-satisfying dr never produces, but guard anyway) => a finite
@@ -2091,10 +2117,10 @@ kalman_filter <- function(data, dr, model, params, obs_vars,
   if (lik_init_orig %in% c("diffuse", "kappa") &&
       !(has_missing && lik_init_orig == "diffuse") &&
       method_orig %in% c("standard", "dare", "chandrasekhar", "reference")) {
-    has_unit_roots <- if (exists("tt_evals"))   # reuse from "auto" branch
-      any(Mod(tt_evals) > 1 - 1e-6)
+    has_unit_roots <- if (exists("tt_radius"))   # reuse from "auto" branch
+      tt_radius > 1 - 1e-6
     else
-      any(Mod(eigen(TT, symmetric = FALSE, only.values = TRUE)$values) > 1 - 1e-6)
+      .state_radius(TT, dr) > 1 - 1e-6
     if (has_unit_roots) {
       .dynhr_warn("kalman_filter: unit-root model detected with method = \"",
               method, "\". ",
@@ -2137,7 +2163,7 @@ kalman_filter <- function(data, dr, model, params, obs_vars,
       method <- "standard"
       route_log[[length(route_log) + 1L]] <-
         c(from = "auto", to = "standard",
-          reason = "missing observations need the per-step loop")
+          reason = "missing observations need the per-period standard filter")
     }
     else if (lik_init %in% c("diffuse", "kappa")) {
       ## The exact-diffuse phase has no multivariate Rcpp fast path (the
@@ -2150,7 +2176,7 @@ kalman_filter <- function(data, dr, model, params, obs_vars,
       ## rank) at ~2x the speed.
       ##
       ## ROUTING GATE (conservative): route to univariate only at
-      ## me_variance == 0. Since F3-D both paths implement the SAME true-ME
+      ## me_variance == 0. Both paths now implement the SAME true-ME
       ## law, so this is no longer a correctness requirement -- it is kept so
       ## that turning on a measurement-error floor cannot silently change
       ## which ALGORITHM (and hence which round-off/steady-state behaviour)
@@ -2166,22 +2192,35 @@ kalman_filter <- function(data, dr, model, params, obs_vars,
           else paste("diffuse initialisation with measurement error or",
                      "me_extra: kept on the multivariate per-step loop"))
     }
-    ## F4-B: the Chandrasekhar branch is exact again (see METHOD 2), so it is
-    ## back in "auto" -- but only above the MEASURED crossover. The increment
-    ## recursion runs in R at O(n_state^2 n_obs) per step, the "standard"
-    ## filter in C++ at O(n_state^3); on this machine (T = 200, random dense
-    ## systems, R CMD INSTALL build) chandrasekhar/standard wall clock was
-    ##   n_state   50    100    200    300      (n_obs = 3)
-    ##   ratio   1.85   1.01   0.64   0.33
-    ##   n_state  100    200                    (n_obs = 7)
-    ##   ratio   1.11   0.61
-    ## i.e. the old n_state > 50 rule was a ~1.9x PESSIMIZATION and the
-    ## crossover sits near n_state = 100 (weakly dependent on n_obs).
+    ## The Chandrasekhar branch is exact (see METHOD 2) and runs as a compiled
+    ## kernel, so it is chosen from the MEASURED crossover with the compiled
+    ## standard filter. The increment recursion costs O(n_state^2 n_obs) per
+    ## step, the Riccati recursion O(n_state^3); this machine (T = 200, random
+    ## dense stable systems, optimised build, vendor BLAS; ms per likelihood):
+    ##   n_obs = 3, spectral radius 0.9
+    ##   n_state       10     20     40     60     80    100    160    240
+    ##   standard    0.08   0.68   1.02   3.06   4.69   7.70  15.75  45.00
+    ##   chandra     0.05   0.41   0.64   1.62   2.48   3.67   7.34  15.69
+    ##   ratio       0.63   0.60   0.63   0.53   0.53   0.48   0.47   0.35
+    ##   n_obs = 7, spectral radius 0.9 (locks early)
+    ##   standard    0.14   0.31   0.59   1.37   1.64   4.61   8.42  21.81
+    ##   chandra     0.14   0.27   0.50   0.98   1.07   2.61   4.20   8.16
+    ##   ratio       1.00   0.87   0.85   0.72   0.65   0.57   0.50   0.37
+    ## (the same recursion in R, before the port, lost to the compiled
+    ## standard filter up to n_state ~ 220: 59 vs 57 ms at n_state = 240.)
+    ## Chandrasekhar is below ~0.7 of the standard cost from n_state ~ 60 for
+    ## every n_obs tried and never slower above ~20. "auto" nevertheless
+    ## switches only above n_state = 100: the increment recursion never forms
+    ## P, so `final_cov` (the documented sample-split hand-off) is NULL on it,
+    ## and near unit roots its loglik sits ~1e-7 from the Riccati one. Below
+    ## 100 that would silently change what "auto" returns; above 100 it was
+    ## already the rule. Ask for method = "chandrasekhar" to take the measured
+    ## ~2x on 61-100 states when the hand-off is not needed.
     else if (n_state > 100) {
       method <- "chandrasekhar"
       route_log[[length(route_log) + 1L]] <-
         c(from = "auto", to = "chandrasekhar",
-          reason = sprintf("n_state = %d > 100 (measured crossover)", n_state))
+          reason = sprintf("n_state = %d > 100 (final_cov not formed above this size)", n_state))
     } else {
       method <- "standard"
       route_log[[length(route_log) + 1L]] <-
@@ -2249,6 +2288,8 @@ kalman_filter <- function(data, dr, model, params, obs_vars,
     ## Reuse the P0 already computed while resolving lik_init = "auto" (avoids a
     ## second solve_lyapunov on the near-unit-root auto path).
     if (!is.null(P0_auto)) return(P0_auto)
+    ## ...or the one the measurement-error floor check solved for.
+    if (!is.null(P0_lyap) && !anyNA(P0_lyap)) return(P0_lyap)
     P0 <- solve_lyapunov(TT, QQ)
     if (anyNA(P0))
       stop("kalman_filter: lik_init = \"stationary\" failed because ",
@@ -2398,9 +2439,9 @@ kalman_filter <- function(data, dr, model, params, obs_vars,
     TmKZ <- TT - K %*% ZZ
     RmKD <- RR - K %*% DD
     P_n  <- tcrossprod(TmKZ %*% P, TmKZ) + tcrossprod(RmKD %*% Sigma_e, RmKD)
-    ## TRUE measurement-noise law (F3-D): y_t = ZZ x_t + DD e_t + u_t with
+    ## TRUE measurement-noise law: y_t = ZZ x_t + DD e_t + u_t with
     ## Var(u_t) = me_variance * I requires P' += K me_variance I K' for ANY
-    ## gain K. Before F3-D `me_variance` entered F only (a regulariser), which
+    ## gain K. Formerly `me_variance` entered F only (a regulariser), which
     ## made the multivariate paths disagree with the univariate filter, the
     ## smoother and the DARE fixed point by O(me_variance).
     ## Per-observable H = diag(me_vec): P' += K diag(me_vec) K'.
@@ -2506,8 +2547,8 @@ kalman_filter <- function(data, dr, model, params, obs_vars,
   ## fallback would then be sampling a mixture of two different densities,
   ## silently. The two conventions coincide only when ALL of the following
   ## hold (each condition documented elsewhere in this file):
-  ##   * me_variance == 0 -- a CONSERVATIVE gate retained from the pre-F3-D
-  ##     regulariser convention. Since F3-D the multivariate paths treat
+  ##   * me_variance == 0 -- a CONSERVATIVE gate retained from the former
+  ##     regulariser convention. The multivariate paths treat
   ##     me_variance as TRUE iid measurement noise, exactly like the
   ##     univariate filter (test-kf-true-me.R pins agreement to 1e-10 at
   ##     me_variance in {1e-3, 1e-2}), so the fallback would now be sound at
@@ -2889,6 +2930,25 @@ kalman_filter <- function(data, dr, model, params, obs_vars,
     HH_full <- HH + me_diag
     P0      <- .solve_lyapunov_stationary()
 
+    ## Compiled recursion: the same increments, lock and tail as the R loop
+    ## below (which stays as the options(dynhr.use_rcpp = FALSE) reference).
+    if (.HAS_RCPP_KALMAN_CHAND()) {
+      cout <- kalman_chandrasekhar_loop_cpp(
+        Y_minus_d, ZZ, TT, SS, HH_full, P0, as.numeric(a0_vec), ll_const,
+        ss_tol, .KF_LL_MIN, isTRUE(return_filtered))
+      if (!isTRUE(cout$ok)) return(.kf_fail("chandrasekhar"))
+      if (return_filtered) {
+        filtered <- cout$filtered
+        rownames(filtered) <- state_names_out
+      }
+      return(.kf_result(cout$loglik, filtered, "chandrasekhar", lik_init,
+                        d_diffuse, final_state = as.numeric(cout$s),
+                        final_cov = NULL,
+                        extra = list(boot_steps = 0L,
+                                     ss_reached_at = if (cout$ss_step > 0L)
+                                       cout$ss_step else NA_integer_)))
+    }
+
     ## --- Exact initialisation: F_1, K_1 at P_1 = P_0, W_1 = K_1, M_1 = -F_1
     PZ0   <- P0 %*% tZZ
     F_mat <- ZZ %*% PZ0 + HH_full
@@ -2976,7 +3036,7 @@ kalman_filter <- function(data, dr, model, params, obs_vars,
 
 
   ## ===================================================================
-  ## METHOD 3: Standard KF (handles missing data)
+  ## METHOD 3: Standard KF (handles missing data; compiled, R loop = reference)
   ## ===================================================================
 
   P <- if (lik_init == "stationary") .solve_lyapunov_stationary() else init_P
@@ -2988,11 +3048,11 @@ kalman_filter <- function(data, dr, model, params, obs_vars,
 
   ## Fast path: run the entire standard filter (transient + steady-state lock
   ## + tail) in one C++ call. Only when there is no missing data (the per-step
-  ## partial-observation handling below needs the R loop), the Rcpp backend
-  ## is available, AND no diffuse phase was needed (lik_init == "stationary").
-  ## A diffuse phase always uses the per-step R loop below (init_t_start > 1
-  ## and/or non-Lyapunov P0) -- see use_diffuse_phase above. Bit-parity with
-  ## the R loop is asserted by test-kalman-rcpp-parity.R.
+  ## partial-observation handling needs the general kernel below), the Rcpp
+  ## backend is available, AND no diffuse phase was needed (lik_init ==
+  ## "stationary"). A diffuse phase hands (s, P, t_start) to the general
+  ## kernel below -- see use_diffuse_phase above. Bit-parity with the R loop
+  ## is asserted by test-kalman-rcpp-parity.R.
   ## has_shock_scale is excluded explicitly (belt-and-suspenders): it already
   ## forces has_missing <- TRUE above (the C++ kernel bakes a single
   ## time-invariant Sigma_e/HH/SS and cannot express a per-period scale), but
@@ -3001,8 +3061,8 @@ kalman_filter <- function(data, dr, model, params, obs_vars,
   ## `a0` gate: kalman_standard_loop_cpp() takes no initial state -- it starts
   ## the recursion at zero, unconditionally. Without this test a non-zero `a0`
   ## would be accepted, validated, reported, and then SILENTLY DROPPED on the
-  ## default fast path for every stationary model. Fall through to the R loop,
-  ## which reads init_s.
+  ## default fast path for every stationary model. Fall through to the
+  ## general kernel (or the R loop), which reads init_s.
   if (!has_missing && !has_shock_scale && lik_init == "stationary" &&
       all(a0_vec == 0) && .HAS_RCPP_KALMAN()) {
     out <- kalman_standard_loop_cpp(Y_minus_d, ZZ, TT, RR, DD, HH + me_diag,
@@ -3026,6 +3086,32 @@ kalman_filter <- function(data, dr, model, params, obs_vars,
     if (return_filtered) rownames(filtered) <- state_names_out
     return(.kf_result(loglik, filtered, "standard", lik_init, d_diffuse,
                       final_state = s, final_cov = P))
+  }
+
+  ## Everything else -- missing observations, a non-zero a0, a user / kappa /
+  ## post-diffuse (s0, P0, t_start), shock_scale, me_extra -- runs the general
+  ## C++ kernel: the per-step loop below, branch for branch, in one call, so a
+  ## few missing periods cost a few periods rather than moving the whole
+  ## sample onto the R interpreter. The R loop below stays as the reference
+  ## behind options(dynhr.use_rcpp = FALSE); test-t20-kf-missing-cpp.R holds
+  ## the two together.
+  if (.HAS_RCPP_KALMAN_GENERAL()) {
+    out <- kalman_standard_general_loop_cpp(
+      Y_minus_d, ZZ, TT, RR, DD, HH, QQ, Sigma_e, SS,
+      as.numeric(init_s), P, init_t_start, init_loglik, ll_const, ss_tol,
+      .KF_LL_MIN, return_filtered, me_vec,
+      if (has_me_extra) me_extra else matrix(0, 0, 0),
+      if (has_shock_scale) shock_scale else matrix(0, 0, 0),
+      .KF_ZERO_VAR_TOL)
+    if (!out$ok)
+      return(.kf_fail("standard"))
+    filt <- NULL
+    if (return_filtered) {
+      filt <- out$filtered
+      rownames(filt) <- state_names_out
+    }
+    return(.kf_result(out$loglik, filt, "standard", lik_init, d_diffuse,
+                      final_state = out$s, final_cov = out$P))
   }
 
   for (t in init_t_start:n_T) {
@@ -3067,7 +3153,7 @@ kalman_filter <- function(data, dr, model, params, obs_vars,
       ## The complete-data step's singularity rule (.kf_F_singular, Dynare's),
       ## not chol() success alone: a relatively singular observed subset used
       ## to be inverted through here while the same F on a complete period
-      ## went to the univariate fallback (W76, 2026-09-26).
+      ## went to the univariate fallback.
       if (.kf_F_singular(Fc, Ft, Fi = Fi)) return(.kf_fail("standard"))
       ## Constant is -0.5 * n_obs_t * log(2*pi): correct ll_const (which
       ## bakes in the full n_obs) UP by the number of missing components.

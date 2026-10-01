@@ -20,13 +20,13 @@
 ##
 ## Consumers of the engine below: the deterministic path solvers
 ## (boehl_solve_regime_path, solve_obc_lcp, obc_simulate, compute_irfs_obc,
-## ramsey_obc_pwlinear, occbin_solve_path(method = "pwlinear"), W48) and,
-## since W49 (2026-09-25), the piecewise-linear Kalman filter
+## ramsey_obc_pwlinear, occbin_solve_path(method = "pwlinear")) and,
+## since 0.9.3.93, the piecewise-linear Kalman filter
 ## kalman_filter_obc_pkf() (Dynare's OccBin PKF) with everything built on it
 ## (obc_guess_verify, kalman_filter_obc, the smoother, the historical
 ## decomposition, the PKF posterior and conditional forecasts), the
 ## inversion filter (R/obc-inversion-filter.R, per-period rules along the
-## regime path) and, since W50, the particle filters (PPF / COPF,
+## regime path) and, since 0.9.3.93, the particle filters (PPF / COPF,
 ## R/obc-ppf.R: each particle follows the regime sequence solved from its own
 ## state).  No filter uses the one-period policies of obc_ensure_policy()
 ## (next period slack) any more.
@@ -103,7 +103,7 @@ obc_build_binding_sys <- function(sys, specs) {
 #' \code{eq_to_decl}; \code{extract_system_matrices_fast()} keeps the model
 #' order and returns no \code{eq_to_decl}.  Replacing row \code{eq_idx} of a
 #' permuted system replaced ANOTHER equation whenever the equations were not
-#' written in declaration order (fixed 2026-09-25, W48).  A spec that already
+#' written in declaration order.  A spec that already
 #' carries its system row (\code{row_idx}, e.g. the OccBin block specs of
 #' .occbin_build_pwlinear_drs()) is used as is.
 #'
@@ -148,7 +148,7 @@ obc_build_binding_sys <- function(sys, specs) {
 #'
 #' OBC bounds in DEVIATION-FROM-STEADY-STATE units
 #'
-#' THE package convention (fixed 0.9.4, ledger A6): an \code{[mcp = 'v > b']}
+#' THE package convention (fixed 0.9.4): an \code{[mcp = 'v > b']}
 #' bound is a LEVEL, in the same units as the model variable \code{v}.  Every
 #' internal comparison happens in deviations (\code{ghx}/\code{ghu} produce
 #' deviations, and \code{boehl_simulate()}'s \code{paths} are deviations), so
@@ -434,7 +434,7 @@ obc_solve_binding <- function(sys, dr_slack, specs, obs_idx) {
 #' above the bound; no tolerance), and solve_one_constraint.m updates
 #' B <- (B | binding) & !(B & relax).  dynhr takes the same decisions up to a
 #' round-off band RELATIVE to the magnitude of the quantities compared, so the
-#' regimes do not depend on the units of the model.  (Before W78 (2026-09) the
+#' regimes do not depend on the units of the model.  (Previously the
 #' band was an absolute 1e-8 in level units: with every shock std, the data
 #' and the bound scaled by 1e-4 a violation of 1 percent of the bound was
 #' ignored.)  A slack period binds when gap = sgn (x - b) < -rtol (|x| + |b|);

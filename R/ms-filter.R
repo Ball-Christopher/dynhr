@@ -96,7 +96,7 @@
 #'   the \emph{Collapse quality} section).  \code{return_state_path} is
 #'   supported under \code{"gpb3"}, but the state path then carries the
 #'   \eqn{h^2} pair-indexed components, which the Kim SMOOTHERS route to
-#'   their own PAIR-INDEXED backward pass (F4-D): an adjoint per pair
+#'   their own PAIR-INDEXED backward pass: an adjoint per pair
 #'   collapsed with the \eqn{h^3} smoothed joint
 #'   \eqn{\Pr[s_{t-2}, s_{t-1}, s_t \mid y_{1:T}]}, whose weights come from
 #'   \code{cell_filt}.
@@ -336,7 +336,7 @@ ms_kim_filter <- function(data, dr, model, params, obs_vars, ms_spec,
   ## PER-REGIME P_{0|0} (Kim & Nelson 1999, sec. 5.3): regime j starts at its
   ## OWN unconditional state covariance Lyapunov(TT, QQ_j), not at regime 1's.
   ##
-  ## FIXED 2026-09-02 (E3-C).  The old code built ONE P0 from regime 1's QQ and
+  ## FIXED 2026-09-02.  The old code built ONE P0 from regime 1's QQ and
   ## handed the same matrix to every regime.  That is a bug, and the P = I
   ## oracle exposes it: with a degenerate transition matrix the Kim filter
   ## started in regime r must reproduce the fixed-regime-r Kalman filter
@@ -383,7 +383,7 @@ ms_kim_filter <- function(data, dr, model, params, obs_vars, ms_spec,
   ## Everything else in the loop -- the Joseph update, the -Inf / singular-F /
   ## all-NA branches, the Durbin-Koopman blocks, the collapse diagnostic -- is
   ## identical, which is why `collapse = "gpb2"` is bit-identical to the
-  ## pre-F3-C recursion: the same cell arithmetic is emitted in the same order.
+  ## earlier recursion: the same cell arithmetic is emitted in the same order.
   ##
   ## Initialised with s_0 = 0, P_0^{(j)} = P0_list[[j]].
   gpb3 <- identical(collapse, "gpb3")
@@ -445,7 +445,7 @@ ms_kim_filter <- function(data, dr, model, params, obs_vars, ms_spec,
   ## which under gpb2 is the familiar i + (j - 1) h.
   ## joint_filt[i, j, t] = Pr[s_{t-1} = i, s_t = j | y_{1:t}] -- the Hamilton
   ## filter's own posterior JOINT, which the recursion already forms (and, up
-  ## to F2-A, threw away after collapsing).  The joint regime smoother
+  ## until then, threw away after collapsing).  The joint regime smoother
   ## (ms_kim_smoother(regime_pass = "joint")) needs it: under dynhr's lag-1
   ## timing y_t loads s_{t-1} DIRECTLY, so this joint carries information about
   ## s_{t-1} that Kim's Pr[s_{t-1}=i | s_t=j, y_{1:t-1}] approximation
@@ -458,7 +458,7 @@ ms_kim_filter <- function(data, dr, model, params, obs_vars, ms_spec,
   ## s_{-1}).  `joint_filt` is its collapse onto the surviving pair, so the
   ## gpb2 smoother needs nothing more; the GPB(3) BACKWARD pass does, because
   ## its triple pass conditions the collapsed-away s_{t-2} on y_{1:t} exactly
-  ## as the gpb2 joint pass conditions s_{t-1} on y_{1:t} (F2-A, one level
+  ## as the gpb2 joint pass conditions s_{t-1} on y_{1:t} (one level
   ## up).  Stored only under gpb3, so the gpb2 state path is untouched.
   if (return_state_path) {
     beta_path <- array(0, c(n_state, n_new, n_T))
@@ -676,7 +676,7 @@ ms_kim_filter <- function(data, dr, model, params, obs_vars, ms_spec,
 
     ## Group mass Pr[surviving suffix g | y_{1:t}]: sum the cells of each
     ## contiguous block.  Under gpb2 a block IS a column of prob_joint, so this
-    ## is the same colSums() the pre-F3-C code ran.
+    ## is the same colSums() the earlier code ran.
     group_mass_raw <- colSums(array(prob_joint, c(n_coll, n_new)))
 
     ## Guard: floor at 1e-300 to avoid division by zero in collapsing.  The RAW
@@ -753,7 +753,7 @@ ms_kim_filter <- function(data, dr, model, params, obs_vars, ms_spec,
 
     ## Carry this period's PRE-collapse cells for the next period's
     ## collapse-quality statistic.  `ord` re-orders the cells so that gpb2
-    ## reproduces the pre-F3-C (k outer, i inner) enumeration exactly, which
+    ## reproduces the earlier (k outer, i inner) enumeration exactly, which
     ## keeps the diagnostic bit-identical as well as the loglik.
     if (return_collapse_diag) {
       ord <- as.integer(t(matrix(seq_len(n_cell), M, h)))
@@ -869,7 +869,7 @@ ms_kim_filter <- function(data, dr, model, params, obs_vars, ms_spec,
 ##   t = 1), with `mix_filt` the conditional Pr[s_{t-1} = i | s_t = j, .]
 ##   itself.
 ##
-## PER-REGIME BLOCKS (W39, 2026-09-25).  `TT`, `RR`, `ZZ` and `DD` may each
+## PER-REGIME BLOCKS.  `TT`, `RR`, `ZZ` and `DD` may each
 ## be a single matrix (common to every regime: the reduced-form call) or a
 ## length-h list indexed by the regime in force at t (the structural call:
 ## y_t = d_k + ZZ_k s_{t-1} + DD_k eps_t, s_t = TT_k s_{t-1} + RR_k eps_t).
@@ -879,7 +879,7 @@ ms_kim_filter <- function(data, dr, model, params, obs_vars, ms_spec,
 ## With single matrices and d_list = NULL every per-regime block IS the common
 ## one and nothing extra is subtracted, so the reduced-form recursion is
 ## bit-identical to the single-matrix one.
-## `c_list` (optional, W47) is the length-h list of per-regime STATE
+## `c_list` (optional) is the length-h list of per-regime STATE
 ## intercepts, s_t = c_k + TT_k s_{t-1} + RR_k eps_t, and `b0_list` the
 ## per-regime initial means of s_0 (zeros when NULL); both come from
 ## .ms_struct_intercepts() / .ms_struct_b0() and are NULL on the reduced-form
@@ -1231,7 +1231,7 @@ ms_kim_filter <- function(data, dr, model, params, obs_vars, ms_spec,
 #'   the \emph{Collapse quality} section).  \code{return_state_path} is
 #'   supported under \code{"gpb3"}, but the state path then carries the
 #'   \eqn{h^2} pair-indexed components, which the Kim SMOOTHERS route to
-#'   their own PAIR-INDEXED backward pass (F4-D): an adjoint per pair
+#'   their own PAIR-INDEXED backward pass: an adjoint per pair
 #'   collapsed with the \eqn{h^3} smoothed joint
 #'   \eqn{\Pr[s_{t-2}, s_{t-1}, s_t \mid y_{1:T}]}, whose weights come from
 #'   \code{cell_filt}.
@@ -1375,10 +1375,10 @@ ms_kim_filter_struct <- function(data, ms_dr, model, params, obs_vars,
     DD_list[[s]] <- dr_s$ghu[obs_idx,   , drop = FALSE]
   }
 
-  ## Intercepts of the law in the common state coordinates (W47): the state
+  ## Intercepts of the law in the common state coordinates: the state
   ## intercept c_j and observation intercept d_j carry the regime steady
   ## states and the solver's regime constant c_const.  With a shared steady
-  ## state c_list is NULL and d_j = ys_j[obs] -- the pre-W47 recursion.
+  ## state c_list is NULL and d_j = ys_j[obs] -- the earlier recursion.
   law    <- .ms_struct_intercepts(ms_dr, obs_vars)
   d_list <- law$d_list
   c_list <- law$c_list
@@ -1469,7 +1469,7 @@ ms_kim_filter_struct <- function(data, ms_dr, model, params, obs_vars,
   ## the period-t update reads -- and `comp_mass[m]` the suffix probability.
   ## GPB(2) and GPB(3) differ only in which coordinate of the post-update cell
   ## (m, k) is collapsed away, so `collapse = "gpb2"` is bit-identical to the
-  ## pre-F3-C recursion.  See ms_kim_filter() for the full note.
+  ## earlier recursion.  See ms_kim_filter() for the full note.
   ##
   ## Initialise: s_0 = 0, P_0^{(s)} = P0_list[[s]]
   gpb3 <- identical(collapse, "gpb3")
@@ -1484,7 +1484,7 @@ ms_kim_filter_struct <- function(data, ms_dr, model, params, obs_vars,
 
   ## ---- Kim-Nelson loop (structural version) --------------------------------
   ##
-  ## THE LAW (W39b, 2026-09-25).  solve_ms_perturbation() returns, per regime
+  ## THE LAW.  solve_ms_perturbation() returns, per regime
   ## s, the decision rule of EVERY endogenous row at t given that s is the
   ## regime in force at t (Maih 2015; ms_irf() propagates it that way), so the
   ## observables of period t are rows of the SAME regime-j rule as the states:
@@ -1502,7 +1502,7 @@ ms_kim_filter_struct <- function(data, ms_dr, model, params, obs_vars,
   ## d_i) with the current regime's DD_j -- a law no DSGE solution implies,
   ## invisible to the tests because their simulators copied it.
   ##
-  ## STEADY STATES (W47, 2026-09-25).  The solver's law is
+  ## STEADY STATES.  The solver's law is
   ##   x_t = ys_j + k_j + G_j (x_{t-1} - ys_j)[state] + H_j eps_t ,
   ## k_j = c_const.  s_t = x_t[state] - ref is ONE coordinate system shared
   ## by all regimes (ref = ys_1[state]), so the prediction above gains the
@@ -1512,7 +1512,7 @@ ms_kim_filter_struct <- function(data, ms_dr, model, params, obs_vars,
   ##   d_j = (ys_j + k_j)[obs]         - ZZ_j (ys_j[state] - ref) .
   ## Nothing else changes: the covariance recursion and the DK blocks do not
   ## see intercepts.  With a shared steady state c_list is NULL and d_j =
-  ## ys_j[obs], the pre-W47 recursion bit for bit.  Before W47 the state
+  ## ys_j[obs], the earlier recursion bit for bit.  Previously the state
   ## recursion had no intercept at all, exact only for a shared steady state.
 
   ll_const <- -0.5 * n_obs * log(2 * pi)
@@ -1606,7 +1606,7 @@ ms_kim_filter_struct <- function(data, ms_dr, model, params, obs_vars,
         HH_j  <- cov_j$HH
         SS_j  <- cov_j$SS
 
-        ## Prediction: TO-regime j transition (+ its intercept c_j, W47)
+        ## Prediction: TO-regime j transition (+ its intercept c_j)
         beta_pred <- drop(TT_j %*% b_i)
         if (!is.null(c_list)) beta_pred <- beta_pred + c_list[[j]]
         P_pred    <- tcrossprod(TT_j %*% P_i, TT_j) + QQ_j
@@ -1755,7 +1755,7 @@ ms_kim_filter_struct <- function(data, ms_dr, model, params, obs_vars,
     regime_prob <- if (gpb3) colSums(matrix(group_mass, h, h)) else group_mass
 
     ## Carry this period's PRE-collapse cells for the next period's
-    ## collapse-quality statistic (`ord` preserves the pre-F3-C enumeration
+    ## collapse-quality statistic (`ord` preserves the earlier enumeration
     ## order under gpb2, so the diagnostic is bit-identical too).
     if (return_collapse_diag) {
       ord <- as.integer(t(matrix(seq_len(n_cell), M, h)))
@@ -1866,7 +1866,7 @@ ms_kim_filter_struct <- function(data, ms_dr, model, params, obs_vars,
 ## per-path covariances are singular, which is precisely the regime in which
 ## the collapse fails.
 ##
-## WHY IT EXISTS (F2-D).  Kim's collapse error is usually negligible, but it
+## WHY IT EXISTS.  Kim's collapse error is usually negligible, but it
 ## is NOT bounded.  On the rbc two-structural-regime fixture with
 ## n_obs = n_exo = 1 and me_variance = 0 the model is EXACTLY identified, the
 ## per-path covariances collapse toward singular, and on one draw (seed 11,
@@ -1877,17 +1877,17 @@ ms_kim_filter_struct <- function(data, ms_dr, model, params, obs_vars,
 ## recursion, as the entire source of the error.  Raising me_variance off
 ## zero relieves the degeneracy (the GPB(2)-vs-GPB(3) gap on that draw falls
 ## from 48 nats to 5.6 at me_variance = 1e-2, and to 0.01 at 1e-1; those three
-## figures were measured before F3-A made me_variance TRUE i.i.d. measurement
+## figures were measured before me_variance became TRUE i.i.d. measurement
 ## error rather than an F-only regulariser).  There is
 ## no fix available inside GPB(2); this statistic exists so the breakdown is
 ## DETECTABLE instead of silent.
-## (W39b, 2026-09-25: all figures in this paragraph were measured under the
+## (2026-09-25: all figures in this paragraph were measured under the
 ## structural filter's OLD previous-regime measurement law; under the
 ## corrected law that fixture shows no breakdown.  The current breakdown
 ## fixture -- alpha .33/.6, P = .6/.7, seed 11: GPB(2) 23.4 nats off, this
 ## statistic 20.2 at t = 2, GPB(3) exact to 4e-14 -- is pinned in
 ## test-ms-filter-exact.R and test-ms-gpb3.R.)
-## (W47, 2026-09-25: with the regime steady-state intercepts that seed-11
+## (2026-09-25: with the regime steady-state intercepts that seed-11
 ## draw is exact to 3e-14.  The breakdown draw is now alpha .33/.5, P =
 ## .6/.7, regime order "21", seed 31: GPB(2) 3.07 nats off, this statistic
 ## 2.873 at t = 2, GPB(3) exact to 4e-15; and on alpha .33/.6, P = .9/.9,
@@ -1968,7 +1968,7 @@ ms_kim_filter_struct <- function(data, ms_dr, model, params, obs_vars,
   if (identical(lik_init, "auto")) {
     P0_try <- tryCatch(solve_lyapunov(TT_list[[1L]], QQ_list[[1L]]),
                        error = function(e) .dynhr_reraise_bug(e, NULL))
-    ok_stat <- .kf_stationary_P0_ok(P0_try)     # relative rule (W77)
+    ok_stat <- .kf_stationary_P0_ok(P0_try)     # relative rule
     lik_init <- if (ok_stat) "stationary" else "kappa"
   }
 
@@ -1991,7 +1991,7 @@ ms_kim_filter_struct <- function(data, ms_dr, model, params, obs_vars,
 }
 
 
-## Internal: the structural filter's state-space INTERCEPTS (W47, 2026-09-25).
+## Internal: the structural filter's state-space INTERCEPTS.
 ##
 ## solve_ms_perturbation() returns, per regime j, the law (see its roxygen and
 ## .ms_regime_constants())
@@ -2007,7 +2007,7 @@ ms_kim_filter_struct <- function(data, ms_dr, model, params, obs_vars,
 ## When every ys_j[state] equals ref and every k_j is 0 (in particular when
 ## the regimes share the steady state) c_j = 0 and d_j = ys_j[obs]; the
 ## helper then reports shift = FALSE and hands back d_j = dr$ys[obs] verbatim
-## so the recursion is bit-identical to the pre-W47 one.
+## so the recursion is bit-identical to the earlier one.
 ##
 ## A hand-built MsDecisionRules without c_const is read as k_j = 0.  Missing
 ## ys names read as 0, the value the solver linearises them at.
@@ -2064,12 +2064,12 @@ ms_kim_filter_struct <- function(data, ms_dr, model, params, obs_vars,
 }
 
 ## Internal: per-regime initial state MEANS E[s_0 | s_0 = i] for the
-## structural filter (W47).  Component i starts at the stationary mean of the
+## structural filter.  Component i starts at the stationary mean of the
 ## regime-i law held forever, (I - TT_i)^{-1} c_i -- the convention of the
 ## per-regime Lyapunov P_{0|0}^{(i)} of .ms_init_P0().  Under a diffuse
 ## (kappa) start, or when I - TT_i is singular (a unit root: no such mean
 ## exists), it is the regime's own steady-state level ys_i[state] - ref.
-## All zeros (the pre-W47 start) when the law has no shift.
+## All zeros (the earlier start) when the law has no shift.
 ## @noRd
 .ms_struct_b0 <- function(law, TT_list, lik_init) {
   h <- length(TT_list)

@@ -444,7 +444,7 @@ ramsey_obc_pwlinear <- function(model,
   # ---- 2. Get OBC specs ----
   # With obc_specs = NULL the specs are the model's MCP tags plus its
   # ramsey_constraints block (mapped onto the augmented system in step 6),
-  # exactly as in ramsey_obc_pf().  Until 2026-09-25 (W48) a
+  # exactly as in ramsey_obc_pf().  Until 2026-09-25 a
   # ramsey_constraints block was refused here: the per-regime binding policy
   # assumed the NEXT period slack (a spell of 2+ periods was solved with the
   # wrong expectation) and the regime search flagged a bound only when the
