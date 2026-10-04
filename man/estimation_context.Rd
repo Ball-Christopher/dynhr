@@ -9,6 +9,7 @@ estimation_context(
   likelihood = c("gaussian", "cumulant", "whittle", "tpf", "pskf", "student_t", "pkf",
     "ppf", "copf", "pruned", "sv_rbpf", "global_pf"),
   lik_init = "auto",
+  filter_method = "auto",
   me_extra = NULL,
   shock_scale = NULL,
   freq_band = c(0, pi),
@@ -42,6 +43,14 @@ constraints).}
 \item{lik_init}{Kalman filter \code{P0} initialisation (default
 \code{"auto"}).  Forwarded to \code{\link{kalman_filter}} on the
 Gaussian path.  Ignored for cumulant/whittle/tpf likelihoods.}
+
+\item{filter_method}{Kalman filter recursion for the Gaussian value path
+(default \code{"auto"}): one of the \code{method} choices of
+\code{\link{kalman_filter}}.  See \code{\link{make_log_posterior}} for
+what \code{"auto"} means inside the posterior and for the forced
+choices.  A value other than \code{"auto"} with any likelihood but
+\code{"gaussian"}, or with a Markov-switching spec, is an error of class
+\code{dynhr_error_inapplicable_argument}.}
 
 \item{me_extra}{\code{n_obs x T} matrix of per-period extra measurement
 error variances (resolved from a \code{filter_tunes} block); \code{NULL}

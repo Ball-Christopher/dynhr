@@ -29,6 +29,7 @@ run_full_estimation(
   likelihood = c("gaussian", "cumulant", "whittle", "tpf", "sv_rbpf", "pskf",
     "student_t", "pruned", "global_pf", "pkf", "ppf", "copf"),
   lik_init = "auto",
+  filter_method = "auto",
   freq_band = c(0, pi),
   system_priors = NULL,
   seed = 42L,
@@ -163,6 +164,11 @@ the filter of an OBC model) -- every likelihood of
 
 \item{lik_init}{Kalman filter \code{P0} initialisation
 (default \code{"auto"}).  Ignored for non-Gaussian likelihoods.}
+
+\item{filter_method}{Kalman filter recursion of the Gaussian value path
+(default \code{"auto"}); one of the \code{method} choices of
+\code{\link{kalman_filter}}.  See \code{\link{make_log_posterior}}.
+Any value but \code{"auto"} with a non-Gaussian likelihood is an error.}
 
 \item{freq_band}{Numeric(2) \code{c(lo, hi)} in radians; Whittle band
 restriction (default \code{c(0, pi)}, ignored for other likelihoods).}
@@ -325,8 +331,8 @@ argument has a default; a minimal call needs only \code{mod_file},
     \code{obs_vars}, \code{data_col_map}, \code{dates}, \code{model},
     \code{compiled}}
   \item{\strong{Likelihood}}{\code{likelihood}, \code{me_variance},
-    \code{lik_init}, \code{freq_band}, \code{system_priors},
-    \code{tpf_options}, \code{filter_tunes},
+    \code{lik_init}, \code{filter_method}, \code{freq_band},
+    \code{system_priors}, \code{tpf_options}, \code{filter_tunes},
     \code{heteroskedastic_shocks}, \code{stochastic_volatility},
     \code{plan}}
   \item{\strong{Mode-finding}}{\code{n_mode_iter}, \code{mode_method},

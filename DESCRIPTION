@@ -1,6 +1,6 @@
 Package: dynhr
 Title: DSGE Modelling Toolkit (Parsing, Solving, Estimating, Diagnosing)
-Version: 0.9.4.43
+Version: 0.9.4.48
 Authors@R: c(
     person("Chris", "Ball", role = c("aut", "cre"),
            email = "chrispball1@gmail.com"))
@@ -100,6 +100,7 @@ Collate:
     'ast-codegen.R'
     'ast-tape.R'
     'benchmark.R'
+    'native-build.R'
     'compile-static.R'
     'compile-dynamic.R'
     'compile-model.R'

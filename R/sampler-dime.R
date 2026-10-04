@@ -833,6 +833,7 @@ run_dime_mirai <- function(
     shock_scale  = NULL,
     system_priors = NULL,
     lik_init     = "auto",
+    filter_method   = "auto",
     tpf_options  = list(),
     gradient_policy = "auto",
     log_post_fn  = NULL,
@@ -847,6 +848,7 @@ run_dime_mirai <- function(
     shock_scale     <- ctx$shock_scale
     system_priors   <- ctx$system_priors
     lik_init        <- ctx$lik_init        %||% "auto"
+    filter_method   <- ctx$filter_method   %||% "auto"
     tpf_options     <- ctx$tpf_options     %||% list()
     gradient_policy <- ctx$gradient_policy %||% "auto"
   }
@@ -877,6 +879,7 @@ run_dime_mirai <- function(
                            shock_scale = shock_scale,
                            system_priors = system_priors,
                            lik_init = lik_init,
+                           filter_method = filter_method,
                            tpf_options = tpf_options)
   }
   on.exit({ mirai::daemons(NULL); if (!is.null(sh)) rm(sh) }, add = TRUE)

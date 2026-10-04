@@ -120,6 +120,21 @@
 #' optimised library (otherwise \code{NA}). \code{matprod} is R's
 #' matrix-product setting as \code{sessionInfo()} reports it.
 #'
+#' The \code{dynhr_*} build columns describe dynhr's OWN compiled library as
+#' the compiler actually built it, read from the predefined compiler macros of
+#' the package's C++ -- unlike \code{cxxflags}, which is R's default flag set
+#' and says nothing about a package installed with a personal Makevars (see
+#' \code{\link{dynhr_install_native}}). \code{dynhr_optimize} is whether the
+#' library was compiled with optimisation (\code{FALSE} for a
+#' \code{devtools::load_all()} build, which is several times slower);
+#' \code{dynhr_simd} lists the instruction sets enabled at compile time
+#' (e.g. \code{"sse2"}, \code{"avx2+fma"}, \code{"neon"}); \code{dynhr_fma}
+#' says whether fused multiply-add may be contracted; \code{dynhr_fast_math}
+#' is \code{TRUE} if the library was compiled with \code{-ffast-math}, a
+#' configuration whose results are not supported, in which case
+#' \code{dynhr_build_note} says so; \code{dynhr_compiler} is the compiler name
+#' and version and \code{dynhr_cplusplus} the C++ standard macro.
+#'
 #' @return A one-row \code{data.frame} of character/numeric fields.
 #' @examples
 #' dynhr_system_info()
@@ -128,6 +143,7 @@ dynhr_system_info <- function() {
   si <- tryCatch(utils::sessionInfo(), error = function(e) NULL)
   br <- .blas_report(si$BLAS, si$LAPACK, si$matprod)
   nm <- Sys.info()
+  bi <- .build_info_report()
   gc_stamp <- tryCatch({
     p <- system.file("GIT_COMMIT", package = "dynhr")
     if (nzchar(p)) readLines(p, warn = FALSE)[1L] else NA_character_
@@ -158,8 +174,45 @@ dynhr_system_info <- function() {
     cxxflags       = .bench_sh(paste(shQuote(file.path(R.home("bin"), "R")),
                                      "CMD config CXXFLAGS")),
     dynhr_version  = as.character(utils::packageVersion("dynhr")),
-    dynhr_commit   = gc_stamp
+    dynhr_commit   = gc_stamp,
+    dynhr_optimize   = bi$optimize,
+    dynhr_simd       = bi$simd,
+    dynhr_fma        = bi$fma,
+    dynhr_fast_math  = bi$fast_math,
+    dynhr_compiler   = bi$compiler,
+    dynhr_cplusplus  = bi$cplusplus,
+    dynhr_build_note = bi$note
   )
+}
+
+
+## Summarise the compiled library's own build facts (see src/build_info.cpp)
+## into the fields dynhr_system_info() reports. The probe is injectable so the
+## fast-math note and the SIMD label are testable without rebuilding the DLL.
+.build_info_report <- function(bi = .dynhr_build_info()) {
+  simd <- c(if (isTRUE(bi$avx512f)) "avx512f",
+            if (isTRUE(bi$avx2)) "avx2" else if (isTRUE(bi$avx)) "avx",
+            if (isTRUE(bi$sse2)) "sse2",
+            if (isTRUE(bi$neon)) "neon")
+  fma <- isTRUE(bi$fma) || isTRUE(bi$fp_fast_fma)
+  simd_lab <- paste(simd, collapse = "+")
+  if (!nzchar(simd_lab)) simd_lab <- "none"
+  if (isTRUE(bi$fma)) simd_lab <- paste0(simd_lab, "+fma")
+  note <- NA_character_
+  if (isTRUE(bi$fast_math))
+    note <- paste0("dynhr's compiled library was built with -ffast-math: ",
+                   "results from this build are not supported (fast-math ",
+                   "reassociates floating-point sums and assumes no NaN/Inf, ",
+                   "which breaks the Kalman filter and the likelihood ",
+                   "fingerprints). Reinstall without fast-math flags.")
+  else if (!isTRUE(bi$optimize))
+    note <- paste0("dynhr's compiled library was built WITHOUT optimisation ",
+                   "(for example by devtools::load_all()); compiled code runs ",
+                   "several times slower than an installed build.")
+  list(optimize = isTRUE(bi$optimize), simd = simd_lab, fma = fma,
+       fast_math = isTRUE(bi$fast_math),
+       compiler = trimws(paste(bi$compiler, bi$compiler_version)),
+       cplusplus = as.numeric(bi$cplusplus), note = note)
 }
 
 
@@ -587,4 +640,235 @@ print.dynhr_benchmark <- function(x, ...) {
       "\n  is per-draw or per-second. Compare only against runs with the same",
       "\n  fingerprint and BLAS.\n")
   invisible(x)
+}
+
+
+## --------------------------------------------------------------------------
+## Posterior benchmark: time ONE user-supplied log-posterior closure and a
+## short seeded RWMH run, and record enough build / system / closure detail
+## that two runs (two builds, two machines) can be compared line by line.
+## Independent of any particular model: the closure is the user's.
+## --------------------------------------------------------------------------
+
+## Flatten the closure's stats-like attributes (anything but srcref and the
+## structural ones) into scalar fields named attr_<attribute>[_<field>]. Read
+## generically so a closure that carries filter-method or cache/fallback
+## counters is recorded whatever those attributes are called; a closure that
+## carries none contributes no columns.
+.bench_closure_attrs <- function(fn) {
+  at <- attributes(fn)
+  at <- at[setdiff(names(at), c("srcref", "class", "names", "dim", "dimnames"))]
+  out <- list()
+  scalar <- function(v) {
+    if (is.null(v) || !length(v)) return(NA_character_)
+    if (is.atomic(v)) return(paste(as.character(v), collapse = ";"))
+    NA_character_
+  }
+  for (nm in names(at)) {
+    v <- at[[nm]]
+    if (is.list(v) && length(v) && !is.null(names(v))) {
+      for (k in names(v)) out[[paste0("attr_", nm, "_", k)]] <- scalar(v[[k]])
+    } else if (is.environment(v) || is.function(v)) {
+      next
+    } else {
+      out[[paste0("attr_", nm)]] <- scalar(v)
+    }
+  }
+  out
+}
+
+## T, n_obs, missing-cell count and first / last period holding a missing
+## value, from a data matrix (NULL -> all NA).
+.bench_data_shape <- function(data) {
+  if (is.null(data) || !(is.matrix(data) || is.data.frame(data)))
+    return(list(n_periods = NA_integer_, n_obs = NA_integer_,
+                n_missing = NA_integer_, first_missing = NA_integer_,
+                last_missing = NA_integer_))
+  m <- as.matrix(data)
+  miss_rows <- which(rowSums(is.na(m)) > 0L)
+  list(n_periods = nrow(m), n_obs = ncol(m), n_missing = sum(is.na(m)),
+       first_missing = if (length(miss_rows)) min(miss_rows) else NA_integer_,
+       last_missing = if (length(miss_rows)) max(miss_rows) else NA_integer_)
+}
+
+## md5 of a character vector, via a temp file (base R only).
+.bench_md5 <- function(txt) {
+  f <- tempfile("dynhr-bench-digest-")
+  on.exit(unlink(f), add = TRUE)
+  writeLines(txt, f)
+  unname(tools::md5sum(f))
+}
+
+#' Benchmark a log-posterior closure and a short seeded RWMH run
+#'
+#' Times repeated evaluations of your own log-posterior function and runs a
+#' short seeded random-walk Metropolis chain, returning one row that records
+#' the system, the dynhr build, the closure and the results. Appending rows
+#' (\code{file}) from several machines or builds gives a table that compares
+#' them like for like. It is independent of any model: the closure is yours;
+#' \code{dynhr:::.bench_problem()} builds the Smets-Wouters closure used in
+#' the examples.
+#'
+#' @section Columns:
+#' \itemize{
+#'   \item the \code{\link{dynhr_system_info}} fields (version, commit, R,
+#'     compiler and flags, the compiled-library build columns, BLAS/LAPACK,
+#'     matrix-product setting, cores);
+#'   \item \code{attr_*}: every list-like or atomic attribute the closure
+#'     carries (for example filter-method or cache and fallback counters),
+#'     flattened as \code{attr_<attribute>_<field>}; none if it carries none;
+#'   \item \code{n_periods}, \code{n_obs}, \code{n_state}, \code{n_missing},
+#'     \code{first_missing}, \code{last_missing}: the data shape.
+#'     \code{data} is read from the closure's environment when it holds a
+#'     matrix called \code{data} (as \code{\link{make_log_posterior}} closures
+#'     do) unless you pass it; \code{n_state} is \code{NA} unless you pass
+#'     \code{n_state};
+#'   \item \code{logpost}, \code{loglik}: the value at \code{theta}
+#'     (\code{loglik} is \code{NA} if the closure returns a plain number);
+#'   \item \code{ms_min}, \code{ms_median}, \code{ms_mean}: milliseconds per
+#'     evaluation over \code{n_eval} calls after \code{n_warmup} untimed ones;
+#'   \item \code{rwmh_elapsed_sec}, \code{rwmh_accept}: wall time and
+#'     acceptance rate of the seeded chain;
+#'   \item \code{rwmh_accept_digest}: md5 of the accept/reject sequence, equal
+#'     between two builds exactly when they made identical decisions;
+#'   \item \code{rwmh_draws_digest}: md5 of the draws at full precision, which
+#'     changes with any round-off difference.
+#' }
+#'
+#' @param log_post_fn Function of \code{theta} (and \code{...}) returning a
+#'   number or a list with \code{logpost} and optionally \code{loglik}.
+#' @param theta Evaluation point and starting value of the chain.
+#' @param ... Further arguments passed to \code{log_post_fn}.
+#' @param n_eval,n_warmup Timed and untimed warm-up evaluations.
+#' @param rwmh_draws Draws of the seeded RWMH chain (no burn-in, scale 1).
+#' @param Sigma_prop Proposal covariance. Default: diagonal with standard
+#'   deviation \code{0.02 * max(|theta|, 0.1)} per parameter. Pass the same
+#'   matrix on every machine you compare.
+#' @param seed Seed of the chain. The caller's RNG state is restored.
+#' @param file Optional CSV path; the row is appended (header written when the
+#'   file is new). A file whose columns differ from this row is refused.
+#' @param data Optional data matrix for the shape columns.
+#' @param n_state Optional state dimension to record.
+#'
+#' @return A one-row \code{data.frame} (invisibly if \code{file} is given).
+#' @examples
+#' \donttest{
+#' p <- dynhr:::.bench_problem()
+#' r <- dynhr_benchmark_posterior(p$log_post_fn, p$theta0,
+#'                                Sigma_prop = p$Sigma_prop,
+#'                                n_eval = 5, rwmh_draws = 20)
+#' r[, c("ms_median", "rwmh_accept", "rwmh_accept_digest")]
+#' }
+#' @seealso \code{\link{dynhr_benchmark}}, \code{\link{dynhr_system_info}}
+#' @export
+dynhr_benchmark_posterior <- function(log_post_fn, theta, ...,
+                                      n_eval = 100L, n_warmup = 10L,
+                                      rwmh_draws = 300L, Sigma_prop = NULL,
+                                      seed = 1L, file = NULL,
+                                      data = NULL, n_state = NA_integer_) {
+  if (!is.function(log_post_fn))
+    .dynhr_abort("dynhr_benchmark_posterior: `log_post_fn` must be a function.",
+                 class = "dynhr_error_benchmark_args")
+  if (!is.numeric(theta) || !length(theta) || anyNA(theta))
+    .dynhr_abort("dynhr_benchmark_posterior: `theta` must be a numeric vector ",
+                 "without missing values.", class = "dynhr_error_benchmark_args")
+  whole <- function(v, min) is.numeric(v) && length(v) == 1L && is.finite(v) &&
+    v >= min && v == as.integer(v)
+  if (!whole(n_eval, 1) || !whole(n_warmup, 0) || !whole(rwmh_draws, 2) ||
+      !whole(seed, -.Machine$integer.max))
+    .dynhr_abort("dynhr_benchmark_posterior: `n_eval` >= 1, `n_warmup` >= 0, ",
+                 "`rwmh_draws` >= 2 and `seed` must be whole numbers.",
+                 class = "dynhr_error_benchmark_args")
+  n_eval <- as.integer(n_eval); n_warmup <- as.integer(n_warmup)
+  rwmh_draws <- as.integer(rwmh_draws); seed <- as.integer(seed)
+  n_par <- length(theta)
+  if (is.null(Sigma_prop)) {
+    Sigma_prop <- diag((0.02 * pmax(abs(theta), 0.1))^2, nrow = n_par)
+  } else if (!is.matrix(Sigma_prop) || any(dim(Sigma_prop) != n_par)) {
+    .dynhr_abort("dynhr_benchmark_posterior: `Sigma_prop` must be a ", n_par,
+                 " x ", n_par, " matrix.", class = "dynhr_error_benchmark_args")
+  }
+
+  extra <- list(...)
+  f <- function(th) do.call(log_post_fn, c(list(th), extra))
+  val <- function(r) {
+    if (is.list(r))
+      list(logpost = as.numeric(r$logpost)[1L],
+           loglik = if (is.null(r$loglik)) NA_real_ else as.numeric(r$loglik)[1L])
+    else list(logpost = as.numeric(r)[1L], loglik = NA_real_)
+  }
+  v0 <- val(f(theta))
+  for (i in seq_len(n_warmup)) f(theta)
+  ms <- numeric(n_eval)
+  for (i in seq_len(n_eval)) {
+    t0 <- proc.time()[["elapsed"]]
+    f(theta)
+    ms[i] <- 1000 * (proc.time()[["elapsed"]] - t0)
+  }
+
+  ## the seeded chain: restore the caller's RNG state afterwards
+  had_seed <- exists(".Random.seed", envir = globalenv(), inherits = FALSE)
+  old_seed <- if (had_seed) get(".Random.seed", envir = globalenv()) else NULL
+  on.exit({
+    if (had_seed) assign(".Random.seed", old_seed, envir = globalenv())
+    else if (exists(".Random.seed", envir = globalenv(), inherits = FALSE))
+      rm(".Random.seed", envir = globalenv())
+  }, add = TRUE)
+  set.seed(seed)
+  t0 <- proc.time()[["elapsed"]]
+  ch <- rwmh(function(th) list(logpost = val(f(th))$logpost), theta,Sigma_prop, n_draws = rwmh_draws, n_burn = 0L,
+             scale = 1, verbose = FALSE)
+  rw_sec <- proc.time()[["elapsed"]] - t0
+  draws <- ch$full_chain
+  ## accept/reject sequence: a step is an acceptance iff the state moved
+  acc <- rowSums(abs(diff(draws))) > 0
+  acc_digest <- .bench_md5(paste(as.integer(acc), collapse = ""))
+  draws_digest <- .bench_md5(sprintf("%.17g", as.vector(draws)))
+
+  if (is.null(data)) {
+    d <- get0("data", envir = environment(log_post_fn), inherits = FALSE)
+    if (is.matrix(d) || is.data.frame(d)) data <- d
+  }
+  shape <- .bench_data_shape(data)
+
+  ca <- .bench_closure_attrs(log_post_fn)
+  ca <- if (length(ca)) as.data.frame(ca, stringsAsFactors = FALSE) else
+    data.frame(row.names = 1L)
+  row <- cbind(
+    dynhr_system_info(),
+    ca,
+    data.frame(n_periods = shape$n_periods, n_obs = shape$n_obs,
+               n_state = as.integer(n_state), n_missing = shape$n_missing,
+               first_missing = shape$first_missing,
+               last_missing = shape$last_missing,
+               n_par = n_par, n_eval = n_eval,
+               logpost = v0$logpost, loglik = v0$loglik,
+               ms_min = min(ms), ms_median = stats::median(ms),
+               ms_mean = mean(ms),
+               rwmh_draws = rwmh_draws, rwmh_elapsed_sec = rw_sec,
+               rwmh_accept = mean(acc),
+               rwmh_accept_digest = acc_digest,
+               rwmh_draws_digest = draws_digest,
+               stringsAsFactors = FALSE))
+
+  if (!is.null(file)) {
+    if (!is.character(file) || length(file) != 1L || is.na(file) || !nzchar(file))
+      .dynhr_abort("dynhr_benchmark_posterior: `file` must be a single path.",
+                   class = "dynhr_error_benchmark_args")
+    if (file.exists(file) && file.size(file) > 0L) {
+      hdr <- names(utils::read.csv(file, nrows = 1L, check.names = FALSE))
+      if (!identical(hdr, names(row)))
+        .dynhr_abort("dynhr_benchmark_posterior: '", file, "' has different ",
+                     "columns from this result (a different closure ",
+                     "attribute set or dynhr version); use a new file.",
+                     class = "dynhr_error_benchmark_args")
+      utils::write.table(row, file, sep = ",", append = TRUE,
+                         col.names = FALSE, row.names = FALSE, qmethod = "double")
+    } else {
+      utils::write.table(row, file, sep = ",", col.names = TRUE,
+                         row.names = FALSE, qmethod = "double")
+    }
+    return(invisible(row))
+  }
+  row
 }

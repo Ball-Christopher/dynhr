@@ -119,6 +119,10 @@
     lik_init = .spec_f("chr1", "auto",
       choices = c("auto", "stationary", "diffuse", "kappa"),
       doc = "Kalman filter P0 initialisation"),
+    filter_method = .spec_f("chr1", "auto",
+      choices = c("auto", "dare", "chandrasekhar", "standard", "reference",
+                  "univariate", "univariate_ss"),
+      doc = "Kalman filter recursion of the posterior's value path, as the method argument of kalman_filter() (gaussian only; see make_log_posterior())"),
     freq_band = .spec_f("num", c(0, pi), check = .spec_chk_band,
       doc = "Whittle frequency band c(lo, hi) in radians (whittle only)"),
     pskf_cdf = .spec_f("chr1", "accurate", check = function(x) .pskf_cdf_check(x),
@@ -558,6 +562,7 @@
     me_variance     = x$me_variance,
     likelihood      = x$type,
     lik_init        = x$lik_init,
+    filter_method   = x$filter_method,
     freq_band       = x$freq_band,
     system_priors   = x$system_priors,
     tpf_options     = x$tpf_options,
@@ -2306,7 +2311,8 @@ print.dynhr_spec_diff <- function(x, ...) {
     metric = "sampler$metric", n_mode_iter = "mode$n_iter",
     mode_method = "mode$method", mode_n_starts = "mode$n_starts",
     me_variance = "likelihood$me_variance", likelihood = "likelihood$type",
-    lik_init = "likelihood$lik_init", freq_band = "likelihood$freq_band",
+    lik_init = "likelihood$lik_init", filter_method = "likelihood$filter_method",
+    freq_band = "likelihood$freq_band",
     system_priors = "likelihood$system_priors", seed = "compute$seed",
     run_diag = "outputs$diagnostics", verbose = "compute$verbose",
     model = "model$mod", compiled = "model$compiled",
@@ -2361,7 +2367,8 @@ print.dynhr_spec_diff <- function(x, ...) {
 )
 
 ## Keys of run_mode_finding()'s posterior_options that are likelihood fields.
-.spec_rmf_posterior_keys <- c(lik_init = "lik_init", freq_band = "freq_band",
+.spec_rmf_posterior_keys <- c(lik_init = "lik_init", filter_method = "filter_method",
+  freq_band = "freq_band",
   system_priors = "system_priors", infeasible_penalty = "infeasible_penalty",
   obc_filter = "obc_filter", max_inner = "obc_max_inner",
   tpf_options = "tpf_options", obc_options = "obc_options")
@@ -2450,6 +2457,7 @@ print.dynhr_spec_diff <- function(x, ...) {
     list(n_particles = a$n_particles) else list()
   lik <- likelihood_spec(a$likelihood,
     me_variance = a$me_variance, lik_init = a$lik_init,
+    filter_method = a$filter_method,
     freq_band = a$freq_band, system_priors = a$system_priors,
     tpf_options = a$tpf_options, obc = a$obc, obc_max_inner = a$obc_max_inner,
     obc_filter = obc_filter, filter_tunes = a$filter_tunes,
@@ -2538,6 +2546,7 @@ print.dynhr_spec_diff <- function(x, ...) {
   lik <- likelihood_spec(
     if (obc) "gaussian" else ctx$likelihood,
     me_variance = ctx$me_variance, lik_init = ctx$lik_init,
+    filter_method = ctx$filter_method %||% "auto",
     freq_band = ctx$freq_band, system_priors = ctx$system_priors,
     tpf_options = ctx$tpf_options, obc_options = ctx$obc_options,
     obc_filter = if (obc) ctx$likelihood else "pkf",

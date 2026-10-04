@@ -26,7 +26,8 @@ kalman_filter(
   known_shocks_sd = NULL,
   shock_means = NULL,
   shock_timing = c("dated", "transition_next"),
-  me_floor_check = getOption("dynhr.me_floor_check", TRUE)
+  me_floor_check = getOption("dynhr.me_floor_check", TRUE),
+  .need_final_cov = TRUE
 )
 }
 \arguments{
@@ -262,6 +263,15 @@ combination of observables (see
 stationary (non-\code{shock_scale}) baseline system; scoped to the
 \code{me_variance} floor (its largest entry when it is a vector), not
 \code{me_extra}.}
+
+\item{.need_final_cov}{Internal. \code{TRUE} (default) keeps
+\code{method = "auto"} on the routes that return \code{final_cov}.
+\code{FALSE} declares that only the likelihood is read (the
+log-posterior closures): \code{"auto"} may then take the Chandrasekhar
+recursion at the measured crossover (\code{n_state >= 40} and
+\code{n_state >= 5 * n_obs}) instead of \code{n_state > 100}, and a draw
+on which that recursion fails is re-run on the standard filter. Leave
+it at the default when calling the filter directly.}
 }
 \value{
 A list with

@@ -165,7 +165,8 @@ prior_spec <- function(model) extract_prior_spec(model)
 #'   chosen likelihood. The names each likelihood accepts here:
 #'   \itemize{
 #'     \item \code{"gaussian"}: none beyond the \code{make_log_posterior}
-#'       formals \code{lik_init}, \code{me_extra}, \code{shock_scale},
+#'       formals \code{lik_init}, \code{filter_method}, \code{me_extra},
+#'       \code{shock_scale},
 #'       \code{system_priors}, \code{infeasible_penalty} and \code{power}.
 #'     \item \code{"cumulant"}: \code{order} (perturbation order, default 2),
 #'       \code{cumulant_orders} (which orders to match, default 1:4),

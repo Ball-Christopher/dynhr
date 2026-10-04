@@ -261,8 +261,15 @@
 #' @param pass_dots Return \code{function(theta, ...)} rather than
 #'   \code{function(theta)}; only the TPF closure (which takes \code{U_list})
 #'   needs it.
+#' @param extra_attrs Named list of attributes set on the returned closure
+#'   (the Gaussian adapter's \code{filter_method} record).
 #' @return A closure \code{function(theta)} (or \code{function(theta, ...)})
-#'   returning \code{list(logpost, loglik, logprior, <extra>)}.
+#'   returning \code{list(logpost, loglik, logprior, <extra>)}. It carries
+#'   \code{attr(, "cache_stats")}, an environment (read with
+#'   \code{as.list()}) counting \code{n_calls} (evaluations),
+#'   \code{n_struct_hit} (draws that reused the cached steady state and
+#'   decision rule) and \code{n_struct_miss} (draws that re-solved them while
+#'   the cache was active); the last two stay 0 when no cache is built.
 #' @noRd
 .make_posterior_closure <- function(model, data, prior_spec, obs_vars,
                                     compiled,
@@ -287,7 +294,8 @@
                                     ## function of (ss, params): the draw's
                                     ## solve is then reused while the
                                     ## structural parameters do not move.
-                                    structural_cache  = FALSE) {
+                                    structural_cache  = FALSE,
+                                    extra_attrs       = NULL) {
   if (!isTRUE(obs_trends_ok))
     .refuse_obs_trends(model, "this likelihood")
 
@@ -336,6 +344,14 @@
   struct_cache <- if (isTRUE(structural_cache) && warm_retry &&
                       isTRUE(getOption("dynhr.structural_cache", TRUE)))
     .structural_cache_new(model) else NULL
+  ## Counters read with as.list(attr(<closure>, "cache_stats")): an
+  ## environment, updated by slot assignment, so counting cannot change a
+  ## result. n_struct_hit / n_struct_miss count draws that reached the cache
+  ## lookup (a draw rejected by the prior never does).
+  cache_stats <- new.env(parent = emptyenv())
+  cache_stats$n_calls       <- 0L
+  cache_stats$n_struct_hit  <- 0L
+  cache_stats$n_struct_miss <- 0L
   ## me-floor hazard guard: warn at most once per closure, not once per draw.
   .me_floor_checked <- FALSE
 
@@ -377,6 +393,7 @@
   ## mis-named one is a classed error.
   spec_names <- prior_spec$name
   inner <- function(theta, ...) {
+    cache_stats$n_calls <- cache_stats$n_calls + 1L
     theta <- .theta_by_name(theta, spec_names)
     lp <- log_prior(theta, prior_spec)
     if (!is.finite(lp)) return(.reject(lp))
@@ -389,6 +406,8 @@
     if (!is.null(struct_cache)) {
       key <- .structural_cache_key(struct_cache, params)
       hit <- .structural_cache_lookup(struct_cache, key)
+      if (is.null(hit)) cache_stats$n_struct_miss <- cache_stats$n_struct_miss + 1L
+      else              cache_stats$n_struct_hit  <- cache_stats$n_struct_hit + 1L
     }
     if (!is.null(hit)) {
       ss_result <- hit$ss_result
@@ -468,7 +487,10 @@
     .emit(logpost, loglik, lp, res$extra, lp_param = lp_param, sp = sp_part)
   }
 
-  if (pass_dots) inner else function(theta) inner(theta)
+  out <- if (pass_dots) inner else function(theta) inner(theta)
+  attr(out, "cache_stats") <- cache_stats
+  for (nm in names(extra_attrs)) attr(out, nm) <- extra_attrs[[nm]]
+  out
 }
 
 

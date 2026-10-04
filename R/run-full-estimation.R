@@ -190,8 +190,8 @@ print.dynhr_estimation_result <- function(x, ...) {
 #'     \code{obs_vars}, \code{data_col_map}, \code{dates}, \code{model},
 #'     \code{compiled}}
 #'   \item{\strong{Likelihood}}{\code{likelihood}, \code{me_variance},
-#'     \code{lik_init}, \code{freq_band}, \code{system_priors},
-#'     \code{tpf_options}, \code{filter_tunes},
+#'     \code{lik_init}, \code{filter_method}, \code{freq_band},
+#'     \code{system_priors}, \code{tpf_options}, \code{filter_tunes},
 #'     \code{heteroskedastic_shocks}, \code{stochastic_volatility},
 #'     \code{plan}}
 #'   \item{\strong{Mode-finding}}{\code{n_mode_iter}, \code{mode_method},
@@ -332,6 +332,10 @@ print.dynhr_estimation_result <- function(x, ...) {
 #'   \code{\link{likelihood_spec}}.
 #' @param lik_init    Kalman filter \code{P0} initialisation
 #'   (default \code{"auto"}).  Ignored for non-Gaussian likelihoods.
+#' @param filter_method Kalman filter recursion of the Gaussian value path
+#'   (default \code{"auto"}); one of the \code{method} choices of
+#'   \code{\link{kalman_filter}}.  See \code{\link{make_log_posterior}}.
+#'   Any value but \code{"auto"} with a non-Gaussian likelihood is an error.
 #' @param freq_band   Numeric(2) \code{c(lo, hi)} in radians; Whittle band
 #'   restriction (default \code{c(0, pi)}, ignored for other likelihoods).
 #' @param system_priors  Optional \code{system_prior_spec} object
@@ -452,6 +456,7 @@ run_full_estimation <- function(
                       "pskf", "student_t", "pruned", "global_pf", "pkf",
                       "ppf", "copf"),
     lik_init      = "auto",
+    filter_method = "auto",
     freq_band     = c(0, pi),
     system_priors = NULL,
     seed          = 42L,

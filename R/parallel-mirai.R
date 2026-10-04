@@ -283,7 +283,8 @@
                              system_priors = NULL,
                              lik_init = "auto",
                              tpf_options = list(),
-                             ctx = NULL) {
+                             ctx = NULL,
+                             filter_method = "auto") {
   ## Unpack ctx fields when provided (ctx wins over individual args).
   if (!is.null(ctx) && inherits(ctx, "dynhr_estimation_context")) {
     me_variance   <- ctx$me_variance
@@ -291,6 +292,7 @@
     shock_scale   <- ctx$shock_scale
     system_priors <- ctx$system_priors
     lik_init      <- ctx$lik_init    %||% "auto"
+    filter_method <- ctx$filter_method %||% "auto"
     tpf_options   <- ctx$tpf_options %||% list()
   }
   .restore_blas <- .mirai_pin_blas_threads()
@@ -332,6 +334,9 @@
       ## tpf_options is a LIST of extra arguments forwarded to the TPF likelihood
       ## path via `...`. We use do.call() so the list items are spread as
       ## individual named arguments, not passed as a single `tpf_options=` arg.
+      ## filter_method is passed only when forced: a daemon on an older
+      ## installed dynhr (version skew) has no such formal, and "auto" is
+      ## its behaviour anyway.
       .worker_lp <<- do.call(.mk_lp,
         c(list(parsed_model, .worker_Y, prior_spec, obs_names,
                .worker_cm, me_variance = me_variance,
@@ -339,6 +344,8 @@
                shock_scale = shock_scale,
                system_priors = system_priors,
                lik_init = lik_init),
+          if (!identical(filter_method, "auto"))
+            list(filter_method = filter_method),
           tpf_options))
       ## Stash the ingredients make_posterior_grad() needs (parsed model,
       ## compiled model, mapped Y) as daemon globals too, so a chain task can
@@ -361,6 +368,7 @@
                  shock_scale = shock_scale,
                  system_priors = system_priors,
                  lik_init = lik_init,
+                 filter_method = filter_method,
                  tpf_options = tpf_options,
                  .dynhr_state = .dynhr_daemon_state(),
                  .dynhr_apply = .dynhr_daemon_apply)
@@ -396,7 +404,8 @@
 .mirai_rebind_worker_lp <- function(prior_spec, obs_names, me_variance = 0,
                                     me_extra = NULL, shock_scale = NULL,
                                     system_priors = NULL, lik_init = "auto",
-                                    tpf_options = list()) {
+                                    tpf_options = list(),
+                                    filter_method = "auto") {
   .dynhr_raise_worker_skew(mirai::everywhere(
     {
       ## Re-apply the host option state before rebuilding the closure: the
@@ -413,6 +422,8 @@
                .worker_cm, me_variance = me_variance,
                me_extra = me_extra, shock_scale = shock_scale,
                system_priors = system_priors, lik_init = lik_init),
+          if (!identical(filter_method, "auto"))
+            list(filter_method = filter_method),
           tpf_options))
       ## Kept in step with .worker_lp (see .mirai_pool_init).
       assign(".worker_lik_init", lik_init, envir = globalenv())
@@ -421,6 +432,7 @@
                  me_variance = me_variance, me_extra = me_extra,
                  shock_scale = shock_scale, system_priors = system_priors,
                  lik_init = lik_init, tpf_options = tpf_options,
+                 filter_method = filter_method,
                  .dynhr_state = .dynhr_daemon_state(),
                  .dynhr_apply = .dynhr_daemon_apply)
   )[])
@@ -549,6 +561,7 @@ run_mcmc_mirai <- function(
     n_blocks      = 1L,
     system_priors = NULL,
     lik_init      = "auto",
+    filter_method = "auto",
     tpf_options   = list(),
     gradient_policy = "auto",
     ctx           = NULL,
@@ -562,6 +575,7 @@ run_mcmc_mirai <- function(
     shock_scale     <- ctx$shock_scale
     system_priors   <- ctx$system_priors
     lik_init        <- ctx$lik_init        %||% "auto"
+    filter_method   <- ctx$filter_method   %||% "auto"
     tpf_options     <- ctx$tpf_options     %||% list()
     gradient_policy <- ctx$gradient_policy %||% "auto"
   }
@@ -584,6 +598,7 @@ run_mcmc_mirai <- function(
                            shock_scale = shock_scale,
                            system_priors = system_priors,
                            lik_init = lik_init,
+                           filter_method = filter_method,
                            tpf_options = tpf_options)
   }
   on.exit({ mirai::daemons(NULL); if (!is.null(sh)) rm(sh) }, add = TRUE)
@@ -872,6 +887,7 @@ run_nuts_mirai <- function(
     grad_method   = c("auto", "hybrid", "implicit", "adjoint", "adjoint_solution"),
     system_priors = NULL,
     lik_init      = "auto",
+    filter_method = "auto",
     tpf_options   = list(),
     gradient_policy = "auto",
     ctx           = NULL,
@@ -905,6 +921,7 @@ run_nuts_mirai <- function(
     likelihood      <- ctx$likelihood      %||% "gaussian"
     freq_band       <- ctx$freq_band       %||% c(0, pi)
     lik_init        <- ctx$lik_init        %||% "auto"
+    filter_method   <- ctx$filter_method   %||% "auto"
     tpf_options     <- ctx$tpf_options     %||% list()
     gradient_policy <- ctx$gradient_policy %||% "auto"
   }
@@ -949,6 +966,7 @@ run_nuts_mirai <- function(
                            shock_scale = shock_scale,
                            system_priors = system_priors,
                            lik_init = lik_init,
+                           filter_method = filter_method,
                            tpf_options = tpf_options)
   }
   on.exit({ mirai::daemons(NULL); if (!is.null(sh)) rm(sh) }, add = TRUE)
@@ -1211,6 +1229,7 @@ run_mode_mirai <- function(
     freq_band      = NULL,
     newrat_H0_seed = NULL,
     lik_init       = "auto",
+    filter_method  = "auto",
     pool_ready     = FALSE,
     progress       = interactive()
 ) {
@@ -1367,7 +1386,8 @@ run_mode_mirai <- function(
     ## the caller. Saves a full per-daemon model recompile vs a fresh pool.
     .mirai_rebind_worker_lp(prior_spec, obs_names, me_variance = me_variance,
                             me_extra = me_extra, shock_scale = shock_scale,
-                            system_priors = system_priors, lik_init = lik_init)
+                            system_priors = system_priors, lik_init = lik_init,
+                            filter_method = filter_method)
     .dynhr_cat(sprintf("  Daemon pool reused (lik_init = %s): %.1f sec\n",
                 lik_init, (proc.time() - t_init)[["elapsed"]]))
   } else {
@@ -1377,7 +1397,8 @@ run_mode_mirai <- function(
       sh <- .mirai_pool_init(n_cores, parsed_model, Y, prior_spec, obs_names,
                              me_variance, me_extra = me_extra,
                              shock_scale = shock_scale,
-                             system_priors = system_priors, lik_init = lik_init)
+                             system_priors = system_priors, lik_init = lik_init,
+                             filter_method = filter_method)
     }
     on.exit({ mirai::daemons(NULL); if (!is.null(sh)) rm(sh) }, add = TRUE)
     .dynhr_cat(sprintf("  Daemon init: %.1f sec\n", (proc.time() - t_init)[["elapsed"]]))

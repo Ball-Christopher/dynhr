@@ -11,6 +11,16 @@ Rcpp::Rostream<true>&  Rcpp::Rcout = Rcpp::Rcpp_cout_get();
 Rcpp::Rostream<false>& Rcpp::Rcerr = Rcpp::Rcpp_cerr_get();
 #endif
 
+// dynhr_build_info_cpp
+Rcpp::List dynhr_build_info_cpp();
+RcppExport SEXP _dynhr_dynhr_build_info_cpp() {
+BEGIN_RCPP
+    Rcpp::RObject rcpp_result_gen;
+    Rcpp::RNGScope rcpp_rngScope_gen;
+    rcpp_result_gen = Rcpp::wrap(dynhr_build_info_cpp());
+    return rcpp_result_gen;
+END_RCPP
+}
 // fdb_compose_folded_cpp
 NumericMatrix fdb_compose_folded_cpp(int Nc, int n_out, List shapes, List Glist, List Hlist);
 RcppExport SEXP _dynhr_fdb_compose_folded_cpp(SEXP NcSEXP, SEXP n_outSEXP, SEXP shapesSEXP, SEXP GlistSEXP, SEXP HlistSEXP) {
@@ -544,8 +554,8 @@ BEGIN_RCPP
 END_RCPP
 }
 // kalman_standard_loop_cpp
-List kalman_standard_loop_cpp(const arma::mat& Y_minus_d, const arma::mat& ZZ, const arma::mat& TT, const arma::mat& RR, const arma::mat& DD, const arma::mat& HH_full, const arma::mat& Sigma_e, const arma::mat& SS, arma::mat P, double ll_const, double ss_tol, double ll_min, bool return_filtered, const arma::vec& me_diag_vec, double kalman_tol);
-RcppExport SEXP _dynhr_kalman_standard_loop_cpp(SEXP Y_minus_dSEXP, SEXP ZZSEXP, SEXP TTSEXP, SEXP RRSEXP, SEXP DDSEXP, SEXP HH_fullSEXP, SEXP Sigma_eSEXP, SEXP SSSEXP, SEXP PSEXP, SEXP ll_constSEXP, SEXP ss_tolSEXP, SEXP ll_minSEXP, SEXP return_filteredSEXP, SEXP me_diag_vecSEXP, SEXP kalman_tolSEXP) {
+List kalman_standard_loop_cpp(const arma::mat& Y_minus_d, const arma::mat& ZZ, const arma::mat& TT, const arma::mat& RR, const arma::mat& DD, const arma::mat& HH_full, const arma::mat& Sigma_e, const arma::mat& SS, arma::mat P, double ll_const, double ss_tol, double ll_min, bool return_filtered, const arma::vec& me_diag_vec, double kalman_tol, int upd, double guard_piv, double guard_r2, double guard_ret, double guard_amp);
+RcppExport SEXP _dynhr_kalman_standard_loop_cpp(SEXP Y_minus_dSEXP, SEXP ZZSEXP, SEXP TTSEXP, SEXP RRSEXP, SEXP DDSEXP, SEXP HH_fullSEXP, SEXP Sigma_eSEXP, SEXP SSSEXP, SEXP PSEXP, SEXP ll_constSEXP, SEXP ss_tolSEXP, SEXP ll_minSEXP, SEXP return_filteredSEXP, SEXP me_diag_vecSEXP, SEXP kalman_tolSEXP, SEXP updSEXP, SEXP guard_pivSEXP, SEXP guard_r2SEXP, SEXP guard_retSEXP, SEXP guard_ampSEXP) {
 BEGIN_RCPP
     Rcpp::RObject rcpp_result_gen;
     Rcpp::RNGScope rcpp_rngScope_gen;
@@ -564,13 +574,18 @@ BEGIN_RCPP
     Rcpp::traits::input_parameter< bool >::type return_filtered(return_filteredSEXP);
     Rcpp::traits::input_parameter< const arma::vec& >::type me_diag_vec(me_diag_vecSEXP);
     Rcpp::traits::input_parameter< double >::type kalman_tol(kalman_tolSEXP);
-    rcpp_result_gen = Rcpp::wrap(kalman_standard_loop_cpp(Y_minus_d, ZZ, TT, RR, DD, HH_full, Sigma_e, SS, P, ll_const, ss_tol, ll_min, return_filtered, me_diag_vec, kalman_tol));
+    Rcpp::traits::input_parameter< int >::type upd(updSEXP);
+    Rcpp::traits::input_parameter< double >::type guard_piv(guard_pivSEXP);
+    Rcpp::traits::input_parameter< double >::type guard_r2(guard_r2SEXP);
+    Rcpp::traits::input_parameter< double >::type guard_ret(guard_retSEXP);
+    Rcpp::traits::input_parameter< double >::type guard_amp(guard_ampSEXP);
+    rcpp_result_gen = Rcpp::wrap(kalman_standard_loop_cpp(Y_minus_d, ZZ, TT, RR, DD, HH_full, Sigma_e, SS, P, ll_const, ss_tol, ll_min, return_filtered, me_diag_vec, kalman_tol, upd, guard_piv, guard_r2, guard_ret, guard_amp));
     return rcpp_result_gen;
 END_RCPP
 }
 // kalman_standard_general_loop_cpp
-List kalman_standard_general_loop_cpp(const arma::mat& Y_minus_d, const arma::mat& ZZ, const arma::mat& TT, const arma::mat& RR, const arma::mat& DD, const arma::mat& HH, const arma::mat& QQ, const arma::mat& Sigma_e, const arma::mat& SS, arma::vec s, arma::mat P, int t_start, double init_loglik, double ll_const, double ss_tol, double ll_min, bool return_filtered, const arma::vec& me_vec, const arma::mat& me_extra, const arma::mat& shock_scale, double kalman_tol);
-RcppExport SEXP _dynhr_kalman_standard_general_loop_cpp(SEXP Y_minus_dSEXP, SEXP ZZSEXP, SEXP TTSEXP, SEXP RRSEXP, SEXP DDSEXP, SEXP HHSEXP, SEXP QQSEXP, SEXP Sigma_eSEXP, SEXP SSSEXP, SEXP sSEXP, SEXP PSEXP, SEXP t_startSEXP, SEXP init_loglikSEXP, SEXP ll_constSEXP, SEXP ss_tolSEXP, SEXP ll_minSEXP, SEXP return_filteredSEXP, SEXP me_vecSEXP, SEXP me_extraSEXP, SEXP shock_scaleSEXP, SEXP kalman_tolSEXP) {
+List kalman_standard_general_loop_cpp(const arma::mat& Y_minus_d, const arma::mat& ZZ, const arma::mat& TT, const arma::mat& RR, const arma::mat& DD, const arma::mat& HH, const arma::mat& QQ, const arma::mat& Sigma_e, const arma::mat& SS, arma::vec s, arma::mat P, int t_start, double init_loglik, double ll_const, double ss_tol, double ll_min, bool return_filtered, const arma::vec& me_vec, const arma::mat& me_extra, const arma::mat& shock_scale, double kalman_tol, int upd, double guard_piv, double guard_r2, double guard_ret, double guard_amp);
+RcppExport SEXP _dynhr_kalman_standard_general_loop_cpp(SEXP Y_minus_dSEXP, SEXP ZZSEXP, SEXP TTSEXP, SEXP RRSEXP, SEXP DDSEXP, SEXP HHSEXP, SEXP QQSEXP, SEXP Sigma_eSEXP, SEXP SSSEXP, SEXP sSEXP, SEXP PSEXP, SEXP t_startSEXP, SEXP init_loglikSEXP, SEXP ll_constSEXP, SEXP ss_tolSEXP, SEXP ll_minSEXP, SEXP return_filteredSEXP, SEXP me_vecSEXP, SEXP me_extraSEXP, SEXP shock_scaleSEXP, SEXP kalman_tolSEXP, SEXP updSEXP, SEXP guard_pivSEXP, SEXP guard_r2SEXP, SEXP guard_retSEXP, SEXP guard_ampSEXP) {
 BEGIN_RCPP
     Rcpp::RObject rcpp_result_gen;
     Rcpp::RNGScope rcpp_rngScope_gen;
@@ -595,7 +610,90 @@ BEGIN_RCPP
     Rcpp::traits::input_parameter< const arma::mat& >::type me_extra(me_extraSEXP);
     Rcpp::traits::input_parameter< const arma::mat& >::type shock_scale(shock_scaleSEXP);
     Rcpp::traits::input_parameter< double >::type kalman_tol(kalman_tolSEXP);
-    rcpp_result_gen = Rcpp::wrap(kalman_standard_general_loop_cpp(Y_minus_d, ZZ, TT, RR, DD, HH, QQ, Sigma_e, SS, s, P, t_start, init_loglik, ll_const, ss_tol, ll_min, return_filtered, me_vec, me_extra, shock_scale, kalman_tol));
+    Rcpp::traits::input_parameter< int >::type upd(updSEXP);
+    Rcpp::traits::input_parameter< double >::type guard_piv(guard_pivSEXP);
+    Rcpp::traits::input_parameter< double >::type guard_r2(guard_r2SEXP);
+    Rcpp::traits::input_parameter< double >::type guard_ret(guard_retSEXP);
+    Rcpp::traits::input_parameter< double >::type guard_amp(guard_ampSEXP);
+    rcpp_result_gen = Rcpp::wrap(kalman_standard_general_loop_cpp(Y_minus_d, ZZ, TT, RR, DD, HH, QQ, Sigma_e, SS, s, P, t_start, init_loglik, ll_const, ss_tol, ll_min, return_filtered, me_vec, me_extra, shock_scale, kalman_tol, upd, guard_piv, guard_r2, guard_ret, guard_amp));
+    return rcpp_result_gen;
+END_RCPP
+}
+// kalman_standard_struct_loop_cpp
+List kalman_standard_struct_loop_cpp(const arma::mat& Y_minus_d, const arma::mat& ZZ, const arma::mat& TT, const arma::mat& RR, const arma::mat& DD, const arma::mat& HH_full, const arma::mat& Sigma_e, const arma::mat& SS, arma::mat P, double ll_const, double ss_tol, double ll_min, bool return_filtered, const arma::vec& me_diag_vec, double kalman_tol, double zero_tol, int upd, double guard_piv, double guard_r2, double guard_ret, double guard_amp);
+RcppExport SEXP _dynhr_kalman_standard_struct_loop_cpp(SEXP Y_minus_dSEXP, SEXP ZZSEXP, SEXP TTSEXP, SEXP RRSEXP, SEXP DDSEXP, SEXP HH_fullSEXP, SEXP Sigma_eSEXP, SEXP SSSEXP, SEXP PSEXP, SEXP ll_constSEXP, SEXP ss_tolSEXP, SEXP ll_minSEXP, SEXP return_filteredSEXP, SEXP me_diag_vecSEXP, SEXP kalman_tolSEXP, SEXP zero_tolSEXP, SEXP updSEXP, SEXP guard_pivSEXP, SEXP guard_r2SEXP, SEXP guard_retSEXP, SEXP guard_ampSEXP) {
+BEGIN_RCPP
+    Rcpp::RObject rcpp_result_gen;
+    Rcpp::RNGScope rcpp_rngScope_gen;
+    Rcpp::traits::input_parameter< const arma::mat& >::type Y_minus_d(Y_minus_dSEXP);
+    Rcpp::traits::input_parameter< const arma::mat& >::type ZZ(ZZSEXP);
+    Rcpp::traits::input_parameter< const arma::mat& >::type TT(TTSEXP);
+    Rcpp::traits::input_parameter< const arma::mat& >::type RR(RRSEXP);
+    Rcpp::traits::input_parameter< const arma::mat& >::type DD(DDSEXP);
+    Rcpp::traits::input_parameter< const arma::mat& >::type HH_full(HH_fullSEXP);
+    Rcpp::traits::input_parameter< const arma::mat& >::type Sigma_e(Sigma_eSEXP);
+    Rcpp::traits::input_parameter< const arma::mat& >::type SS(SSSEXP);
+    Rcpp::traits::input_parameter< arma::mat >::type P(PSEXP);
+    Rcpp::traits::input_parameter< double >::type ll_const(ll_constSEXP);
+    Rcpp::traits::input_parameter< double >::type ss_tol(ss_tolSEXP);
+    Rcpp::traits::input_parameter< double >::type ll_min(ll_minSEXP);
+    Rcpp::traits::input_parameter< bool >::type return_filtered(return_filteredSEXP);
+    Rcpp::traits::input_parameter< const arma::vec& >::type me_diag_vec(me_diag_vecSEXP);
+    Rcpp::traits::input_parameter< double >::type kalman_tol(kalman_tolSEXP);
+    Rcpp::traits::input_parameter< double >::type zero_tol(zero_tolSEXP);
+    Rcpp::traits::input_parameter< int >::type upd(updSEXP);
+    Rcpp::traits::input_parameter< double >::type guard_piv(guard_pivSEXP);
+    Rcpp::traits::input_parameter< double >::type guard_r2(guard_r2SEXP);
+    Rcpp::traits::input_parameter< double >::type guard_ret(guard_retSEXP);
+    Rcpp::traits::input_parameter< double >::type guard_amp(guard_ampSEXP);
+    rcpp_result_gen = Rcpp::wrap(kalman_standard_struct_loop_cpp(Y_minus_d, ZZ, TT, RR, DD, HH_full, Sigma_e, SS, P, ll_const, ss_tol, ll_min, return_filtered, me_diag_vec, kalman_tol, zero_tol, upd, guard_piv, guard_r2, guard_ret, guard_amp));
+    return rcpp_result_gen;
+END_RCPP
+}
+// kalman_blas_probe_cpp
+double kalman_blas_probe_cpp();
+RcppExport SEXP _dynhr_kalman_blas_probe_cpp() {
+BEGIN_RCPP
+    Rcpp::RObject rcpp_result_gen;
+    Rcpp::RNGScope rcpp_rngScope_gen;
+    rcpp_result_gen = Rcpp::wrap(kalman_blas_probe_cpp());
+    return rcpp_result_gen;
+END_RCPP
+}
+// kalman_standard_general_struct_loop_cpp
+List kalman_standard_general_struct_loop_cpp(const arma::mat& Y_minus_d, const arma::mat& ZZ, const arma::mat& TT, const arma::mat& RR, const arma::mat& DD, const arma::mat& HH, const arma::mat& QQ, const arma::mat& Sigma_e, const arma::mat& SS, arma::vec s, arma::mat P, int t_start, double init_loglik, double ll_const, double ss_tol, double ll_min, bool return_filtered, const arma::vec& me_vec, const arma::mat& me_extra, const arma::mat& shock_scale, double kalman_tol, double zero_tol, int upd, double guard_piv, double guard_r2, double guard_ret, double guard_amp);
+RcppExport SEXP _dynhr_kalman_standard_general_struct_loop_cpp(SEXP Y_minus_dSEXP, SEXP ZZSEXP, SEXP TTSEXP, SEXP RRSEXP, SEXP DDSEXP, SEXP HHSEXP, SEXP QQSEXP, SEXP Sigma_eSEXP, SEXP SSSEXP, SEXP sSEXP, SEXP PSEXP, SEXP t_startSEXP, SEXP init_loglikSEXP, SEXP ll_constSEXP, SEXP ss_tolSEXP, SEXP ll_minSEXP, SEXP return_filteredSEXP, SEXP me_vecSEXP, SEXP me_extraSEXP, SEXP shock_scaleSEXP, SEXP kalman_tolSEXP, SEXP zero_tolSEXP, SEXP updSEXP, SEXP guard_pivSEXP, SEXP guard_r2SEXP, SEXP guard_retSEXP, SEXP guard_ampSEXP) {
+BEGIN_RCPP
+    Rcpp::RObject rcpp_result_gen;
+    Rcpp::RNGScope rcpp_rngScope_gen;
+    Rcpp::traits::input_parameter< const arma::mat& >::type Y_minus_d(Y_minus_dSEXP);
+    Rcpp::traits::input_parameter< const arma::mat& >::type ZZ(ZZSEXP);
+    Rcpp::traits::input_parameter< const arma::mat& >::type TT(TTSEXP);
+    Rcpp::traits::input_parameter< const arma::mat& >::type RR(RRSEXP);
+    Rcpp::traits::input_parameter< const arma::mat& >::type DD(DDSEXP);
+    Rcpp::traits::input_parameter< const arma::mat& >::type HH(HHSEXP);
+    Rcpp::traits::input_parameter< const arma::mat& >::type QQ(QQSEXP);
+    Rcpp::traits::input_parameter< const arma::mat& >::type Sigma_e(Sigma_eSEXP);
+    Rcpp::traits::input_parameter< const arma::mat& >::type SS(SSSEXP);
+    Rcpp::traits::input_parameter< arma::vec >::type s(sSEXP);
+    Rcpp::traits::input_parameter< arma::mat >::type P(PSEXP);
+    Rcpp::traits::input_parameter< int >::type t_start(t_startSEXP);
+    Rcpp::traits::input_parameter< double >::type init_loglik(init_loglikSEXP);
+    Rcpp::traits::input_parameter< double >::type ll_const(ll_constSEXP);
+    Rcpp::traits::input_parameter< double >::type ss_tol(ss_tolSEXP);
+    Rcpp::traits::input_parameter< double >::type ll_min(ll_minSEXP);
+    Rcpp::traits::input_parameter< bool >::type return_filtered(return_filteredSEXP);
+    Rcpp::traits::input_parameter< const arma::vec& >::type me_vec(me_vecSEXP);
+    Rcpp::traits::input_parameter< const arma::mat& >::type me_extra(me_extraSEXP);
+    Rcpp::traits::input_parameter< const arma::mat& >::type shock_scale(shock_scaleSEXP);
+    Rcpp::traits::input_parameter< double >::type kalman_tol(kalman_tolSEXP);
+    Rcpp::traits::input_parameter< double >::type zero_tol(zero_tolSEXP);
+    Rcpp::traits::input_parameter< int >::type upd(updSEXP);
+    Rcpp::traits::input_parameter< double >::type guard_piv(guard_pivSEXP);
+    Rcpp::traits::input_parameter< double >::type guard_r2(guard_r2SEXP);
+    Rcpp::traits::input_parameter< double >::type guard_ret(guard_retSEXP);
+    Rcpp::traits::input_parameter< double >::type guard_amp(guard_ampSEXP);
+    rcpp_result_gen = Rcpp::wrap(kalman_standard_general_struct_loop_cpp(Y_minus_d, ZZ, TT, RR, DD, HH, QQ, Sigma_e, SS, s, P, t_start, init_loglik, ll_const, ss_tol, ll_min, return_filtered, me_vec, me_extra, shock_scale, kalman_tol, zero_tol, upd, guard_piv, guard_r2, guard_ret, guard_amp));
     return rcpp_result_gen;
 END_RCPP
 }
@@ -1004,6 +1102,7 @@ END_RCPP
 }
 
 static const R_CallMethodDef CallEntries[] = {
+    {"_dynhr_dynhr_build_info_cpp", (DL_FUNC) &_dynhr_dynhr_build_info_cpp, 0},
     {"_dynhr_fdb_compose_folded_cpp", (DL_FUNC) &_dynhr_fdb_compose_folded_cpp, 5},
     {"_dynhr_hank_ar_slab_adjoint_psi_cpp", (DL_FUNC) &_dynhr_hank_ar_slab_adjoint_psi_cpp, 2},
     {"_dynhr_hank_ar_score_weights_cpp", (DL_FUNC) &_dynhr_hank_ar_score_weights_cpp, 4},
@@ -1028,8 +1127,11 @@ static const R_CallMethodDef CallEntries[] = {
     {"_dynhr_kf_adjoint_uni_cpp", (DL_FUNC) &_dynhr_kf_adjoint_uni_cpp, 20},
     {"_dynhr_kalman_chandrasekhar_loop_cpp", (DL_FUNC) &_dynhr_kalman_chandrasekhar_loop_cpp, 11},
     {"_dynhr_kalman_ss_loop_cpp", (DL_FUNC) &_dynhr_kalman_ss_loop_cpp, 10},
-    {"_dynhr_kalman_standard_loop_cpp", (DL_FUNC) &_dynhr_kalman_standard_loop_cpp, 15},
-    {"_dynhr_kalman_standard_general_loop_cpp", (DL_FUNC) &_dynhr_kalman_standard_general_loop_cpp, 21},
+    {"_dynhr_kalman_standard_loop_cpp", (DL_FUNC) &_dynhr_kalman_standard_loop_cpp, 20},
+    {"_dynhr_kalman_standard_general_loop_cpp", (DL_FUNC) &_dynhr_kalman_standard_general_loop_cpp, 26},
+    {"_dynhr_kalman_standard_struct_loop_cpp", (DL_FUNC) &_dynhr_kalman_standard_struct_loop_cpp, 21},
+    {"_dynhr_kalman_blas_probe_cpp", (DL_FUNC) &_dynhr_kalman_blas_probe_cpp, 0},
+    {"_dynhr_kalman_standard_general_struct_loop_cpp", (DL_FUNC) &_dynhr_kalman_standard_general_struct_loop_cpp, 27},
     {"_dynhr_kalman_univariate_loop_cpp", (DL_FUNC) &_dynhr_kalman_univariate_loop_cpp, 16},
     {"_dynhr_kf_adjoint_diffuse_cpp", (DL_FUNC) &_dynhr_kf_adjoint_diffuse_cpp, 9},
     {"_dynhr_kf_loglik_dG_cpp", (DL_FUNC) &_dynhr_kf_loglik_dG_cpp, 15},

@@ -1,3 +1,101 @@
+# dynhr 0.9.4.48
+
+**Public release: everything since 0.9.4.43** (the 0.9.4.44 - 0.9.4.48
+entries below). Highlights:
+
+- **Speed on a reference BLAS** (e.g. Windows R reporting "Matrix products:
+  default"): a structured Kalman kernel, chosen automatically by a
+  once-per-session BLAS probe, cuts an NZSIM-size posterior evaluation by
+  about a third (11.9 -> 7.6 ms measured with R's reference BLAS), with or
+  without missing data. Optimised BLAS (MKL, OpenBLAS, Accelerate) keeps the
+  previous kernel. Results move by round-off only.
+- **Filter selection in the posterior**: `filter_method` on
+  `make_log_posterior()`, `make_posterior()`, the estimation spec and the
+  runner, recorded on the closure; structural-cache counters.
+- **Benchmarking**: `dynhr_benchmark_posterior()`, build details in
+  `dynhr_system_info()`, and `dynhr_install_native()` for a no-admin
+  CPU-tuned build.
+
+**Re-run if affected:** nothing changes results beyond round-off. On a
+reference BLAS the new kernel moves logliks at the 1e-14 relative level;
+`options(dynhr.kf_struct = FALSE)` restores the previous kernel exactly.
+
+- The structured Kalman kernel (slow-BLAS machines, 0.9.4.47) now also covers
+  missing observations, `a0` / `P0`, the post-diffuse start, `shock_scale`
+  and `me_extra`. Reference BLAS, NZSIM-size model with a missing tail:
+  11.9 -> 7.6 ms per filter; agrees with the dense kernel to round-off.
+- New option `dynhr.kf_update`: "joseph" (default, unchanged results),
+  "simple" (P' = T P T' + R Sigma R' - K F K', algebraically the Joseph
+  recursion at the optimal gain) or "auto" (simple, re-run in Joseph form
+  when an observable's forecast is nearly collinear with the others:
+  1 - R^2 < 5e-3; `$diagnostics$kf_update` reports which form ran). Measured
+  speed gain of "simple" is small (0-15%), so the default stays "joseph".
+
+# dynhr 0.9.4.47
+
+- On a slow (reference) BLAS -- e.g. Windows R with "Matrix products:
+  default" -- the complete-data Gaussian Kalman filter uses a structured
+  kernel: it skips the entries of the solved state-space matrices that are
+  numerically zero (round-off left where a structural coefficient is zero)
+  and forms the covariance update with symmetric BLAS updates. Measured with
+  R's reference BLAS: NZSIM-size posterior evaluation 11.9 -> 7.7 ms (-36%),
+  sw2007 2.1 -> 1.7 ms (-20%). A once-per-process probe (dgemm vs a plain
+  loop) selects it, so an optimised BLAS (Accelerate, OpenBLAS, MKL) keeps the
+  dense kernel. Options `dynhr.kf_struct` ("auto" / TRUE / FALSE) and
+  `dynhr.kf_zero_tol` (default 1e-13 relative).
+- Results: the structured kernel agrees with the dense one to round-off
+  (<= 1e-14 relative on the logliks checked); unchanged on optimised BLAS.
+
+# dynhr 0.9.4.46
+
+- `filter_method` validation no longer reads `kalman_filter()`'s formals at
+  run time (a mocked or wrapped `kalman_filter` made every value invalid);
+  the choices are a package constant kept equal to the formal by a test.
+- No result changes.
+
+# dynhr 0.9.4.45
+
+- New `filter_method` argument (`make_log_posterior()`, `make_posterior()`,
+  `make_loglik_contrib()`, `estimation_context()`, `likelihood_spec()`,
+  `run_full_estimation()`, and the mode stage / parallel workers): force the
+  Kalman recursion of the Gaussian posterior's value path. A choice that
+  cannot run on the model or data (e.g. `"chandrasekhar"` with missing
+  observations) is refused when the closure is built; a non-`"auto"` value
+  for a likelihood without a Kalman value path is refused. The closure records
+  requested and resolved method and fallback draws in
+  `attr(lp, "filter_method")` (read with `as.list()`). The exact gradient runs
+  its own kernels and is not affected.
+- Inside the posterior, `"auto"` takes the Chandrasekhar recursion from the
+  measured crossover (`n_state >= 40` and `n_state >= 5 * n_obs`) instead of
+  only above 100 states, because a likelihood evaluation never reads
+  `final_cov`. A draw on which it fails is re-run on the standard filter (one
+  likelihood convention per closure). sw2007 and NZSIM-size models stay on the
+  standard filter under this rule. Public `kalman_filter(method = "auto")` is
+  unchanged.
+- Every posterior closure carries `attr(lp, "cache_stats")`: evaluations and
+  structural-cache hits / misses.
+- Results: unchanged wherever `"auto"` still resolves to the standard filter
+  (all package benchmark and parity harnesses). Where it now resolves to
+  Chandrasekhar the loglik moves by round-off of that recursion, which is not
+  re-formed from P and can accumulate (documented under `filter_method`).
+
+# dynhr 0.9.4.44
+
+- `dynhr_system_info()` reports how dynhr's own compiled library was built:
+  optimisation, SIMD / FMA, fast-math, compiler, C++ standard (read from the
+  compiler's predefined macros, so it reflects a personal Makevars too).
+- New `dynhr_install_native()`: installs a CPU-tuned build (default
+  `-O3 -march=native`) into a user library with no admin rights, through a
+  temporary `R_MAKEVARS_USER` file (never `~/.R/Makevars` or R's Makeconf).
+  Fast-math flags are refused. The new build is checked in a fresh R process
+  against the sw2007 benchmark fingerprint. It recompiles dynhr's own C++
+  only: matrix products still go to R's BLAS.
+- New `dynhr_benchmark_posterior()`: times a log-posterior closure and a
+  seeded RWMH run, recording the system / build fields and digests of the
+  accept/reject sequence so two builds or machines can be compared; can
+  append rows to a CSV.
+- No result changes.
+
 # dynhr 0.9.4.43
 
 **Public release: everything since 0.9.4.** This release carries all

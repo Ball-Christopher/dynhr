@@ -10,6 +10,7 @@
 #include <RcppArmadillo.h>
 #include <limits>
 #include <algorithm>
+#include "kf_guard.h"
 // [[Rcpp::depends(RcppArmadillo)]]
 
 using Rcpp::List;
@@ -93,9 +94,21 @@ List kalman_standard_loop_cpp(const arma::mat& Y_minus_d,
                               double ll_min,
                               bool return_filtered,
                               const arma::vec& me_diag_vec,
-                              double kalman_tol) {
+                              double kalman_tol,
+                              int upd = 0,
+                              double guard_piv = -1.0,
+                              double guard_r2 = -1.0,
+                              double guard_ret = -1.0,
+                              double guard_amp = -1.0) {
   const arma::uword n_state = TT.n_rows;
   const arma::uword n_T     = Y_minus_d.n_cols;
+  // upd = 1: simple covariance update P' = T P T' + R Sigma R' - K F K'
+  // (algebraically the Joseph recursion below for the optimal gain, with F
+  // carrying the measurement-error diagonal); see kf_guard.h for the guard.
+  const bool simple = (upd == 1);
+  KfGuard guard(guard_piv, guard_r2, guard_ret, guard_amp);
+  arma::mat QQs, Xs, base_s;
+  if (simple) QQs = RR * Sigma_e * RR.t();
   arma::vec s(n_state, arma::fill::zeros);
   double loglik = 0.0;
   bool ok = true;
@@ -159,6 +172,10 @@ List kalman_standard_loop_cpp(const arma::mat& Y_minus_d,
       double ll = ll_const - 0.5 * (ldf + arma::dot(v, Fiv));
       if (!std::isfinite(ll) || ll < ll_min) { ok = false; break; }
       loglik += ll;
+      if (simple) {
+        guard.note_F(Rc, Ft, Fi);
+        if (guard.tripped) break;
+      }
       // K = (TT*PZ + SS) * Fi
       TPZ = TT * PZ;
       TPZ += SS;
@@ -167,6 +184,17 @@ List kalman_standard_loop_cpp(const arma::mat& Y_minus_d,
       s_n = TT * s;
       Kv  = K * v;
       s_n += Kv;
+      if (simple) {
+        // P' = T P T' + R Sigma R' - K F K', with K F = TPZ.
+        base_s = TT * P * TT.t();
+        base_s += QQs;
+        guard.pending = arma::sum((ZZ * base_s) % ZZ, 1);
+        Xs = K * TPZ.t();
+        P_n = base_s - 0.5 * (Xs + Xs.t());
+        P_n = 0.5 * (P_n + P_n.t());
+        guard.note_P(base_s, P_n);
+        if (guard.tripped) break;
+      } else {
       // TmKZ = TT - K*ZZ ;  RmKD = RR - K*DD
       KZ = K * ZZ;   TmKZ = TT - KZ;
       KD = K * DD;   RmKD = RR - KD;
@@ -178,6 +206,7 @@ List kalman_standard_loop_cpp(const arma::mat& Y_minus_d,
       // TRUE measurement-noise law (F3-D): P' += K diag(me) K'.
       if (has_me) P_n += (K * arma::diagmat(me_diag_vec)) * K.t();
       P_n = 0.5 * (P_n + P_n.t());
+      }
       s = s_n;
       // RELATIVE lock, as in the R loop (kalman_filter): an absolute ss_tol
       // froze the gain at t = 2 on a model whose P is ~1e-15.
@@ -212,7 +241,13 @@ List kalman_standard_loop_cpp(const arma::mat& Y_minus_d,
                       _["filtered"]   = return_filtered ? Rcpp::wrap(filtered)
                                                         : R_NilValue,
                       _["ok"]         = ok,
-                      _["ss_reached"] = ss_reached);
+                      _["ss_reached"] = ss_reached,
+                      _["guard_tripped"] = guard.tripped,
+                      _["ind_piv"]    = guard.piv,
+                      _["ind_r2"]     = guard.r2,
+                      _["ind_ret"]    = guard.ret,
+                      _["ind_amp"]    = guard.amp,
+                      _["ind_bad"]    = guard.bad);
 }
 
 
@@ -220,8 +255,9 @@ List kalman_standard_loop_cpp(const arma::mat& Y_minus_d,
 // and .kf_F_singular() in R/kalman-filter.R (keep the three in step). `Rc` is
 // the upper Cholesky factor of `Ft`, `Fi` its inverse. TRUE = treat as
 // singular (the caller hands the evaluation to the univariate filter).
-static bool kf_general_F_singular(const arma::mat& Rc, const arma::mat& Ft,
-                                  const arma::mat& Fi, double kalman_tol) {
+// External linkage: kalman_struct.cpp's structured kernel applies the same rule.
+bool kf_general_F_singular(const arma::mat& Rc, const arma::mat& Ft,
+                           const arma::mat& Fi, double kalman_tol) {
   const arma::vec piv = Rc.diag();
   const arma::vec dF  = Ft.diag();
   if (!piv.is_finite() || piv.min() <= 0.0 || !dF.is_finite() ||
@@ -285,7 +321,12 @@ List kalman_standard_general_loop_cpp(const arma::mat& Y_minus_d,
                                       const arma::vec& me_vec,
                                       const arma::mat& me_extra,
                                       const arma::mat& shock_scale,
-                                      double kalman_tol) {
+                                      double kalman_tol,
+                                      int upd = 0,
+                                      double guard_piv = -1.0,
+                                      double guard_r2 = -1.0,
+                                      double guard_ret = -1.0,
+                              double guard_amp = -1.0) {
   const arma::uword n_state = TT.n_rows;
   const arma::uword n_obs   = ZZ.n_rows;
   const arma::uword n_T     = Y_minus_d.n_cols;
@@ -317,6 +358,11 @@ List kalman_standard_general_loop_cpp(const arma::mat& Y_minus_d,
   arma::mat  K_ss, F_inv_ss;
   double     ll_ss_const = 0.0;
 
+  // upd = 1: simple covariance update at every observed period (see
+  // kalman_standard_loop_cpp); the prediction-only step is the same in both.
+  const bool simple = (upd == 1);
+  KfGuard guard(guard_piv, guard_r2, guard_ret, guard_amp);
+  arma::mat base_s, Xs, QQ_t;
   arma::vec y, v, Fiv, Kv, s_n, me_t;
   arma::mat PZ, Ft, Rc, Fi, TPZ, K, KZ, KD, TmKZ, RmKD, P_n, tmpA, tmpB;
   arma::mat Se_t, HH_t, SS_t;
@@ -339,6 +385,7 @@ List kalman_standard_general_loop_cpp(const arma::mat& Y_minus_d,
       // ---- missing observation(s): drop them, release the lock ----------
       ss_reached = false;
       if (n_ok == 0) {
+        guard.pending.reset();
         s = TT * s;
         if (has_sc) P = TT * P * TT.t() + RR * Se * RR.t();
         else        P = TT * P * TT.t() + QQ;
@@ -365,13 +412,27 @@ List kalman_standard_general_loop_cpp(const arma::mat& Y_minus_d,
       // missing components (the R loop applies no ll_min floor here).
       loglik += ll_const + 0.5 * static_cast<double>(n_obs - n_ok) * log2pi -
         0.5 * (ldf + arma::dot(v_o, Fi * v_o));
-      K = (TT * P * ZZ_o.t() + RR * Se * DD_o.t()) * Fi;
+      const arma::mat N_o = TT * P * ZZ_o.t() + RR * Se * DD_o.t();
+      K = N_o * Fi;
       s = TT * s + K * v_o;
-      TmKZ = TT - K * ZZ_o;
-      RmKD = RR - K * DD_o;
-      P_n  = TmKZ * P * TmKZ.t() + RmKD * Se * RmKD.t();
-      if (arma::any(me_t != 0.0)) P_n += (K * arma::diagmat(me_t)) * K.t();
-      P = 0.5 * (P_n + P_n.t());
+      if (simple) {
+        guard.note_F(Rc, Ft, Fi, obs_ok.memptr());
+        if (guard.tripped) break;
+        QQ_t = has_sc ? arma::mat(RR * Se * RR.t()) : QQ;
+        base_s = TT * P * TT.t() + QQ_t;
+        guard.pending = arma::sum((ZZ * base_s) % ZZ, 1);
+        Xs = K * N_o.t();
+        P_n = base_s - 0.5 * (Xs + Xs.t());
+        P = 0.5 * (P_n + P_n.t());
+        guard.note_P(base_s, P);
+        if (guard.tripped) break;
+      } else {
+        TmKZ = TT - K * ZZ_o;
+        RmKD = RR - K * DD_o;
+        P_n  = TmKZ * P * TmKZ.t() + RmKD * Se * RmKD.t();
+        if (arma::any(me_t != 0.0)) P_n += (K * arma::diagmat(me_t)) * K.t();
+        P = 0.5 * (P_n + P_n.t());
+      }
       if (return_filtered) filtered.col(t) = s;
       continue;
     }
@@ -405,13 +466,27 @@ List kalman_standard_general_loop_cpp(const arma::mat& Y_minus_d,
       const double ll = ll_const - 0.5 * (ldf + arma::dot(v, Fi * v));
       if (!std::isfinite(ll) || ll < ll_min) { ok = false; break; }
       loglik += ll;
-      K = (TT * PZ + (has_sc ? SS_t : SS)) * Fi;
+      const arma::mat N_t = TT * PZ + (has_sc ? SS_t : SS);
+      K = N_t * Fi;
       s = TT * s + K * v;
-      TmKZ = TT - K * ZZ;
-      RmKD = RR - K * DD;
-      P_n  = TmKZ * P * TmKZ.t() + RmKD * Se * RmKD.t();
-      if (arma::any(me_t != 0.0)) P_n += (K * arma::diagmat(me_t)) * K.t();
-      P = 0.5 * (P_n + P_n.t());
+      if (simple) {
+        guard.note_F(Rc, Ft, Fi);
+        if (guard.tripped) break;
+        QQ_t = has_sc ? arma::mat(RR * Se * RR.t()) : QQ;
+        base_s = TT * P * TT.t() + QQ_t;
+        guard.pending = arma::sum((ZZ * base_s) % ZZ, 1);
+        Xs = K * N_t.t();
+        P_n = base_s - 0.5 * (Xs + Xs.t());
+        P = 0.5 * (P_n + P_n.t());
+        guard.note_P(base_s, P);
+        if (guard.tripped) break;
+      } else {
+        TmKZ = TT - K * ZZ;
+        RmKD = RR - K * DD;
+        P_n  = TmKZ * P * TmKZ.t() + RmKD * Se * RmKD.t();
+        if (arma::any(me_t != 0.0)) P_n += (K * arma::diagmat(me_t)) * K.t();
+        P = 0.5 * (P_n + P_n.t());
+      }
       if (return_filtered) filtered.col(t) = s;
       continue;
     }
@@ -436,6 +511,17 @@ List kalman_standard_general_loop_cpp(const arma::mat& Y_minus_d,
     s_n = TT * s;
     Kv  = K * v;
     s_n += Kv;
+    if (simple) {
+      guard.note_F(Rc, Ft, Fi);
+      if (guard.tripped) break;
+      base_s = TT * P * TT.t() + QQ;
+      guard.pending = arma::sum((ZZ * base_s) % ZZ, 1);
+      Xs = K * TPZ.t();
+      P_n = base_s - 0.5 * (Xs + Xs.t());
+      P_n = 0.5 * (P_n + P_n.t());
+      guard.note_P(base_s, P_n);
+      if (guard.tripped) break;
+    } else {
     KZ = K * ZZ;   TmKZ = TT - KZ;
     KD = K * DD;   RmKD = RR - KD;
     tmpA = TmKZ * P;
@@ -444,6 +530,7 @@ List kalman_standard_general_loop_cpp(const arma::mat& Y_minus_d,
     P_n += tmpB * RmKD.t();
     if (has_me) P_n += (K * arma::diagmat(me_vec)) * K.t();
     P_n = 0.5 * (P_n + P_n.t());
+    }
     s = s_n;
     if (!has_mx && !has_sc && t > 0 &&
         arma::abs(P_n - P).max() < ss_tol * arma::abs(P_n).max()) {
@@ -462,5 +549,11 @@ List kalman_standard_general_loop_cpp(const arma::mat& Y_minus_d,
                       _["filtered"]   = return_filtered ? Rcpp::wrap(filtered)
                                                         : R_NilValue,
                       _["ok"]         = ok,
-                      _["ss_reached"] = ss_reached);
+                      _["ss_reached"] = ss_reached,
+                      _["guard_tripped"] = guard.tripped,
+                      _["ind_piv"]    = guard.piv,
+                      _["ind_r2"]     = guard.r2,
+                      _["ind_ret"]    = guard.ret,
+                      _["ind_amp"]    = guard.amp,
+                      _["ind_bad"]    = guard.bad);
 }

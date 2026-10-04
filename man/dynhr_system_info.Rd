@@ -26,6 +26,21 @@ using its bundled reference BLAS / LAPACK (\code{Rblas} / \code{Rlapack}),
 and \code{blas_note} then says what that costs and how to switch to an
 optimised library (otherwise \code{NA}). \code{matprod} is R's
 matrix-product setting as \code{sessionInfo()} reports it.
+
+The \code{dynhr_*} build columns describe dynhr's OWN compiled library as
+the compiler actually built it, read from the predefined compiler macros of
+the package's C++ -- unlike \code{cxxflags}, which is R's default flag set
+and says nothing about a package installed with a personal Makevars (see
+\code{\link{dynhr_install_native}}). \code{dynhr_optimize} is whether the
+library was compiled with optimisation (\code{FALSE} for a
+\code{devtools::load_all()} build, which is several times slower);
+\code{dynhr_simd} lists the instruction sets enabled at compile time
+(e.g. \code{"sse2"}, \code{"avx2+fma"}, \code{"neon"}); \code{dynhr_fma}
+says whether fused multiply-add may be contracted; \code{dynhr_fast_math}
+is \code{TRUE} if the library was compiled with \code{-ffast-math}, a
+configuration whose results are not supported, in which case
+\code{dynhr_build_note} says so; \code{dynhr_compiler} is the compiler name
+and version and \code{dynhr_cplusplus} the C++ standard macro.
 }
 \examples{
 dynhr_system_info()

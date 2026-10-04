@@ -15,6 +15,7 @@ make_loglik_contrib(
   me_extra = NULL,
   shock_scale = NULL,
   likelihood = "gaussian",
+  filter_method = "auto",
   ...
 )
 }
@@ -56,6 +57,13 @@ see \code{\link{kalman_filter}}.}
 \item{likelihood}{Likelihood type. Only \code{"gaussian"} (the default)
 is supported; any other value errors ("gaussian only for now") rather
 than silently approximating a per-period decomposition it does not have.}
+
+\item{filter_method}{Kalman filter recursion, as in
+\code{\link{make_log_posterior}} (same validation). Per-period
+contributions exist only on the textbook (\code{"dare"}) and
+\code{"univariate"} recursions, so \code{\link{kalman_filter}} runs
+those whatever other method is requested; the sum equals the posterior's
+\code{$loglik} to round-off.}
 
 \item{...}{Accepted for signature parity with
 \code{make_log_posterior}; unused (errors are raised instead of

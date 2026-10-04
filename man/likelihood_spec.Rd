@@ -55,6 +55,7 @@ does not change an existing spec.
   \item{\code{type}}{Likelihood: gaussian (Kalman filter), cumulant, whittle, tpf, pskf, student_t, pkf, ppf, copf, pruned, sv_rbpf or global_pf. One of \code{"gaussian"}, \code{"cumulant"}, \code{"whittle"}, \code{"tpf"}, \code{"pskf"}, \code{"student_t"}, \code{"pkf"}, \code{"ppf"}, \code{"copf"}, \code{"pruned"}, \code{"sv_rbpf"}, \code{"global_pf"}. Default: \code{"gaussian"}.}
   \item{\code{me_variance}}{Measurement-error variance: one value, or one per observable. Default: the \code{me_variance} option (registered default \code{0}).}
   \item{\code{lik_init}}{Kalman filter P0 initialisation. One of \code{"auto"}, \code{"stationary"}, \code{"diffuse"}, \code{"kappa"}. Default: \code{"auto"}.}
+  \item{\code{filter_method}}{Kalman filter recursion of the posterior's value path, as the method argument of kalman_filter() (gaussian only; see make_log_posterior()). One of \code{"auto"}, \code{"dare"}, \code{"chandrasekhar"}, \code{"standard"}, \code{"reference"}, \code{"univariate"}, \code{"univariate_ss"}. Default: \code{"auto"}.}
   \item{\code{freq_band}}{Whittle frequency band c(lo, hi) in radians (whittle only). Default: \code{c(0, 3.14159265358979)}.}
   \item{\code{pskf_cdf}}{PSKF CDF evaluation: accurate (default and only value; pskf only). Default: the \code{pskf_cdf} option (registered default \code{"accurate"}).}
   \item{\code{power_posterior}}{Power-posterior tempering exponent in (0, 1] applied to the log-likelihood. Default: the \code{power_posterior} option (registered default \code{1}).}

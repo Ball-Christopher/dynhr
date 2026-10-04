@@ -42,6 +42,133 @@
          inherits = FALSE, mode = "function")
 }
 
+### Structured standard-filter kernel (src/kalman_struct.cpp). It runs the same
+### Joseph recursion over a thresholded sparse view of TT, ZZ, RR, DD (entries
+### at or below `zero_tol * max|matrix|` are the round-off the solver leaves
+### where the structural coefficient is zero) and costs ~35-40% fewer flops on
+### an NZSIM-sized model, but its sparse loops are plain compiled code: they
+### beat a slow dgemm and lose to an optimised one. Measured on an Apple M-series
+### laptop, complete-data filter, T = 133, min of 5 x 200 calls:
+###
+###                      Accelerate BLAS        R reference BLAS
+###                      dense   structured     dense   structured
+###   NZSIM (37 st/20 obs)  1.95 ms   3.89 ms   11.1 ms   7.1 ms
+###   sw2007 (20 st/7 obs)  0.80 ms   1.10 ms    1.81 ms  1.43 ms
+###
+### so the kernel is used only when a start-of-process probe finds the BLAS
+### slow: kalman_blas_probe_cpp() = t(dgemm 40^3) / t(plain loop, same product)
+### is 0.06 on Accelerate and 1.86 on the reference BLAS (an optimised
+### OpenBLAS / MKL sits near the former); the cut is 0.4. Options:
+###   dynhr.kf_struct    "auto" (default), TRUE (always), FALSE (never)
+###   dynhr.kf_zero_tol  drop threshold (default 1e-13; 0 = exact zeros only)
+###
+### The general loop (missing observations, a0 / P0, shock_scale, me_extra) has
+### a structured twin, kalman_standard_general_struct_loop_cpp(), selected by the
+### same switch; a period with observed rows O uses the sparse view of those
+### rows, built once per distinct missingness pattern in the call. On NZSIM
+### (T = 132) with three cells missing in the last two periods, kernel time
+### on the reference BLAS is 12.7 ms dense and 6.5 ms structured; on
+### Accelerate it is 1.95 ms dense and 3.6 ms structured (not selected).
+.KF_STRUCT_ZERO_TOL  <- 1e-13
+.KF_STRUCT_BLAS_RATIO <- 0.4
+
+## The zero threshold to pass to kalman_standard_struct_loop_cpp(), or NA when
+## the dense kalman_standard_loop_cpp() should run.
+.kf_struct_zero_tol <- function() {
+  mode <- getOption("dynhr.kf_struct", "auto")
+  if (!(identical(mode, "auto") || isTRUE(mode) || isFALSE(mode)))
+    .dynhr_abort("option `dynhr.kf_struct` must be \"auto\", TRUE or FALSE.")
+  if (isFALSE(mode)) return(NA_real_)
+  if (!exists("kalman_standard_struct_loop_cpp", envir = asNamespace("dynhr"),
+              inherits = FALSE, mode = "function"))
+    return(NA_real_)
+  tol <- getOption("dynhr.kf_zero_tol", .KF_STRUCT_ZERO_TOL)
+  if (!(is.numeric(tol) && length(tol) == 1L && is.finite(tol) && tol >= 0))
+    .dynhr_abort("option `dynhr.kf_zero_tol` must be a single finite number >= 0.")
+  if (identical(mode, "auto") &&
+      kalman_blas_probe_cpp() < .KF_STRUCT_BLAS_RATIO)
+    return(NA_real_)
+  as.numeric(tol)
+}
+
+### -- Covariance-update form (compiled standard kernels) ----------------------
+###
+### The Riccati covariance step has two algebraically identical forms for the
+### optimal gain K = (T P Z' + S) F^-1, with F = Z P Z' + D Sigma D' + H and
+### S = R Sigma D' (H the true measurement-error diagonal):
+###   Joseph  P' = A P A' + B Sigma B' + K H K',  A = T - K Z, B = R - K D
+###   simple  P' = T P T' + R Sigma R' - K F K'
+### Expanding the Joseph form,  A P A' + B Sigma B' + K H K' = T P T' +
+### R Sigma R' - (T P Z' + S) K' - K (Z P T' + S') + K (Z P Z' + D Sigma D' +
+### H) K', and (T P Z' + S) = K F turns the three K terms into -K F K' - K F K'
+### + K F K' = -K F K'. The simple form needs one rank-p product instead of
+### two n x n x n products, but it is a difference of positive semidefinite
+### matrices and loses digits where T P T' + R Sigma R' nearly cancels K F K'
+### (P nearly singular along the observed directions). Option
+### `dynhr.kf_update`: "joseph" (default), "simple", or "auto" = simple with a
+### per-call guard that re-runs the SAME call with the Joseph form when a cheap
+### risk indicator (see src/kf_guard.h) crosses its threshold, so one form is
+### used per call. The R reference loop, the diffuse phase and the univariate
+### filters always use the Joseph form.
+###
+### The guard indicator is r2 = min over steps and observables of
+### 1 / (F_ii (F^-1)_ii) (1 - R^2 of an observable on the others; scale free,
+### O(p) from the F and F^-1 the step already holds); the call is flagged when
+### it falls below .KF_UPDATE_GUARD[["r2"]] or when a P diagonal is non-finite,
+### and a simple-form kernel failure (the singularity rule firing) is re-run as
+### Joseph too. Calibrated on 1,639 draws (sw2007 and NZSIM from the prior and
+### around the mode, nk_demo) against the loglik difference to the Joseph form:
+###   the simple form differs from Joseph by <= 1e-9 relative wherever
+###   r2 >= 5e-3 (max 2.7e-10), and by up to 5e-2 relative (on a loglik of
+###   -6e7, i.e. draws no sampler would visit) where r2 << 1e-5; around the
+###   mode r2 is ~1e-2 on NZSIM (2% of draws below 5e-3), ~0.3 on sw2007 and
+###   nk_demo. The pivot ratio of F, the surviving fraction of the prior
+###   variance and the magnification of the subtraction's round-off in the next
+###   F (indicators piv, ret, amp in the kernel output) all missed material
+###   draws at any threshold that left the guard useful, so they are recorded
+###   but not used to trip.
+### Speed (kernel only, T = 132, NZSIM 37 states / 20 observables, min of 6 x 60
+### calls; simple vs Joseph): reference BLAS dense 12.8 -> 10.5-11.8 ms, structured
+### 7.7 -> 7.7 ms (the K F K' term is cheaper but the structured Joseph is already
+### near its sparse-loop floor); Accelerate dense 1.95 -> 1.92 ms. sw2007: within
+### 10% either way. The form is therefore opt-in.
+.KF_UPDATE_GUARD <- c(piv = -1, r2 = 5e-3, ret = -1, amp = -1)
+
+.kf_update_mode <- function() {
+  mode <- getOption("dynhr.kf_update", "joseph")
+  if (!(is.character(mode) && length(mode) == 1L &&
+        mode %in% c("joseph", "simple", "auto")))
+    .dynhr_abort("option `dynhr.kf_update` must be \"joseph\", \"simple\" or \"auto\".")
+  mode
+}
+
+## Run a compiled kernel under the requested update form. `runner(upd, gp, gr2,
+## gret)` calls the kernel; "auto" re-runs it with the Joseph form when the
+## guard tripped. Returns the kernel output plus the form actually used.
+.kf_run_update <- function(runner, mode) {
+  if (identical(mode, "joseph"))
+    return(list(out = runner(0L, -1, -1, -1, -1), used = "joseph",
+                fallback = FALSE))
+  if (identical(mode, "simple"))
+    return(list(out = runner(1L, -1, -1, -1, -1), used = "simple",
+                fallback = FALSE))
+  g <- .KF_UPDATE_GUARD
+  out <- runner(1L, g[["piv"]], g[["r2"]], g[["ret"]], g[["amp"]])
+  if (isTRUE(out$guard_tripped) || !isTRUE(out$ok))
+    return(list(out = runner(0L, -1, -1, -1, -1), used = "joseph",
+                fallback = TRUE))
+  list(out = out, used = "simple", fallback = FALSE)
+}
+
+.kf_update_diag <- function(run, mode) {
+  list(requested = mode, used = run$used,
+       guard_fallback = isTRUE(run$fallback),
+       indicators = if (identical(run$used, "simple"))
+         c(piv = run$out$ind_piv, r2 = run$out$ind_r2, ret = run$out$ind_ret,
+           amp = run$out$ind_amp)
+       else NULL)
+}
+
 .kf_ss_dispatch <- function(Y_minus_d, ZZ, TT, K_ss, F_inv_ss,
                             ll_ss_const, s, start_t, end_t,
                             filtered = NULL) {
@@ -1228,6 +1355,21 @@
 }
 
 
+## kalman_filter()'s `method` choices, for validators that must not depend on
+## the function object itself (a test may mock kalman_filter). Kept equal to
+## the formal's default by a test.
+.KF_METHOD_CHOICES <- c("auto", "dare", "chandrasekhar", "standard",
+                        "reference", "univariate", "univariate_ss")
+
+
+## Where "auto" may take the Chandrasekhar recursion for a caller that does
+## not read `final_cov`. See the measured table beside the routing block in
+## kalman_filter().
+#' @noRd
+.kf_chandrasekhar_wins <- function(n_state, n_obs)
+  n_state >= 40L && n_state >= 5L * n_obs
+
+
 ### -- Main filter ----------------------------------------------------------------
 
 #' Kalman filter for DSGE models
@@ -1450,6 +1592,14 @@
 #'   stationary (non-\code{shock_scale}) baseline system; scoped to the
 #'   \code{me_variance} floor (its largest entry when it is a vector), not
 #'   \code{me_extra}.
+#' @param .need_final_cov Internal. \code{TRUE} (default) keeps
+#'   \code{method = "auto"} on the routes that return \code{final_cov}.
+#'   \code{FALSE} declares that only the likelihood is read (the
+#'   log-posterior closures): \code{"auto"} may then take the Chandrasekhar
+#'   recursion at the measured crossover (\code{n_state >= 40} and
+#'   \code{n_state >= 5 * n_obs}) instead of \code{n_state > 100}, and a draw
+#'   on which that recursion fails is re-run on the standard filter. Leave
+#'   it at the default when calling the filter directly.
 #'
 #' @details
 #' \strong{Measurement-error convention:}
@@ -1746,13 +1896,20 @@ kalman_filter <- function(data, dr, model, params, obs_vars,
                           shock_means = NULL,
                           shock_timing = c("dated", "transition_next"),
                           me_floor_check = getOption("dynhr.me_floor_check",
-                                                     TRUE)) {
+                                                     TRUE),
+                          .need_final_cov = TRUE) {
   shock_timing <- match.arg(shock_timing)
 
   ## "reference" is an alias for "dare" -- both run the per-step textbook
   ## Kalman filter with no steady-state shortcut. "dare" is kept for
   ## backward compatibility but may be deprecated in a future release.
   method <- match.arg(method)
+  ## A caller that never reads `final_cov` (a likelihood evaluation) lets
+  ## "auto" take the Chandrasekhar recursion at the measured crossover, and a
+  ## draw on which that recursion fails is re-run on the standard filter (see
+  ## `.kf_fail`). The original call is kept for that re-run.
+  .kf_args0 <- if (identical(method, "auto") && !isTRUE(.need_final_cov))
+    mget(names(formals(sys.function())), envir = environment())
   if (method == "reference") method <- "dare"
   ## "univariate_ss" is the univariate filter with the opt-in steady-state lock
   ## (frozen gains on the converged stationary tail; an ~ss_tol approximation,
@@ -1925,6 +2082,9 @@ kalman_filter <- function(data, dr, model, params, obs_vars,
   ##
   ## Appended positionally (no `<<-`) so the record stays a plain local.
   route_log <- list()
+  ## TRUE when "auto" itself picked Chandrasekhar for a caller that does not
+  ## read final_cov (the fallback in `.kf_fail` is conditional on it).
+  chand_from_auto <- FALSE
 
   ## ---- me_extra validation and routing ------------------------------------
   ## me_extra must be n_obs x T when non-NULL.
@@ -2216,11 +2376,47 @@ kalman_filter <- function(data, dr, model, params, obs_vars,
     ## 100 that would silently change what "auto" returns; above 100 it was
     ## already the rule. Ask for method = "chandrasekhar" to take the measured
     ## ~2x on 61-100 states when the hand-off is not needed.
+    ##
+    ## A caller that declares it does not need final_cov (.need_final_cov =
+    ## FALSE: the log-posterior closures, which only read the likelihood) takes
+    ## the measured crossover instead of 100. The speed-up depends on n_obs as
+    ## well as n_state (the increment recursion is O(n_state^2 n_obs) per
+    ## step against O(n_state^3)), so the rule is on both. Ratio chandra /
+    ## standard, compiled filter, dense random stable systems, n_exo = n_obs,
+    ## me_variance 0.01, optimised build, vendor BLAS, min of 5 (ms; rows are
+    ## n_state, columns n_obs; T = 133 and 200 agree to the noise, spectral
+    ## radius 0.9 and 0.99 likewise):
+    ##   n_state     n_obs=3   7    12   20   = n_state
+    ##        10      0.80   0.96  0.95 1.04   0.96
+    ##        20      0.64   0.87  0.96 1.03   1.03
+    ##        30      0.66   0.81  0.96 1.00   0.97
+    ##        40      0.70   0.77  0.94 0.95   1.07
+    ##        60      0.59   0.68  0.78 0.85   1.05
+    ##        80      0.66   0.70  0.73 0.80   1.04
+    ##       100      0.62   0.67  0.65 0.71   1.03
+    ## (T = 200: 30 -> 0.66 0.86 0.92 0.96; 40 -> 0.67 0.78 0.97 1.05;
+    ##  60 -> 0.57 0.68 0.75 0.85; n_state = 10 -> 0.78 1.00 1.00 1.00.)
+    ## Chandrasekhar is <= 0.85 of the standard cost where n_state >= 40 and
+    ## n_state >= 5 * n_obs, and gains nothing (>= 0.95) as n_obs approaches
+    ## n_state, so the rule below switches only inside that region. The
+    ## loglik differs from the Riccati one by <= 1e-13 relative in it
+    ## (<= 1e-10 near n_obs = n_state at radius 0.99), at round-off.
     else if (n_state > 100) {
       method <- "chandrasekhar"
       route_log[[length(route_log) + 1L]] <-
         c(from = "auto", to = "chandrasekhar",
           reason = sprintf("n_state = %d > 100 (final_cov not formed above this size)", n_state))
+    } else if (!isTRUE(.need_final_cov) &&
+               .kf_chandrasekhar_wins(n_state, n_obs)) {
+      ## Caller does not read final_cov: take the measured crossover.
+      method <- "chandrasekhar"
+      chand_from_auto <- TRUE
+      route_log[[length(route_log) + 1L]] <-
+        c(from = "auto", to = "chandrasekhar",
+          reason = sprintf(paste("n_state = %d, n_obs = %d: the increment",
+                                 "recursion is measured faster here and the",
+                                 "caller does not need final_cov"),
+                           n_state, n_obs))
     } else {
       method <- "standard"
       route_log[[length(route_log) + 1L]] <-
@@ -2579,6 +2775,22 @@ kalman_filter <- function(data, dr, model, params, obs_vars,
   .kf_fallback_warned <- FALSE
 
   .kf_fail <- function(failed_method) {
+    ## "auto" chose Chandrasekhar only because the caller does not read
+    ## final_cov. When it fails, rerun the SAME call on the standard filter,
+    ## which computes the same Riccati likelihood to round-off, rather than
+    ## letting the likelihood convention change per draw by dropping to the
+    ## univariate filter (whose own fallback still applies if the standard one
+    ## fails too). The rerun is recorded in $diagnostics.
+    if (identical(failed_method, "chandrasekhar") && chand_from_auto &&
+        !is.null(.kf_args0)) {
+      args_sd <- .kf_args0
+      args_sd$method <- "standard"
+      args_sd$.need_final_cov <- TRUE
+      out <- do.call(kalman_filter, args_sd)
+      out$diagnostics$method_requested <- "auto"
+      out$diagnostics$chandrasekhar_fallback <- TRUE
+      return(out)
+    }
     fb <- c(from = failed_method, to = "univariate",
             reason = paste("singular / non-positive-definite innovation",
                            "covariance (or a non-finite step)"))
@@ -3065,11 +3277,25 @@ kalman_filter <- function(data, dr, model, params, obs_vars,
   ## general kernel (or the R loop), which reads init_s.
   if (!has_missing && !has_shock_scale && lik_init == "stationary" &&
       all(a0_vec == 0) && .HAS_RCPP_KALMAN()) {
-    out <- kalman_standard_loop_cpp(Y_minus_d, ZZ, TT, RR, DD, HH + me_diag,
-                                    Sigma_e, SS, P, ll_const, ss_tol,
-                                    .KF_LL_MIN, return_filtered,
-                                    me_vec,
-                                    .KF_ZERO_VAR_TOL)
+    zero_tol <- .kf_struct_zero_tol()
+    upd_mode <- .kf_update_mode()
+    run <- .kf_run_update(function(upd, gp, gr2, gret, gamp) {
+      if (is.na(zero_tol)) {
+        kalman_standard_loop_cpp(Y_minus_d, ZZ, TT, RR, DD, HH + me_diag,
+                                 Sigma_e, SS, P, ll_const, ss_tol,
+                                 .KF_LL_MIN, return_filtered,
+                                 me_vec,
+                                 .KF_ZERO_VAR_TOL, upd, gp, gr2, gret, gamp)
+      } else {
+        kalman_standard_struct_loop_cpp(Y_minus_d, ZZ, TT, RR, DD, HH + me_diag,
+                                        Sigma_e, SS, P, ll_const, ss_tol,
+                                        .KF_LL_MIN, return_filtered,
+                                        me_vec,
+                                        .KF_ZERO_VAR_TOL, zero_tol,
+                                        upd, gp, gr2, gret, gamp)
+      }
+    }, upd_mode)
+    out <- run$out
     if (!out$ok)
       return(.kf_fail("standard"))
     filt <- NULL
@@ -3077,8 +3303,10 @@ kalman_filter <- function(data, dr, model, params, obs_vars,
       filt <- out$filtered
       rownames(filt) <- state_names_out
     }
-    return(.kf_result(out$loglik, filt, "standard", lik_init, d_diffuse,
-                      final_state = out$s, final_cov = out$P))
+    res <- .kf_result(out$loglik, filt, "standard", lik_init, d_diffuse,
+                      final_state = out$s, final_cov = out$P)
+    res$diagnostics$kf_update <- .kf_update_diag(run, upd_mode)
+    return(res)
   }
 
   if (init_t_start > n_T) {
@@ -3096,13 +3324,29 @@ kalman_filter <- function(data, dr, model, params, obs_vars,
   ## behind options(dynhr.use_rcpp = FALSE); test-t20-kf-missing-cpp.R holds
   ## the two together.
   if (.HAS_RCPP_KALMAN_GENERAL()) {
-    out <- kalman_standard_general_loop_cpp(
-      Y_minus_d, ZZ, TT, RR, DD, HH, QQ, Sigma_e, SS,
-      as.numeric(init_s), P, init_t_start, init_loglik, ll_const, ss_tol,
-      .KF_LL_MIN, return_filtered, me_vec,
-      if (has_me_extra) me_extra else matrix(0, 0, 0),
-      if (has_shock_scale) shock_scale else matrix(0, 0, 0),
-      .KF_ZERO_VAR_TOL)
+    zero_tol <- .kf_struct_zero_tol()
+    upd_mode <- .kf_update_mode()
+    me_x <- if (has_me_extra) me_extra else matrix(0, 0, 0)
+    sc_x <- if (has_shock_scale) shock_scale else matrix(0, 0, 0)
+    run <- .kf_run_update(function(upd, gp, gr2, gret, gamp) {
+      if (is.na(zero_tol) ||
+          !exists("kalman_standard_general_struct_loop_cpp",
+                  envir = asNamespace("dynhr"), inherits = FALSE,
+                  mode = "function")) {
+        kalman_standard_general_loop_cpp(
+          Y_minus_d, ZZ, TT, RR, DD, HH, QQ, Sigma_e, SS,
+          as.numeric(init_s), P, init_t_start, init_loglik, ll_const, ss_tol,
+          .KF_LL_MIN, return_filtered, me_vec, me_x, sc_x,
+          .KF_ZERO_VAR_TOL, upd, gp, gr2, gret, gamp)
+      } else {
+        kalman_standard_general_struct_loop_cpp(
+          Y_minus_d, ZZ, TT, RR, DD, HH, QQ, Sigma_e, SS,
+          as.numeric(init_s), P, init_t_start, init_loglik, ll_const, ss_tol,
+          .KF_LL_MIN, return_filtered, me_vec, me_x, sc_x,
+          .KF_ZERO_VAR_TOL, zero_tol, upd, gp, gr2, gret, gamp)
+      }
+    }, upd_mode)
+    out <- run$out
     if (!out$ok)
       return(.kf_fail("standard"))
     filt <- NULL
@@ -3110,8 +3354,10 @@ kalman_filter <- function(data, dr, model, params, obs_vars,
       filt <- out$filtered
       rownames(filt) <- state_names_out
     }
-    return(.kf_result(out$loglik, filt, "standard", lik_init, d_diffuse,
-                      final_state = out$s, final_cov = out$P))
+    res <- .kf_result(out$loglik, filt, "standard", lik_init, d_diffuse,
+                      final_state = out$s, final_cov = out$P)
+    res$diagnostics$kf_update <- .kf_update_diag(run, upd_mode)
+    return(res)
   }
 
   for (t in init_t_start:n_T) {

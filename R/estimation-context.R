@@ -42,6 +42,13 @@
 #' @param lik_init     Kalman filter \code{P0} initialisation (default
 #'   \code{"auto"}).  Forwarded to \code{\link{kalman_filter}} on the
 #'   Gaussian path.  Ignored for cumulant/whittle/tpf likelihoods.
+#' @param filter_method Kalman filter recursion for the Gaussian value path
+#'   (default \code{"auto"}): one of the \code{method} choices of
+#'   \code{\link{kalman_filter}}.  See \code{\link{make_log_posterior}} for
+#'   what \code{"auto"} means inside the posterior and for the forced
+#'   choices.  A value other than \code{"auto"} with any likelihood but
+#'   \code{"gaussian"}, or with a Markov-switching spec, is an error of class
+#'   \code{dynhr_error_inapplicable_argument}.
 #' @param me_extra     \code{n_obs x T} matrix of per-period extra measurement
 #'   error variances (resolved from a \code{filter_tunes} block); \code{NULL}
 #'   = no filter tunes.  Must be \code{NULL} when \code{plan} is supplied.
@@ -135,6 +142,7 @@ estimation_context <- function(
                         "student_t", "pkf", "ppf", "copf", "pruned", "sv_rbpf",
                         "global_pf"),
     lik_init        = "auto",
+    filter_method   = "auto",
     me_extra        = NULL,
     shock_scale     = NULL,
     freq_band       = c(0, pi),
@@ -153,6 +161,10 @@ estimation_context <- function(
 ) {
   likelihood      <- match.arg(likelihood)
   gradient_policy <- match.arg(gradient_policy)
+  .mlp_check_filter_method(filter_method, likelihood, data = NULL,
+                           me_extra = NULL, shock_scale = NULL,
+                           lik_init = lik_init,
+                           ms = !is.null(ms_spec) || !is.null(ms_struct_spec))
 
   ## ---- Plan compilation ----------------------
   ## When a plan is supplied: run the two estimation adapters
@@ -303,6 +315,7 @@ estimation_context <- function(
       me_variance     = me_variance,
       likelihood      = likelihood,
       lik_init        = lik_init,
+      filter_method   = filter_method,
       me_extra        = me_extra,
       shock_scale     = shock_scale,
       freq_band       = freq_band,
@@ -330,6 +343,7 @@ print.dynhr_estimation_context <- function(x, ...) {
   cat(sprintf("  likelihood    : %s\n", x$likelihood))
   cat(sprintf("  me_variance   : %g\n", x$me_variance))
   cat(sprintf("  lik_init      : %s\n", x$lik_init))
+  cat(sprintf("  filter_method : %s\n", x$filter_method %||% "auto"))
   cat(sprintf("  freq_band     : [%.4g, %.4g]\n", x$freq_band[1], x$freq_band[2]))
   cat(sprintf("  me_extra      : %s\n",
               if (is.null(x$me_extra)) "NULL"
@@ -483,6 +497,7 @@ ctx_from_mode_result <- function(mr) {
     me_variance   = mr$me_variance   %||% 0,
     likelihood    = mr$likelihood    %||% "gaussian",
     lik_init      = mr$lik_init      %||% "auto",
+    filter_method = mr$filter_method %||% "auto",
     me_extra      = mr$me_extra      %||% NULL,
     shock_scale   = mr$shock_scale   %||% NULL,
     freq_band     = mr$freq_band     %||% c(0, pi),

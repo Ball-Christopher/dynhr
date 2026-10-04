@@ -14,6 +14,7 @@ make_log_posterior(
   likelihood = c("gaussian", "cumulant", "whittle", "tpf", "pskf", "student_t", "pruned",
     "ppf", "copf", "sv_rbpf", "global_pf"),
   lik_init = "auto",
+  filter_method = "auto",
   me_extra = NULL,
   shock_scale = NULL,
   freq_band = c(0, pi),
@@ -65,6 +66,33 @@ unit-root models use the exact diffuse initialization). See
 and \code{"kappa"}. Ignored when \code{likelihood = "cumulant"} or
 \code{likelihood = "whittle"}.}
 
+\item{filter_method}{Kalman filter recursion for the value path of
+\code{likelihood = "gaussian"}: one of the \code{method} choices of
+\code{\link{kalman_filter}} (default \code{"auto"}). Inside the
+posterior \code{"auto"} may take the Chandrasekhar recursion on models
+where it is measured faster than the standard filter (the posterior never
+reads \code{final_cov}, which that recursion does not form), and a draw on
+which it fails is re-run on the standard filter; the two agree to
+round-off. The Chandrasekhar increments are not re-formed from \eqn{P},
+so round-off can accumulate: on a 37-state, 20-observable model with as
+many shocks as observables (no measurement error) its loglik was up to
+6e-4 from the exact Riccati value on 20 periods and 2e-5 on 132 (the
+standard filter 5e-9), while agreeing to 1e-12 at that model's mode.
+A forced choice that cannot run on this model or data
+(\code{"chandrasekhar"} with missing observations, nonzero
+\code{me_extra}, a non-trivial \code{shock_scale}, or a diffuse
+\code{lik_init}) is refused when the closure is built, with class
+\code{dynhr_error_filter_method_incompatible}; an unknown value has class
+\code{dynhr_error_filter_method}; a value other than \code{"auto"} for a
+likelihood with no Kalman filter value path (or with a Markov-switching
+spec) is a \code{dynhr_error_inapplicable_argument}. The closure's
+\code{attr(, "filter_method")} environment (read with
+\code{as.list()}) holds \code{requested}, \code{resolved} (the method of
+the first successful evaluation) and \code{n_filter_fallback} (draws
+re-run on the standard filter). The exact gradient
+(\code{\link{make_posterior_grad}}) runs its own kernels:
+\code{filter_method} governs the value path only.}
+
 \item{me_extra}{Optional \code{n_obs x T} matrix of ADDITIONAL per-period
 measurement-error variance, added on top of \code{me_variance}. Rows are
 observables in \code{obs_vars} order and columns are periods, so a row
@@ -93,7 +121,8 @@ unpenalised behaviour. A single number is taken as
 may supply \code{floor}.}
 
 \item{ctx}{Optional \code{\link{estimation_context}} bundling
-\code{me_variance}, \code{likelihood}, \code{lik_init}, \code{me_extra},
+\code{me_variance}, \code{likelihood}, \code{lik_init},
+\code{filter_method}, \code{me_extra},
 \code{shock_scale}, \code{freq_band}, \code{system_priors},
 \code{infeasible_penalty} and the Markov-switching specs. **When supplied,
 its fields OVERRIDE the individual arguments silently**, so pass a context
@@ -150,6 +179,13 @@ A closure \code{function(theta)} returning
   unnamed \code{theta} of another length, or a named one whose names are
   not exactly \code{prior_spec$name}, is an error of class
   \code{dynhr_error_theta_names}.
+
+  The closure carries \code{attr(, "cache_stats")}, an environment (read
+  with \code{as.list()}) counting \code{n_calls} (evaluations),
+  \code{n_struct_hit} (draws that reused the cached steady state and
+  decision rule because only covariance-side parameters moved) and
+  \code{n_struct_miss} (draws that re-solved them while the cache was
+  active). The counts never change a result.
 
   The closure captures a compiled model, so it holds external pointers and
   **does not survive \code{saveRDS}/\code{readRDS} or transport to a worker

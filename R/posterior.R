@@ -1117,6 +1117,60 @@ apply_theta_to_params <- function(model, theta, params = NULL) {
     copf      = ppf)
 }
 
+## The reason a FORCED Kalman recursion cannot run on this problem, or NULL.
+## The one home of the Chandrasekhar scope rule for closures that fix the
+## method at construction (kalman_filter() refuses the same cases at call
+## time, with its own message): the increment recursion needs a
+## time-invariant observation equation, a complete panel and the Lyapunov P0.
+#' @noRd
+.kf_forced_method_refusal <- function(method, data, me_extra, shock_scale,
+                                      lik_init) {
+  if (!identical(method, "chandrasekhar")) return(NULL)
+  if (anyNA(data))
+    return("the data has missing observations")
+  if (!is.null(me_extra) && any(me_extra != 0))
+    return("me_extra is nonzero (time-varying measurement-error variances)")
+  if (!is.null(shock_scale) && !all(shock_scale == 1))
+    return("shock_scale is not all ones (time-varying shock variances)")
+  if (lik_init %in% c("diffuse", "kappa"))
+    return(paste0("lik_init = \"", lik_init, "\" (the recursion is ",
+                  "initialised from the Lyapunov P0)"))
+  NULL
+}
+
+## Validate make_log_posterior()'s `filter_method` (see its documentation).
+#' @noRd
+.mlp_check_filter_method <- function(filter_method, likelihood, data,
+                                     me_extra, shock_scale, lik_init,
+                                     ms = FALSE) {
+  choices <- .KF_METHOD_CHOICES
+  if (!is.character(filter_method) || length(filter_method) != 1L ||
+        is.na(filter_method) || !filter_method %in% choices)
+    .dynhr_abort(
+      "make_log_posterior: `filter_method` must be one of ",
+      paste0("\"", choices, "\"", collapse = ", "), "; got ",
+      if (is.character(filter_method) && length(filter_method) == 1L)
+        paste0("\"", filter_method, "\"") else "a non-scalar value", ".",
+      class = "dynhr_error_filter_method")
+  if (identical(filter_method, "auto")) return(invisible(NULL))
+  if (!identical(likelihood, "gaussian") || isTRUE(ms))
+    .dynhr_abort(
+      "make_log_posterior: `filter_method = \"", filter_method, "\"` does ",
+      "not apply to ",
+      if (isTRUE(ms)) "a Markov-switching spec (it runs the Kim filter)"
+      else paste0("likelihood = \"", likelihood, "\" (it has no Kalman ",
+                  "filter value path)"), ". Leave it at \"auto\".",
+      class = "dynhr_error_inapplicable_argument")
+  why <- .kf_forced_method_refusal(filter_method, data, me_extra, shock_scale,
+                                   lik_init)
+  if (!is.null(why))
+    .dynhr_abort(
+      "make_log_posterior: `filter_method = \"", filter_method, "\"` cannot ",
+      "run here: ", why, ". Use \"auto\", \"standard\" or \"univariate\".",
+      class = "dynhr_error_filter_method_incompatible")
+  invisible(NULL)
+}
+
 ## Check make_log_posterior()'s `...` names and the likelihood-specific
 ## formals against the chosen likelihood. A `...` name no likelihood takes is
 ## a classed error (dynhr_error_unknown_argument); one another likelihood
@@ -1207,6 +1261,32 @@ apply_theta_to_params <- function(model, theta, params = NULL) {
 #'   \code{\link{kalman_filter}} for \code{"stationary"}, \code{"diffuse"},
 #'   and \code{"kappa"}. Ignored when \code{likelihood = "cumulant"} or
 #'   \code{likelihood = "whittle"}.
+#' @param filter_method Kalman filter recursion for the value path of
+#'   \code{likelihood = "gaussian"}: one of the \code{method} choices of
+#'   \code{\link{kalman_filter}} (default \code{"auto"}). Inside the
+#'   posterior \code{"auto"} may take the Chandrasekhar recursion on models
+#'   where it is measured faster than the standard filter (the posterior never
+#'   reads \code{final_cov}, which that recursion does not form), and a draw on
+#'   which it fails is re-run on the standard filter; the two agree to
+#'   round-off. The Chandrasekhar increments are not re-formed from \eqn{P},
+#'   so round-off can accumulate: on a 37-state, 20-observable model with as
+#'   many shocks as observables (no measurement error) its loglik was up to
+#'   6e-4 from the exact Riccati value on 20 periods and 2e-5 on 132 (the
+#'   standard filter 5e-9), while agreeing to 1e-12 at that model's mode.
+#'   A forced choice that cannot run on this model or data
+#'   (\code{"chandrasekhar"} with missing observations, nonzero
+#'   \code{me_extra}, a non-trivial \code{shock_scale}, or a diffuse
+#'   \code{lik_init}) is refused when the closure is built, with class
+#'   \code{dynhr_error_filter_method_incompatible}; an unknown value has class
+#'   \code{dynhr_error_filter_method}; a value other than \code{"auto"} for a
+#'   likelihood with no Kalman filter value path (or with a Markov-switching
+#'   spec) is a \code{dynhr_error_inapplicable_argument}. The closure's
+#'   \code{attr(, "filter_method")} environment (read with
+#'   \code{as.list()}) holds \code{requested}, \code{resolved} (the method of
+#'   the first successful evaluation) and \code{n_filter_fallback} (draws
+#'   re-run on the standard filter). The exact gradient
+#'   (\code{\link{make_posterior_grad}}) runs its own kernels:
+#'   \code{filter_method} governs the value path only.
 #' @param freq_band   Numeric(2) \code{c(lo, hi)} in radians (only used when
 #'   \code{likelihood = "whittle"}). Restricts the Whittle sum to Fourier
 #'   frequencies in \code{(lo, hi]}. Default \code{c(0, pi)} uses all
@@ -1265,7 +1345,8 @@ apply_theta_to_params <- function(model, theta, params = NULL) {
 #'   \code{list(scale = x, floor = -1e6)}; a list must supply \code{scale} and
 #'   may supply \code{floor}.
 #' @param ctx Optional \code{\link{estimation_context}} bundling
-#'   \code{me_variance}, \code{likelihood}, \code{lik_init}, \code{me_extra},
+#'   \code{me_variance}, \code{likelihood}, \code{lik_init},
+#'   \code{filter_method}, \code{me_extra},
 #'   \code{shock_scale}, \code{freq_band}, \code{system_priors},
 #'   \code{infeasible_penalty} and the Markov-switching specs. **When supplied,
 #'   its fields OVERRIDE the individual arguments silently**, so pass a context
@@ -1282,6 +1363,13 @@ apply_theta_to_params <- function(model, theta, params = NULL) {
 #'   unnamed \code{theta} of another length, or a named one whose names are
 #'   not exactly \code{prior_spec$name}, is an error of class
 #'   \code{dynhr_error_theta_names}.
+#'
+#'   The closure carries \code{attr(, "cache_stats")}, an environment (read
+#'   with \code{as.list()}) counting \code{n_calls} (evaluations),
+#'   \code{n_struct_hit} (draws that reused the cached steady state and
+#'   decision rule because only covariance-side parameters moved) and
+#'   \code{n_struct_miss} (draws that re-solved them while the cache was
+#'   active). The counts never change a result.
 #'
 #'   The closure captures a compiled model, so it holds external pointers and
 #'   **does not survive \code{saveRDS}/\code{readRDS} or transport to a worker
@@ -1313,6 +1401,7 @@ make_log_posterior <- function(model, data, prior_spec, obs_vars = NULL,
                                               "ppf", "copf", "sv_rbpf",
                                               "global_pf"),
                                lik_init = "auto",
+                               filter_method = "auto",
                                me_extra = NULL,
                                shock_scale = NULL,
                                freq_band = c(0, pi),
@@ -1332,6 +1421,7 @@ make_log_posterior <- function(model, data, prior_spec, obs_vars = NULL,
     me_variance        <- ctx$me_variance
     likelihood         <- ctx$likelihood
     lik_init           <- ctx$lik_init
+    filter_method      <- ctx$filter_method %||% "auto"
     me_extra           <- ctx$me_extra
     shock_scale        <- ctx$shock_scale
     freq_band          <- ctx$freq_band
@@ -1354,6 +1444,13 @@ make_log_posterior <- function(model, data, prior_spec, obs_vars = NULL,
   .mlp_check_arguments(likelihood, ...names(), freq_band = freq_band,
                        pruned_order = pruned_order, student_df = student_df,
                        lik_init = lik_init)
+
+  ## A forced Kalman recursion: validated against the likelihood, the model's
+  ## data and the other filter arguments at BUILD time, not per draw.
+  .mlp_check_filter_method(filter_method, likelihood, data, me_extra,
+                           shock_scale, lik_init,
+                           ms = !is.null(ms_spec_ctx) ||
+                                !is.null(ms_struct_spec_ctx))
 
   ## .mod blocks this call does not apply (the spec runner does).
   .warn_mod_blocks_ignored(model, likelihood, me_extra, shock_scale,
@@ -2005,6 +2102,15 @@ make_log_posterior <- function(model, data, prior_spec, obs_vars = NULL,
     list(sys = sys, dr = dr)
   }
 
+  ## What the closure reports about its filter (read with as.list()): the
+  ## requested method, the method the first successful evaluation resolved to,
+  ## and the draws on which an auto-chosen Chandrasekhar recursion failed and
+  ## the standard filter supplied the value.
+  filter_stats <- new.env(parent = emptyenv())
+  filter_stats$requested         <- filter_method
+  filter_stats$resolved          <- NA_character_
+  filter_stats$n_filter_fallback <- 0L
+
   .make_posterior_closure(
     model, data, prior_spec, obs_vars, compiled,
     obs_trends_ok = TRUE,
@@ -2029,9 +2135,11 @@ make_log_posterior <- function(model, data, prior_spec, obs_vars = NULL,
         tryCatch(
           kalman_filter(data, sol$dr, model, params, obs_vars,
                         return_filtered = FALSE, me_variance = me_variance,
+                        method = filter_method,
                         lik_init = lik_init, me_extra = me_extra,
                         shock_scale = shock_scale,
-                        me_floor_check = me_floor_check),
+                        me_floor_check = me_floor_check,
+                        .need_final_cov = FALSE),
           error = function(e) {
             ## Lyapunov / inv_sympd / other KF failures must not propagate: they
             ## indicate an infeasible parameter draw (singular covariance,
@@ -2048,12 +2156,18 @@ make_log_posterior <- function(model, data, prior_spec, obs_vars = NULL,
           }
         )
       }
+      if (!is.null(kf) && is.null(ms_spec_ctx) &&
+          isTRUE(kf$diagnostics$chandrasekhar_fallback))
+        filter_stats$n_filter_fallback <- filter_stats$n_filter_fallback + 1L
       if (is.null(kf) || !is.finite(kf$loglik)) return(NULL)
+      if (is.null(ms_spec_ctx) && is.na(filter_stats$resolved))
+        filter_stats$resolved <- kf$diagnostics$method_used %||% kf$method
       list(loglik = kf$loglik)
     },
     power             = power,
     system_prior      = system_priors,
-    system_prior_mode = "lp")
+    system_prior_mode = "lp",
+    extra_attrs       = list(filter_method = filter_stats))
 }
 
 #' Build a per-period log-likelihood-contribution closure
@@ -2098,6 +2212,12 @@ make_log_posterior <- function(model, data, prior_spec, obs_vars = NULL,
 #' @param lik_init    Kalman filter \code{P0} initialization, forwarded to
 #'   \code{\link{kalman_filter}} (default \code{"auto"}); see
 #'   \code{make_log_posterior}.
+#' @param filter_method Kalman filter recursion, as in
+#'   \code{\link{make_log_posterior}} (same validation). Per-period
+#'   contributions exist only on the textbook (\code{"dare"}) and
+#'   \code{"univariate"} recursions, so \code{\link{kalman_filter}} runs
+#'   those whatever other method is requested; the sum equals the posterior's
+#'   \code{$loglik} to round-off.
 #' @param me_extra    \code{n_obs x T} matrix of additional per-observable,
 #'   per-period measurement-error variance (filter_tunes soft tunes); see
 #'   \code{\link{kalman_filter}}.
@@ -2127,6 +2247,7 @@ make_loglik_contrib <- function(model, data, prior_spec = NULL, obs_vars = NULL,
                                 me_extra = NULL,
                                 shock_scale = NULL,
                                 likelihood = "gaussian",
+                                filter_method = "auto",
                                 ...) {
   if (!identical(likelihood, "gaussian"))
     stop("make_loglik_contrib: likelihood = \"", likelihood, "\" is not ",
@@ -2136,6 +2257,9 @@ make_loglik_contrib <- function(model, data, prior_spec = NULL, obs_vars = NULL,
          "pruned, student_t, ppf/copf, MS-DSGE) do not have a per-period ",
          "decomposition wired up and this builder will not silently ",
          "approximate one.", call. = FALSE)
+
+  .mlp_check_filter_method(filter_method, likelihood, data, me_extra,
+                           shock_scale, lik_init)
 
   ## Default obs_vars from the model's varobs declaration, identical to
   ## make_log_posterior.
@@ -2192,7 +2316,7 @@ make_loglik_contrib <- function(model, data, prior_spec = NULL, obs_vars = NULL,
     kf <- tryCatch(
       kalman_filter(data, solved$dr, model, solved$params, obs_vars,
                     return_filtered = FALSE, me_variance = me_variance,
-                    return_ll_contrib = TRUE,
+                    return_ll_contrib = TRUE, method = filter_method,
                     lik_init = lik_init, me_extra = me_extra,
                     shock_scale = shock_scale,
                     me_floor_check = !.me_floor_checked &&
