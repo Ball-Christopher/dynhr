@@ -39,7 +39,9 @@
 #'   forecast draws that follow it. The result is reproducible for a fixed
 #'   seed; the caller's global RNG stream is restored on exit.
 #' @param ...           Additional arguments forwarded to
-#'   \code{\link{conditional_forecast}} (e.g. \code{free_shocks}, \code{Q}).
+#'   \code{\link{conditional_forecast}} (e.g. \code{free_shocks}, \code{Q},
+#'   and the trend-model inputs \code{shock_means}, \code{shock_timing},
+#'   \code{a0}, \code{P0}, applied identically at every parameter draw).
 #'
 #' @return An object of class \code{"dynhr_bayesian_cfcst"} with:
 #'   \describe{
@@ -123,7 +125,8 @@ bayesian_conditional_forecast <- function(
         solve_steady(compiled, pv,
                      endo_names = model$var_names,
                      exo_names  = model$varexo_names,
-                     verbose    = FALSE)
+                     verbose    = FALSE,
+                     growth     = isTRUE(model$balanced_growth))
       ),
       error = function(e) .dynhr_reraise_bug(e, NULL)
     )
@@ -142,6 +145,9 @@ bayesian_conditional_forecast <- function(
       n_fail <- n_fail + 1L
       next
     }
+    ## Balanced growth (R/balanced-growth.R): the path solved at this draw
+    ## travels with its decision rule, as in .solve_dr_for_theta().
+    if (!is.null(ss_k$growth) && any(ss_k$growth != 0)) dr_k$growth <- ss_k$growth
 
     ## Conditional forecast at this draw
     cfcst_k <- tryCatch(

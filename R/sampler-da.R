@@ -229,6 +229,7 @@ rwmh_da <- function(log_post_fn, screen_fn, theta0, Sigma_prop,
   n_par     <- length(theta0)
   par_names <- names(theta0)
 
+  scale0     <- scale
   Sigma_curr <- Sigma_prop
   L <- .robust_chol(Sigma_curr, n_par)
 
@@ -297,7 +298,25 @@ rwmh_da <- function(log_post_fn, screen_fn, theta0, Sigma_prop,
            paste(st$meta$par_names, collapse = ", "),
            ") but theta0 carries (", paste(par_names, collapse = ", "),
            "). Refusing to resume.", call. = FALSE)
+    ## Config that changes the continuation must match the saved run.
+    da_cfg <- list(scale0 = scale0, target_rate = target_rate,
+                   adapt_every = adapt_every, adapt_cov = adapt_cov,
+                   Sigma_prop = .ckpt_md5(Sigma_prop))
+    if (!isTRUE(all.equal(st$meta$config, da_cfg)))
+      stop("checkpoint resume (rwmh_da): the sampler configuration ",
+           "(target_rate, adapt_every, adapt_cov, Sigma_prop) differs from ",
+           "the saved run; use a new checkpoint directory.", call. = FALSE)
     ad <- st$adapt_state
+    ## Verify the target BEFORE any file is touched: the screen is
+    ## deterministic (always checkable); the expensive target is re-evaluated
+    ## unless it is a noisy pseudo-marginal one. The RNG is restored from the
+    ## pack afterwards so the checks cannot perturb the stream.
+    .ckpt_verify_lp(ad$lp_cheap, .da_logpost_value(screen_fn(st$position)),
+                    "rwmh_da (screen)")
+    if (!isTRUE(pseudo_marginal) && !isFALSE(checkpoint$lp_check))
+      .ckpt_verify_lp(st$lp, .da_logpost_value(log_post_fn(st$position)),
+                      "rwmh_da")
+    assign(".Random.seed", st$rng, envir = .GlobalEnv)
     state_curr    <- st$position
     lp_exp_curr   <- st$lp
     lp_cheap_curr <- ad$lp_cheap
@@ -319,6 +338,14 @@ rwmh_da <- function(log_post_fn, screen_fn, theta0, Sigma_prop,
     obj <- readRDS(ckpt_paths$draws)
     old_z  <- obj$z[seq_len(i_start), , drop = FALSE]   # drop any post-state rows
     old_lp <- obj$lp[seq_len(i_start)]
+    if (nrow(obj$z) > i_start) {
+      ## Persist the truncation: later flushes APPEND to this file, so rows
+      ## written after the last saved state would otherwise be duplicated.
+      obj$z <- old_z; obj$lp <- old_lp; obj$sweep <- i_start
+      tmp_d <- paste0(ckpt_paths$draws, ".tmp")
+      saveRDS(obj, tmp_d)
+      .ckpt_rename_or_stop(tmp_d, ckpt_paths$draws)
+    }
     chain[seq_len(i_start), ] <- old_z
     logpost_trace[seq_len(i_start)] <- old_lp
     accepted[seq_len(i_start)] <- ad$accepted[seq_len(i_start)]
@@ -365,7 +392,12 @@ rwmh_da <- function(log_post_fn, screen_fn, theta0, Sigma_prop,
       ## Adaptation is still live during burn-in; the flag advertises that
       ## honestly and the resume path above restores the adapter exactly.
       adapt_frozen = (i > n_burn),
-      meta = list(sampler = "rwmh_da", par_names = par_names))
+      meta = list(sampler = "rwmh_da", par_names = par_names,
+                  config = list(scale0 = scale0,
+                                target_rate = target_rate,
+                                adapt_every = adapt_every,
+                                adapt_cov = adapt_cov,
+                                Sigma_prop = .ckpt_md5(Sigma_prop))))
     mcmc_chain_save(st, ckpt_paths$state)
     invisible(NULL)
   }

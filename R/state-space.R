@@ -138,9 +138,12 @@ new_dsge_ss <- function(T_mat, R_mat, Z_mat, D_mat, Sigma_e,
 #' @return Named numeric slope per observable (0 where none), or NULL when no
 #'   observable in `obs_vars` carries a trend.
 #' @noRd
-.has_obs_trends <- function(model) {
+.has_obs_trends <- function(model, dr = NULL) {
   ot <- model$observation_trends
-  !is.null(ot) && length(ot$trends) > 0L
+  (!is.null(ot) && length(ot$trends) > 0L) ||
+    ## A balanced-growth model's observable growth is the same kind of
+    ## deterministic intercept trend (R/balanced-growth.R).
+    isTRUE(model$balanced_growth) || !is.null(.dr_growth(dr))
 }
 
 #' Abort unless the caller's filter honours observation_trends.
@@ -150,25 +153,48 @@ new_dsge_ss <- function(T_mat, R_mat, Z_mat, D_mat, Sigma_e,
 #' diagnostic builds its own measurement intercept from `dr$ys`, so on a
 #' trended model it would silently score untrended data.
 #' @noRd
-.refuse_obs_trends <- function(model, what) {
-  if (.has_obs_trends(model))
+.refuse_obs_trends <- function(model, what, dr = NULL) {
+  if (.has_obs_trends(model, dr)) {
+    growth <- isTRUE(model$balanced_growth) || !is.null(.dr_growth(dr))
     .dynhr_abort(
-      what, " does not support observation_trends: only the Gaussian Kalman ",
+      what, " does not support ",
+      if (growth) paste0("a balanced-growth model (solved with ",
+                         "steady_options = list(growth = TRUE); its growth ",
+                         "is a deterministic observation trend)")
+      else "observation_trends",
+      ": only the Gaussian Kalman ",
       "filter (kalman_filter(), make_log_posterior(likelihood = \"gaussian\")) ",
       "and the Kalman smoother subtract the deterministic trend. Use the ",
-      "Gaussian likelihood, or detrend the data and drop the block.",
+      "Gaussian likelihood, or detrend the data and drop the ",
+      if (growth) "drift." else "block.",
       class = "dynhr_error_observation_trends_unsupported")
+  }
   invisible(TRUE)
 }
 
-.obs_trend_slopes <- function(model, params, obs_vars) {
+## `dr` (optional): a decision rule whose `$growth` (balanced growth, see
+## R/balanced-growth.R) adds g[obs] to the slope of each observable -- the
+## observation intercept of period t is then ys[obs] + g[obs] * (first_obs +
+## t - 1), ADDED to any observation_trends slope. The model and dr must agree
+## about balanced growth (.check_growth_pair).
+.obs_trend_slopes <- function(model, params, obs_vars, dr = NULL) {
+  .check_growth_pair(model, dr)
+  g <- .dr_growth(dr)
+  g_obs <- NULL
+  if (!is.null(g)) {
+    g_obs <- stats::setNames(numeric(length(obs_vars)), obs_vars)
+    hit_g <- intersect(obs_vars, names(g))
+    g_obs[hit_g] <- g[hit_g]
+    if (!any(g_obs != 0)) g_obs <- NULL
+  }
   ot <- model$observation_trends
-  if (is.null(ot) || length(ot$trends) == 0L) return(NULL)
-  hit <- intersect(obs_vars, names(ot$trends))
-  if (length(hit) == 0L) return(NULL)
+  hit <- if (is.null(ot) || length(ot$trends) == 0L) character(0)
+         else intersect(obs_vars, names(ot$trends))
+  if (length(hit) == 0L) return(g_obs)
   if (is.null(params)) params <- model$param_values
   env <- .dynhr_param_eval_env(params)
   slopes <- stats::setNames(numeric(length(obs_vars)), obs_vars)
+  if (!is.null(g_obs)) slopes <- slopes + g_obs
   for (nm in hit) {
     v <- .dynhr_sandbox_eval(ot$trends[[nm]], env,
                              context = "the observation_trends expression")
@@ -178,7 +204,7 @@ new_dsge_ss <- function(T_mat, R_mat, Z_mat, D_mat, Sigma_e,
         "`) does not evaluate to a finite number at the supplied parameters",
         if (is.null(v)) " (a parameter it uses has no value)" else "", ".",
         class = "dynhr_error_observation_trends")
-    slopes[[nm]] <- v
+    slopes[[nm]] <- slopes[[nm]] + v
   }
   slopes
 }
@@ -189,8 +215,8 @@ new_dsge_ss <- function(T_mat, R_mat, Z_mat, D_mat, Sigma_e,
 #' @param n_T Number of sample periods (data rows).
 #' @return Numeric matrix, or NULL when there is no trend to subtract.
 #' @noRd
-.obs_trend_path <- function(model, params, obs_vars, n_T) {
-  slopes <- .obs_trend_slopes(model, params, obs_vars)
+.obs_trend_path <- function(model, params, obs_vars, n_T, dr = NULL) {
+  slopes <- .obs_trend_slopes(model, params, obs_vars, dr = dr)
   if (is.null(slopes)) return(NULL)
   first_obs <- model$observation_trends$first_obs %||% 1L
   outer(slopes, first_obs - 1 + seq_len(n_T))

@@ -284,7 +284,8 @@
                              lik_init = "auto",
                              tpf_options = list(),
                              ctx = NULL,
-                             filter_method = "auto") {
+                             filter_method = "auto",
+                             singular_obs = "reject") {
   ## Unpack ctx fields when provided (ctx wins over individual args).
   if (!is.null(ctx) && inherits(ctx, "dynhr_estimation_context")) {
     me_variance   <- ctx$me_variance
@@ -293,6 +294,7 @@
     system_priors <- ctx$system_priors
     lik_init      <- ctx$lik_init    %||% "auto"
     filter_method <- ctx$filter_method %||% "auto"
+    singular_obs <- ctx$singular_obs %||% "reject"
     tpf_options   <- ctx$tpf_options %||% list()
   }
   .restore_blas <- .mirai_pin_blas_threads()
@@ -346,6 +348,8 @@
                lik_init = lik_init),
           if (!identical(filter_method, "auto"))
             list(filter_method = filter_method),
+          if (!identical(singular_obs, "reject"))
+            list(singular_obs = singular_obs),
           tpf_options))
       ## Stash the ingredients make_posterior_grad() needs (parsed model,
       ## compiled model, mapped Y) as daemon globals too, so a chain task can
@@ -370,6 +374,7 @@
                  lik_init = lik_init,
                  filter_method = filter_method,
                  tpf_options = tpf_options,
+                 singular_obs = singular_obs,
                  .dynhr_state = .dynhr_daemon_state(),
                  .dynhr_apply = .dynhr_daemon_apply)
   )[])
@@ -405,7 +410,8 @@
                                     me_extra = NULL, shock_scale = NULL,
                                     system_priors = NULL, lik_init = "auto",
                                     tpf_options = list(),
-                                    filter_method = "auto") {
+                                    filter_method = "auto",
+                                    singular_obs = "reject") {
   .dynhr_raise_worker_skew(mirai::everywhere(
     {
       ## Re-apply the host option state before rebuilding the closure: the
@@ -424,6 +430,8 @@
                system_priors = system_priors, lik_init = lik_init),
           if (!identical(filter_method, "auto"))
             list(filter_method = filter_method),
+          if (!identical(singular_obs, "reject"))
+            list(singular_obs = singular_obs),
           tpf_options))
       ## Kept in step with .worker_lp (see .mirai_pool_init).
       assign(".worker_lik_init", lik_init, envir = globalenv())
@@ -433,6 +441,7 @@
                  shock_scale = shock_scale, system_priors = system_priors,
                  lik_init = lik_init, tpf_options = tpf_options,
                  filter_method = filter_method,
+                 singular_obs = singular_obs,
                  .dynhr_state = .dynhr_daemon_state(),
                  .dynhr_apply = .dynhr_daemon_apply)
   )[])
@@ -562,6 +571,7 @@ run_mcmc_mirai <- function(
     system_priors = NULL,
     lik_init      = "auto",
     filter_method = "auto",
+    singular_obs = "reject",
     tpf_options   = list(),
     gradient_policy = "auto",
     ctx           = NULL,
@@ -576,6 +586,7 @@ run_mcmc_mirai <- function(
     system_priors   <- ctx$system_priors
     lik_init        <- ctx$lik_init        %||% "auto"
     filter_method   <- ctx$filter_method   %||% "auto"
+    singular_obs <- ctx$singular_obs %||% "reject"
     tpf_options     <- ctx$tpf_options     %||% list()
     gradient_policy <- ctx$gradient_policy %||% "auto"
   }
@@ -599,6 +610,7 @@ run_mcmc_mirai <- function(
                            system_priors = system_priors,
                            lik_init = lik_init,
                            filter_method = filter_method,
+                           singular_obs = singular_obs,
                            tpf_options = tpf_options)
   }
   on.exit({ mirai::daemons(NULL); if (!is.null(sh)) rm(sh) }, add = TRUE)
@@ -888,6 +900,7 @@ run_nuts_mirai <- function(
     system_priors = NULL,
     lik_init      = "auto",
     filter_method = "auto",
+    singular_obs = "reject",
     tpf_options   = list(),
     gradient_policy = "auto",
     ctx           = NULL,
@@ -922,6 +935,7 @@ run_nuts_mirai <- function(
     freq_band       <- ctx$freq_band       %||% c(0, pi)
     lik_init        <- ctx$lik_init        %||% "auto"
     filter_method   <- ctx$filter_method   %||% "auto"
+    singular_obs <- ctx$singular_obs %||% "reject"
     tpf_options     <- ctx$tpf_options     %||% list()
     gradient_policy <- ctx$gradient_policy %||% "auto"
   }
@@ -967,6 +981,7 @@ run_nuts_mirai <- function(
                            system_priors = system_priors,
                            lik_init = lik_init,
                            filter_method = filter_method,
+                           singular_obs = singular_obs,
                            tpf_options = tpf_options)
   }
   on.exit({ mirai::daemons(NULL); if (!is.null(sh)) rm(sh) }, add = TRUE)
@@ -1230,6 +1245,7 @@ run_mode_mirai <- function(
     newrat_H0_seed = NULL,
     lik_init       = "auto",
     filter_method  = "auto",
+    singular_obs  = "reject",
     pool_ready     = FALSE,
     progress       = interactive()
 ) {
@@ -1387,7 +1403,8 @@ run_mode_mirai <- function(
     .mirai_rebind_worker_lp(prior_spec, obs_names, me_variance = me_variance,
                             me_extra = me_extra, shock_scale = shock_scale,
                             system_priors = system_priors, lik_init = lik_init,
-                            filter_method = filter_method)
+                            filter_method = filter_method,
+                            singular_obs = singular_obs)
     .dynhr_cat(sprintf("  Daemon pool reused (lik_init = %s): %.1f sec\n",
                 lik_init, (proc.time() - t_init)[["elapsed"]]))
   } else {
@@ -1398,7 +1415,8 @@ run_mode_mirai <- function(
                              me_variance, me_extra = me_extra,
                              shock_scale = shock_scale,
                              system_priors = system_priors, lik_init = lik_init,
-                             filter_method = filter_method)
+                             filter_method = filter_method,
+                             singular_obs = singular_obs)
     }
     on.exit({ mirai::daemons(NULL); if (!is.null(sh)) rm(sh) }, add = TRUE)
     .dynhr_cat(sprintf("  Daemon init: %.1f sec\n", (proc.time() - t_init)[["elapsed"]]))

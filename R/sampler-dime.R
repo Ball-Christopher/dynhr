@@ -297,14 +297,22 @@ run_dime <- function(log_post_fn,
   if (ckpt) {
     if (ckpt_resume) {
       ## Verify the saved meta matches current configuration, then restore state.
+      ## ALL verification (meta, then the log density at every saved walker)
+      ## happens BEFORE any file is touched, so a refused resume leaves the
+      ## checkpoint byte-identical. The RNG is restored below, so the
+      ## re-evaluation cannot perturb the stream.
       .ckpt_meta_verify(ckpt_paths$meta, "dime", checkpoint$fingerprint)
       st <- .ckpt_load_state(ckpt_paths$state)
+      if (!isFALSE(checkpoint$lp_check))
+        .dime_verify_resume_lp(st, log_post_fn, par_names)
       ## Restore all sampler state
       ensemble     <- st$ensemble
       lp_vec       <- st$lp_vec
       prop_mean    <- st$prop_mean
       prop_cov     <- st$prop_cov
-      chol_S       <- .dime_chol(prop_cov)   # recompute from saved cov
+      ## The Cholesky factor is saved (the sampler keeps the PREVIOUS factor
+      ## when a refactorisation fails, so it is not always chol(prop_cov)).
+      chol_S       <- st$chol_S %||% .dime_chol(prop_cov)
       cumlweight   <- st$cumlweight
       n_accept     <- st$n_accept
       n_burn       <- st$n_burn              # original burn-in fixes retained set
@@ -313,6 +321,7 @@ run_dime <- function(log_post_fn,
       ## n_done is in ITERATIONS; truncate draws/lp files to n_done * n_chain rows
       .ckpt_truncate(ckpt_paths, st$n_done * n_chain, n_par)
       assign(".Random.seed", st$rng, envir = .GlobalEnv)
+      total_iter <- n_burn + n_iter           # n_burn was restored above
     } else {
       ## Fresh checkpoint run: clear stale files and write meta once.
       unlink(c(ckpt_paths$draws, ckpt_paths$lp))
@@ -427,6 +436,7 @@ run_dime <- function(log_post_fn,
           prop_mean  = prop_mean,
           prop_cov   = prop_cov,
           cumlweight = cumlweight,
+          chol_S     = chol_S,
           n_accept   = n_accept,
           n_burn     = n_burn,
           n_eval     = n_eval,
@@ -607,13 +617,16 @@ run_dime <- function(log_post_fn,
   ## ---- Fresh-vs-resume branch --------------------------------------------
   if (ckpt) {
     if (ckpt_resume) {
+      ## Verify everything BEFORE any file is touched (see run_dime()).
       .ckpt_meta_verify(ckpt_paths$meta, "dime", checkpoint$fingerprint)
       st <- .ckpt_load_state(ckpt_paths$state)
+      if (!isFALSE(checkpoint$lp_check))
+        .dime_verify_resume_lp(st, log_post_fn, par_names)
       ensemble     <- st$ensemble
       lp_vec       <- st$lp_vec
       prop_mean    <- st$prop_mean
       prop_cov     <- st$prop_cov
-      chol_S       <- .dime_chol(prop_cov)
+      chol_S       <- st$chol_S %||% .dime_chol(prop_cov)
       cumlweight   <- st$cumlweight
       n_accept     <- st$n_accept
       n_burn       <- st$n_burn
@@ -728,6 +741,7 @@ run_dime <- function(log_post_fn,
           prop_mean     = prop_mean,
           prop_cov      = prop_cov,
           cumlweight    = cumlweight,
+          chol_S        = chol_S,
           n_accept      = n_accept,
           n_burn        = n_burn,
           n_eval        = n_eval,
@@ -834,6 +848,7 @@ run_dime_mirai <- function(
     system_priors = NULL,
     lik_init     = "auto",
     filter_method   = "auto",
+    singular_obs   = "reject",
     tpf_options  = list(),
     gradient_policy = "auto",
     log_post_fn  = NULL,
@@ -849,6 +864,7 @@ run_dime_mirai <- function(
     system_priors   <- ctx$system_priors
     lik_init        <- ctx$lik_init        %||% "auto"
     filter_method   <- ctx$filter_method   %||% "auto"
+    singular_obs <- ctx$singular_obs %||% "reject"
     tpf_options     <- ctx$tpf_options     %||% list()
     gradient_policy <- ctx$gradient_policy %||% "auto"
   }
@@ -880,6 +896,7 @@ run_dime_mirai <- function(
                            system_priors = system_priors,
                            lik_init = lik_init,
                            filter_method = filter_method,
+                           singular_obs = singular_obs,
                            tpf_options = tpf_options)
   }
   on.exit({ mirai::daemons(NULL); if (!is.null(sh)) rm(sh) }, add = TRUE)
@@ -927,3 +944,18 @@ run_dime_mirai <- function(
   )
   res
 }
+
+## Resume guard for DIME: re-evaluate the target at EVERY saved walker position
+## (same NA / non-finite -> -Inf mapping the sampler uses) and compare with the
+## saved log densities. Called BEFORE any checkpoint file is touched.
+.dime_verify_resume_lp <- function(st, log_post_fn, par_names) {
+  for (i in seq_len(nrow(st$ensemble))) {
+    th <- st$ensemble[i, ]
+    names(th) <- par_names
+    r <- log_post_fn(th)$logpost
+    if (is.na(r) || !is.finite(r)) r <- -Inf
+    .ckpt_verify_lp(st$lp_vec[i], r, "dime")
+  }
+  invisible(TRUE)
+}
+

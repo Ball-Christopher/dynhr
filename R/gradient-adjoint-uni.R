@@ -171,7 +171,8 @@
     if (!isTRUE(out$ok)) {
       return(list(loglik = -Inf, grad = rep(NA_real_, n_par)))
     }
-    res <- list(loglik = out$loglik, grad = as.numeric(out$grad))
+    res <- list(loglik = out$loglik, grad = as.numeric(out$grad),
+                min_rcond = out$min_rcond)
     if (isTRUE(return_bars))
       res$bars <- list(G_TT = out$bars$G_TT, G_RR = out$bars$G_RR,
                        G_ZZ = out$bars$G_ZZ, G_DD = out$bars$G_DD,

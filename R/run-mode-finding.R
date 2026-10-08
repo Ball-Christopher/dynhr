@@ -485,6 +485,7 @@ run_mode_finding <- function(solved,
   freq_band           <- lik$freq_band
   lik_init            <- lik$lik_init
   filter_method       <- lik$filter_method %||% "auto"
+  singular_obs        <- lik$singular_obs %||% "reject"
   system_priors       <- lik$system_priors
   ## run_mode_finding()'s `...`: log-posterior-constructor extras (student_df
   ## is a likelihood field of the spec) and optimiser arguments.
@@ -612,6 +613,7 @@ run_mode_finding <- function(solved,
       pruned_order       = pruned_order,
       lik_init           = lik_init,
       filter_method      = filter_method,
+      singular_obs       = singular_obs,
       me_extra           = me_extra,
       shock_scale        = shock_scale_mat,
       freq_band          = freq_band,
@@ -737,7 +739,8 @@ run_mode_finding <- function(solved,
                        ## (system prior included) the portfolio optimises
                        system_priors = system_priors,
                        lik_init = "stationary",
-                       filter_method = filter_method),
+                       filter_method = filter_method,
+                       singular_obs = singular_obs),
       error = function(e) {
         ## A worker/host version skew is not "pool unavailable": every stage
         ## would hit it again. Re-raise it.
@@ -788,7 +791,8 @@ run_mode_finding <- function(solved,
         ## the stage's own lik_init: run_mode_mirai re-binds .worker_lp to it
         ## (pool_ready) and the chains build their gradients with it.
         newrat_H0_seed = H0_seed, lik_init = lik_init,
-        filter_method = filter_method, pool_ready = pool_ok,
+        filter_method = filter_method, singular_obs = singular_obs,
+        pool_ready = pool_ok,
         progress = verbose)
     })
     ## Pool stays alive for Step 6; torn down once by the on.exit above.
@@ -827,6 +831,7 @@ run_mode_finding <- function(solved,
       ## defaulted to "auto" whatever the stage's lik_init was.
       lik_init     = lik_init,
       filter_method = filter_method,
+      singular_obs = singular_obs,
       progress     = verbose
     )
     mode_res <- par_mode$best
@@ -920,11 +925,11 @@ run_mode_finding <- function(solved,
       hessian_fn <- local({
         .lp <- log_post_fn; .model <- model; .data <- data; .priors <- priors
         .obs <- obs_vars;  .mev <- me_variance; .nc <- n_cores
-        .fm <- filter_method
+        .fm <- filter_method; .so <- singular_obs
         function(theta) {
           ncs <- .mirai_n_cores(.nc, length(theta) * (length(theta) + 1L) %/% 2L)
           sh <- .mirai_pool_init(ncs, .model, .data, .priors, .obs, .mev,
-                                 lik_init = "stationary", filter_method = .fm)
+                                 lik_init = "stationary", filter_method = .fm, singular_obs = .so)
           on.exit({ mirai::daemons(NULL); if (!is.null(sh)) rm(sh) }, add = TRUE)
           ## .lp is unused on the pool_ready path (daemons evaluate .worker_lp);
           ## pass NULL so num_hessian_mirai's task closure never serialises this
@@ -1140,6 +1145,7 @@ run_mode_finding <- function(solved,
       shock_scale  = shock_scale_mat,
       lik_init     = lik_init,
       filter_method = filter_method,
+      singular_obs = singular_obs,
       ## Re-bind .worker_lp on the live portfolio pool instead of recompiling the
       ## model on every daemon again (Step 5 -> Step 6 pool sharing).
       pool_ready   = shared_pool_ok,
@@ -1291,6 +1297,7 @@ build_sigma_prop <- function(lp_fn, theta_mode, prior_spec,
                               ## The log-posterior's Kalman recursion (value
                               ## path), for the same daemon filter.
                               filter_method = "auto",
+                              singular_obs = "reject",
                               ## return_V = TRUE: return list(Sigma, V_mode) so
                               ## the caller can keep the regularised inverse
                               ## Hessian (documented as result$V_mode) instead
@@ -1402,14 +1409,16 @@ build_sigma_prop <- function(lp_fn, theta_mode, prior_spec,
           .mirai_rebind_worker_lp(prior_spec, obs_vars, me_variance = me_variance,
                                   me_extra = me_extra, shock_scale = shock_scale,
                                   system_priors = system_priors,
-                                  lik_init = lik, filter_method = filter_method)
+                                  lik_init = lik, filter_method = filter_method,
+                                  singular_obs = singular_obs)
           NULL
         } else {
           .mirai_pool_init(n_cores_h, parsed_model, data, prior_spec, obs_vars,
                            me_variance, me_extra = me_extra,
                            shock_scale = shock_scale,
                            system_priors = system_priors, lik_init = lik,
-                           filter_method = filter_method)
+                           filter_method = filter_method,
+                           singular_obs = singular_obs)
         }
       }
       fit_filter <- "stationary"

@@ -414,13 +414,8 @@ run_posterior_estimation <- function(mode_result,
   # chain streams its draws to chain_<id>.* files (RAM bounded by the flush
   # window, parallel-safe) and saves a restart state; `resume = TRUE` continues a
   # prior run with more draws. The config fingerprint forces the same parameters.
-  sampler_checkpoint <- if (!is.null(checkpoint_dir)) {
-    if (!dir.exists(checkpoint_dir)) dir.create(checkpoint_dir, recursive = TRUE)
-    list(dir         = checkpoint_dir,
-         flush_every = as.integer(.dynhr_opt("checkpoint_flush_every", default = 1000L)),
-         resume      = isTRUE(cmp$resume),
-         fingerprint = .ckpt_fingerprint(prior_spec$name, prior_spec))
-  } else NULL
+  ## (sampler_checkpoint is built below, once the estimation context and the
+  ## observed data are in hand: the fingerprint must identify the target.)
 
   # Opt-in unconstrained-parameter transform (eta-space sampling), per
   # sampler (sampler$transform_params). RWMH / NUTS / MALA / ChEES / HMC then
@@ -480,6 +475,36 @@ run_posterior_estimation <- function(mode_result,
   par_me_var      <- par_ctx$me_variance
   par_me_extra    <- par_ctx$me_extra
   par_shock_scale <- par_ctx$shock_scale
+  sampler_checkpoint <- if (!is.null(checkpoint_dir)) {
+    if (!dir.exists(checkpoint_dir)) dir.create(checkpoint_dir, recursive = TRUE)
+    ## The fingerprint identifies the TARGET: observed data (hashed) and
+    ## variable names, likelihood, measurement-error / shock-scale settings and
+    ## each stage's sampler + transform choice. (Draw counts are free to grow.)
+    ckpt_override <- isTRUE(cmp$resume) && identical(cmp$on_mismatch, "warn")
+    ckpt_extra <- list(
+      data_md5   = .ckpt_md5(par_data),
+      likelihood = par_ctx$likelihood,
+      settings_md5 = .ckpt_md5(list(par_me_var, par_me_extra, par_shock_scale)),
+      stages     = lapply(samplers, function(s)
+        list(method = s$method, transform_params = isTRUE(s$transform_params))))
+    list(dir         = checkpoint_dir,
+         flush_every = as.integer(.dynhr_opt("checkpoint_flush_every", default = 1000L)),
+         resume      = isTRUE(cmp$resume),
+         ## A noisy (particle) likelihood re-evaluates to a different value at
+         ## the saved position: skip the log-density resume guard for it only.
+         ## compute$on_mismatch = "warn" is the user's explicit decision to
+         ## resume a different target (the spec layer already reported it
+         ## and marks the result): the target-identity guards stand down.
+         lp_check    = !(par_ctx$likelihood %in%
+                           c("tpf", "ppf", "copf", "sv_rbpf", "global_pf")) &&
+                       !ckpt_override,
+         fingerprint = {
+           fp <- .ckpt_fingerprint(prior_spec$name, prior_spec,
+                                   obs_vars = par_obs_vars, extra = ckpt_extra)
+           if (ckpt_override) attr(fp, "relaxed") <- TRUE
+           fp
+         })
+  } else NULL
   par_standard    <- .ctx_is_standard_gaussian(par_ctx,
                        use_obc = !is.null(mode_result$obc_specs),
                        model   = model)
@@ -630,6 +655,7 @@ run_posterior_estimation <- function(mode_result,
                              likelihood  = par_ctx$likelihood,
                              freq_band   = par_ctx$freq_band,
                              lik_init    = par_ctx$lik_init %||% "auto",
+                             singular_obs = par_ctx$singular_obs %||% "reject",
                              power         = spec$likelihood$power_posterior,
                              system_priors = par_ctx$system_priors)
     .vcat(sprintf("  [%s] gradient method: %s\n", tag,

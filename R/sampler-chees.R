@@ -288,17 +288,36 @@ dynhr_chees <- function(
     # ---- Continue a saved run. Restore position, lp, RNG, step_size, T_adapt /
     # log_T, mass matrix, n_done, n_warmup, and accept count. Adaptation is frozen
     # post-warmup, so the ChEES running mean is NOT needed for the continuation.
+    ## ALL verification (meta, then the log density at the saved position)
+    ## happens BEFORE any file is touched, so a refused resume leaves the
+    ## checkpoint byte-identical.
     .ckpt_meta_verify(ckpt_paths$meta, "chees", checkpoint$fingerprint)
     st <- .ckpt_load_state(ckpt_paths$state)
+    mid_warm_saved <- st$n_done < st$n_warmup
+    if (mid_warm_saved && !identical(as.integer(st$n_warmup), as.integer(n_warmup)))
+      stop("checkpoint resume: the saved run is mid-warmup with n_warmup = ",
+           st$n_warmup, " but this call has n_warmup = ", n_warmup,
+           "; resume with the same n_warmup.", call. = FALSE)
+    if (mid_warm_saved && is.null(st$eps_bar))
+      stop("checkpoint resume: the saved mid-warmup state carries no ",
+           "adaptation state (written by an older build); start a fresh run.",
+           call. = FALSE)
     theta         <- st$theta
     lp_curr       <- st$lp_curr
     trace_lp_curr <- st$trace_lp_curr
-    ## fused: the gradient at the saved position (deterministic in it)
-    g_curr <- if (!is.null(vg_fn)) vg_fn(theta)$grad else NULL
+    ## Re-evaluate the SAME target (incl. transform / Jacobian) at the saved
+    ## position (fused: value and gradient from one call). The RNG is restored
+    ## below, so this cannot perturb the stream.
+    vg_saved <- if (!is.null(vg_fn)) vg_fn(theta) else NULL
+    if (!isFALSE(checkpoint$lp_check))
+      .ckpt_verify_lp(lp_curr,
+                      if (is.null(vg_saved)) .lp_scalar(theta) else vg_saved$lp,
+                      "chees")
+    g_curr <- if (is.null(vg_saved)) NULL else vg_saved$grad
     eps_m         <- st$step_size
-    eps_bar       <- st$step_size   # frozen -- no further dual-averaging
+    eps_bar       <- st$eps_bar %||% st$step_size   # frozen post-warmup
     T_max         <- st$T_adapt
-    log_T         <- log(T_max)
+    log_T         <- st$log_T %||% log(T_max)
     M_diag        <- st$M_mass_diag
     ## Restore the stored inverse mass (as NUTS does): since 0.9.3.50 the
     ## adaptation sets M_inv_diag <- vars directly, and 1 / (1 / vars) is not
@@ -306,6 +325,13 @@ dynhr_chees <- function(
     ## Checkpoints written before this field existed fall back to 1 / M_diag.
     M_inv_diag    <- if (use_dense) NULL else (st$M_inv_diag %||% (1 / M_diag))
     M_mass_diag   <- M_diag
+    ## Warm-up adaptation state (saved AFTER the saved iteration's updates).
+    if (mid_warm_saved) {
+      H_bar <- st$H_bar; mu <- st$mu; da_m <- st$da_m
+      mu_run <- st$mu_run; n_mu <- st$n_mu
+      state_chain[seq_len(nrow(st$state_chain)), ] <- st$state_chain
+    }
+    n_grad_evals  <- st$n_grad_evals %||% 0L
     n_warmup      <- st$n_warmup    # original warmup count fixes the retained set
     n_accept      <- st$n_accept
     m_start       <- st$n_done + 1L  # resume from next draw (st$n_done is already on disk)
@@ -410,6 +436,7 @@ dynhr_chees <- function(
     }
     stored_m <- if (!is.null(transform)) transform$to_constrained(theta) else theta
     state_chain[m, ] <- theta
+    ckpt_save_now <- FALSE
     if (ckpt) {
       buf_i <- buf_i + 1L
       buf[buf_i, ]  <- stored_m
@@ -417,19 +444,7 @@ dynhr_chees <- function(
       if (buf_i >= flush_every || m == n_total) {
         .ckpt_append_draws(ckpt_paths$draws, buf[seq_len(buf_i), , drop = FALSE])
         .ckpt_append_lp(ckpt_paths$lp, buf_lp[seq_len(buf_i)])
-        .ckpt_save_state(ckpt_paths$state, list(
-          theta         = theta,
-          lp_curr       = lp_curr,
-          trace_lp_curr = trace_lp_curr,
-          step_size     = eps_m,
-          T_adapt       = T_max,
-          M_mass_diag   = M_diag,
-          M_inv_diag    = M_inv_diag,
-          n_done        = m,
-          n_warmup      = n_warmup,
-          n_accept      = n_accept,
-          n_draws_target = n_total,
-          rng           = get(".Random.seed", envir = .GlobalEnv)))
+        ckpt_save_now <- TRUE
         buf_i <- 0L
       }
     } else {
@@ -535,6 +550,36 @@ dynhr_chees <- function(
         .dynhr_inform(sprintf("ChEES: warmup complete: step_size = %.4e, T_max = %.4e",
                         eps_m, T_max))
       }
+    }
+
+    ## ---- Restart state: saved AFTER every per-iteration update (running
+    ## mean, dual averaging, ChEES log T, mass adaptation, end-of-warmup fix)
+    ## so a resume -- even mid-warmup -- continues exactly. Written atomically
+    ## AFTER the draws were flushed above.
+    if (ckpt_save_now) {
+      mid_warm <- m < n_warmup
+      .ckpt_save_state(ckpt_paths$state, list(
+        theta         = theta,
+        lp_curr       = lp_curr,
+        trace_lp_curr = trace_lp_curr,
+        step_size     = eps_m,
+        T_adapt       = T_max,
+        log_T         = log_T,
+        eps_bar       = eps_bar,
+        H_bar         = H_bar,
+        mu            = mu,
+        da_m          = da_m,
+        mu_run        = mu_run,
+        n_mu          = n_mu,
+        state_chain   = if (mid_warm) state_chain[seq_len(m), , drop = FALSE] else NULL,
+        M_mass_diag   = M_diag,
+        M_inv_diag    = M_inv_diag,
+        n_done        = m,
+        n_warmup      = n_warmup,
+        n_accept      = n_accept,
+        n_grad_evals  = n_grad_evals,
+        n_draws_target = n_total,
+        rng           = get(".Random.seed", envir = .GlobalEnv)))
     }
 
     # ---- Progress ----

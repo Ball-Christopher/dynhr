@@ -144,10 +144,7 @@ dynhr_system_info <- function() {
   br <- .blas_report(si$BLAS, si$LAPACK, si$matprod)
   nm <- Sys.info()
   bi <- .build_info_report()
-  gc_stamp <- tryCatch({
-    p <- system.file("GIT_COMMIT", package = "dynhr")
-    if (nzchar(p)) readLines(p, warn = FALSE)[1L] else NA_character_
-  }, error = function(e) NA_character_)
+  gc_stamp <- .dynhr_git_stamp_at(getNamespaceInfo(asNamespace("dynhr"), "path"))
   data.frame(
     stringsAsFactors = FALSE,
     timestamp      = format(Sys.time(), "%Y-%m-%dT%H:%M:%S%z"),

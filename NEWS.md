@@ -1,3 +1,301 @@
+# dynhr 0.9.4.64
+
+**Public release: everything since 0.9.4.48** (the 0.9.4.49 - 0.9.4.64
+entries below). Highlights:
+
+- **Linear trend models with drift** (e.g. potential-output models,
+  `a = a(-1) + rho*(a(-1) - a(-2)) + (1-rho)*g + e`):
+  `solve_model(steady_options = list(growth = TRUE))` solves the
+  balanced-growth path (IRIS `sstate(m, 'growth=', true)`); the filter,
+  smoother, Gaussian posterior and `conditional_forecast()` carry the trend
+  (`growth_path` output; forecast `units = "auto" / "deviations" /
+  "levels"`). `conditional_forecast()` also takes `shock_means`, `a0`, `P0`.
+- **IRIS's Kalman initialisation**, `lik_init = "fixed_unknown"`, in IRIS's
+  state coordinates. On a potential-output model (four unit-root trends,
+  static identities, real NZ data) filtered, predicted and smoothed states,
+  a 40-quarter forecast and the likelihood match IRIS to 1e-11.
+- **Contradictory singular observations** score `-Inf` in estimation
+  (`singular_obs = "reject"`, the new default there, including the HANK
+  Kalman likelihoods); `kalman_filter()` keeps the Dynare skip unless asked.
+- **Checkpoints** (RWMH, NUTS, ChEES, DIME, MALA) resume exactly from any
+  point, including mid-warm-up, refuse a changed target before touching any
+  file, and fail loudly when a save cannot be committed.
+- **Input contracts**: HANK EGM matrix dimensions checked before native code
+  (an undersized buffer was read out of bounds); `chain_diagnostics()`
+  aligns chains by name; one-period anticipated forecasts; `simulate_model()`
+  simulates higher-order rules at their own order.
+- **Provenance**: the installed `GIT_COMMIT` stamp names this release
+  (0.9.4.48 shipped one stamped 0.9.4.43); a stale stamp now reads as
+  unknown.
+- Hard anticipated conditional forecasts no longer build the full
+  horizon-stacked response matrix (H = 400 plan: 0.30 -> 0.005 s).
+
+**Re-run if affected:** estimation on data a singular model cannot generate
+(now `-Inf`); resumed checkpoint runs; `simulate_model()` on order-2/3
+decision rules (and `stoch_simul()` moments / D9 checks built on them);
+`chain_diagnostics()` on chains with differently ordered columns; seeded
+conditional-forecast draws (same distribution, different stream).
+`lik_init = "fixed_unknown"` is new in this release (0.9.4.63's version,
+superseded by 0.9.4.64, was never published).
+
+**Re-run if affected:** `lik_init = "fixed_unknown"` results from 0.9.4.63
+on models with static variables (identities) or several unit roots.
+
+- `lik_init = "fixed_unknown"` builds its initial distribution in IRIS's
+  state coordinates. The fixed-unknown start (zero variance along the
+  unit-root directions, the stationary distribution on their orthogonal
+  complement) depends on the state coordinates, and IRIS's state vector
+  contains every non-forward-looking, non-measurement variable -- including
+  static ones such as identities -- where dynhr's contains only the
+  predetermined ones. 0.9.4.63 used dynhr's states, which coincide with
+  IRIS's on simple models but not on a potential-output model with four
+  unit-root trends and static identities: there filtered states were up to
+  4e-2 off and the likelihood 0.1. On that model (real public NZ data,
+  batch_2 calibration) filtered, predicted and smoothed states and a
+  40-quarter forecast now match IRIS to 1e-11 and the likelihood to 1e-12.
+  The coordinates used are in `$diagnostics$init_coordinates`.
+- `lik_init = "fixed_unknown"` handles a singular forecast-error covariance
+  (e.g. identity observables observed together with their components): it
+  switches to a sequential recursion with the univariate filter's drop rule,
+  diagnostics and `singular_obs` policy (it returned -Inf). Consistent
+  identities add no information -- states equal the identities-missing run
+  -- while the likelihood differs by the dropped components' Jacobian
+  constant, as with `lik_init = "diffuse"`. IRIS returns an infinite
+  likelihood here.
+
+# dynhr 0.9.4.63
+
+- New `lik_init = "fixed_unknown"`: IRIS's default Kalman initialisation
+  (`initMeanUnit = 'optimal'`). The initial unit-root components are fixed
+  unknowns estimated by GLS from the whole sample, the rest of the state
+  starts from its stationary distribution, and filtered / predicted states
+  and the log-likelihood are corrected for the estimate (the likelihood is
+  concentrated over it, as IRIS's `loglik(..., 'relative=', false)`; IRIS's
+  default `relative = true` also profiles a common scale factor, which is
+  not reproduced). On a toy potential-output model every filtered and
+  predicted period matches IRIS to 3e-14 and the likelihood to 2e-13 --
+  including the first periods, where the real-time `"diffuse"` start
+  differs by design. The "filtered" states under this option use the whole
+  sample, so they are not real-time estimates; `"diffuse"` stays the
+  default. Smoothed states equal the exact diffuse smoother (same
+  estimate). Available in `kalman_filter()`, `kalman_smoother()`,
+  `conditional_forecast()` (new `lik_init` argument for the terminal-state
+  run) and the estimation closures / spec; analytic gradients are refused
+  (finite differences under `grad_method = "auto"`), and `P0`,
+  `known_shocks`, mixed frequency, the univariate / Chandrasekhar methods,
+  Student-t and Markov-switching filters refuse it.
+- `make_log_posterior()` / `make_loglik_contrib()` reject an invalid
+  `lik_init` when the closure is built (it was -Inf on every draw).
+
+# dynhr 0.9.4.62
+
+- `conditional_forecast()` supports trend models: balanced-growth models
+  (0.9.4.61) and `observation_trends` models, which it used to refuse. The
+  forecast adds the deterministic trend over the horizon on the filter's
+  period index; conditions and outputs are in levels. New argument
+  `units = c("auto", "deviations", "levels")`: `"levels"` works for every
+  model (steady state + trend + deviation, as IRIS reports), `"deviations"`
+  is the existing convention and is refused on a trend model (a deviation
+  from an arbitrary unit-root level has no meaning), and `"auto"` (default)
+  keeps deviations for models without trends -- unchanged results -- and
+  uses levels for trend models. `result$units` records the choice; print and
+  plot label it. On a toy potential-output model the forecast straight from
+  the model with its drift (`steady_options = list(growth = TRUE)`, no
+  manual shock means) matches IRIS to 3e-13. `bayesian_conditional_forecast()`
+  re-solves the growth path per draw.
+
+# dynhr 0.9.4.61
+
+- **Linear models with unit roots and drift** (balanced growth, IRIS
+  `sstate(m, 'growth=', true)`): `solve_steady_state(growth = TRUE)` /
+  `solve_model(steady_options = list(growth = TRUE))` solve the
+  balanced-growth path y_t = y0 + g t of a `model(linear)` whose static
+  system has no solution (e.g. `a - a(-1) = rho*(a(-1) - a(-2)) +
+  (1-rho)*g + e`), accepting it only when the path solves the dynamic
+  equations. The model is flagged (`model$balanced_growth`), the decision
+  rule carries `dr$growth`, and the observables' growth becomes a
+  deterministic observation trend in `kalman_filter()`, `kalman_smoother()`
+  and the Gaussian posterior (re-solved at every parameter draw, so an
+  estimated drift moves the likelihood). Both return `growth_path`
+  (levels = growth_path + states). Every routine that does not support
+  deterministic trends refuses a growth model, as it refuses
+  `observation_trends`. On a toy potential-output model the smoothed levels
+  match IRIS to 1e-14 and the filtered levels after the diffuse start to
+  4e-10 (IRIS estimates the initial unit-root level from the whole sample,
+  so its first filtered periods differ by design). The default
+  `growth = FALSE` is unchanged; its "no steady state" warning now points at
+  `growth = TRUE`.
+
+# dynhr 0.9.4.60
+
+- `conditional_forecast()` takes `shock_means` (an `n_exo x (nrow(data) +
+  horizon)` matrix or a named constant vector), `shock_timing`, `a0` and
+  `P0`, with IRIS `vary` semantics: each shock is its mean plus a random part;
+  the terminal state is filtered with the sample means and `a0` / `P0`, the
+  horizon means shift the baseline, and conditions are met by the random part
+  (reported shock paths are mean + random part). `dm_forecast()` and
+  `bayesian_conditional_forecast()` pass them through; `forecast_backtest()`
+  refuses them. This is how a linear model with unit-root drift
+  (`a = a(-1) + ... + (1-rho)*g + e_a`) is forecast: solve with the drift
+  off, carry it as the mean of the shock in the same equation, and start the
+  growth state on its balanced-growth path with `a0`; on such a model the
+  forecast matches IRIS to 1e-10.
+
+# dynhr 0.9.4.59
+
+**Re-run if affected:** HANK aggregate-data likelihoods with more observables
+than shocks and no measurement error.
+
+- `hank_loglik_ss()`, `hank_kalman_loglik()` and `hank_reiter_kalman_loglik()`
+  follow the estimation default of 0.9.4.54: data the stochastically singular
+  state space cannot generate give `-Inf` (`singular_obs = "reject"`) instead
+  of a finite log-likelihood that silently ignored the contradicting
+  observations; `singular_obs = "skip"` keeps the old value. Both now raise
+  the `dynhr_warning_dropped_observations` warning that `kalman_filter()`
+  gives. `make_log_posterior_hank()` gains `singular_obs` for its Kalman
+  likelihood. Consistent data (and any positive `me_variance`) are
+  unaffected.
+
+# dynhr 0.9.4.58
+
+- MALA checkpoints resume exactly (the restart state was saved before the
+  step-size adaptation, so a run interrupted during warm-up resumed with a
+  stale step size) and refuse a changed target, like the other samplers.
+- `hank_het3_jacobian_checkpoint()` stops when it cannot rename a finished
+  block into place (the failure was ignored).
+
+# dynhr 0.9.4.57
+
+- The analytic Kalman gradient kernels report the smallest reciprocal
+  condition number of the forecast covariance; the fused log-posterior +
+  gradient re-runs the forward filter for the `singular_obs = "reject"`
+  check only when it is below `kalman_tol` (the filter's own condition for
+  leaving the multivariate recursion). sw2007 fused evaluation: 15-20 ms
+  under "reject" in 0.9.4.56, now ~10.5 ms, the same as "skip".
+
+# dynhr 0.9.4.56
+
+- The fused log-posterior + gradient used by NUTS / ChEES / MALA / HMC
+  honours `singular_obs = "reject"`: at a parameter where the forward filter
+  makes an informative drop it is `-Inf`, like the objective (the analytic
+  Kalman kernel could return a finite value there).
+
+# dynhr 0.9.4.55
+
+**Re-run if affected** (review 2026-10-07): resumed NUTS / ChEES / DIME
+checkpoints.
+
+- NUTS and ChEES saved their restart state before the iteration's
+  adaptation (a flush at the last warm-up iteration kept the pre-update step
+  size); NUTS refused a resume during warm-up and ChEES resumed it with
+  frozen adaptation. The state is now saved after every update and carries
+  the full warm-up state (dual averaging, window schedule, mass-matrix
+  history, ChEES running mean and trajectory length), so an interrupted run
+  resumes exactly at any point.
+- NUTS, ChEES and DIME re-evaluate the target at the saved position (every
+  walker for DIME) before touching the checkpoint and refuse a changed
+  target. DIME restores its saved proposal factor.
+
+# dynhr 0.9.4.54
+
+**Re-run if affected** (review 2026-10-07 R01): estimation on data that a
+stochastically singular model cannot generate.
+
+- When the Kalman filter skips an observation component whose forecast
+  variance is (numerically) zero but whose innovation is not -- data outside
+  the model's support -- the estimation log-likelihood is now `-Inf` (it was
+  a finite value that also depended on the order of the observables: the
+  same contradictory data gave -3.3 or -18803). New argument
+  `singular_obs = c("reject", "skip")` on `make_log_posterior()`,
+  `make_posterior()`, `make_posterior_grad()`, `make_loglik_contrib()`,
+  `estimation_context()`, `likelihood_spec()`, `run_mode_finding()` and
+  `run_full_estimation()`, default `"reject"`; `"skip"` restores the Dynare
+  convention. Consistent exact duplicates and round-off drops are unaffected.
+- `kalman_filter()` keeps the Dynare skip by default and gains
+  `singular_obs = "reject"`; `$diagnostics$singular_obs_rejected` records it.
+
+# dynhr 0.9.4.53
+
+- Hard anticipated conditional forecasts scale with the number of conditions:
+  only the conditioned rows of the horizon-stacked response matrix are built,
+  the shock covariance factor is applied period by period, and the shock path
+  and draws come from a thin QR of the whitened condition matrix (exact
+  Gaussian conditional; no free-coordinate-squared matrix). Paths are rebuilt
+  by the state recursion. Measured (development build, 10 observables, 5
+  shocks, H = 400, 20 conditions): point forecast 0.30 -> 0.005 s, 100 draws
+  1.53 -> 0.06 s; the 64 MB response stack and 32 MB covariance factor are no
+  longer formed. Point forecasts are unchanged (<= 1e-10); seeded draw
+  sequences differ from earlier builds (same distribution). Soft anticipated
+  forecasts still use the dense stack.
+
+# dynhr 0.9.4.52
+
+**Re-run if affected** (review 2026-10-07): checkpointed RWMH runs that were
+resumed.
+
+- Resuming an RWMH checkpoint (`dynhr_mcmc(checkpoint_dir =, resume = TRUE)`,
+  the estimation runner, `rwmh_da`) re-evaluates the target at the saved
+  position and refuses when the log density differs: a resume against a
+  different target (data, prior, transform) used to continue silently,
+  comparing new proposals with the OLD density. Fingerprints now also cover
+  the observed data, likelihood, measurement-error settings, proposal
+  covariance and adaptation settings. All checks run before any checkpoint
+  file is touched. Particle likelihoods skip the density check (their value
+  is noisy).
+- A run interrupted during warm-up now resumes exactly: the restart state is
+  saved after the iteration's adaptation and includes the Haario history and
+  acceptance / block windows (resumed chains diverged; with `adapt_cov = TRUE`
+  the resume failed).
+- A checkpoint or `mcmc_chain_save()` whose final rename fails is an error
+  (it returned normally, leaving only the older checkpoint).
+- Checkpoint format version 2; version-1 checkpoints are refused with a
+  message.
+
+# dynhr 0.9.4.51
+
+**Re-run if affected** (review 2026-10-07):
+
+- `simulate_model()` on a second- or third-order decision rule simulated with
+  the first-order terms only (`ghx`, `ghu`), silently dropping the nonlinear
+  ones. It now simulates at the rule's own order (pruned, as
+  `simulate_model_order2()` / `simulate_model_order3()`); `linear = TRUE`
+  restores the first-order simulation. This also reaches `stoch_simul()`'s
+  simulated moments and the D9 posterior predictive check for higher-order
+  solutions.
+- `simulate_model(shocks = )` now follows the order-2/3 contract: the matrix
+  has `n_periods + burn_in` rows (the documented `n_periods` rows failed with
+  "subscript out of bounds" under the default burn-in); a short matrix gets
+  an actionable error, named columns are matched to the model's shocks, and
+  `n_periods` / `burn_in` are validated.
+- `chain_diagnostics()` with a list of chains matched columns by POSITION:
+  chains whose parameters were in different orders were mixed (a reversed
+  second chain gave alpha/beta means 10 / 10 and R-hat 1.83 instead of
+  0 / 20 and 1). Chains are now aligned by name; differing, duplicated or
+  partly missing names are an error.
+- One-period anticipated conditional forecasts (`horizon = 1`, hard or soft)
+  failed with "attempt to select less than one element".
+
+# dynhr 0.9.4.50
+
+- `hank_egm_solve()` validates `Va_init`, `coh_extra`, the asset grid and the
+  scalar controls before choosing a backend: a wrongly shaped `coh_extra` was
+  an error on `backend = "R"` but silently reinterpreted (oversized) or read
+  past its buffer (undersized) on the default C++ backend. The compiled
+  one- and three-asset entry points check every buffer's dimensions too.
+- The HANK run manifest reads the provenance stamp through the same
+  version-checked reader as the rest of the package.
+
+# dynhr 0.9.4.49
+
+- Provenance stamp: the public 0.9.4.48 shipped `inst/GIT_COMMIT` naming its
+  release commit but `version: 0.9.4.43` (the release script read the version
+  before writing the new DESCRIPTION). The stamp reader now treats a stamp
+  whose version disagrees with the package's DESCRIPTION as unknown, so
+  `dynhr_build_info()`, run records, `dynhr_system_info()` and the LLM
+  diagnostic report report `NA` instead of a misleading commit, and worker
+  build checks fall back to the code fingerprint. The release scripts take
+  the version from master and stop on any verification failure.
+
 # dynhr 0.9.4.48
 
 **Public release: everything since 0.9.4.43** (the 0.9.4.44 - 0.9.4.48

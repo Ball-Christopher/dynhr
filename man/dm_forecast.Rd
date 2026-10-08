@@ -28,7 +28,9 @@ forecast)}
 of the filter and the forecast) are those at that point.}
 
 \item{...}{Further arguments for \code{\link{conditional_forecast}}
-(e.g. \code{type}, \code{method}, \code{n_draws}).}
+(e.g. \code{type}, \code{method}, \code{n_draws}, and the trend-model
+inputs \code{shock_means}, \code{shock_timing}, \code{a0}, \code{P0}:
+a drift carried as a deterministic shock mean).}
 }
 \value{
 The updated \code{dynhr_model}, with \code{$forecast} set.

@@ -15,7 +15,7 @@ kalman_smoother(
   Q = NULL,
   me_extra = NULL,
   shock_scale = NULL,
-  lik_init = c("auto", "stationary", "kappa", "diffuse"),
+  lik_init = c("auto", "stationary", "kappa", "diffuse", "fixed_unknown"),
   kalman_tol = 1e-10,
   a0 = NULL,
   P0 = NULL,
@@ -87,6 +87,29 @@ block), or \code{NULL} (constant shock variances).}
     for comparing against \code{kalman_filter(lik_init = "kappa")};
     its log-likelihood carries an arbitrary additive constant, so it is
     not comparable across initialisations.}
+  \item{\code{"fixed_unknown"}}{IRIS's initialisation (see
+    \code{\link{kalman_filter}}): the unit-root level is a fixed unknown
+    estimated by GLS. The SMOOTHED states and shocks (and every
+    covariance, \code{P_filt_last} included) are those of the exact
+    diffuse smoother, which they equal; \code{filtered_states} /
+    \code{updated_states} / \code{predicted_states} and \code{loglik}
+    are the fixed-unknown filter's (corrected by the GLS level, and the
+    concentrated log-likelihood), with the diffuse log-likelihood kept in
+    \code{diagnostics$loglik_diffuse}. \code{diagnostics} also carries
+    \code{n_unit}, \code{n_unit_identified},
+    \code{init_unit_estimate}, \code{init_coordinates} (the IRIS state
+    vector the init is built on -- all non-forward-looking,
+    non-measurement variables, static ones included; see
+    \code{\link{kalman_filter}}) and \code{fixed_unknown_recursion}
+    (\code{"sequential"} when a singular innovation covariance, e.g. an
+    observed exact identity, made the filter drop exactly predictable
+    components; counts in \code{fixed_unknown_dropped} /
+    \code{fixed_unknown_dropped_informative}). Refuses \code{P0} and \code{known_shocks}
+    (class \code{dynhr_error_fixed_unknown_unsupported}); on a model with
+    no unit root it is \code{"stationary"}. With \code{pre_sample > 0}
+    the fixed unknown is the state BEFORE the padded periods, so the
+    log-likelihood is that of the padded sample (unlike the diffuse
+    prior, the placement of a fixed unknown matters).}
 }
 \strong{Changed in 0.9.3.2:} \code{"auto"} used to fall back to
 \code{"kappa"} on a unit root, with a warning saying the loglik had a
@@ -229,6 +252,17 @@ List with \code{smoothed_states} (\eqn{T \times n_{state}}, row
   \code{method_used} naming the recursion that ran
   (\code{"durbin-koopman"}, \code{"univariate"} or
   \code{"sequential-diffuse"}).
+
+  On a BALANCED-GROWTH model (\code{dr$growth} non-zero, from
+  \code{solve_model(steady_options = list(growth = TRUE))}) the growth of
+  the observables is subtracted from the data as an observation trend
+  (period index \code{first_obs + t - 1}, added to any
+  \code{observation_trends} slope), the reported states stay deviations,
+  and \code{growth_path} (\eqn{T \times n_{state}}, same orientation and
+  columns as \code{smoothed_states}) holds the deterministic
+  \eqn{y_0 + g\,(first\_obs + t - 1)} of the state variables, so LEVELS are
+  \code{growth_path + smoothed_states} (likewise for the filtered and
+  predicted paths). Absent otherwise.
 
   During a diffuse phase the reported \code{filtered_cov} /
   \code{predicted_cov} are the PROPER (\eqn{P_{star}}) part; the diffuse

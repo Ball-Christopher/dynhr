@@ -15,7 +15,8 @@ make_log_posterior_hank(
   prior_rho_sd = 0.3,
   prior_sigma_sd = 0.05,
   boundary = c("warn", "reject", "ignore"),
-  boundary_tol = 0.001
+  boundary_tol = 0.001,
+  singular_obs = c("reject", "skip")
 )
 }
 \arguments{
@@ -74,6 +75,11 @@ imprecise and no \code{q} repairs it -- see
 \code{\link{hank_theta_boundary_check}}.}
 
 \item{boundary_tol}{Bound on \eqn{|\rho|^{T_h}}; default \code{1e-3}.}
+
+\item{singular_obs}{\code{"reject"} (default) or \code{"skip"}, passed to
+\code{\link{hank_kalman_loglik}} (\code{likelihood = "kalman"}): data the
+stochastically singular state space cannot generate give \code{logpost
+= -Inf} under \code{"reject"}. Ignored by \code{likelihood = "exact_ar"}.}
 }
 \value{
 A function \code{log_post_fn(theta)} where \code{theta} is a named

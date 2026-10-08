@@ -534,11 +534,22 @@ hank_reiter_irf <- function(rss, T_h = 100L, shock = 0.01) {
 #' @param me_variance Measurement-error variance added to each observable (needed
 #'   when \code{length(obs_vars) > 1}: one structural shock, so more than
 #'   one observable is stochastically singular without it).
+#' @param singular_obs \code{"reject"} (default) or \code{"skip"}: an
+#'   observation component the filter skips because its forecast variance is
+#'   at most \code{kalman_tol} although its innovation is not negligible (data
+#'   the model cannot generate, e.g. more observables than shocks with
+#'   \code{me_variance = 0} and inconsistent data) makes the log-likelihood
+#'   \code{-Inf} under \code{"reject"}; \code{"skip"} keeps the Dynare
+#'   convention (component ignored, finite value). Both raise a
+#'   \code{dynhr_warning_dropped_observations} warning. See
+#'   \code{\link{kalman_filter}}.
 #'
 #' @return Scalar Gaussian log-likelihood.
 #' @export
 hank_reiter_kalman_loglik <- function(data, rss, obs_vars = "A",
-                                      me_variance = 0) {
+                                      me_variance = 0,
+                                      singular_obs = c("reject", "skip")) {
+  singular_obs <- match.arg(singular_obs)
   if (!inherits(rss, "hank_reiter_ss"))
     stop("hank_reiter_kalman_loglik(): `rss` must be a hank_reiter_ss object.")
   if (!all(obs_vars %in% rss$obs_names))
@@ -574,7 +585,7 @@ hank_reiter_kalman_loglik <- function(data, rss, obs_vars = "A",
     P_state = P,
     P_inf_state = NULL,
     me_variance = me_variance)
-  out$loglik
+  .kf_dispatch_loglik(out, singular_obs, t(data))
 }
 
 

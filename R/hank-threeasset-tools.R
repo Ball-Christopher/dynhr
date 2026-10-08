@@ -275,7 +275,7 @@ hank_het3_jacobian_checkpoint <- function(block, T_h, dir, inputs = NULL,
       tmp <- paste0(path, ".part")
       saveRDS(list(fingerprint = fp, T_h = as.integer(T_h), input = i,
                    columns = piece), tmp)
-      file.rename(tmp, path)
+      .ckpt_rename_or_stop(tmp, path)
     }
     for (o in outputs) J[[o]][[i]] <- piece[[o]]
   }

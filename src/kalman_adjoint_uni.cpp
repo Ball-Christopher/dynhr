@@ -169,6 +169,10 @@ List kf_adjoint_uni_cpp(const arma::mat& Y,
   arma::mat P = P0;
   double loglik = 0.0;
   bool ok = true;
+  // min over periods of rcond1(F_t) = 1/(||F||_1 ||F^-1||_1), the SAME formula as
+  // .kf_rcond1() (R/kalman-filter.R): the necessary condition of the forward
+  // filter's singular-F univariate fallback. Missing data: observed sub-block F.
+  double min_rcond = R_PosInf;
 
   for (arma::uword t = 0; t < n_T; ++t) {
     s_store[t] = s;
@@ -225,6 +229,11 @@ List kf_adjoint_uni_cpp(const arma::mat& Y,
     // (see kalman_adjoint.cpp) -- degrade gracefully instead of throwing.
     arma::mat Fi;
     if (!arma::inv_sympd(Fi, Ft)) { ok = false; break; }
+    {
+      double rc = 1.0 / (arma::norm(Ft, 1) * arma::norm(Fi, 1));
+      if (!std::isfinite(rc)) rc = 0.0;
+      if (rc < min_rcond) min_rcond = rc;
+    }
     double ldf    = 2.0 * arma::accu(arma::log(Fc.diag()));
 
     arma::vec yt  = arma::vec(Y.col(t));
@@ -481,6 +490,7 @@ List kf_adjoint_uni_cpp(const arma::mat& Y,
     return List::create(_["loglik"] = loglik,
                         _["grad"]   = grad,
                         _["ok"]     = true,
+                        _["min_rcond"] = min_rcond,
                         _["bars"]   = List::create(_["G_TT"]  = G_TT,
                                                    _["G_RR"]  = G_RR,
                                                    _["G_ZZ"]  = G_ZZ,
@@ -490,5 +500,6 @@ List kf_adjoint_uni_cpp(const arma::mat& Y,
   }
   return List::create(_["loglik"] = loglik,
                       _["grad"]   = grad,
-                      _["ok"]     = true);
+                      _["ok"]     = true,
+                      _["min_rcond"] = min_rcond);
 }

@@ -674,12 +674,9 @@ write_report <- function(diagnostics,
   colours <- stats::setNames(vapply(lv, .badge_colour, character(1)), lv)
 
   prov_in <- attr(diagnostics, "provenance")
-  git_file <- system.file("GIT_COMMIT", package = "dynhr")
   provenance <- list(
     dynhr_version = as.character(utils::packageVersion("dynhr")),
-    git_commit    = if (nzchar(git_file) && file.exists(git_file))
-                      trimws(readLines(git_file, warn = FALSE)[1L])
-                    else NA_character_,
+    git_commit    = .dynhr_git_stamp_at(getNamespaceInfo(asNamespace("dynhr"), "path")),
     model_name    = prov_in$model_name  %||% model_name %||% NA_character_,
     model_file    = prov_in$model_file  %||% NA_character_,
     n_obs         = prov_in$n_obs       %||% NA_integer_,

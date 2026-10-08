@@ -56,6 +56,30 @@ static inline int clamped_lower_idx0(const double *x, int n, double xq) {
   return idxR - 1;              // 0-indexed access into x[idxR-1], x[idxR]
 }
 
+// Shape guard shared by the one-asset exports (review 2026-10-07, F03). Every
+// matrix below is wrapped as arma::mat(ptr, n_e, n_a) on ASSUMED dims, so a
+// wrong-sized buffer was a silent reinterpretation (oversized) or an
+// out-of-bounds read (undersized). Dims are checked here before any wrap.
+static void egm1_check_dims(const char *fn, int n_e, int n_a,
+                            const NumericMatrix &Pi,
+                            const Nullable<NumericMatrix> &opt1, const char *nm1,
+                            const Nullable<NumericMatrix> &opt2, const char *nm2) {
+  if (n_e < 1) stop("%s: need at least one income state (n_e >= 1).", fn);
+  if (n_a < 2) stop("%s: `a_grid` must have at least 2 points; got %d.", fn, n_a);
+  if (Pi.nrow() != n_e || Pi.ncol() != n_e)
+    stop("%s: `Pi` must be n_e x n_e = %d x %d; got %d x %d.", fn, n_e, n_e,
+         (int)Pi.nrow(), (int)Pi.ncol());
+  const Nullable<NumericMatrix> *opts[2] = {&opt1, &opt2};
+  const char *nms[2] = {nm1, nm2};
+  for (int k = 0; k < 2; k++) {
+    if (nms[k] == nullptr || !opts[k]->isNotNull()) continue;
+    NumericMatrix m(*opts[k]);
+    if (m.nrow() != n_e || m.ncol() != n_a)
+      stop("%s: `%s` must be n_e x n_a = %d x %d; got %d x %d.", fn, nms[k],
+           n_e, n_a, (int)m.nrow(), (int)m.ncol());
+  }
+}
+
 // One EGM backward step (compiled). C++ port of .hank_egm_step: given
 // next-period marginal value Va_p (n_e x n_a), returns the updated marginal
 // value and this period's savings/consumption policies at fixed prices
@@ -67,6 +91,14 @@ List hank_egm_step_cpp(NumericMatrix Va_p_, NumericVector a_grid_,
                         NumericMatrix Pi_, double amin,
                         Nullable<NumericMatrix> coh_extra_ = R_NilValue) {
   int n_e = Va_p_.nrow(), n_a = Va_p_.ncol();
+  egm1_check_dims("hank_egm_step_cpp", n_e, n_a, Pi_, coh_extra_, "coh_extra",
+                  R_NilValue, nullptr);
+  if (a_grid_.size() != n_a)
+    stop("hank_egm_step_cpp: `a_grid` must have length n_a = %d; got %d.",
+         n_a, (int)a_grid_.size());
+  if (y_.size() != n_e)
+    stop("hank_egm_step_cpp: `y` must have length n_e = %d; got %d.",
+         n_e, (int)y_.size());
   arma::mat Va_p(Va_p_.begin(), n_e, n_a, false);
   arma::mat Pi(Pi_.begin(), n_e, n_e, false);
   arma::vec a_grid(a_grid_.begin(), n_a, false);
@@ -146,6 +178,8 @@ List hank_egm_solve_cpp(NumericVector a_grid_, NumericVector y_, double r,
                          Nullable<NumericMatrix> Va_init_ = R_NilValue,
                          Nullable<NumericMatrix> coh_extra_ = R_NilValue) {
   int n_e = y_.size(), n_a = a_grid_.size();
+  egm1_check_dims("hank_egm_solve_cpp", n_e, n_a, Pi_, Va_init_, "Va_init",
+                  coh_extra_, "coh_extra");
   arma::mat Pi(Pi_.begin(), n_e, n_e, false);
   arma::vec a_grid(a_grid_.begin(), n_a, false);
   arma::vec y(y_.begin(), n_e, false);
@@ -242,6 +276,11 @@ List hank_egm_solve_cpp(NumericVector a_grid_, NumericVector y_, double r,
 List hank_stationary_dist_cpp(NumericMatrix a_pol_, NumericVector a_grid_,
                                NumericMatrix Pi_, double tol, int maxit) {
   int n_e = a_pol_.nrow(), n_a = a_pol_.ncol();
+  egm1_check_dims("hank_stationary_dist_cpp", n_e, n_a, Pi_, R_NilValue,
+                  nullptr, R_NilValue, nullptr);
+  if (a_grid_.size() != n_a)
+    stop("hank_stationary_dist_cpp: `a_grid` must have length n_a = %d; "
+         "got %d.", n_a, (int)a_grid_.size());
   arma::mat a_pol(a_pol_.begin(), n_e, n_a, false);
   arma::vec a_grid(a_grid_.begin(), n_a, false);
   arma::mat Pi(Pi_.begin(), n_e, n_e, false);

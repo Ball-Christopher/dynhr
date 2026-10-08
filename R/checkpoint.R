@@ -89,10 +89,44 @@
        obs_vars = obs_vars, extra = extra)
 }
 
+.ckpt_version <- 2L
+
 .ckpt_meta_write <- function(path, sampler, fingerprint) {
   saveRDS(list(sampler = sampler, fingerprint = fingerprint,
-               dynhr_ckpt_version = 1L), path)
+               dynhr_ckpt_version = .ckpt_version), path)
   invisible(NULL)
+}
+
+## md5 of any R object (used for data / covariance fingerprints).
+.ckpt_md5 <- function(x) .raw_md5(serialize(x, NULL, version = 2L))
+
+## Rename tmp -> path; on failure remove tmp and stop, naming both paths (the
+## previous good file at `path`, if any, is left untouched).
+.ckpt_rename_or_stop <- function(tmp, path) {
+  ok <- file.rename(tmp, path)
+  if (!isTRUE(ok)) {
+    unlink(tmp)
+    stop("checkpoint: could not rename '", tmp, "' to '", path,
+         "' (the temporary file was removed; any previous file at '", path,
+         "' is unchanged).", call. = FALSE)
+  }
+  invisible(NULL)
+}
+
+## Resume guard: the log density re-evaluated at the restored position must
+## equal the saved one, else the target (data, prior, transform, model) has
+## changed and the continuation would compare new proposals against the OLD
+## density. Not for noisy (pseudo-marginal) targets: callers skip it there.
+.ckpt_verify_lp <- function(saved_lp, recomputed_lp, sampler) {
+  same <- if (is.finite(saved_lp) && is.finite(recomputed_lp))
+    abs(saved_lp - recomputed_lp) <= 1e-8 * max(1, abs(saved_lp))
+  else identical(is.finite(saved_lp), is.finite(recomputed_lp))
+  if (!isTRUE(same))
+    stop("checkpoint resume (", sampler, "): the log density at the saved ",
+         "position differs: saved ", format(saved_lp, digits = 15), ", now ",
+         format(recomputed_lp, digits = 15), " -- data, prior, transform or ",
+         "model changed; use a new checkpoint directory.", call. = FALSE)
+  invisible(TRUE)
 }
 
 ## Verify the saved meta matches the current call; stop() on any mismatch so a
@@ -102,11 +136,22 @@
     stop("checkpoint resume: 'meta.rds' not found in the checkpoint directory -- ",
          "there is no run to resume.", call. = FALSE)
   m <- readRDS(path)
+  if (!identical(m$dynhr_ckpt_version, .ckpt_version))
+    stop("checkpoint resume: the checkpoint was written by an older format ",
+         "(version ", m$dynhr_ckpt_version %||% 1L, "; this build needs ",
+         .ckpt_version, ") and cannot be resumed. Start a fresh run in a ",
+         "new checkpoint directory.", call. = FALSE)
   if (!identical(m$sampler, sampler))
     stop("checkpoint resume: sampler mismatch (saved '", m$sampler,
          "', requested '", sampler, "'). Resume requires the same sampler.",
          call. = FALSE)
-  if (!isTRUE(all.equal(m$fingerprint, fingerprint)))
+  ## A caller that has ALREADY surfaced a target mismatch to the user and been
+  ## told to resume anyway (compute$on_mismatch = "warn") marks its fingerprint
+  ## "relaxed": only the parameter names must then agree.
+  same <- if (isTRUE(attr(fingerprint, "relaxed")))
+    identical(m$fingerprint$par_names, fingerprint$par_names)
+  else isTRUE(all.equal(m$fingerprint, fingerprint))
+  if (!same)
     stop("checkpoint resume: the model / prior / parameter configuration differs ",
          "from the saved run. Resume forces identical parameters; start a fresh ",
          "run (new checkpoint directory) for a different configuration.",
@@ -119,7 +164,7 @@
 .ckpt_save_state <- function(path, state) {
   tmp <- paste0(path, ".tmp")
   saveRDS(state, tmp)
-  file.rename(tmp, path)
+  .ckpt_rename_or_stop(tmp, path)
   invisible(NULL)
 }
 

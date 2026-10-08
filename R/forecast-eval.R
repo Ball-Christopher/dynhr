@@ -480,6 +480,10 @@ forecast_backtest <- function(model,
   .dynhr_run_epoch <- .dynhr_epoch("forecast_backtest")
   on.exit(.dynhr_close_epoch(.dynhr_run_epoch), add = TRUE)
 
+  dots_names <- names(list(...))
+  if (any(dots_names %in% c("shock_means", "shock_timing", "a0", "P0")))
+    .dynhr_abort("forecast_backtest: `shock_means` / `shock_timing` / `a0` / `P0` are not supported -- the backtest's predictive moments are stationary-model moments with no deterministic path. Use conditional_forecast() for a trend model with drift.",
+                 class = "dynhr_error_bad_argument")
   if (length(list(...)))
     stop("forecast_backtest: unused argument(s): ",
          paste(names(list(...)), collapse = ", "), call. = FALSE)

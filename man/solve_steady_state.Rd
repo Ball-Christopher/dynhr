@@ -14,7 +14,8 @@ solve_steady_state(
   max_iter = 1000L,
   tol = 1e-10,
   verbose = FALSE,
-  max_attempts = 3L
+  max_attempts = 3L,
+  growth = FALSE
 )
 }
 \arguments{
@@ -49,6 +50,26 @@ is matched in declaration order.}
 \item{max_attempts}{Integer guard on how many times the whole cascade may be
 retried; each attempt tries the remaining methods in order. Raising it does
 not make a genuinely infeasible calibration solvable.}
+
+\item{growth}{Logical (default \code{FALSE}). \code{TRUE} solves the
+BALANCED-GROWTH path of a \code{model(linear)} that has no static steady
+state -- a unit root with drift, e.g.
+\code{a - a(-1) = rho*(a(-1) - a(-2)) + (1-rho)*g + e} -- as IRIS's
+\code{sstate(m, 'growth=', true)} does: every variable gets a level
+\eqn{y_0} and a growth \eqn{g} such that \eqn{y_0 + g t} solves every
+dynamic equation with the shocks at zero. The stacked system
+\eqn{S g = 0}, \eqn{S y_0 + (C - B) g = -c} (\eqn{S = A + B + C} from the
+constant dynamic Jacobian) is solved in the minimum-norm sense, so an
+indeterminate unit-root level is reported at its minimum-norm value; the
+path is accepted only if its dynamic residual is ~0 at two different
+\eqn{t}, otherwise \code{converged = FALSE}. A model whose static system
+IS consistent returns its usual steady state with \code{growth} all zero.
+Nonlinear models are refused (\code{dynhr_error_growth_unsupported}).
+A model returned by \code{solve_model(steady_options = list(growth =
+TRUE))} with non-zero growth carries \code{balanced_growth = TRUE}, and
+every steady-state solve on it (e.g. a posterior evaluation at a new
+parameter vector) solves the balanced-growth path whatever this argument
+says.}
 }
 \value{
 An object of class \code{dynhr_steady} (a list) with the named
@@ -58,7 +79,12 @@ An object of class \code{dynhr_steady} (a list) with the named
   which method actually succeeded. **Check \code{converged} before using the
   result**: a non-converged solve is returned rather than raised, so that
   callers sweeping a parameter can inspect the failure instead of aborting
-  the sweep.
+  the sweep. With \code{growth = TRUE} it also carries \code{growth}, the
+  named per-period growth of every endogenous variable (auxiliary lag/lead
+  variables included); \code{ss} is then the level \eqn{y_0} at
+  \eqn{t = 0}, \code{residuals} the DYNAMIC residual of the path at
+  \eqn{t = 0}, and \code{method_used = "linear_growth"} when the path (not
+  a static steady state) was solved.
 }
 \description{
 Finds the vector of endogenous values at which every static equation

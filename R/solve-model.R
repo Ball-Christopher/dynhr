@@ -26,7 +26,18 @@
 #' @param Sigma_e  (order >= 2) \eqn{n_{exo} \times n_{exo}} shock
 #'   covariance matrix.  \code{NULL} uses the model's \code{shocks} block.
 #' @param steady_options  List of options passed to \code{solve_steady()},
-#'   e.g. \code{list(y0 = ..., tol = 1e-10)}.
+#'   e.g. \code{list(y0 = ..., tol = 1e-10)}. \code{list(growth = TRUE)}
+#'   solves the BALANCED-GROWTH path of a \code{model(linear)} with unit roots
+#'   and drift (see \code{\link{solve_steady_state}}). When the solved growth
+#'   is non-zero, \code{dr$growth} carries it (named, every endogenous
+#'   variable), \code{dr$ys} is the path's level at \eqn{t = 0}, and the
+#'   returned \code{model} carries \code{balanced_growth = TRUE}: pass THAT
+#'   model with the \code{dr} to \code{\link{kalman_filter}},
+#'   \code{\link{kalman_smoother}} and \code{\link{make_log_posterior}}, which
+#'   treat the growth of the observables as a deterministic observation trend
+#'   (re-solved at every parameter draw in estimation) and refuse it where
+#'   they cannot honour it. The decision rule (\code{ghx}, \code{ghu}) is that
+#'   of the deviations from the path, unchanged.
 #' @param perturbation_options  List of options passed to
 #'   \code{solve_perturbation()}, e.g. \code{list(h = 1e-4, sigma3 = NULL)}.
 #' @param stoch_simul  If \code{TRUE} (default), compute IRFs and
@@ -133,15 +144,18 @@ solve_model <- function(mod_file,
   # Step 4: Steady state
   # -------------------------------------------------------------------
   .vcat("-- Step 3: Steady state --\n")
-  so <- modifyList(list(y0 = NULL, tol = 1e-10, max_iter = 1000L),
+  so <- modifyList(list(y0 = NULL, tol = 1e-10, max_iter = 1000L,
+                        growth = FALSE),
                    steady_options)
+  growth_req <- .ss_growth_requested(so$growth, model)
   ss <- solve_steady(compiled, params,
                      y0        = so$y0,
                      endo_names = model$var_names,
                      exo_names  = model$varexo_names,
                      max_iter  = so$max_iter,
                      tol       = so$tol,
-                     verbose   = verbose)
+                     verbose   = verbose,
+                     growth    = growth_req)
   if (!isTRUE(ss$converged)) {
     stop("Steady state did not converge. Check parameter values or initial guess.")
   }
@@ -177,6 +191,20 @@ solve_model <- function(mod_file,
   )
   .vcat(sprintf("  BK satisfied=%s, n_stable=%d\n",
                 dr$bk_satisfied, dr$n_stable))
+
+  ## Balanced growth: the growth is solved at the same parameters as dr$ys,
+  ## so it travels with the decision rule; the model records the REQUEST so
+  ## that re-solves at other parameters (estimation) solve the path again and
+  ## every observation-trend refusal site sees it (R/balanced-growth.R).
+  if (!is.null(ss$growth) && any(ss$growth != 0)) {
+    if (order != 1L)
+      .dynhr_abort(
+        "solve_model: a balanced-growth model (steady_options = list(growth ",
+        "= TRUE) with non-zero growth) is solved at order 1 only.",
+        class = "dynhr_error_growth_unsupported")
+    dr$growth <- ss$growth
+    model$balanced_growth <- TRUE
+  }
 
   # -------------------------------------------------------------------
   # Step 5b: Stoch_simul (IRFs + moments)

@@ -440,6 +440,13 @@
       ## ---- Solve ----------------------------------------------------------
       sol <- solve_fn(model, compiled, sys_cache, ss_result$ss, params, theta)
       if (.is_posterior_reject(sol)) return(.reject(lp, sol))
+      ## Balanced growth (R/balanced-growth.R): solve_steady_state() re-solved
+      ## the path at THIS theta (the model carries balanced_growth = TRUE), so
+      ## its growth travels with this draw's decision rule -- the filter's
+      ## observation trend is never a slope frozen at the calibration. Only
+      ## the Gaussian adapter (obs_trends_ok) gets here with such a model.
+      if (!is.null(ss_result$growth) && is.list(sol) && is.list(sol$dr))
+        sol$dr$growth <- ss_result$growth
       if (!is.null(struct_cache))
         .structural_cache_store(struct_cache, key, params_in, params,
                                 ss_result, sol)

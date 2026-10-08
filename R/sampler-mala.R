@@ -416,11 +416,21 @@ dynhr_mala <- function(
     # and the position matter.
     .ckpt_meta_verify(ckpt_paths$meta, "mala", checkpoint$fingerprint)
     st            <- .ckpt_load_state(ckpt_paths$state)
+    ## ALL verification (meta, then the log density at the saved position)
+    ## happens BEFORE any file is touched, so a refused resume leaves the
+    ## checkpoint byte-identical.  The RNG is restored below, so this
+    ## evaluation cannot perturb the stream.
     theta         <- st$theta
     lp_curr       <- st$lp_curr
     trace_lp_curr <- st$trace_lp_curr
+    e_saved <- if (!is.null(vg_fn)) vg_fn(theta) else NULL
+    if (!isFALSE(checkpoint$lp_check)) {
+      lp_now <- if (!is.null(e_saved)) e_saved$lp else .lp_scalar(theta)
+      .ckpt_verify_lp(st$lp_curr, lp_now, "mala")
+    }
     ## fused: the gradient at the saved position (deterministic in it)
-    g_curr <- if (!is.null(vg_fn)) vg_fn(theta)$grad else NULL
+    g_curr <- if (!is.null(e_saved)) e_saved$grad else NULL
+    if (!is.null(st$mu_da)) mu_da <- st$mu_da
     eps           <- st$eps
     eps_bar       <- st$eps_bar
     H_bar         <- st$H_bar
@@ -549,6 +559,7 @@ dynhr_mala <- function(
 
     # ---- Store draw m (streaming buffer or in-RAM chain) ---------------
     stored_m <- if (!is.null(transform)) transform$to_constrained(theta) else theta
+    ckpt_save_now <- FALSE
     if (ckpt) {
       buf_i <- buf_i + 1L
       buf[buf_i, ]  <- stored_m
@@ -558,25 +569,8 @@ dynhr_mala <- function(
         # AFTER draws so n_done never exceeds what is on disk).
         .ckpt_append_draws(ckpt_paths$draws, buf[seq_len(buf_i), , drop = FALSE])
         .ckpt_append_lp(ckpt_paths$lp, buf_lp[seq_len(buf_i)])
-        .ckpt_save_state(ckpt_paths$state, list(
-          theta         = theta,
-          lp_curr       = lp_curr,
-          trace_lp_curr = trace_lp_curr,
-          eps           = eps,
-          eps_bar       = eps_bar,
-          H_bar         = H_bar,
-          da_m          = da_m,
-          n_accept      = n_accept,
-          n_warmup      = n_warmup,
-          n_done        = m,
-          n_total_target = n_total,
-          # Save the cached metric only for constant-metric runs; for
-          # metric_fn runs it is recomputed from theta each step so we
-          # save NULL and call .metric_at(theta) on resume.
-          met_curr      = if (!use_metric_fn) met_curr else NULL,
-          rng           = get(".Random.seed", envir = .GlobalEnv)
-        ))
         buf_i <- 0L
+        ckpt_save_now <- TRUE
       }
     } else {
       chain[m, ]       <- stored_m
@@ -599,6 +593,31 @@ dynhr_mala <- function(
     if (adapt_step && m == n_warmup) {
       eps <- eps_bar
       if (verbose) .dynhr_inform(sprintf("MALA: warmup complete, final step_size = %.4e", eps))
+    }
+
+    # ---- Restart state: saved AFTER the dual-averaging update and the
+    # end-of-warmup step-size fix, so eps / eps_bar / H_bar / da_m are the
+    # post-iteration values and a resume continues exactly.
+    if (ckpt_save_now) {
+      .ckpt_save_state(ckpt_paths$state, list(
+        theta         = theta,
+        lp_curr       = lp_curr,
+        trace_lp_curr = trace_lp_curr,
+        eps           = eps,
+        eps_bar       = eps_bar,
+        H_bar         = H_bar,
+        da_m          = da_m,
+        mu_da         = mu_da,
+        n_accept      = n_accept,
+        n_warmup      = n_warmup,
+        n_done        = m,
+        n_total_target = n_total,
+        # Save the cached metric only for constant-metric runs; for
+        # metric_fn runs it is recomputed from theta each step so we
+        # save NULL and call .metric_at(theta) on resume.
+        met_curr      = if (!use_metric_fn) met_curr else NULL,
+        rng           = get(".Random.seed", envir = .GlobalEnv)
+      ))
     }
 
     # ---- Progress -------------------------------------------------------

@@ -75,15 +75,10 @@
     if (length(commit) == 1L && is_sha1(commit)) return(commit)
   }
 
-  gc_path <- tryCatch(system.file("GIT_COMMIT", package = "dynhr"),
-                       error = function(e) "")
-  if (is.character(gc_path) && length(gc_path) == 1L && nzchar(gc_path) &&
-      file.exists(gc_path)) {
-    txt <- tryCatch(suppressWarnings(readLines(gc_path, n = 1L, warn = FALSE)),
-                     error = function(e) character(0))
-    txt <- trimws(txt)
-    if (length(txt) == 1L && is_sha1(txt)) return(txt)
-  }
+  ## The shared reader also rejects a stamp whose "version:" line disagrees
+  ## with DESCRIPTION (a stale stamp names some other build's commit).
+  stamp <- .dynhr_git_stamp_at(getNamespaceInfo(asNamespace("dynhr"), "path"))
+  if (!is.na(stamp)) return(stamp)
 
   desc <- tryCatch(utils::packageDescription("dynhr"), error = function(e) NULL)
   if (is.list(desc)) {

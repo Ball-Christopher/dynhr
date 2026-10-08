@@ -16,6 +16,7 @@ make_loglik_contrib(
   shock_scale = NULL,
   likelihood = "gaussian",
   filter_method = "auto",
+  singular_obs = "reject",
   ...
 )
 }
@@ -64,6 +65,10 @@ contributions exist only on the textbook (\code{"dare"}) and
 \code{"univariate"} recursions, so \code{\link{kalman_filter}} runs
 those whatever other method is requested; the sum equals the posterior's
 \code{$loglik} to round-off.}
+
+\item{singular_obs}{As in \code{\link{make_log_posterior}}: \code{"reject"}
+(default) returns \code{-Inf} contributions on an informative singular
+observation, \code{"skip"} is the Dynare convention.}
 
 \item{...}{Accepted for signature parity with
 \code{make_log_posterior}; unused (errors are raised instead of

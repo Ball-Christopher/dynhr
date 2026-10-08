@@ -162,10 +162,22 @@ hank_state_space <- function(model, shock_specs, obs_vars, q = NULL) {
 #'   diagonal (default 0; needed when \code{n_obs > n_shock}, i.e. stochastic
 #'   singularity).
 #'
+#' @param singular_obs \code{"reject"} (default) or \code{"skip"}: an
+#'   observation component the filter skips because its forecast variance is
+#'   at most \code{kalman_tol} although its innovation is not negligible (data
+#'   the model cannot generate, e.g. more observables than shocks with
+#'   \code{me_variance = 0} and inconsistent data) makes the log-likelihood
+#'   \code{-Inf} under \code{"reject"}; \code{"skip"} keeps the Dynare
+#'   convention (component ignored, finite value). Both raise a
+#'   \code{dynhr_warning_dropped_observations} warning. See
+#'   \code{\link{kalman_filter}}.
+#'
 #' @return The scalar Gaussian log-likelihood.
 #' @seealso \code{\link{hank_state_space}}, \code{\link{make_log_posterior_hank}}
 #' @export
-hank_kalman_loglik <- function(data, ss, me_variance = 0) {
+hank_kalman_loglik <- function(data, ss, me_variance = 0,
+                               singular_obs = c("reject", "skip")) {
+  singular_obs <- match.arg(singular_obs)
   if (!inherits(ss, "dsge_ss"))
     stop("hank_kalman_loglik: `ss` must be a hank_state_space()/dsge_ss object.")
   data <- as.matrix(data)
@@ -191,7 +203,7 @@ hank_kalman_loglik <- function(data, ss, me_variance = 0) {
     P_state = P0,
     P_inf_state = NULL,
     me_variance = me_variance)
-  out$loglik
+  .kf_dispatch_loglik(out, singular_obs, t(data))
 }
 
 
@@ -255,6 +267,10 @@ hank_kalman_loglik <- function(data, ss, me_variance = 0) {
 #'   imprecise and no \code{q} repairs it -- see
 #'   \code{\link{hank_theta_boundary_check}}.
 #' @param boundary_tol Bound on \eqn{|\rho|^{T_h}}; default \code{1e-3}.
+#' @param singular_obs \code{"reject"} (default) or \code{"skip"}, passed to
+#'   \code{\link{hank_kalman_loglik}} (\code{likelihood = "kalman"}): data the
+#'   stochastically singular state space cannot generate give \code{logpost
+#'   = -Inf} under \code{"reject"}. Ignored by \code{likelihood = "exact_ar"}.
 #'
 #' @return A function \code{log_post_fn(theta)} where \code{theta} is a named
 #'   numeric vector with entries \code{rho_<shock>} and \code{sigma_<shock>}
@@ -269,8 +285,10 @@ make_log_posterior_hank <- function(model, data, obs_vars, q = NULL,
                                     prior_rho_mean = 0.5, prior_rho_sd = 0.3,
                                     prior_sigma_sd = 0.05,
                                     boundary = c("warn", "reject", "ignore"),
-                                    boundary_tol = 1e-3) {
+                                    boundary_tol = 1e-3,
+                                    singular_obs = c("reject", "skip")) {
   likelihood <- match.arg(likelihood)
+  singular_obs <- match.arg(singular_obs)
   boundary <- match.arg(boundary)
   if (!(is.numeric(boundary_tol) && length(boundary_tol) == 1L &&
         is.finite(boundary_tol) && boundary_tol > 0))
@@ -315,7 +333,8 @@ make_log_posterior_hank <- function(model, data, obs_vars, q = NULL,
       lapply(exo, function(z) list(rho = rho[[z]], sigma = sigma[[z]])), exo)
     if (likelihood == "kalman") {
       ss <- hank_state_space(model, shock_specs, obs_vars, q = q)
-      loglik <- hank_kalman_loglik(data, ss, me_variance = me_variance)
+      loglik <- hank_kalman_loglik(data, ss, me_variance = me_variance,
+                                   singular_obs = singular_obs)
     } else {
       ## Representability: reject/flag BEFORE spending a likelihood on a Theta
       ## the sequence-space solve cannot represent at this persistence.

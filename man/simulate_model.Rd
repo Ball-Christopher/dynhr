@@ -11,7 +11,8 @@ simulate_model(
   n_replications = 1L,
   model = NULL,
   burn_in = 100L,
-  init_state = NULL
+  init_state = NULL,
+  linear = FALSE
 )
 }
 \arguments{
@@ -19,7 +20,11 @@ simulate_model(
 
 \item{n_periods}{Number of simulation periods}
 
-\item{shocks}{Matrix of shocks (n_periods x n_exo). If NULL, shocks are
+\item{shocks}{Matrix of shocks with \code{n_periods + burn_in} rows and
+\code{n_exo} columns (the burn-in rows are simulated and then discarded;
+pass \code{burn_in = 0} to supply exactly \code{n_periods} rows). If the
+matrix has column names they must be the model's exogenous names and the
+columns are matched by name. If NULL, shocks are
 drawn from the model's full shock covariance \eqn{\Sigma_e} (from
 \code{\link{shock_cov}}), \strong{including} the \code{corr} /
 \code{var a, b} entries of the shocks block, via its lower Cholesky
@@ -41,6 +46,13 @@ the first slice only (2-D case) or omitted (3-D case).}
 \item{init_state}{Optional named numeric vector of initial state deviations
 (over endogenous names) loaded into the period-1 state; pair with
 \code{burn_in = 0}. \code{NULL} starts at the steady state.}
+
+\item{linear}{Logical (default \code{FALSE}). For a second- or third-order
+rule (\code{DecisionRules2} / \code{DecisionRules3}) the simulation uses
+the rule's native order (pruned, via \code{simulate_model_order2} /
+\code{simulate_model_order3}); \code{linear = TRUE} forces the
+first-order (\code{ghx}/\code{ghu}) simulation. No effect on a
+first-order rule.}
 }
 \value{
 Matrix (n_periods x n_endo) when \code{n_replications = 1};

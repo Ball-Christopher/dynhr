@@ -56,7 +56,9 @@ forecast draws that follow it. The result is reproducible for a fixed
 seed; the caller's global RNG stream is restored on exit.}
 
 \item{...}{Additional arguments forwarded to
-\code{\link{conditional_forecast}} (e.g. \code{free_shocks}, \code{Q}).}
+\code{\link{conditional_forecast}} (e.g. \code{free_shocks}, \code{Q},
+and the trend-model inputs \code{shock_means}, \code{shock_timing},
+\code{a0}, \code{P0}, applied identically at every parameter draw).}
 }
 \value{
 An object of class \code{"dynhr_bayesian_cfcst"} with:

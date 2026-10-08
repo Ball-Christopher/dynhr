@@ -222,12 +222,17 @@ build_dsge_state_space <- function(m, dr, obs_vars, verbose = TRUE,
       d                 = ys_obs,               # obs intercept: ys[obs_vars]
       ## observation_trends: the intercept of period t (t-th data row) is
       ## d + obs_trend * (obs_trend_first_obs + t - 1). NULL = no trend.
-      obs_trend         = .obs_trend_slopes(m, params, obs_vars),
+      ## A balanced-growth dr (dr$growth) adds g[obs] to these slopes.
+      obs_trend         = .obs_trend_slopes(m, params, obs_vars, dr = dr),
       obs_trend_first_obs = m$observation_trends$first_obs %||% 1L,
       ys                = dr$ys,                # full steady state (all endo)
       ghx               = dr$ghx,
       ghu               = dr$ghu,
       ghx_col_to_endo   = ghx_col_to_endo,     # maps ghx column i -> endo index
+      ## IRIS's state coordinates, in which lik_init = "fixed_unknown" builds
+      ## its init (R/kalman-fixed-unknown.R); NULL = dynhr's states.
+      init_coordinates  = .fu_init_coordinates(m, endo_names,
+                                               state_names_ordered, obs_vars),
       obs_idx           = obs_idx,
       state_names       = state_names_ordered,  # in ghx column order
       obs_names         = obs_vars,            # observable names (character)
@@ -417,6 +422,29 @@ build_dsge_state_space <- function(m, dr, obs_vars, verbose = TRUE,
 #'       for comparing against \code{kalman_filter(lik_init = "kappa")};
 #'       its log-likelihood carries an arbitrary additive constant, so it is
 #'       not comparable across initialisations.}
+#'     \item{\code{"fixed_unknown"}}{IRIS's initialisation (see
+#'       \code{\link{kalman_filter}}): the unit-root level is a fixed unknown
+#'       estimated by GLS. The SMOOTHED states and shocks (and every
+#'       covariance, \code{P_filt_last} included) are those of the exact
+#'       diffuse smoother, which they equal; \code{filtered_states} /
+#'       \code{updated_states} / \code{predicted_states} and \code{loglik}
+#'       are the fixed-unknown filter's (corrected by the GLS level, and the
+#'       concentrated log-likelihood), with the diffuse log-likelihood kept in
+#'       \code{diagnostics$loglik_diffuse}. \code{diagnostics} also carries
+#'       \code{n_unit}, \code{n_unit_identified},
+#'       \code{init_unit_estimate}, \code{init_coordinates} (the IRIS state
+#'       vector the init is built on -- all non-forward-looking,
+#'       non-measurement variables, static ones included; see
+#'       \code{\link{kalman_filter}}) and \code{fixed_unknown_recursion}
+#'       (\code{"sequential"} when a singular innovation covariance, e.g. an
+#'       observed exact identity, made the filter drop exactly predictable
+#'       components; counts in \code{fixed_unknown_dropped} /
+#'       \code{fixed_unknown_dropped_informative}). Refuses \code{P0} and \code{known_shocks}
+#'       (class \code{dynhr_error_fixed_unknown_unsupported}); on a model with
+#'       no unit root it is \code{"stationary"}. With \code{pre_sample > 0}
+#'       the fixed unknown is the state BEFORE the padded periods, so the
+#'       log-likelihood is that of the padded sample (unlike the diffuse
+#'       prior, the placement of a fixed unknown matters).}
 #'   }
 #'   \strong{Changed in 0.9.3.2:} \code{"auto"} used to fall back to
 #'   \code{"kappa"} on a unit root, with a warning saying the loglik had a
@@ -563,6 +591,17 @@ build_dsge_state_space <- function(m, dr, obs_vars, verbose = TRUE,
 #'   (\code{"durbin-koopman"}, \code{"univariate"} or
 #'   \code{"sequential-diffuse"}).
 #'
+#'   On a BALANCED-GROWTH model (\code{dr$growth} non-zero, from
+#'   \code{solve_model(steady_options = list(growth = TRUE))}) the growth of
+#'   the observables is subtracted from the data as an observation trend
+#'   (period index \code{first_obs + t - 1}, added to any
+#'   \code{observation_trends} slope), the reported states stay deviations,
+#'   and \code{growth_path} (\eqn{T \times n_{state}}, same orientation and
+#'   columns as \code{smoothed_states}) holds the deterministic
+#'   \eqn{y_0 + g\,(first\_obs + t - 1)} of the state variables, so LEVELS are
+#'   \code{growth_path + smoothed_states} (likewise for the filtered and
+#'   predicted paths). Absent otherwise.
+#'
 #'   During a diffuse phase the reported \code{filtered_cov} /
 #'   \code{predicted_cov} are the PROPER (\eqn{P_{star}}) part; the diffuse
 #'   part is unbounded by construction. \code{diagnostics$diffuse_periods}
@@ -602,7 +641,7 @@ kalman_smoother <- function(data, dr, model, params = NULL,
                             d = NULL, Q = NULL, me_extra = NULL,
                             shock_scale = NULL,
                             lik_init = c("auto", "stationary", "kappa",
-                                         "diffuse"),
+                                         "diffuse", "fixed_unknown"),
                             kalman_tol = 1e-10, a0 = NULL, P0 = NULL,
                             pre_sample = 0L, known_shocks = NULL,
                             shock_means = NULL,
@@ -643,12 +682,19 @@ kalman_smoother <- function(data, dr, model, params = NULL,
 
   ss <- build_dsge_state_space(model, dr, obs_vars, verbose = FALSE,
                                params = params)
-  .kalman_smoother_ss(data, ss, d = d, me_variance = me_variance, Q = Q,
-                      me_extra = me_extra, shock_scale = shock_scale,
-                      lik_init = lik_init, kalman_tol = kalman_tol,
-                      a0 = a0, P0 = P0, pre_sample = pre_sample,
-                      known_shocks = known_shocks, shock_means = shock_means,
-                      shock_timing = shock_timing, method = method)
+  res <- .kalman_smoother_ss(data, ss, d = d, me_variance = me_variance, Q = Q,
+                             me_extra = me_extra, shock_scale = shock_scale,
+                             lik_init = lik_init, kalman_tol = kalman_tol,
+                             a0 = a0, P0 = P0, pre_sample = pre_sample,
+                             known_shocks = known_shocks,
+                             shock_means = shock_means,
+                             shock_timing = shock_timing, method = method)
+  ## Balanced growth: the deterministic y0 + g t of the states over the
+  ## caller's sample, in this function's orientation (rows = periods), so
+  ## LEVELS = growth_path + smoothed_states.
+  gp <- .growth_state_path(dr, model, ss$state_names, NROW(data))
+  if (!is.null(gp)) res$growth_path <- t(gp)
+  res
 }
 
 
@@ -673,7 +719,7 @@ kalman_smoother <- function(data, dr, model, params = NULL,
 .kalman_smoother_ss <- function(data, ss, d = NULL, me_variance = 0,
                                 Q = NULL, me_extra = NULL, shock_scale = NULL,
                                 lik_init = c("auto", "stationary", "kappa",
-                                             "diffuse"),
+                                             "diffuse", "fixed_unknown"),
                                 kalman_tol = 1e-10, a0 = NULL, P0 = NULL,
                                 pre_sample = 0L, known_shocks = NULL,
                                 shock_means = NULL,
@@ -858,7 +904,9 @@ kalman_smoother <- function(data, dr, model, params = NULL,
         reason = if (identical(lik_init_used, "diffuse"))
           "unit root(s) in T: the unconditional state covariance does not exist"
         else if (identical(lik_init_used, "stationary"))
-          "no unit roots: the exact diffuse initialisation is the stationary one"
+          paste0("no unit roots: the ", if (identical(lik_init_orig,
+                 "fixed_unknown")) "fixed-unknown" else "exact diffuse",
+                 " initialisation is the stationary one")
         else "requested initialisation was not available")))
     routing <- .kf_routing_df(routing)
     dd <- if (length(d_diffuse) != 1L || is.na(d_diffuse)) NA_integer_
@@ -1074,7 +1122,7 @@ kalman_smoother <- function(data, dr, model, params = NULL,
          "Lyapunov solve returned NaN -- TT has unit-root eigenvalues, so the ",
          "unconditional state covariance does not exist. Use lik_init = ",
          "\"kappa\" (or \"auto\") for a nonstationary model.", call. = FALSE)
-  if (anyNA(P_ss)) {
+  if (anyNA(P_ss) && !identical(lik_init, "fixed_unknown")) {
     ## Unit roots detected. This used to warn and substitute a large finite
     ## prior P0 = 1e6 * I -- an approximating sequence whose smoothed states
     ## are close (measured: ~5e-8 on the local-level fixture) but whose
@@ -1101,7 +1149,8 @@ kalman_smoother <- function(data, dr, model, params = NULL,
   ##     .kf_univariate_loop_R applies in the filter.
   ## Each builds its inputs here and leaves through the shared exit.
   .smoother_sequential <- function(P_star_s, P_inf_s, lik_init_used,
-                                   method_used, routing = list()) {
+                                   method_used, routing = list(),
+                                   fu_init = NULL) {
     nb   <- n_s + n_shk
     s_ix <- seq_len(n_s); e_ix <- n_s + seq_len(n_shk)
     Sig_list <- lapply(seq_len(TT), function(t)
@@ -1138,6 +1187,34 @@ kalman_smoother <- function(data, dr, model, params = NULL,
     dimnames(ds$filtered_cov)  <- dn3
     dimnames(ds$predicted_cov) <- dn3
     dimnames(ds$smoothed_cov)  <- dn3
+    ## lik_init = "fixed_unknown": the smoothed states are the exact diffuse
+    ## smoother's (the GLS estimate of a fixed unknown unit-root level and the
+    ## flat diffuse prior give the same smoothed path); the forward paths and
+    ## the log-likelihood are the fixed-unknown filter's, run here on the SAME
+    ## deviation data, ME and shock covariances (R/kalman-fixed-unknown.R).
+    fu <- NULL
+    if (!is.null(fu_init)) {
+      ## A singular F hands the fixed-unknown recursion to its sequential
+      ## form, which drops exactly predictable components by the same
+      ## kalman_tol rule as the sequential smoother above (whose drop counts
+      ## are the ones reported).
+      fu <- .kf_fixed_unknown_core(Ydev, TT_mat, R_mat, Z_mat, D_mat, Q,
+                                   a0_user, me_mat,
+                                   shock_scale = if (has_shock_scale) shock_scale,
+                                   init = fu_init, return_filtered = TRUE,
+                                   kalman_tol = kalman_tol)
+      if (!isTRUE(fu$ok))
+        .dynhr_abort("kalman_smoother: lik_init = \"fixed_unknown\": the ",
+                     "fixed-unknown filter hit a non-finite step. Use ",
+                     "lik_init = \"diffuse\".",
+                     class = "dynhr_error_fixed_unknown_unsupported")
+      ds$filtered_states  <- t(fu$filtered)
+      ds$predicted_states <- t(fu$predicted)
+      colnames(ds$filtered_states)  <- nm
+      colnames(ds$predicted_states) <- nm
+      ds$loglik_diffuse <- ds$loglik
+      ds$loglik <- fu$loglik
+    }
     out <- list(
       smoothed_states = ds$smoothed_states,
       smoothed_shocks = ds$smoothed_shocks,
@@ -1156,7 +1233,54 @@ kalman_smoother <- function(data, dr, model, params = NULL,
         d_diffuse = if (isTRUE(ds$diffuse_failed)) TT else ds$d_diffuse,
         dropped = ds$n_skipped, data = data, method_used = method_used,
         routing = routing))
+    if (!is.null(fu)) {
+      out$diagnostics$n_unit <- fu$n_unit
+      out$diagnostics$init_coordinates <- fu_init$coordinates
+      out$diagnostics$fixed_unknown_recursion <- fu$recursion
+      out$diagnostics$fixed_unknown_dropped <- sum(fu$dropped)
+      out$diagnostics$fixed_unknown_dropped_informative <-
+        sum(fu$dropped_informative)
+      out$diagnostics$n_unit_identified <- fu$rank_S
+      out$diagnostics$init_unit_estimate <-
+        stats::setNames(fu$init_unit_estimate, nm)
+      ## The exact diffuse log-likelihood of the same data, for reference: it
+      ## differs from the concentrated one by the diffuse-phase terms.
+      out$diagnostics$loglik_diffuse <- ds$loglik_diffuse
+    }
     .smoother_finish(out)
+  }
+
+  ## lik_init = "fixed_unknown": the smoothed states are the exact diffuse
+  ## smoother's; the forward paths and loglik come from the fixed-unknown
+  ## filter (see .smoother_sequential). With no unit root it IS "stationary".
+  if (identical(lik_init, "fixed_unknown")) {
+    bad <- c(if (!is.null(P0_user)) "`P0` (`a0` composes)",
+             if (!is.null(known_sm)) "known_shocks")
+    if (length(bad))
+      .dynhr_abort("kalman_smoother: lik_init = \"fixed_unknown\" does not ",
+                   "support ", paste(bad, collapse = ", "), ".",
+                   class = "dynhr_error_fixed_unknown_unsupported")
+    dp <- .kf_diffuse_P0(TT_mat, RQR)
+    if (dp$nunit == 0L) {
+      lik_init <- "stationary"
+      P_ss     <- solve_lyapunov(TT_mat, RQR)
+    } else {
+      rt <- if (identical(method, "durbin-koopman"))
+        list(c(from = "durbin-koopman", to = "sequential-diffuse",
+               reason = paste("the fixed-unknown smoother is the exact diffuse",
+                              "smoother, implemented in sequential form")))
+      else list()
+      ## The smoother runs on the (coordinate-invariant) exact diffuse
+      ## initialisation `dp`; the fixed-unknown filter's init is built in
+      ## IRIS's state coordinates (ss$init_coordinates, from
+      ## build_dsge_state_space), as kalman_filter() builds it.
+      fu_ini <- .fu_init(TT_mat, R_mat, Q, ss$state_names,
+                         coords = ss$init_coordinates, ghx = ss$ghx,
+                         ghu = ss$ghu, endo_names = ss$endo_names)
+      return(.smoother_sequential(dp$P_star, dp$P_inf, "fixed_unknown",
+                                  "sequential-diffuse", routing = rt,
+                                  fu_init = fu_ini))
+    }
   }
 
   if (identical(lik_init, "diffuse")) {

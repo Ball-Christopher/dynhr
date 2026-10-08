@@ -16,7 +16,7 @@ kalman_filter(
   return_ll_contrib = FALSE,
   method = c("auto", "dare", "chandrasekhar", "standard", "reference", "univariate",
     "univariate_ss"),
-  lik_init = c("auto", "stationary", "diffuse", "kappa"),
+  lik_init = c("auto", "stationary", "diffuse", "kappa", "fixed_unknown"),
   me_extra = NULL,
   shock_scale = NULL,
   obs_aggregation = NULL,
@@ -26,6 +26,7 @@ kalman_filter(
   known_shocks_sd = NULL,
   shock_means = NULL,
   shock_timing = c("dated", "transition_next"),
+  singular_obs = c("skip", "reject"),
   me_floor_check = getOption("dynhr.me_floor_check", TRUE),
   .need_final_cov = TRUE
 )
@@ -78,9 +79,11 @@ covariances and the exact-diffuse phase with singular \code{F_inf}).}
 
 \item{lik_init}{character; initialization of the state covariance \code{P0}
 (and, for unit-root models, the diffuse covariance): \code{"auto"}
-(default), \code{"stationary"}, \code{"diffuse"}, or \code{"kappa"}.
+(default), \code{"stationary"}, \code{"diffuse"}, \code{"kappa"}, or
+\code{"fixed_unknown"} (IRIS's default initialization; see Details).
 See Details. Supplying \code{P0} overrides this and is reported back as
-\code{lik_init = "user"}.}
+\code{lik_init = "user"} (except with \code{"fixed_unknown"}, which
+refuses it).}
 
 \item{me_extra}{\code{n_obs x T} matrix of additional per-observable,
 per-period measurement-error variances (default \code{NULL}, no extra
@@ -252,6 +255,21 @@ which is what a judgemental adjustment usually is. \code{NULL} or
 }
 Ignored when \code{shock_means} is \code{NULL}.}
 
+\item{singular_obs}{What to do when the univariate filter skips an
+observation component whose forecast variance is at most
+\code{kalman_tol} but whose innovation is NOT negligible (an
+\emph{informative} drop: data the model assigns zero probability).
+\code{"skip"} (default here) is the Dynare convention: the component is
+ignored, \code{$loglik} stays finite and a warning of class
+\code{dynhr_warning_dropped_observations} is raised. \code{"reject"}
+returns \code{loglik = -Inf} whenever
+\code{$diagnostics$n_dropped_informative > 0} (diagnostics are kept and
+\code{$diagnostics$singular_obs_rejected} is \code{TRUE}), so the support
+status does not depend on observable order. Estimation closures
+(\code{make_log_posterior}, \code{make_posterior}, ...) default to
+\code{"reject"}. Non-informative drops (exact redundant duplicates,
+round-off innovations) never trigger it.}
+
 \item{me_floor_check}{Logical: when \code{me_variance > 0}, compare it
 against the smallest eigenvalue of the model-implied (ME-free) steady-
 state innovation covariance \code{F} and warn when the assumed
@@ -286,6 +304,15 @@ A list with
     \item{\code{filtered_states}}{the SAME matrix as
       \code{updated_states}, under the name the rest of the package uses.}
     \item{\code{loglik_contrib}}{per-period contributions, when asked for.}
+    \item{\code{growth_path}}{BALANCED-GROWTH models only (\code{dr$growth}
+      non-zero, from \code{solve_model(steady_options = list(growth =
+      TRUE))}): the deterministic path \eqn{y_0 + g\,(first\_obs + t - 1)}
+      of the state variables, \code{n_state x T} with the same rows as
+      \code{updated_states}, so that LEVELS are \code{growth_path +
+      updated_states}. The reported states stay deviations; the growth of
+      the observables is subtracted from the data as an observation trend
+      (added to any \code{observation_trends} slope, same period index).
+      Absent otherwise.}
     \item{\code{final_state}, \code{final_cov}}{the state hand-off:
       \eqn{s_{T|T}} and \eqn{Var(s_T \mid y_{1:T})}, named, in the same
       convention \code{a0} / \code{P0} take. \code{final_cov} is
@@ -308,7 +335,8 @@ A list with
       ignored although the model deemed it impossible; a positive count
       raises a warning of class
       \code{dynhr_warning_dropped_observations}, and the log-likelihood
-      value is left unchanged), \code{known_shocks} (how many injected cells, and how
+      value is left unchanged unless \code{singular_obs = "reject"}, which sets it
+      to \code{-Inf}), \code{known_shocks} (how many injected cells, and how
       many of them were deterministic) and \code{loglik_type}
       (\code{"marginal"}, \code{"joint"} or \code{"conditional"}).
       \code{\link{kalman_smoother}} returns the same fields.}
@@ -426,6 +454,66 @@ forced \code{lik_init = "diffuse"} on near-unit-root models -- it returns
 the (correct) stationary likelihood there. To force the exact-diffuse
 treatment for every near-unit root, pass \code{lik_init = "diffuse"}
 explicitly.
+
+\strong{\code{lik_init = "fixed_unknown"} (IRIS's initialization):} the
+augmented filter of de Jong (1991). The unit-root subspace of \code{TT}
+(the same Schur block, and the same \eqn{||\lambda| - 1| < 10^{-6}}
+rule, as \code{"diffuse"}) carries a FIXED UNKNOWN level: \eqn{s_0 = a_0 +
+U_u \delta}, with the stationary Lyapunov covariance on the complement and
+none along \eqn{U_u}. "The orthogonal complement" depends on the state
+COORDINATES (the diffuse prior and the smoothed states do not), so the
+init is built where IRIS builds it -- on the IRIS state vector: every
+endogenous variable that is not forward-looking (no lead; lead
+auxiliaries excluded) and is not a measurement variable, STATIC ones
+(identities such as \code{l = n + p + er}) included, plus the lag
+auxiliaries -- and mapped to the filter's states (a subset). A
+measurement variable is an observable (\code{obs_vars} or the model's
+\code{varobs}) that is not itself a state; an observable that IS a state
+stays. The set used is \code{$diagnostics$init_coordinates} (the filter's
+own states when the model does not record which variables are
+forward-looking). The filter runs once, tracking the response
+\eqn{A_t} of the filtered state to \eqn{\delta}; \eqn{\delta} is then the
+GLS estimate \eqn{S^{+} s} (a pseudo-inverse: a direction the data does not
+identify is estimated as 0) and every reported state is corrected:
+\code{updated_states[, t]} \eqn{+ A_t \delta}, \code{predicted_states[,
+t]} \eqn{+ T A_{t-1} \delta}. Unlike \code{"diffuse"}, the early
+periods therefore use the WHOLE sample's estimate of the initial level --
+which is what IRIS's \code{filter()} reports; the smoothed states are the
+same. \code{loglik} is concentrated over \eqn{\delta},
+\eqn{\ell_0 + \tfrac12 \delta' s}, with NO \eqn{-\tfrac12 \log|S|} term:
+it equals IRIS's \code{loglik(..., 'relative=', false)} (IRIS's default
+\code{relative = true} also profiles out a common scale factor, which is
+not reproduced). \code{loglik_contrib} holds the contributions of the
+CORRECTED innovations \eqn{v_t - Z A_{t-1} \delta}; they sum to
+\code{loglik} exactly. \code{final_state} is corrected and
+\code{final_cov} is \eqn{P_T + A_T S^{+} A_T'}, the MSE with \eqn{\delta}
+estimated (the exact diffuse filter's once \eqn{\delta} is identified).
+\code{$diagnostics} adds \code{n_unit}, \code{n_unit_identified} (rank of
+\eqn{S}), \code{init_unit_estimate} (\eqn{U_u \delta}, in state
+coordinates) and \code{init_coordinates}. It runs on its own per-step multivariate R recursion
+(\code{$method} \code{"standard"}, or \code{"dare"} when that was asked
+for) and handles missing observations, \code{me_variance} / \code{me_extra},
+\code{shock_scale}, \code{shock_means}, \code{a0} and trend /
+balanced-growth models. A singular innovation covariance (e.g. an
+observable that is an exact identity of others) hands the recursion to
+its SEQUENTIAL (univariate) form, which drops a component whose
+conditional variance is at most \code{kalman_tol}, as the univariate
+filter does: \code{$method} is then \code{"univariate"}, a
+\code{dynhr_warning_fixed_unknown_sequential} warning says so, and the
+drops are in \code{$diagnostics$n_dropped} /
+\code{n_dropped_informative} (informative = a non-negligible CORRECTED
+innovation; \code{dynhr_warning_dropped_observations},
+\code{singular_obs = "reject"} as for the univariate filter). The filtered
+states then equal those of the same data with the redundant observables
+missing; the log-likelihood is that of the kept components, so it differs
+from the redundant-observables-missing one by the Jacobian of the change
+of variables between the kept and the dropped components (as the
+univariate filter's does). Refused with class
+\code{dynhr_error_fixed_unknown_unsupported}: \code{P0},
+\code{method = "chandrasekhar"} / \code{"univariate"} /
+\code{"univariate_ss"}, \code{obs_aggregation}, \code{known_shocks}. On a
+model with no unit root it is \code{"stationary"} -- run as exactly that,
+with a \code{$diagnostics$routing} row saying so.
 }
 \section{State timing}{
 
@@ -561,6 +649,8 @@ Kalman, R. E. (1960). A new approach to linear filtering and prediction
     Analysis}, 21(3), 281-296.
   Strid, I., & Walentin, K. (2011). Block Kalman filtering for large-scale
     DSGE models. \emph{Computational Economics}, 39(2), 145-160.
+  de Jong, P. (1991). The diffuse Kalman filter. \emph{The Annals of
+    Statistics}, 19(2), 1073-1083.
 }
 \seealso{
 \code{\link{kalman_smoother}}, \code{\link{make_posterior}},

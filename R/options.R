@@ -435,14 +435,28 @@ dynhr_reset_options <- function(...) {
   unname(tools::md5sum(tf))
 }
 
-# First line of the GIT_COMMIT stamp under a package root (installed layout,
-# or <source>/inst under pkgload); NA when absent.
+# The commit SHA of the GIT_COMMIT stamp under a package root (installed
+# layout, or <source>/inst under pkgload); NA when absent, malformed, or
+# STALE. Line 1 is the SHA; line 2 ("version: x.y.z", written since
+# 2026-07-29) is the package version the stamp was made at. A stamp whose
+# version disagrees with the DESCRIPTION beside it names some other build's
+# commit (public 0.9.4.48 shipped one stamped 0.9.4.43), so it is reported
+# as unknown -- NA lets build-identity checks fall back to the code
+# fingerprint instead of trusting it. A bare-SHA stamp (no line 2) predates
+# the version line and is accepted.
 .dynhr_git_stamp_at <- function(path) {
   for (f in file.path(path, c("GIT_COMMIT", file.path("inst", "GIT_COMMIT")))) {
-    if (file.exists(f)) {
-      txt <- trimws(readLines(f, n = 1L, warn = FALSE))
-      if (length(txt) == 1L && nzchar(txt)) return(txt)
+    if (!file.exists(f)) next
+    txt <- trimws(readLines(f, n = 2L, warn = FALSE))
+    if (!length(txt) || !grepl("^[0-9a-f]{40}$", txt[[1L]])) return(NA_character_)
+    if (length(txt) >= 2L && grepl("^version:", txt[[2L]])) {
+      stamp_ver <- trimws(sub("^version:", "", txt[[2L]]))
+      dfile <- file.path(path, "DESCRIPTION")
+      desc_ver <- if (file.exists(dfile))
+        unname(read.dcf(dfile, fields = "Version")[1L, 1L]) else NA_character_
+      if (is.na(desc_ver) || !identical(stamp_ver, desc_ver)) return(NA_character_)
     }
+    return(txt[[1L]])
   }
   NA_character_
 }

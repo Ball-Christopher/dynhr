@@ -30,6 +30,7 @@ run_full_estimation(
     "student_t", "pruned", "global_pf", "pkf", "ppf", "copf"),
   lik_init = "auto",
   filter_method = "auto",
+  singular_obs = "reject",
   freq_band = c(0, pi),
   system_priors = NULL,
   seed = 42L,
@@ -169,6 +170,10 @@ the filter of an OBC model) -- every likelihood of
 (default \code{"auto"}); one of the \code{method} choices of
 \code{\link{kalman_filter}}.  See \code{\link{make_log_posterior}}.
 Any value but \code{"auto"} with a non-Gaussian likelihood is an error.}
+
+\item{singular_obs}{Informative-singular-observation policy of the Gaussian
+value path: \code{"reject"} (default; log-likelihood \code{-Inf}) or
+\code{"skip"} (Dynare convention). See \code{\link{make_log_posterior}}.}
 
 \item{freq_band}{Numeric(2) \code{c(lo, hi)} in radians; Whittle band
 restriction (default \code{c(0, pi)}, ignored for other likelihoods).}

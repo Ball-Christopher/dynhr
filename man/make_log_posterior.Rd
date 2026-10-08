@@ -15,6 +15,7 @@ make_log_posterior(
     "ppf", "copf", "sv_rbpf", "global_pf"),
   lik_init = "auto",
   filter_method = "auto",
+  singular_obs = "reject",
   me_extra = NULL,
   shock_scale = NULL,
   freq_band = c(0, pi),
@@ -63,7 +64,13 @@ shocks block (or \code{estimated_params}) to specify shock shapes.}
 (default \code{"auto"}: stationary models use the Lyapunov \code{P0};
 unit-root models use the exact diffuse initialization). See
 \code{\link{kalman_filter}} for \code{"stationary"}, \code{"diffuse"},
-and \code{"kappa"}. Ignored when \code{likelihood = "cumulant"} or
+\code{"kappa"} and \code{"fixed_unknown"} (IRIS's default: the
+unit-root level is a fixed unknown estimated by GLS and concentrated out
+of the likelihood; Gaussian, non-Markov-switching, non-mixed-frequency
+only -- other combinations are refused at build time with class
+\code{dynhr_error_fixed_unknown_unsupported}; its gradient is finite
+differences, as for \code{"kappa"}). An unknown value is an error at
+build time. Ignored when \code{likelihood = "cumulant"} or
 \code{likelihood = "whittle"}.}
 
 \item{filter_method}{Kalman filter recursion for the value path of
@@ -92,6 +99,22 @@ the first successful evaluation) and \code{n_filter_fallback} (draws
 re-run on the standard filter). The exact gradient
 (\code{\link{make_posterior_grad}}) runs its own kernels:
 \code{filter_method} governs the value path only.}
+
+\item{singular_obs}{Policy for an \emph{informative singular observation}:
+an observation component the univariate Kalman filter would skip because
+its forecast variance is at most \code{kalman_tol}, while its innovation
+is NOT negligible (the data lie outside the model's support).
+\code{"reject"} (default) makes the log-likelihood \code{-Inf} whenever
+\code{kalman_filter()$diagnostics$n_dropped_informative > 0}, so an
+optimiser or sampler is never rewarded for a degenerate parameter draw
+and the support status does not depend on observable order.
+\code{"skip"} restores the Dynare convention (the component is ignored, a
+finite value is returned with a
+\code{dynhr_warning_dropped_observations}). Non-informative drops (exact
+redundant duplicates, round-off innovations) are allowed under both.
+Applies to \code{likelihood = "gaussian"}; recorded on the closure as
+\code{attr(, "filter_method")$singular_obs}. Invalid values have class
+\code{dynhr_error_singular_obs}.}
 
 \item{me_extra}{Optional \code{n_obs x T} matrix of ADDITIONAL per-period
 measurement-error variance, added on top of \code{me_variance}. Rows are

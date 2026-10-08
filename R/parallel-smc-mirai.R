@@ -72,6 +72,7 @@ run_smc_mirai <- function(
     system_priors   = NULL,
     lik_init        = "auto",
     filter_method   = "auto",
+    singular_obs   = "reject",
     tpf_options     = list(),
     gradient_policy = "auto",
     log_post_fn     = NULL,
@@ -86,6 +87,7 @@ run_smc_mirai <- function(
     system_priors   <- ctx$system_priors
     lik_init        <- ctx$lik_init        %||% "auto"
     filter_method   <- ctx$filter_method   %||% "auto"
+    singular_obs <- ctx$singular_obs %||% "reject"
     tpf_options     <- ctx$tpf_options     %||% list()
     gradient_policy <- ctx$gradient_policy %||% "auto"
   }
@@ -120,6 +122,7 @@ run_smc_mirai <- function(
                            system_priors = system_priors,
                            lik_init = lik_init,
                            filter_method = filter_method,
+                           singular_obs = singular_obs,
                            tpf_options = tpf_options)
   }
   on.exit({ mirai::daemons(NULL); if (!is.null(sh)) rm(sh) }, add = TRUE)

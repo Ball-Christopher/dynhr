@@ -407,8 +407,17 @@ rwmh <- function(log_post_fn, theta0, Sigma_prop,
     # parameters are forced), then restore position, scale, proposal covariance,
     # accept count, burn-in and draw count, and -- crucially -- the RNG state,
     # so the continuation draws the SAME random stream a single long run would.
+    ## ALL verification (meta, then the log density at the saved position)
+    ## happens BEFORE any file is touched, so a refused resume leaves the
+    ## checkpoint byte-identical.
     .ckpt_meta_verify(ckpt_paths$meta, "rwmh", checkpoint$fingerprint)
     st <- .ckpt_load_state(ckpt_paths$state)
+    if (!isFALSE(checkpoint$lp_check)) {
+      ## Re-evaluate the SAME target (incl. transform / Jacobian) at the saved
+      ## state; the RNG is restored from the checkpoint below, so this
+      ## evaluation cannot perturb the stream.
+      .ckpt_verify_lp(st$lp_curr, lp_target(st$state_curr)$logpost, "rwmh")
+    }
     state_curr    <- st$state_curr
     lp_curr       <- st$lp_curr
     trace_lp_curr <- st$trace_lp_curr
@@ -418,6 +427,20 @@ rwmh <- function(log_post_fn, theta0, Sigma_prop,
     n_accept      <- st$n_accept
     n_burn        <- st$n_burn          # original burn-in fixes the retained set
     i_start       <- st$n_done
+    ## Adapter state (saved AFTER the saved iteration's updates).
+    if (!is.null(st$accepted))
+      accepted[seq_along(st$accepted)] <- st$accepted
+    if (adapt_cov) {
+      if (is.null(st$state_hist) && i_start < n_burn)
+        stop("checkpoint resume: adapt_cov = TRUE but the saved state carries ",
+             "no Haario history. Resume with the same adapt_cov setting.",
+             call. = FALSE)
+      state_hist <- st$state_hist
+    }
+    block_accept_window <- st$block_accept_window %||% 0L
+    block_total_window  <- st$block_total_window  %||% 0L
+    block_accept_total  <- st$block_accept_total  %||% 0L
+    block_total_total   <- st$block_total_total   %||% 0L
     .ckpt_truncate(ckpt_paths, st$n_done, n_par)  # drop any post-state partial flush
     assign(".Random.seed", st$rng, envir = .GlobalEnv)
   } else {
@@ -506,21 +529,19 @@ rwmh <- function(log_post_fn, theta0, Sigma_prop,
     }
 
     stored_i <- if (!is.null(transform)) transform$to_constrained(state_curr) else state_curr
+    ckpt_save_now <- FALSE
     if (ckpt) {
       buf_i <- buf_i + 1L
       buf[buf_i, ]  <- stored_i
       buf_lp[buf_i] <- trace_lp_curr
       if (buf_i >= flush_every || i == n_draws) {
-        # Flush the buffer to disk and persist the restart state (state written
-        # atomically AFTER the draws, so n_done never exceeds what is on disk).
+        # Flush the buffer to disk now; the restart state is saved at the END
+        # of the iteration (after adaptation), written atomically AFTER the
+        # draws, so n_done never exceeds what is on disk.
         .ckpt_append_draws(ckpt_paths$draws, buf[seq_len(buf_i), , drop = FALSE])
         .ckpt_append_lp(ckpt_paths$lp, buf_lp[seq_len(buf_i)])
-        .ckpt_save_state(ckpt_paths$state, list(
-          state_curr = state_curr, lp_curr = lp_curr, trace_lp_curr = trace_lp_curr,
-          scale = scale, Sigma_curr = Sigma_curr, n_done = i, n_burn = n_burn,
-          n_accept = n_accept, n_draws_target = n_draws,
-          rng = get(".Random.seed", envir = .GlobalEnv)))
         buf_i <- 0L
+        ckpt_save_now <- TRUE
       }
     } else {
       chain[i, ]       <- stored_i
@@ -554,6 +575,23 @@ rwmh <- function(log_post_fn, theta0, Sigma_prop,
       }
       if (recent_rate > target_rate + 0.05) scale <- scale * 1.1
       else if (recent_rate < target_rate - 0.05) scale <- scale * 0.9
+    }
+
+    ## ---- Restart state: saved AFTER every per-iteration update so a resume
+    ## continues exactly (scale, Sigma, Haario history, acceptance window and
+    ## block counters are all post-iteration-i values).
+    if (ckpt_save_now) {
+      .ckpt_save_state(ckpt_paths$state, list(
+        state_curr = state_curr, lp_curr = lp_curr, trace_lp_curr = trace_lp_curr,
+        scale = scale, Sigma_curr = Sigma_curr, n_done = i, n_burn = n_burn,
+        n_accept = n_accept, n_draws_target = n_draws,
+        accepted = if (i <= n_burn) accepted[seq_len(i)] else NULL,
+        state_hist = if (adapt_cov && i <= n_burn) state_hist else NULL,
+        block_accept_window = block_accept_window,
+        block_total_window = block_total_window,
+        block_accept_total = block_accept_total,
+        block_total_total = block_total_total,
+        rng = get(".Random.seed", envir = .GlobalEnv)))
     }
 
     if (i %% 1000 == 0 || i == n_draws) {

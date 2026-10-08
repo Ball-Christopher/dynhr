@@ -477,9 +477,15 @@
 #'   side, no filter pass); for the cumulant and pruned likelihoods (whose
 #'   system prior sees a lifted decision rule) by a central difference of the
 #'   system-prior term the forward posterior closure itself evaluates.
+#' @param singular_obs \code{"reject"} (default) or \code{"skip"}: the
+#'   informative-singular-observation policy of the Gaussian objective being
+#'   differentiated, as in \code{\link{make_log_posterior}}. It must match the
+#'   posterior being sampled. Under \code{"reject"} the fused value is
+#'   \code{-Inf} wherever the objective's is.
 #' @param lik_init Kalman filter \code{P0} initialization of the Gaussian
 #'   likelihood being differentiated: \code{"auto"} (default),
-#'   \code{"stationary"}, \code{"diffuse"} or \code{"kappa"}, exactly as in
+#'   \code{"stationary"}, \code{"diffuse"}, \code{"kappa"} or
+#'   \code{"fixed_unknown"}, exactly as in
 #'   \code{\link{make_log_posterior}} -- it must match the \code{lik_init} of
 #'   the posterior being sampled or optimized, because the initializations
 #'   are different likelihoods (on a root within \code{1e-6} of the unit
@@ -488,12 +494,13 @@
 #'   per draw: the stationary kernels, or the exact-diffuse adjoint where the
 #'   init in force is diffuse; under \code{"stationary"} a draw with a unit
 #'   root (whose log-posterior is \code{-Inf}) gets the prior score only.
-#'   \code{"kappa"} (the big-\code{kappa} approximation) has no analytic
+#'   \code{"kappa"} (the big-\code{kappa} approximation) and
+#'   \code{"fixed_unknown"} (the GLS-estimated unit-root level) have no analytic
 #'   kernel: \code{"implicit"}, \code{"adjoint"} and
 #'   \code{"adjoint_solution"} refuse it (an error of class
 #'   \code{dynhr_error_grad_lik_init}), \code{"auto"} resolves to
 #'   \code{"hybrid"}, and \code{"hybrid"} then differentiates every parameter
-#'   by finite differences of the kappa-initialized likelihood. Ignored by
+#'   by finite differences of that likelihood. Ignored by
 #'   the Whittle, cumulant and pruned likelihoods (as by their posteriors).
 #' @return \code{function(theta)} returning the gradient vector, suitable for the
 #'   \code{grad_fn} argument of \code{\link{nuts}}, named and in
@@ -579,7 +586,10 @@ make_posterior_grad <- function(model, data, prior_spec, obs_vars, compiled,
                                 power = NULL,
                                 system_priors = NULL,
                                 lik_init = c("auto", "stationary",
-                                             "diffuse", "kappa")) {
+                                             "diffuse", "kappa",
+                                             "fixed_unknown"),
+                                singular_obs = c("reject", "skip")) {
+  singular_obs <- match.arg(singular_obs)
   ## The analytic / adjoint gradients build the measurement intercept from
   ## dr$ys and ignore observation_trends; callers catch this and fall back to
   ## finite differences of the (trend-aware) Gaussian posterior.
@@ -647,12 +657,16 @@ make_posterior_grad <- function(model, data, prior_spec, obs_vars, compiled,
     make_log_posterior(model, data, prior_spec, obs_vars, compiled,
                        me_variance = me_variance,
                        me_extra = me_extra, shock_scale = shock_scale,
-                       power = power, lik_init = lik_init)
+                       power = power, lik_init = lik_init,
+                       singular_obs = singular_obs)
   }
   ## lik_init only changes the Gaussian likelihood (the other posteriors
   ## ignore it); keep it only there so the kappa gate below cannot fire for
   ## a likelihood it does not apply to.
-  use_kappa <- identical(likelihood, "gaussian") && identical(lik_init, "kappa")
+  ## "fixed_unknown" (the GLS unit-root level, R/kalman-fixed-unknown.R) has
+  ## no analytic kernel either: it is handled exactly like "kappa".
+  use_kappa <- identical(likelihood, "gaussian") &&
+    lik_init %in% c("kappa", "fixed_unknown")
   ## The big-kappa P0 (.build_P0) has no analytic Kalman kernel: the tangent /
   ## adjoint kernels start from the Lyapunov P0 or the exact-diffuse
   ## (P_inf, P_star) pair, which are different likelihoods (a kappa-dependent
@@ -661,11 +675,14 @@ make_posterior_grad <- function(model, data, prior_spec, obs_vars, compiled,
   if (use_kappa &&
       grad_method %in% c("implicit", "adjoint", "adjoint_solution"))
     .dynhr_abort("make_posterior_grad(): grad_method = \"", grad_method,
-                 "\" has no analytic kernel for lik_init = \"kappa\" (the ",
-                 "big-kappa P0 approximation). Use grad_method = \"hybrid\" ",
-                 "or \"auto\" (finite differences of the kappa-initialized ",
-                 "likelihood), or lik_init = \"diffuse\" (exact diffuse ",
-                 "initialization, which has an exact adjoint).",
+                 "\" has no analytic kernel for lik_init = \"", lik_init,
+                 "\"", if (identical(lik_init, "kappa"))
+                   " (the big-kappa P0 approximation)"
+                 else " (the GLS-estimated unit-root level)",
+                 ". Use grad_method = \"hybrid\" ",
+                 "or \"auto\" (finite differences of the ", lik_init,
+                 "-initialized likelihood), or lik_init = \"diffuse\" ",
+                 "(exact diffuse initialization, which has an exact adjoint).",
                  class = "dynhr_error_grad_lik_init")
   ## Time-varying inputs present? .kf_loglik_score_sigma (the analytic sigma
   ## score used by the "hybrid" closure) is NOT tv-aware: its loglik would be
@@ -927,9 +944,10 @@ make_posterior_grad <- function(model, data, prior_spec, obs_vars, compiled,
       singular_F = singular_F)
     ## singular_F warns on its own (dynhr_warning_grad_singular_F) below.
     if (identical(grad_method, "hybrid") && !isTRUE(singular_F)) {
-      if (identical(lik_init, "kappa")) {
+      if (lik_init %in% c("kappa", "fixed_unknown")) {
         .grad_warn_fd_fallback(
-          "grad_method = \"auto\" resolved to \"hybrid\": lik_init = \"kappa\" (big-kappa P0) has no analytic kernel",
+          paste0("grad_method = \"auto\" resolved to \"hybrid\": lik_init = \"",
+                 lik_init, "\" has no analytic kernel"),
           n_par = length(par_names))
       } else if (!is.null(base)) {
         dr0 <- base$dr; si0 <- dr0$state_idx
@@ -1777,7 +1795,36 @@ make_posterior_grad <- function(model, data, prior_spec, obs_vars, compiled,
     ## re-checks it against the objective at its start point). A non-finite
     ## one is replaced by the objective's own below, or noted by
     ## .fused_of()'s fallback.
-    if (is.finite(base_ll)) .fuse_note(base_ll)
+    ## singular_obs = "reject": the dense kernel gives no per-step singular-F
+    ## flag, and at a theta where the forward filter leaves the multivariate
+    ## recursion and makes an INFORMATIVE drop it can return a finite,
+    ## undropped loglik while the objective is -Inf. The fused value is the
+    ## sampler's log density on every draw, so it must not take the kernel's
+    ## number blindly: one compiled forward pass (structural solve cached; a
+    ## small fraction of the tangent / adjoint pass over np directions) decides
+    ## it, and a -Inf objective is noted as -Inf. (Under "skip" the dropped
+    ## likelihood is the Dynare one; the build-time singular_F gate covers that
+    ## mismatch as before.)
+    ##
+    ## The forward filter leaves the multivariate recursion (and so can make an
+    ## informative drop) only where .kf_F_singular() fires, whose FIRST test is
+    ## rcond1(F_t) < kalman_tol with rcond1 = 1 / (||F||_1 ||F^-1||_1). The
+    ## compiled kernels return min over ALL periods of that SAME quantity
+    ## (`min_rcond`, formula pinned against .kf_rcond1 by
+    ## test-review-1007-fused-value.R), a superset of the periods the forward
+    ## filter evaluates, so min_rcond >= kalman_tol means the forward filter
+    ## cannot have dropped anything: the gate cannot miss a fallback. Only below
+    ## it (or when a kernel reports no min_rcond: the diffuse and R reference
+    ## paths) is the forward pass paid for.
+    if (is.finite(base_ll)) {
+      mrc <- tang$min_rcond
+      need_fwd <- identical(singular_obs, "reject") &&
+        identical(likelihood, "gaussian") &&
+        (is.null(mrc) || length(mrc) != 1L || !is.finite(mrc) ||
+           mrc < .KF_ZERO_VAR_TOL)
+      if (need_fwd && !is.finite(lp_fn(theta)$loglik)) .fuse_note(-Inf)
+      else .fuse_note(base_ll)
+    }
 
     fd_names <- character(0)
     if (use_sol_adjoint && length(num_names) > 0) {
@@ -1874,6 +1921,7 @@ make_posterior_grad <- function(model, data, prior_spec, obs_vars, compiled,
 ##   "stationary" -- the Lyapunov P0 (stationary tangent/adjoint kernels);
 ##   "diffuse"    -- the exact diffuse (P_inf, P_star) init (diffuse adjoint);
 ##   "kappa"      -- the big-kappa P0 (no analytic kernel; FD only);
+##   "fixed_unknown" -- the GLS unit-root level (no analytic kernel; FD only);
 ##   "reject"     -- lik_init = "stationary" on a unit root: the posterior is
 ##                   -Inf there (make_log_posterior's stationarity guard).
 ## "auto" is kalman_filter()'s rule (diffuse only where the Lyapunov P0 is not
@@ -1888,6 +1936,7 @@ make_posterior_grad <- function(model, data, prior_spec, obs_vars, compiled,
 .grad_init_in_force <- function(TT, RR, Sigma_e, lik_init = "auto",
                                 dr = NULL) {
   if (identical(lik_init, "kappa")) return("kappa")
+  if (identical(lik_init, "fixed_unknown")) return("fixed_unknown")
   if (identical(lik_init, "auto"))
     return(if (.grad_needs_diffuse_init(TT, RR, Sigma_e, dr)) "diffuse"
            else "stationary")
@@ -2161,7 +2210,8 @@ make_posterior_grad <- function(model, data, prior_spec, obs_vars, compiled,
     return(if (3L %in% cumulant_orders && !(4L %in% cumulant_orders))
       "adjoint_solution" else "implicit")
   if (!identical(likelihood, "gaussian")) return("implicit")
-  if (identical(lik_init, "kappa") || isTRUE(singular_F)) return("hybrid")
+  if (lik_init %in% c("kappa", "fixed_unknown") || isTRUE(singular_F))
+    return("hybrid")
   has_missing <- anyNA(data)
   has_unit_root <- FALSE
   if (!is.null(base)) {

@@ -4,7 +4,13 @@
 \alias{hank_reiter_kalman_loglik}
 \title{Kalman log-likelihood of aggregate data on a Reiter state space}
 \usage{
-hank_reiter_kalman_loglik(data, rss, obs_vars = "A", me_variance = 0)
+hank_reiter_kalman_loglik(
+  data,
+  rss,
+  obs_vars = "A",
+  me_variance = 0,
+  singular_obs = c("reject", "skip")
+)
 }
 \arguments{
 \item{data}{\code{T x n_obs} matrix of DEMEANED observations (deviations from
@@ -19,6 +25,16 @@ the Lyapunov initialization requires a strictly stable \code{T}).}
 \item{me_variance}{Measurement-error variance added to each observable (needed
 when \code{length(obs_vars) > 1}: one structural shock, so more than
 one observable is stochastically singular without it).}
+
+\item{singular_obs}{\code{"reject"} (default) or \code{"skip"}: an
+observation component the filter skips because its forecast variance is
+at most \code{kalman_tol} although its innovation is not negligible (data
+the model cannot generate, e.g. more observables than shocks with
+\code{me_variance = 0} and inconsistent data) makes the log-likelihood
+\code{-Inf} under \code{"reject"}; \code{"skip"} keeps the Dynare
+convention (component ignored, finite value). Both raise a
+\code{dynhr_warning_dropped_observations} warning. See
+\code{\link{kalman_filter}}.}
 }
 \value{
 Scalar Gaussian log-likelihood.

@@ -35,7 +35,18 @@ calibrated values from the \code{.mod} file.}
 covariance matrix.  \code{NULL} uses the model's \code{shocks} block.}
 
 \item{steady_options}{List of options passed to \code{solve_steady()},
-e.g. \code{list(y0 = ..., tol = 1e-10)}.}
+e.g. \code{list(y0 = ..., tol = 1e-10)}. \code{list(growth = TRUE)}
+solves the BALANCED-GROWTH path of a \code{model(linear)} with unit roots
+and drift (see \code{\link{solve_steady_state}}). When the solved growth
+is non-zero, \code{dr$growth} carries it (named, every endogenous
+variable), \code{dr$ys} is the path's level at \eqn{t = 0}, and the
+returned \code{model} carries \code{balanced_growth = TRUE}: pass THAT
+model with the \code{dr} to \code{\link{kalman_filter}},
+\code{\link{kalman_smoother}} and \code{\link{make_log_posterior}}, which
+treat the growth of the observables as a deterministic observation trend
+(re-solved at every parameter draw in estimation) and refuse it where
+they cannot honour it. The decision rule (\code{ghx}, \code{ghu}) is that
+of the deviations from the path, unchanged.}
 
 \item{perturbation_options}{List of options passed to
 \code{solve_perturbation()}, e.g. \code{list(h = 1e-4, sigma3 = NULL)}.}

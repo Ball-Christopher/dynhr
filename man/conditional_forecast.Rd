@@ -19,6 +19,12 @@ conditional_forecast(
   plan = NULL,
   ctx = NULL,
   compiled = NULL,
+  shock_means = NULL,
+  shock_timing = c("dated", "transition_next"),
+  a0 = NULL,
+  P0 = NULL,
+  units = c("auto", "deviations", "levels"),
+  lik_init = c("auto", "stationary", "kappa", "diffuse", "fixed_unknown"),
   ...
 )
 }
@@ -104,6 +110,52 @@ a \code{DecisionRules2} object from \code{solve_perturbation_order2()} and
 (OBC piecewise-linear filter); if \code{NULL} the model is recompiled
 on-the-fly (slower).}
 
+\item{shock_means}{Deterministic shock MEANS (IRIS \code{vary}): every
+shock is \eqn{\varepsilon = m + u}, \eqn{u \sim N(0, Q)}, \eqn{m}
+deterministic. Either an \code{n_exo x (nrow(data) + horizon)} matrix
+(rows by name when named; \code{NA} or 0 = no shift, as in
+\code{\link{kalman_filter}}), or a NAMED numeric vector giving a constant
+mean for every period (unnamed shocks get 0). This is how a
+trend-with-drift model (no static steady state) is forecast: solve the
+decision rule with the drift switched off, carry the drift as the mean of
+its shock, and start the growth state on its balanced-growth path with
+\code{a0}. The sample columns enter the terminal-state filter; the horizon
+columns enter the forecast baseline through the transition. Conditions
+(hard or soft, anticipated or not, with draws) are solved for the random
+part \eqn{u} around that mean-inclusive baseline; \code{shock_paths}
+reports the TOTAL \eqn{m + u}, and draws add \eqn{u}-noise only. When
+\code{data} is a \code{kalman_smoother()} result the sample part is
+already inside it, so \code{shock_means} then covers the horizon only
+(\code{horizon} columns). Refused (classed error) under a non-Gaussian
+\code{ctx$likelihood} (tpf, pskf, pkf, ppf, copf).}
+
+\item{shock_timing}{How to read the columns of \code{shock_means}: as in
+\code{\link{kalman_filter}}, \code{"dated"} (column t enters period t) or
+\code{"transition_next"} (column t drives the transition out of t, so it
+lands on t + 1; the last sample column is the first forecast period).}
+
+\item{a0, P0}{Initial state mean / covariance of the terminal-state filter,
+as in \code{\link{kalman_smoother}} (e.g. the balanced-growth start of a
+drift model). Not allowed with a \code{kalman_smoother()} result as
+\code{data} or a non-Gaussian \code{ctx$likelihood}.}
+
+\item{units}{\code{"auto"} (default), \code{"deviations"} or
+\code{"levels"}. \code{"levels"} (any model): conditions are read, and
+\code{paths_point}, \code{paths_uncond} and \code{draws} returned, as
+steady state + deterministic trend + deviation. \code{"deviations"}:
+deviations from steady state; refused on a trend model. \code{"auto"}:
+\code{"levels"} on a trend model, \code{"deviations"} otherwise. The
+resolved choice is \code{result$units}.}
+
+\item{lik_init}{Initialisation of the Gaussian terminal-state filter, as in
+\code{\link{kalman_smoother}}: \code{"auto"} (default), \code{"stationary"},
+\code{"kappa"}, \code{"diffuse"} or \code{"fixed_unknown"} (IRIS's
+default: the unit-root level estimated by GLS). The terminal state
+\eqn{s_{T|T}} under \code{"fixed_unknown"} equals the exact diffuse one
+once the unit-root level is identified. Refused (classed error) with a
+\code{kalman_smoother()} result as \code{data} or a non-Gaussian
+\code{ctx$likelihood}.}
+
 \item{...}{Currently unused.}
 }
 \value{
@@ -125,6 +177,25 @@ Computes conditional forecasts for a DSGE model by imposing linear
 restrictions on future observables, finding the (minimum-norm) shock path
 that delivers the conditions.
 }
+\section{Trend models}{
+
+A model with \code{observation_trends} and/or a balanced-growth decision
+rule (\code{solve_model(steady_options = list(growth = TRUE))}, pass the
+returned \code{model} and \code{dr}) is supported with the Gaussian
+terminal-state filter. The terminal state comes from the trend-honouring
+smoother, the forecast is computed in deviations, and the deterministic
+trend is added back at the sample's period index continued past the last
+observation (\code{first_obs + T + h - 1}). On such models
+\code{paths_point}, \code{paths_uncond} and \code{draws} are LEVELS
+(steady-state intercept + slope * index + deviation), and \code{conditions}
+are given in levels too. A \code{kalman_smoother()} result as \code{data}
+works (T is its number of rows; a growth model needs its
+\code{growth_path}). Models without trends keep the deviation convention.
+Non-Gaussian terminal-state likelihoods refuse (classed
+\code{dynhr_error_observation_trends_unsupported}). Composes with
+\code{shock_means}.
+}
+
 \examples{
 model    <- parse_mod(system.file("extdata/models/rbc.mod",
                                   package = "dynhr"), verbose = FALSE)

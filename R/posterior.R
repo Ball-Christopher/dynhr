@@ -1019,6 +1019,9 @@ apply_theta_to_params <- function(model, theta, params = NULL) {
   sys <- extract_system_matrices_fast(sys_cache, ss_result$ss, params)
   dr  <- .solve_from_system(sys, model, compiled, ss_result$ss, params, FALSE)
   if (is.null(dr) || !isTRUE(dr$bk_satisfied)) return(NULL)
+  ## Balanced growth (R/balanced-growth.R): the steady state above re-solved
+  ## the path at this theta; carry it on the dr as the posterior closure does.
+  if (!is.null(ss_result$growth)) dr$growth <- ss_result$growth
 
   ## Stationarity guard identical to make_log_posterior's gaussian path.
   ns <- length(dr$state_idx)
@@ -1125,6 +1128,12 @@ apply_theta_to_params <- function(model, theta, params = NULL) {
 #' @noRd
 .kf_forced_method_refusal <- function(method, data, me_extra, shock_scale,
                                       lik_init) {
+  ## lik_init = "fixed_unknown" runs its own per-step multivariate recursion
+  ## (kalman_filter() refuses the sequential and increment ones with it).
+  if (identical(lik_init, "fixed_unknown") &&
+      method %in% c("chandrasekhar", "univariate", "univariate_ss"))
+    return(paste0("lik_init = \"fixed_unknown\" runs its own multivariate ",
+                  "per-step recursion"))
   if (!identical(method, "chandrasekhar")) return(NULL)
   if (anyNA(data))
     return("the data has missing observations")
@@ -1168,6 +1177,48 @@ apply_theta_to_params <- function(model, theta, params = NULL) {
       "make_log_posterior: `filter_method = \"", filter_method, "\"` cannot ",
       "run here: ", why, ". Use \"auto\", \"standard\" or \"univariate\".",
       class = "dynhr_error_filter_method_incompatible")
+  invisible(NULL)
+}
+
+## Validate `lik_init` at BUILD time. The per-draw filter call sits inside a
+## tryCatch that turns an error into a rejected draw, so a typo -- or a
+## combination the filter refuses -- would otherwise be a silent -Inf
+## posterior. "fixed_unknown" (IRIS's initialisation, R/kalman-fixed-unknown.R)
+## is a Gaussian Kalman-filter initialisation only.
+.LIK_INIT_CHOICES <- c("auto", "stationary", "diffuse", "kappa",
+                       "fixed_unknown")
+.mlp_check_lik_init <- function(lik_init, likelihood, ms = FALSE,
+                                model = NULL, where = "make_log_posterior") {
+  if (!likelihood %in% c("gaussian", "student_t")) return(invisible(NULL))
+  if (!is.character(lik_init) || length(lik_init) != 1L || is.na(lik_init) ||
+        !lik_init %in% .LIK_INIT_CHOICES)
+    .dynhr_abort(
+      where, ": `lik_init` must be one of ",
+      paste0("\"", .LIK_INIT_CHOICES, "\"", collapse = ", "), ".",
+      class = "dynhr_error_bad_argument")
+  if (!identical(lik_init, "fixed_unknown")) return(invisible(NULL))
+  why <- c(if (!identical(likelihood, "gaussian"))
+             paste0("likelihood = \"", likelihood, "\""),
+           if (isTRUE(ms)) "a Markov-switching spec (the Kim filter)",
+           if (!is.null(model) && !is.null(model$obs_aggregation))
+             "model$obs_aggregation (mixed frequency)")
+  if (length(why))
+    .dynhr_abort(
+      where, ": lik_init = \"fixed_unknown\" is implemented by the Gaussian ",
+      "Kalman filter only and cannot be combined with ",
+      paste(why, collapse = " or "), ".",
+      class = "dynhr_error_fixed_unknown_unsupported")
+  invisible(NULL)
+}
+
+## Validate `singular_obs` (see kalman_filter()).
+#' @noRd
+.mlp_check_singular_obs <- function(singular_obs, where = "make_log_posterior") {
+  if (!is.character(singular_obs) || length(singular_obs) != 1L ||
+        is.na(singular_obs) || !singular_obs %in% c("reject", "skip"))
+    .dynhr_abort(
+      where, ": `singular_obs` must be \"reject\" or \"skip\".",
+      class = "dynhr_error_singular_obs")
   invisible(NULL)
 }
 
@@ -1259,7 +1310,13 @@ apply_theta_to_params <- function(model, theta, params = NULL) {
 #'   (default \code{"auto"}: stationary models use the Lyapunov \code{P0};
 #'   unit-root models use the exact diffuse initialization). See
 #'   \code{\link{kalman_filter}} for \code{"stationary"}, \code{"diffuse"},
-#'   and \code{"kappa"}. Ignored when \code{likelihood = "cumulant"} or
+#'   \code{"kappa"} and \code{"fixed_unknown"} (IRIS's default: the
+#'   unit-root level is a fixed unknown estimated by GLS and concentrated out
+#'   of the likelihood; Gaussian, non-Markov-switching, non-mixed-frequency
+#'   only -- other combinations are refused at build time with class
+#'   \code{dynhr_error_fixed_unknown_unsupported}; its gradient is finite
+#'   differences, as for \code{"kappa"}). An unknown value is an error at
+#'   build time. Ignored when \code{likelihood = "cumulant"} or
 #'   \code{likelihood = "whittle"}.
 #' @param filter_method Kalman filter recursion for the value path of
 #'   \code{likelihood = "gaussian"}: one of the \code{method} choices of
@@ -1326,6 +1383,21 @@ apply_theta_to_params <- function(model, theta, params = NULL) {
 #'   \code{lik_init} set away from their defaults for a likelihood that does
 #'   not use them, is ignored with a warning of class
 #'   \code{dynhr_warning_inapplicable_argument}.
+#' @param singular_obs Policy for an \emph{informative singular observation}:
+#'   an observation component the univariate Kalman filter would skip because
+#'   its forecast variance is at most \code{kalman_tol}, while its innovation
+#'   is NOT negligible (the data lie outside the model's support).
+#'   \code{"reject"} (default) makes the log-likelihood \code{-Inf} whenever
+#'   \code{kalman_filter()$diagnostics$n_dropped_informative > 0}, so an
+#'   optimiser or sampler is never rewarded for a degenerate parameter draw
+#'   and the support status does not depend on observable order.
+#'   \code{"skip"} restores the Dynare convention (the component is ignored, a
+#'   finite value is returned with a
+#'   \code{dynhr_warning_dropped_observations}). Non-informative drops (exact
+#'   redundant duplicates, round-off innovations) are allowed under both.
+#'   Applies to \code{likelihood = "gaussian"}; recorded on the closure as
+#'   \code{attr(, "filter_method")$singular_obs}. Invalid values have class
+#'   \code{dynhr_error_singular_obs}.
 #' @param me_extra Optional \code{n_obs x T} matrix of ADDITIONAL per-period
 #'   measurement-error variance, added on top of \code{me_variance}. Rows are
 #'   observables in \code{obs_vars} order and columns are periods, so a row
@@ -1402,6 +1474,7 @@ make_log_posterior <- function(model, data, prior_spec, obs_vars = NULL,
                                               "global_pf"),
                                lik_init = "auto",
                                filter_method = "auto",
+                               singular_obs = "reject",
                                me_extra = NULL,
                                shock_scale = NULL,
                                freq_band = c(0, pi),
@@ -1422,6 +1495,7 @@ make_log_posterior <- function(model, data, prior_spec, obs_vars = NULL,
     likelihood         <- ctx$likelihood
     lik_init           <- ctx$lik_init
     filter_method      <- ctx$filter_method %||% "auto"
+    singular_obs       <- ctx$singular_obs %||% singular_obs
     me_extra           <- ctx$me_extra
     shock_scale        <- ctx$shock_scale
     freq_band          <- ctx$freq_band
@@ -1447,6 +1521,10 @@ make_log_posterior <- function(model, data, prior_spec, obs_vars = NULL,
 
   ## A forced Kalman recursion: validated against the likelihood, the model's
   ## data and the other filter arguments at BUILD time, not per draw.
+  .mlp_check_singular_obs(singular_obs)
+  .mlp_check_lik_init(lik_init, likelihood,
+                      ms = !is.null(ms_spec_ctx) || !is.null(ms_struct_spec_ctx),
+                      model = model)
   .mlp_check_filter_method(filter_method, likelihood, data, me_extra,
                            shock_scale, lik_init,
                            ms = !is.null(ms_spec_ctx) ||
@@ -2110,6 +2188,7 @@ make_log_posterior <- function(model, data, prior_spec, obs_vars = NULL,
   filter_stats$requested         <- filter_method
   filter_stats$resolved          <- NA_character_
   filter_stats$n_filter_fallback <- 0L
+  filter_stats$singular_obs        <- singular_obs
 
   .make_posterior_closure(
     model, data, prior_spec, obs_vars, compiled,
@@ -2138,6 +2217,7 @@ make_log_posterior <- function(model, data, prior_spec, obs_vars = NULL,
                         method = filter_method,
                         lik_init = lik_init, me_extra = me_extra,
                         shock_scale = shock_scale,
+                        singular_obs = singular_obs,
                         me_floor_check = me_floor_check,
                         .need_final_cov = FALSE),
           error = function(e) {
@@ -2218,6 +2298,9 @@ make_log_posterior <- function(model, data, prior_spec, obs_vars = NULL,
 #'   \code{"univariate"} recursions, so \code{\link{kalman_filter}} runs
 #'   those whatever other method is requested; the sum equals the posterior's
 #'   \code{$loglik} to round-off.
+#' @param singular_obs As in \code{\link{make_log_posterior}}: \code{"reject"}
+#'   (default) returns \code{-Inf} contributions on an informative singular
+#'   observation, \code{"skip"} is the Dynare convention.
 #' @param me_extra    \code{n_obs x T} matrix of additional per-observable,
 #'   per-period measurement-error variance (filter_tunes soft tunes); see
 #'   \code{\link{kalman_filter}}.
@@ -2248,6 +2331,7 @@ make_loglik_contrib <- function(model, data, prior_spec = NULL, obs_vars = NULL,
                                 shock_scale = NULL,
                                 likelihood = "gaussian",
                                 filter_method = "auto",
+                                singular_obs = "reject",
                                 ...) {
   if (!identical(likelihood, "gaussian"))
     stop("make_loglik_contrib: likelihood = \"", likelihood, "\" is not ",
@@ -2258,6 +2342,9 @@ make_loglik_contrib <- function(model, data, prior_spec = NULL, obs_vars = NULL,
          "decomposition wired up and this builder will not silently ",
          "approximate one.", call. = FALSE)
 
+  .mlp_check_singular_obs(singular_obs, "make_loglik_contrib")
+  .mlp_check_lik_init(lik_init, likelihood, model = model,
+                      where = "make_loglik_contrib")
   .mlp_check_filter_method(filter_method, likelihood, data, me_extra,
                            shock_scale, lik_init)
 
@@ -2317,6 +2404,7 @@ make_loglik_contrib <- function(model, data, prior_spec = NULL, obs_vars = NULL,
       kalman_filter(data, solved$dr, model, solved$params, obs_vars,
                     return_filtered = FALSE, me_variance = me_variance,
                     return_ll_contrib = TRUE, method = filter_method,
+                    singular_obs = singular_obs,
                     lik_init = lik_init, me_extra = me_extra,
                     shock_scale = shock_scale,
                     me_floor_check = !.me_floor_checked &&

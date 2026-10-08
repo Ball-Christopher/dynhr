@@ -379,12 +379,29 @@ dynhr_mcmc <- function(log_post_fn, theta0, Sigma_prop,
       dir.create(checkpoint_dir, recursive = TRUE)
     ckpt <- list(dir = checkpoint_dir, flush_every = flush_every,
                  resume = isTRUE(resume),
-                 fingerprint = .ckpt_fingerprint(names(theta0)))
+                 fingerprint = .ckpt_fingerprint(
+                   names(theta0),
+                   extra = .mcmc_ckpt_config(n_warmup, Sigma_prop, list(...))))
     res <- rwmh(log_post_fn, theta0, Sigma_prop,
                 n_draws = n_draws + n_warmup, n_burn = n_warmup,
                 checkpoint = ckpt, ...)
   }
   new_dynhr_chains(res, "rwmh")
+}
+
+
+## Sampler settings that change a chain's trajectory; part of the checkpoint
+## fingerprint so a resume under different settings is refused. `n_draws` is
+## deliberately absent (a resume may extend the run).
+.mcmc_ckpt_config <- function(n_warmup, Sigma_prop, dots) {
+  g <- function(nm) dots[[nm]] %||% eval(formals(rwmh)[[nm]])
+  list(n_warmup = as.integer(n_warmup),
+       Sigma_prop = .ckpt_md5(Sigma_prop),
+       scale = g("scale"), target_rate = g("target_rate"),
+       adapt_every = as.integer(g("adapt_every")),
+       adapt_cov = isTRUE(dots$adapt_cov),
+       n_blocks = as.integer(g("n_blocks")),
+       transformed = !is.null(dots$transform))
 }
 
 

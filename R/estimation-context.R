@@ -42,6 +42,8 @@
 #' @param lik_init     Kalman filter \code{P0} initialisation (default
 #'   \code{"auto"}).  Forwarded to \code{\link{kalman_filter}} on the
 #'   Gaussian path.  Ignored for cumulant/whittle/tpf likelihoods.
+#'   \code{"fixed_unknown"} is accepted for the Gaussian likelihood without
+#'   a Markov-switching spec only (see \code{\link{make_log_posterior}}).
 #' @param filter_method Kalman filter recursion for the Gaussian value path
 #'   (default \code{"auto"}): one of the \code{method} choices of
 #'   \code{\link{kalman_filter}}.  See \code{\link{make_log_posterior}} for
@@ -49,6 +51,12 @@
 #'   choices.  A value other than \code{"auto"} with any likelihood but
 #'   \code{"gaussian"}, or with a Markov-switching spec, is an error of class
 #'   \code{dynhr_error_inapplicable_argument}.
+#' @param singular_obs What the Gaussian value path does when the univariate
+#'   filter would skip an observation component of ~zero forecast variance
+#'   but non-negligible innovation (data the model deems impossible):
+#'   \code{"reject"} (default) makes the log-likelihood \code{-Inf};
+#'   \code{"skip"} is the Dynare convention (finite value, warning). See
+#'   \code{\link{kalman_filter}} \code{singular_obs}.
 #' @param me_extra     \code{n_obs x T} matrix of per-period extra measurement
 #'   error variances (resolved from a \code{filter_tunes} block); \code{NULL}
 #'   = no filter tunes.  Must be \code{NULL} when \code{plan} is supplied.
@@ -143,6 +151,7 @@ estimation_context <- function(
                         "global_pf"),
     lik_init        = "auto",
     filter_method   = "auto",
+    singular_obs    = "reject",
     me_extra        = NULL,
     shock_scale     = NULL,
     freq_band       = c(0, pi),
@@ -161,6 +170,10 @@ estimation_context <- function(
 ) {
   likelihood      <- match.arg(likelihood)
   gradient_policy <- match.arg(gradient_policy)
+  .mlp_check_singular_obs(singular_obs, "estimation_context")
+  .mlp_check_lik_init(lik_init, likelihood,
+                      ms = !is.null(ms_spec) || !is.null(ms_struct_spec),
+                      where = "estimation_context")
   .mlp_check_filter_method(filter_method, likelihood, data = NULL,
                            me_extra = NULL, shock_scale = NULL,
                            lik_init = lik_init,
@@ -316,6 +329,7 @@ estimation_context <- function(
       likelihood      = likelihood,
       lik_init        = lik_init,
       filter_method   = filter_method,
+      singular_obs    = singular_obs,
       me_extra        = me_extra,
       shock_scale     = shock_scale,
       freq_band       = freq_band,
@@ -344,6 +358,7 @@ print.dynhr_estimation_context <- function(x, ...) {
   cat(sprintf("  me_variance   : %g\n", x$me_variance))
   cat(sprintf("  lik_init      : %s\n", x$lik_init))
   cat(sprintf("  filter_method : %s\n", x$filter_method %||% "auto"))
+  cat(sprintf("  singular_obs  : %s\n", x$singular_obs %||% "reject"))
   cat(sprintf("  freq_band     : [%.4g, %.4g]\n", x$freq_band[1], x$freq_band[2]))
   cat(sprintf("  me_extra      : %s\n",
               if (is.null(x$me_extra)) "NULL"
@@ -498,6 +513,7 @@ ctx_from_mode_result <- function(mr) {
     likelihood    = mr$likelihood    %||% "gaussian",
     lik_init      = mr$lik_init      %||% "auto",
     filter_method = mr$filter_method %||% "auto",
+    singular_obs  = mr$singular_obs  %||% "reject",
     me_extra      = mr$me_extra      %||% NULL,
     shock_scale   = mr$shock_scale   %||% NULL,
     freq_band     = mr$freq_band     %||% c(0, pi),

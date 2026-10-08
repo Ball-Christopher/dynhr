@@ -163,7 +163,8 @@
     if (!isTRUE(out$ok)) {
       return(list(loglik = -Inf, grad = rep(NA_real_, n_par)))
     }
-    return(list(loglik = out$loglik, grad = as.numeric(out$grad)))
+    return(list(loglik = out$loglik, grad = as.numeric(out$grad),
+                min_rcond = out$min_rcond))
   }
 
   tZZ <- t(ZZ)

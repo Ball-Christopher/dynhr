@@ -191,6 +191,10 @@ List kf_tangent_cpp(const arma::mat& Y,
   double loglik = 0.0;
   arma::vec grad_acc = arma::zeros<arma::vec>(n_par);
   bool ok = true;
+  // min over periods of rcond1(F_t) -- the SAME 1-norm condition number as
+  // .kf_rcond1() in R/kalman-filter.R (1 / (||F||_1 ||F^-1||_1)), the necessary
+  // condition of the forward filter's singular-F univariate fallback.
+  double min_rcond = R_PosInf;
 
   for (arma::uword t = 0; t < n_T; ++t) {
     // -- Per-period tv substitutions (mirrors R reference) -------------------
@@ -221,6 +225,11 @@ List kf_tangent_cpp(const arma::mat& Y,
     // (see kalman_adjoint.cpp) -- degrade gracefully instead of throwing.
     arma::mat Fi;
     if (!arma::inv_sympd(Fi, Ft)) { ok = false; break; }
+    {
+      double rc = 1.0 / (arma::norm(Ft, 1) * arma::norm(Fi, 1));
+      if (!std::isfinite(rc)) rc = 0.0;
+      if (rc < min_rcond) min_rcond = rc;
+    }
     double ldf = 2.0 * arma::accu(arma::log(Fc.diag()));
 
     arma::vec v = Y.col(t) - d - ZZ * s;
@@ -338,5 +347,6 @@ List kf_tangent_cpp(const arma::mat& Y,
 
   return List::create(_["loglik"] = loglik,
                       _["grad"]   = grad_acc,
-                      _["ok"]     = true);
+                      _["ok"]     = true,
+                      _["min_rcond"] = min_rcond);
 }

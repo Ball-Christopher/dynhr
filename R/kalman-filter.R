@@ -301,7 +301,8 @@
 ### likelihood: inside a run epoch (an estimation / mode-finding / SMC entry
 ### point) it fires ONCE per run with the repeats counted in the epoch summary;
 ### a direct kalman_filter() call outside any run warns every time.
-.kf_warn_dropped_informative <- function(n_skipped, n_skipped_inf, n_present) {
+.kf_warn_dropped_informative <- function(n_skipped, n_skipped_inf, n_present,
+                                         rejected = FALSE) {
   n_inf <- sum(as.integer(n_skipped_inf))
   if (!(n_inf > 0L)) return(invisible(FALSE))
   n_drop <- sum(as.integer(n_skipped))
@@ -314,7 +315,8 @@
     "Typical causes: a degenerate decision rule, a stochastically singular ",
     "model, or badly scaled observables. See $diagnostics$n_dropped_informative ",
     "/ $diagnostics$dropped_informative_by_period; the log-likelihood value ",
-    "itself is unchanged."), n_drop, n_present, n_inf),
+    if (rejected) "itself is -Inf (singular_obs = \"reject\")."
+    else "itself is unchanged."), n_drop, n_present, n_inf),
     once = !is.null(.dynhr_msg_state$epoch),
     key  = "kalman_filter:dropped_informative_observations",
     class = "dynhr_warning_dropped_observations")
@@ -475,6 +477,21 @@
 ### (NULL or n_state x n_state) is the diffuse part for the exact-diffuse
 ### initialization. The tolerances mirror .kf_diffuse_phase's defaults;
 ### kalman_tol is Dynare's kalman_tol analog (skip threshold for F_i).
+## Log-likelihood of a direct .kf_univariate_dispatch() result under the
+## informative-singular-observation policy (see kalman_filter(), argument
+## `singular_obs`): the same classed warning as kalman_filter(), and -Inf under
+## "reject" when a component of ~zero forecast variance but non-negligible
+## innovation was skipped (data outside the model's support). For the HANK
+## likelihoods that call the dispatcher directly instead of kalman_filter().
+.kf_dispatch_loglik <- function(out, singular_obs, Y_minus_d) {
+  rejected <- identical(singular_obs, "reject") &&
+    sum(as.integer(out$n_skipped_informative)) > 0L
+  .kf_warn_dropped_informative(out$n_skipped, out$n_skipped_informative,
+                               sum(is.finite(Y_minus_d)),
+                               rejected = identical(singular_obs, "reject"))
+  if (rejected) -Inf else out$loglik
+}
+
 .kf_univariate_dispatch <- function(Y_minus_d, ZZ, TT, RR, DD, Sigma_e,
                                     s0, P_state, P_inf_state = NULL,
                                     me_variance = 0,
@@ -1148,7 +1165,7 @@
 ###              (Schur) basis for the (stable, stable) block of
 ###              U' QQ U, and rotate back; zero elsewhere.
 ###
-### Returns list(P_inf, P_star, nunit). nunit == 0 means TT has no unit roots
+### Returns list(P_inf, P_star, nunit, U_unit). nunit == 0 means TT has no unit roots
 ### (the diffuse path degenerates immediately: P_inf == 0).
 .kf_diffuse_P0 <- function(TT, QQ, ur_tol = 1e-6) {
   n <- nrow(TT)
@@ -1194,7 +1211,10 @@
     }
   }
 
-  list(P_inf = .sym(P_inf), P_star = .sym(P_star), nunit = nunit)
+  ## U_unit: the orthonormal unit-root Schur block itself (P_inf = U_unit
+  ## U_unit'), the basis lik_init = "fixed_unknown" estimates a level along.
+  list(P_inf = .sym(P_inf), P_star = .sym(P_star), nunit = nunit,
+       U_unit = U[, seq_len(nunit), drop = FALSE])
 }
 
 ### -- Diffuse recursion (Durbin & Koopman 2012, sec. 5.2) ---------------------
@@ -1417,9 +1437,11 @@
 #'   covariances and the exact-diffuse phase with singular \code{F_inf}).
 #' @param lik_init character; initialization of the state covariance \code{P0}
 #'   (and, for unit-root models, the diffuse covariance): \code{"auto"}
-#'   (default), \code{"stationary"}, \code{"diffuse"}, or \code{"kappa"}.
+#'   (default), \code{"stationary"}, \code{"diffuse"}, \code{"kappa"}, or
+#'   \code{"fixed_unknown"} (IRIS's default initialization; see Details).
 #'   See Details. Supplying \code{P0} overrides this and is reported back as
-#'   \code{lik_init = "user"}.
+#'   \code{lik_init = "user"} (except with \code{"fixed_unknown"}, which
+#'   refuses it).
 #' @param a0 Initial state mean, length \code{n_state}, in \strong{deviations
 #'   from the steady state} -- the convention the filter's own
 #'   \code{filtered_states} are in. \code{NULL} (default) starts at the steady
@@ -1581,6 +1603,20 @@
 #'       transition rather than by the shock.}
 #'   }
 #'   Ignored when \code{shock_means} is \code{NULL}.
+#' @param singular_obs What to do when the univariate filter skips an
+#'   observation component whose forecast variance is at most
+#'   \code{kalman_tol} but whose innovation is NOT negligible (an
+#'   \emph{informative} drop: data the model assigns zero probability).
+#'   \code{"skip"} (default here) is the Dynare convention: the component is
+#'   ignored, \code{$loglik} stays finite and a warning of class
+#'   \code{dynhr_warning_dropped_observations} is raised. \code{"reject"}
+#'   returns \code{loglik = -Inf} whenever
+#'   \code{$diagnostics$n_dropped_informative > 0} (diagnostics are kept and
+#'   \code{$diagnostics$singular_obs_rejected} is \code{TRUE}), so the support
+#'   status does not depend on observable order. Estimation closures
+#'   (\code{make_log_posterior}, \code{make_posterior}, ...) default to
+#'   \code{"reject"}. Non-informative drops (exact redundant duplicates,
+#'   round-off innovations) never trigger it.
 #' @param me_floor_check Logical: when \code{me_variance > 0}, compare it
 #'   against the smallest eigenvalue of the model-implied (ME-free) steady-
 #'   state innovation covariance \code{F} and warn when the assumed
@@ -1707,6 +1743,66 @@
 #' treatment for every near-unit root, pass \code{lik_init = "diffuse"}
 #' explicitly.
 #'
+#' \strong{\code{lik_init = "fixed_unknown"} (IRIS's initialization):} the
+#' augmented filter of de Jong (1991). The unit-root subspace of \code{TT}
+#' (the same Schur block, and the same \eqn{||\lambda| - 1| < 10^{-6}}
+#' rule, as \code{"diffuse"}) carries a FIXED UNKNOWN level: \eqn{s_0 = a_0 +
+#' U_u \delta}, with the stationary Lyapunov covariance on the complement and
+#' none along \eqn{U_u}. "The orthogonal complement" depends on the state
+#' COORDINATES (the diffuse prior and the smoothed states do not), so the
+#' init is built where IRIS builds it -- on the IRIS state vector: every
+#' endogenous variable that is not forward-looking (no lead; lead
+#' auxiliaries excluded) and is not a measurement variable, STATIC ones
+#' (identities such as \code{l = n + p + er}) included, plus the lag
+#' auxiliaries -- and mapped to the filter's states (a subset). A
+#' measurement variable is an observable (\code{obs_vars} or the model's
+#' \code{varobs}) that is not itself a state; an observable that IS a state
+#' stays. The set used is \code{$diagnostics$init_coordinates} (the filter's
+#' own states when the model does not record which variables are
+#' forward-looking). The filter runs once, tracking the response
+#' \eqn{A_t} of the filtered state to \eqn{\delta}; \eqn{\delta} is then the
+#' GLS estimate \eqn{S^{+} s} (a pseudo-inverse: a direction the data does not
+#' identify is estimated as 0) and every reported state is corrected:
+#' \code{updated_states[, t]} \eqn{+ A_t \delta}, \code{predicted_states[,
+#' t]} \eqn{+ T A_{t-1} \delta}. Unlike \code{"diffuse"}, the early
+#' periods therefore use the WHOLE sample's estimate of the initial level --
+#' which is what IRIS's \code{filter()} reports; the smoothed states are the
+#' same. \code{loglik} is concentrated over \eqn{\delta},
+#' \eqn{\ell_0 + \tfrac12 \delta' s}, with NO \eqn{-\tfrac12 \log|S|} term:
+#' it equals IRIS's \code{loglik(..., 'relative=', false)} (IRIS's default
+#' \code{relative = true} also profiles out a common scale factor, which is
+#' not reproduced). \code{loglik_contrib} holds the contributions of the
+#' CORRECTED innovations \eqn{v_t - Z A_{t-1} \delta}; they sum to
+#' \code{loglik} exactly. \code{final_state} is corrected and
+#' \code{final_cov} is \eqn{P_T + A_T S^{+} A_T'}, the MSE with \eqn{\delta}
+#' estimated (the exact diffuse filter's once \eqn{\delta} is identified).
+#' \code{$diagnostics} adds \code{n_unit}, \code{n_unit_identified} (rank of
+#' \eqn{S}), \code{init_unit_estimate} (\eqn{U_u \delta}, in state
+#' coordinates) and \code{init_coordinates}. It runs on its own per-step multivariate R recursion
+#' (\code{$method} \code{"standard"}, or \code{"dare"} when that was asked
+#' for) and handles missing observations, \code{me_variance} / \code{me_extra},
+#' \code{shock_scale}, \code{shock_means}, \code{a0} and trend /
+#' balanced-growth models. A singular innovation covariance (e.g. an
+#' observable that is an exact identity of others) hands the recursion to
+#' its SEQUENTIAL (univariate) form, which drops a component whose
+#' conditional variance is at most \code{kalman_tol}, as the univariate
+#' filter does: \code{$method} is then \code{"univariate"}, a
+#' \code{dynhr_warning_fixed_unknown_sequential} warning says so, and the
+#' drops are in \code{$diagnostics$n_dropped} /
+#' \code{n_dropped_informative} (informative = a non-negligible CORRECTED
+#' innovation; \code{dynhr_warning_dropped_observations},
+#' \code{singular_obs = "reject"} as for the univariate filter). The filtered
+#' states then equal those of the same data with the redundant observables
+#' missing; the log-likelihood is that of the kept components, so it differs
+#' from the redundant-observables-missing one by the Jacobian of the change
+#' of variables between the kept and the dropped components (as the
+#' univariate filter's does). Refused with class
+#' \code{dynhr_error_fixed_unknown_unsupported}: \code{P0},
+#' \code{method = "chandrasekhar"} / \code{"univariate"} /
+#' \code{"univariate_ss"}, \code{obs_aggregation}, \code{known_shocks}. On a
+#' model with no unit root it is \code{"stationary"} -- run as exactly that,
+#' with a \code{$diagnostics$routing} row saying so.
+#'
 #' @references
 #'   Kalman, R. E. (1960). A new approach to linear filtering and prediction
 #'     problems. \emph{Journal of Basic Engineering}, 82(1), 35-45.
@@ -1717,6 +1813,8 @@
 #'     Analysis}, 21(3), 281-296.
 #'   Strid, I., & Walentin, K. (2011). Block Kalman filtering for large-scale
 #'     DSGE models. \emph{Computational Economics}, 39(2), 145-160.
+#'   de Jong, P. (1991). The diffuse Kalman filter. \emph{The Annals of
+#'     Statistics}, 19(2), 1073-1083.
 #' @return A list with
 #'   \describe{
 #'     \item{\code{loglik}}{the log-likelihood.}
@@ -1729,6 +1827,15 @@
 #'     \item{\code{filtered_states}}{the SAME matrix as
 #'       \code{updated_states}, under the name the rest of the package uses.}
 #'     \item{\code{loglik_contrib}}{per-period contributions, when asked for.}
+#'     \item{\code{growth_path}}{BALANCED-GROWTH models only (\code{dr$growth}
+#'       non-zero, from \code{solve_model(steady_options = list(growth =
+#'       TRUE))}): the deterministic path \eqn{y_0 + g\,(first\_obs + t - 1)}
+#'       of the state variables, \code{n_state x T} with the same rows as
+#'       \code{updated_states}, so that LEVELS are \code{growth_path +
+#'       updated_states}. The reported states stay deviations; the growth of
+#'       the observables is subtracted from the data as an observation trend
+#'       (added to any \code{observation_trends} slope, same period index).
+#'       Absent otherwise.}
 #'     \item{\code{final_state}, \code{final_cov}}{the state hand-off:
 #'       \eqn{s_{T|T}} and \eqn{Var(s_T \mid y_{1:T})}, named, in the same
 #'       convention \code{a0} / \code{P0} take. \code{final_cov} is
@@ -1751,7 +1858,8 @@
 #'       ignored although the model deemed it impossible; a positive count
 #'       raises a warning of class
 #'       \code{dynhr_warning_dropped_observations}, and the log-likelihood
-#'       value is left unchanged), \code{known_shocks} (how many injected cells, and how
+#'       value is left unchanged unless \code{singular_obs = "reject"}, which sets it
+#'       to \code{-Inf}), \code{known_shocks} (how many injected cells, and how
 #'       many of them were deterministic) and \code{loglik_type}
 #'       (\code{"marginal"}, \code{"joint"} or \code{"conditional"}).
 #'       \code{\link{kalman_smoother}} returns the same fields.}
@@ -1885,7 +1993,7 @@ kalman_filter <- function(data, dr, model, params, obs_vars,
                                      "standard", "reference", "univariate",
                                      "univariate_ss"),
                           lik_init = c("auto", "stationary",
-                                       "diffuse", "kappa"),
+                                       "diffuse", "kappa", "fixed_unknown"),
                           me_extra = NULL,
                           shock_scale = NULL,
                           obs_aggregation = NULL,
@@ -1895,10 +2003,12 @@ kalman_filter <- function(data, dr, model, params, obs_vars,
                           known_shocks_sd = NULL,
                           shock_means = NULL,
                           shock_timing = c("dated", "transition_next"),
+                          singular_obs = c("skip", "reject"),
                           me_floor_check = getOption("dynhr.me_floor_check",
                                                      TRUE),
                           .need_final_cov = TRUE) {
   shock_timing <- match.arg(shock_timing)
+  singular_obs <- match.arg(singular_obs)
 
   ## "reference" is an alias for "dare" -- both run the per-step textbook
   ## Kalman filter with no steady-state shortcut. "dare" is kept for
@@ -1921,6 +2031,19 @@ kalman_filter <- function(data, dr, model, params, obs_vars,
 
   lik_init <- match.arg(lik_init)
   lik_init_orig <- lik_init      # for M23 warning below
+
+  ## lik_init = "fixed_unknown" (R/kalman-fixed-unknown.R) is its own per-step
+  ## multivariate recursion; the sequential and increment recursions have no
+  ## augmented (A_t) form, so an explicit request for one is refused rather
+  ## than silently answered with another initialisation.
+  if (identical(lik_init, "fixed_unknown") &&
+      method %in% c("chandrasekhar", "univariate"))
+    .dynhr_abort(
+      "kalman_filter: lik_init = \"fixed_unknown\" runs its own multivariate ",
+      "per-step recursion; method = \"",
+      if (ss_lock_req) "univariate_ss" else method, "\" is not available ",
+      "with it. Use method = \"auto\", \"standard\" or \"dare\".",
+      class = "dynhr_error_fixed_unknown_unsupported")
 
   ## Per-period log-likelihood contributions (the prediction-error
   ## decomposition) are collected on the bit-exact per-step "dare" path; this
@@ -1993,6 +2116,16 @@ kalman_filter <- function(data, dr, model, params, obs_vars,
   ## too -- name them and the match is checked for you).
   a0_vec <- .kf_init_mean(a0, state_names_out, n_state)
   P0_mat <- .kf_init_cov(P0, state_names_out, n_state)
+  if (identical(lik_init, "fixed_unknown")) {
+    bad <- c(if (!is.null(P0_mat)) "`P0` (the initialisation builds its own covariance; `a0` composes)",
+             if (!is.null(mf)) "obs_aggregation (mixed frequency)",
+             if (!is.null(known_shocks) && !all(is.na(known_shocks)))
+               "known_shocks (observed shocks need the augmented-state univariate filter)")
+    if (length(bad))
+      .dynhr_abort("kalman_filter: lik_init = \"fixed_unknown\" does not ",
+                   "support ", paste(bad, collapse = "; "), ".",
+                   class = "dynhr_error_fixed_unknown_unsupported")
+  }
   if (!is.null(P0_mat)) {
     if (lik_init_orig == "diffuse")
       stop("kalman_filter: `P0` and lik_init = \"diffuse\" are two different ",
@@ -2205,8 +2338,18 @@ kalman_filter <- function(data, dr, model, params, obs_vars,
   ## + t - 1) is what the recursions see (Dynare's `Y = data - trend`). Taken
   ## off `data`, for the same reason as the mean path above. Slopes are
   ## evaluated at `params`, so an estimated slope moves the likelihood.
-  trend_path <- .obs_trend_path(model, params, obs_vars, n_T)
+  ## A balanced-growth `dr` (R/balanced-growth.R) adds g[obs] to the slopes:
+  ## the observables' growth is the same kind of intercept trend.
+  if (!is.null(mf) && !is.null(.dr_growth(dr)))
+    .dynhr_abort(
+      "kalman_filter: a balanced-growth model cannot be combined with ",
+      "obs_aggregation (the aggregated observable's trend is not ",
+      "implemented).", class = "dynhr_error_observation_trends_unsupported")
+  trend_path <- .obs_trend_path(model, params, obs_vars, n_T, dr = dr)
   if (!is.null(trend_path)) data <- data - trend_path
+  ## Deterministic y0 + g t of the reported states (levels = path +
+  ## deviations); NULL unless `dr` carries a balanced growth.
+  growth_path_out <- .growth_state_path(dr, model, state_names_out, n_T)
 
   Y_minus_d <- data - d
   ## Per-period count of observations that are simply absent, kept apart from
@@ -2214,6 +2357,39 @@ kalman_filter <- function(data, dr, model, params, obs_vars,
   ## information" are different reasons for a shorter conditioning set, and a
   ## parity harness has to be able to tell them apart.
   missing_by_period <- as.integer(colSums(is.na(Y_minus_d)))
+
+  ## -- lik_init = "fixed_unknown": unit-root block --------------------------
+  ## The unit-root subspace and the proper covariance on its complement are
+  ## the exact-diffuse initialisation's (.kf_diffuse_P0: the same Schur basis
+  ## and unit-root rule). With no unit root there is nothing to estimate and
+  ## the initialisation IS the stationary one, so it is run as exactly that
+  ## (same routing, same result) and the reroute is recorded.
+  fu_init <- NULL
+  if (identical(lik_init, "fixed_unknown")) {
+    ## Built in IRIS's state coordinates (every non-forward-looking,
+    ## non-measurement variable, static ones included) and mapped to the
+    ## filter's states: the "orthogonal complement" of the unit-root block,
+    ## and so the init, depends on the coordinates (R/kalman-fixed-unknown.R).
+    fu_init <- .fu_init(TT, RR, Sigma_e, state_names_out,
+                        coords = .fu_init_coordinates(model, endo,
+                                                      state_names_out,
+                                                      obs_vars),
+                        ghx = ghx, ghu = ghu, endo_names = endo)
+    if (fu_init$nunit == 0L) {
+      lik_init <- "stationary"
+      fu_init  <- NULL
+      route_log[[length(route_log) + 1L]] <-
+        c(from = "fixed_unknown", to = "stationary",
+          reason = "no unit roots: the fixed-unknown initialisation is the stationary one")
+    } else {
+      to_m <- if (method == "dare") "dare" else "standard"
+      if (method == "auto")
+        route_log[[length(route_log) + 1L]] <-
+          c(from = "auto", to = to_m,
+            reason = "lik_init = \"fixed_unknown\" runs the per-step multivariate recursion")
+      method <- to_m
+    }
+  }
 
   ## -- Resolve lik_init = "auto" --------------------------------------
   ## Inspect the eigenvalues of TT. Roots well inside the unit circle => the
@@ -2515,7 +2691,7 @@ kalman_filter <- function(data, dr, model, params, obs_vars,
                          loglik_contrib = NULL, dropped = NULL,
                          dropped_informative = NULL,
                          known_applied = NULL, fallback = NULL,
-                         extra = list()) {
+                         extra = list(), s0 = a0_vec) {
     ## ---- Timing contract, and the deterministic add-back ----------------
     ## Two state paths are reported, and the names say which is which rather
     ## than leaving "filtered" to be interpreted:
@@ -2531,7 +2707,7 @@ kalman_filter <- function(data, dr, model, params, obs_vars,
     ## filtered path and then adding s^det gives both series in one step.
     predicted_states <- NULL
     if (!is.null(filtered_states)) {
-      prev <- cbind(a0_vec, filtered_states[, -n_T, drop = FALSE])
+      prev <- cbind(s0, filtered_states[, -n_T, drop = FALSE])
       predicted_states <- TT %*% prev
       if (!is.null(det_path)) {
         filtered_states  <- filtered_states  + det_path$s_det
@@ -2571,6 +2747,9 @@ kalman_filter <- function(data, dr, model, params, obs_vars,
     ll_type <- if (is.null(known_meta)) "marginal"
       else if (known_meta$n_deterministic == known_meta$n_cells) "conditional"
       else "joint"
+    rejected_singular <- identical(singular_obs, "reject") &&
+      sum(as.integer(dropped_informative)) > 0L
+    if (rejected_singular) loglik <- -Inf
     c(list(loglik = loglik, filtered_states = filtered_states,
            updated_states = filtered_states,
            predicted_states = predicted_states,
@@ -2595,7 +2774,9 @@ kalman_filter <- function(data, dr, model, params, obs_vars,
              ## > 0 raises dynhr_warning_dropped_observations.
              dropped_informative_by_period = as.integer(dropped_informative),
              n_dropped_informative = sum(as.integer(dropped_informative)),
-             known_shocks       = if (is.null(known_meta)) NULL
+             singular_obs          = singular_obs,
+             singular_obs_rejected = rejected_singular,
+             known_shocks      = if (is.null(known_meta)) NULL
                                   else c(known_meta,
                                          list(n_applied = known_applied)),
              ## A deterministic mean path is an INPUT, so it is reported as
@@ -2606,7 +2787,70 @@ kalman_filter <- function(data, dr, model, params, obs_vars,
                                             n_cells = sum(mean_path != 0),
                                             names = exo[rowSums(mean_path != 0) > 0]),
              loglik_type        = ll_type)),
+      if (!is.null(growth_path_out)) list(growth_path = growth_path_out),
       extra)
+  }
+
+  ## -- lik_init = "fixed_unknown" (R/kalman-fixed-unknown.R) -------------
+  ## Every input the other paths consume has been applied by now: the trend /
+  ## balanced-growth and shock_means paths are off `data` (and added back by
+  ## .kf_result), me_variance + me_extra form the per-period ME, shock_scale
+  ## the per-period Q. `s0` hands .kf_result the CORRECTED s_0 = a0 + U_u
+  ## delta, so the predicted path it forms is T s_{t-1|t-1} with the estimated
+  ## unit-root level in it.
+  if (!is.null(fu_init)) {
+    me_mat <- matrix(me_vec, n_obs, n_T)
+    if (has_me_extra) me_mat <- me_mat + me_extra
+    fu <- .kf_fixed_unknown_core(Y_minus_d, TT, RR, ZZ, DD, Sigma_e, a0_vec,
+                                 me_mat,
+                                 shock_scale = if (has_shock_scale) shock_scale,
+                                 init = fu_init,
+                                 return_filtered = return_filtered)
+    if (!isTRUE(fu$ok))
+      return(.kf_result(-Inf, NULL, method, "fixed_unknown", NA_integer_))
+    ## A singular innovation covariance (e.g. an observed exact identity of
+    ## other observables) handed the recursion over to its sequential form,
+    ## which drops exactly predictable components by the univariate filter's
+    ## rule: reported as method "univariate", with the same drop diagnostics,
+    ## the same classed warning for informative drops and the same
+    ## singular_obs policy as the univariate filter.
+    fb <- NULL
+    m_used <- method
+    if (identical(fu$recursion, "sequential")) {
+      fb <- c(from = method, to = "univariate",
+              reason = paste("singular innovation covariance: the",
+                             "fixed-unknown recursion was run component by",
+                             "component, dropping exactly predictable components"))
+      m_used <- "univariate"
+      .dynhr_warn("kalman_filter: lik_init = \"fixed_unknown\" hit a singular ",
+                  "innovation covariance; the fixed-unknown recursion was run ",
+                  "in its sequential (univariate) form instead. It SKIPPED ",
+                  sum(fu$dropped), " observation component(s) whose forecast ",
+                  "variance was <= kalman_tol (", sum(fu$dropped_informative),
+                  " of them with a non-negligible innovation), so the value is ",
+                  "the likelihood of the remaining components (see ",
+                  "$diagnostics$n_dropped / $diagnostics$n_dropped_informative).",
+                  " $method is reported as \"univariate\".", call. = FALSE,
+                  once = !is.null(.dynhr_msg_state$epoch),
+                  key = "kalman_filter:fixed_unknown_sequential",
+                  class = "dynhr_warning_fixed_unknown_sequential")
+      .kf_warn_dropped_informative(fu$dropped, fu$dropped_informative,
+                                   sum(is.finite(Y_minus_d)),
+                                   rejected = identical(singular_obs, "reject"))
+    }
+    res <- .kf_result(fu$loglik, fu$filtered, m_used, "fixed_unknown",
+                      NA_integer_, final_state = fu$final_state,
+                      final_cov = fu$final_cov,
+                      loglik_contrib = if (return_ll_contrib) fu$ll_contrib,
+                      dropped = fu$dropped,
+                      dropped_informative = fu$dropped_informative,
+                      fallback = fb, s0 = fu$s0)
+    res$diagnostics$n_unit <- fu$n_unit
+    res$diagnostics$init_coordinates <- fu_init$coordinates
+    res$diagnostics$n_unit_identified <- fu$rank_S
+    res$diagnostics$init_unit_estimate <-
+      stats::setNames(fu$init_unit_estimate, state_names_out)
+    return(res)
   }
 
   ## -- Shared Phase-1 KF step (used by dare, chandrasekhar, and the
@@ -2717,7 +2961,8 @@ kalman_filter <- function(data, dr, model, params, obs_vars,
       rownames(filt) <- state_names_out
     }
     .kf_warn_dropped_informative(out$n_skipped, out$n_skipped_informative,
-                                 sum(is.finite(Y_minus_d)))
+                                 sum(is.finite(Y_minus_d)),
+                                 rejected = identical(singular_obs, "reject"))
     .kf_result(out$loglik, filt, "univariate", li, out$d_diffuse,
                final_state = out$a[seq_len(n_state)],
                final_cov   = out$P_state,

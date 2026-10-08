@@ -461,7 +461,11 @@ compute_irfs <- function(dr, model, n_periods = 40L, shock_size = 1, params = NU
 #'
 #' @param dr DecisionRules object
 #' @param n_periods Number of simulation periods
-#' @param shocks Matrix of shocks (n_periods x n_exo). If NULL, shocks are
+#' @param shocks Matrix of shocks with \code{n_periods + burn_in} rows and
+#'   \code{n_exo} columns (the burn-in rows are simulated and then discarded;
+#'   pass \code{burn_in = 0} to supply exactly \code{n_periods} rows). If the
+#'   matrix has column names they must be the model's exogenous names and the
+#'   columns are matched by name. If NULL, shocks are
 #'   drawn from the model's full shock covariance \eqn{\Sigma_e} (from
 #'   \code{\link{shock_cov}}), \strong{including} the \code{corr} /
 #'   \code{var a, b} entries of the shocks block, via its lower Cholesky
@@ -479,6 +483,12 @@ compute_irfs <- function(dr, model, n_periods = 40L, shock_size = 1, params = NU
 #' @param init_state Optional named numeric vector of initial state deviations
 #'   (over endogenous names) loaded into the period-1 state; pair with
 #'   \code{burn_in = 0}. \code{NULL} starts at the steady state.
+#' @param linear Logical (default \code{FALSE}). For a second- or third-order
+#'   rule (\code{DecisionRules2} / \code{DecisionRules3}) the simulation uses
+#'   the rule's native order (pruned, via \code{simulate_model_order2} /
+#'   \code{simulate_model_order3}); \code{linear = TRUE} forces the
+#'   first-order (\code{ghx}/\code{ghu}) simulation. No effect on a
+#'   first-order rule.
 #' @return Matrix (n_periods x n_endo) when \code{n_replications = 1};
 #'   3-D array (n_periods x n_endo x n_replications) when \code{> 1}.
 #'
@@ -493,7 +503,14 @@ compute_irfs <- function(dr, model, n_periods = 40L, shock_size = 1, params = NU
 #' @export
 simulate_model <- function(dr, n_periods = 200L, shocks = NULL,
                            n_replications = 1L, model = NULL,
-                           burn_in = 100L, init_state = NULL) {
+                           burn_in = 100L, init_state = NULL, linear = FALSE) {
+  if (length(n_periods) != 1L || !is.numeric(n_periods) || !is.finite(n_periods) ||
+      n_periods < 1 || n_periods != round(n_periods))
+    stop("simulate_model: n_periods must be a positive whole number.", call. = FALSE)
+  if (length(burn_in) != 1L || !is.numeric(burn_in) || !is.finite(burn_in) ||
+      burn_in < 0 || burn_in != round(burn_in))
+    stop("simulate_model: burn_in must be a non-negative whole number.", call. = FALSE)
+  n_periods <- as.integer(n_periods); burn_in <- as.integer(burn_in)
   ## n_replications > 1: run the single-path body in a loop and stack results
   ## into a 3-D array.  Each replication draws independently (shocks = NULL).
   if (!is.null(n_replications) && n_replications > 1L) {
@@ -512,9 +529,45 @@ simulate_model <- function(dr, n_periods = 200L, shocks = NULL,
                                    n_replications = 1L,
                                    model = model,
                                    burn_in = burn_in,
-                                   init_state = init_state)
+                                   init_state = init_state,
+                                   linear = linear)
     }
     return(out)
+  }
+
+  ## Supplied shocks: validated (and matched by name) BEFORE the order
+  ## dispatch so the order-2 / order-3 simulators get the same contract.
+  exo <- dr$exo_names
+  if (!is.null(shocks)) {
+    if (!is.matrix(shocks) || !is.numeric(shocks))
+      stop("simulate_model: shocks must be a numeric matrix with n_periods + ",
+           "burn_in rows and one column per exogenous shock.", call. = FALSE)
+    if (ncol(shocks) != length(exo))
+      stop(sprintf("simulate_model: supplied shocks has %d columns; the model has %d shocks (%s).",
+                   ncol(shocks), length(exo), paste(exo, collapse = ", ")), call. = FALSE)
+    if (!is.null(colnames(shocks))) {
+      if (anyDuplicated(colnames(shocks)) || !setequal(colnames(shocks), exo))
+        stop("simulate_model: shocks column names (", paste(colnames(shocks), collapse = ", "),
+             ") do not match the model's exogenous names (", paste(exo, collapse = ", "),
+             ").", call. = FALSE)
+      shocks <- shocks[, exo, drop = FALSE]
+    }
+    if (nrow(shocks) != n_periods + burn_in)
+      stop(sprintf(paste0("simulate_model: supplied shocks has %d rows; needs ",
+                          "n_periods + burn_in = %d rows, or pass burn_in = 0."),
+                   nrow(shocks), n_periods + burn_in), call. = FALSE)
+  }
+
+  ## Native-order dispatch (DR3 inherits DR2, so test DR3 first).
+  if (!isTRUE(linear)) {
+    if (inherits(dr, "DecisionRules3"))
+      return(simulate_model_order3(dr, n_periods = n_periods, model = model,
+                                   burn_in = burn_in, shocks = shocks,
+                                   init_state = init_state))
+    if (inherits(dr, "DecisionRules2"))
+      return(simulate_model_order2(dr, n_periods = n_periods, model = model,
+                                   burn_in = burn_in, shocks = shocks,
+                                   init_state = init_state))
   }
 
   ghx <- dr$ghx

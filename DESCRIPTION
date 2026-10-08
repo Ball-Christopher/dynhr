@@ -1,6 +1,6 @@
 Package: dynhr
 Title: DSGE Modelling Toolkit (Parsing, Solving, Estimating, Diagnosing)
-Version: 0.9.4.48
+Version: 0.9.4.64
 Authors@R: c(
     person("Chris", "Ball", role = c("aut", "cre"),
            email = "chrispball1@gmail.com"))
@@ -105,6 +105,7 @@ Collate:
     'compile-dynamic.R'
     'compile-model.R'
     'steady-monolith.R'
+    'balanced-growth.R'
     'solve-helpers.R'
     'solve-extract-system.R'
     'solve-qz.R'
@@ -142,6 +143,7 @@ Collate:
     'backend-monolith.R'
     'mixed-frequency.R'
     'kalman-filter.R'
+    'kalman-fixed-unknown.R'
     'kf-step.R'
     'kalman-filter-student.R'
     'kf-innovation-diagnostics.R'

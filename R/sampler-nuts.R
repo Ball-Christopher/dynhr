@@ -883,23 +883,51 @@ dynhr_nuts <- function(
     # matrices), position, log-posterior, accept count, draw count, and --
     # critically -- the RNG state, so the continuation is bit-identical to a
     # single longer run.
+    ## ALL verification (meta, then the log density at the saved position)
+    ## happens BEFORE any file is touched, so a refused resume leaves the
+    ## checkpoint byte-identical.
     .ckpt_meta_verify(ckpt_paths$meta, "nuts", checkpoint$fingerprint)
     st <- .ckpt_load_state(ckpt_paths$state)
-    if (st$n_done < st$n_warmup)
-      stop("checkpoint resume: saved state is mid-warmup (n_done=", st$n_done,
-           " < n_warmup=", st$n_warmup, "). NUTS checkpoints are only resumable ",
-           "after warmup completes. Start a fresh run.", call. = FALSE)
+    if (st$n_done < st$n_warmup && !identical(as.integer(st$n_warmup), as.integer(n_warmup)))
+      stop("checkpoint resume: the saved run is mid-warmup with n_warmup = ",
+           st$n_warmup, " but this call has n_warmup = ", n_warmup,
+           "; resume with the same n_warmup.", call. = FALSE)
     theta         <- st$theta
     lp_curr       <- st$lp_curr
     trace_lp_curr <- st$trace_lp_curr
-    ## fused: the gradient at the saved position (a deterministic function of
-    ## it, so the continuation matches the uninterrupted run)
-    g_curr <- if (!is.null(vg_fn)) vg_fn(theta)$grad else NULL
+    ## Re-evaluate the SAME target (incl. transform / Jacobian) at the saved
+    ## position. Fused: the gradient comes from the same call (a deterministic
+    ## function of the position, so the continuation matches the uninterrupted
+    ## run). The RNG is restored below, so this cannot perturb the stream.
+    vg_saved <- if (!is.null(vg_fn)) vg_fn(theta) else NULL
+    if (!isFALSE(checkpoint$lp_check))
+      .ckpt_verify_lp(lp_curr,
+                      if (is.null(vg_saved)) .lp_scalar(theta) else vg_saved$lp,
+                      "nuts")
+    g_curr <- if (is.null(vg_saved)) NULL else vg_saved$grad
     eps_m         <- st$eps_m
     M_diag        <- st$M_diag
     M_inv_diag    <- st$M_inv_diag
     if (!is.null(st$M_inv))    M_inv    <- st$M_inv
     if (!is.null(st$chol_M))   chol_M   <- st$chol_M
+    ## Warm-up adaptation state (saved AFTER the saved iteration's updates).
+    if (st$n_done < st$n_warmup) {
+      if (is.null(st$eps_bar))
+        stop("checkpoint resume: the saved mid-warmup state carries no ",
+             "adaptation state (written by an older build); start a fresh run.",
+             call. = FALSE)
+      eps_bar <- st$eps_bar; H_bar <- st$H_bar; mu <- st$mu
+      da_m <- st$da_m; eps0 <- st$eps0
+      use_dense <- st$use_dense
+      slow_win_idx <- st$slow_win_idx
+      cur_slow_start <- st$cur_slow_start; cur_slow_end <- st$cur_slow_end
+      state_chain[seq_len(nrow(st$state_chain)), ] <- st$state_chain
+      if (!is.null(grad_chain) && !is.null(st$grad_chain))
+        grad_chain[seq_len(nrow(st$grad_chain)), ] <- st$grad_chain
+      lr_history <- st$lr_history %||% list()
+      lr_last <- st$lr_last
+    }
+    n_grad_evals  <- st$n_grad_evals %||% 0L
     n_warmup      <- st$n_warmup        # original warmup fixes the retained set
     n_divergent_total <- st$n_divergent_total
     i_start       <- st$n_done
@@ -983,6 +1011,7 @@ dynhr_nuts <- function(
     }
 
     stored_m <- if (!is.null(transform)) transform$to_constrained(theta) else theta
+    ckpt_save_now <- FALSE
     if (ckpt) {
       # Checkpoint path: buffer the draw; flush to disk every flush_every rows.
       buf_i <- buf_i + 1L
@@ -991,21 +1020,7 @@ dynhr_nuts <- function(
       if (buf_i >= flush_every || m == n_total) {
         .ckpt_append_draws(ckpt_paths$draws, buf[seq_len(buf_i), , drop = FALSE])
         .ckpt_append_lp(ckpt_paths$lp, buf_lp[seq_len(buf_i)])
-        .ckpt_save_state(ckpt_paths$state, list(
-          theta         = theta,
-          lp_curr       = lp_curr,
-          trace_lp_curr = trace_lp_curr,
-          eps_m         = eps_m,
-          M_diag        = M_diag,
-          M_inv_diag    = M_inv_diag,
-          M_inv         = M_inv,
-          chol_M        = chol_M,
-          n_done        = m,
-          n_warmup      = n_warmup,
-          n_draws_target = n_draws,
-          n_divergent_total = n_divergent_total + as.integer(any_divergent),
-          rng           = get(".Random.seed", envir = .GlobalEnv)
-        ))
+        ckpt_save_now <- TRUE
         buf_i <- 0L
       }
     } else {
@@ -1215,6 +1230,37 @@ dynhr_nuts <- function(
     if (m == n_warmup) {
       eps_m <- eps_bar
       if (verbose) .dynhr_inform(sprintf("NUTS: warmup complete, final step_size = %.4e", eps_m))
+    }
+
+    ## ---- Restart state: saved AFTER every per-iteration update (dual
+    ## averaging, windowed mass adaptation, end-of-warmup step-size fix) so a
+    ## resume -- even mid-warmup -- continues exactly. Written atomically
+    ## AFTER the draws were flushed above.
+    if (ckpt_save_now) {
+      mid_warm <- m < n_warmup
+      .ckpt_save_state(ckpt_paths$state, list(
+        theta         = theta,
+        lp_curr       = lp_curr,
+        trace_lp_curr = trace_lp_curr,
+        eps_m         = eps_m,
+        M_diag        = M_diag,
+        M_inv_diag    = M_inv_diag,
+        M_inv         = M_inv,
+        chol_M        = chol_M,
+        n_done        = m,
+        n_warmup      = n_warmup,
+        n_draws_target = n_draws,
+        n_divergent_total = n_divergent_total,
+        n_grad_evals  = n_grad_evals,
+        eps_bar = eps_bar, H_bar = H_bar, mu = mu, da_m = da_m, eps0 = eps0,
+        use_dense = use_dense, slow_win_idx = slow_win_idx,
+        cur_slow_start = cur_slow_start, cur_slow_end = cur_slow_end,
+        state_chain = if (mid_warm) state_chain[seq_len(m), , drop = FALSE] else NULL,
+        grad_chain  = if (mid_warm && !is.null(grad_chain))
+                        grad_chain[seq_len(m), , drop = FALSE] else NULL,
+        lr_history = lr_history, lr_last = lr_last,
+        rng           = get(".Random.seed", envir = .GlobalEnv)
+      ))
     }
 
     # --- Progress ---

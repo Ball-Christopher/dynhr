@@ -184,10 +184,21 @@ hank_ma_state_space <- function(Theta, sigma_eps, q = NULL) {
 #' @param sigma_eps Innovation standard deviation.
 #' @param me_variance Measurement-error variance (needed when n_obs > n_shocks).
 #' @param q Optional state length (default all MA terms).
+#' @param singular_obs \code{"reject"} (default) or \code{"skip"}: an
+#'   observation component the filter skips because its forecast variance is
+#'   at most \code{kalman_tol} although its innovation is not negligible (data
+#'   the model cannot generate, e.g. more observables than shocks with
+#'   \code{me_variance = 0} and inconsistent data) makes the log-likelihood
+#'   \code{-Inf} under \code{"reject"}; \code{"skip"} keeps the Dynare
+#'   convention (component ignored, finite value). Both raise a
+#'   \code{dynhr_warning_dropped_observations} warning. See
+#'   \code{\link{kalman_filter}}.
 #'
 #' @return The scalar Kalman log-likelihood.
 #' @export
-hank_loglik_ss <- function(data, Theta, sigma_eps, me_variance = 0, q = NULL) {
+hank_loglik_ss <- function(data, Theta, sigma_eps, me_variance = 0, q = NULL,
+                           singular_obs = c("reject", "skip")) {
+  singular_obs <- match.arg(singular_obs)
   data  <- as.matrix(data)
   ss <- hank_ma_state_space(Theta, sigma_eps, q = q)
   n_state <- ss$n_state
@@ -199,7 +210,7 @@ hank_loglik_ss <- function(data, Theta, sigma_eps, me_variance = 0, q = NULL) {
     P_state = sigma_eps^2 * diag(n_state),    # nilpotent T => stationary cov
     P_inf_state = NULL,
     me_variance = me_variance)
-  out$loglik
+  .kf_dispatch_loglik(out, singular_obs, t(data))
 }
 
 

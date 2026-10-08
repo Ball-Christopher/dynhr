@@ -174,12 +174,15 @@ solve_steady_state_analytical <- function(model, params) {
 #'   matched in declaration order.  When \code{NULL} (default) all exogenous
 #'   variables are treated as zero, which is the Dynare convention for models
 #'   whose steady state is defined at \eqn{\varepsilon = 0}.
+#' @param growth Logical: solve the balanced-growth path of a linear model
+#'   with no static steady state; see \code{\link{solve_steady_state}}. The
+#'   result then carries \code{growth}.
 #' @export
 solve_steady <- function(compiled, params, y0 = NULL,
                             endo_names = NULL, exo_names = NULL,
                             exo_init = NULL,
                             max_iter = 1000L, tol = 1e-10,
-                            verbose = FALSE) {
+                            verbose = FALSE, growth = FALSE) {
   ## Auto-derive endo_names/exo_names from compiled model when not provided.
   if (is.null(endo_names) && inherits(compiled, "dynhr_compiled"))
     endo_names <- compiled$model$var_names
@@ -193,7 +196,8 @@ solve_steady <- function(compiled, params, y0 = NULL,
   ss <- solve_steady_state(model, compiled, params, y0 = y0,
                             exo_init = exo_init,
                             method = "auto", max_iter = max_iter,
-                            tol = tol, verbose = verbose)
+                            tol = tol, verbose = verbose,
+                            growth = growth)
   ## Remap solve_steady_state output fields to solve_steady convention.
   ## Include updated_params if the analytical SS filled in missing values.
   result <- list(values = ss$values, residuals = ss$residuals,
@@ -202,6 +206,8 @@ solve_steady <- function(compiled, params, y0 = NULL,
                  method = ss$method_used %||% "Newton")
   if (!is.null(ss$params))
     result$params <- ss$params
+  if (!is.null(ss$growth))
+    result$growth <- ss$growth
   structure(result, class = c("dynhr_steady", "list"))
 }
 
@@ -354,6 +360,25 @@ solve_ss_optim <- function(compiled, params, y0 = NULL,
 #' @param max_attempts Integer guard on how many times the whole cascade may be
 #'   retried; each attempt tries the remaining methods in order. Raising it does
 #'   not make a genuinely infeasible calibration solvable.
+#' @param growth Logical (default \code{FALSE}). \code{TRUE} solves the
+#'   BALANCED-GROWTH path of a \code{model(linear)} that has no static steady
+#'   state -- a unit root with drift, e.g.
+#'   \code{a - a(-1) = rho*(a(-1) - a(-2)) + (1-rho)*g + e} -- as IRIS's
+#'   \code{sstate(m, 'growth=', true)} does: every variable gets a level
+#'   \eqn{y_0} and a growth \eqn{g} such that \eqn{y_0 + g t} solves every
+#'   dynamic equation with the shocks at zero. The stacked system
+#'   \eqn{S g = 0}, \eqn{S y_0 + (C - B) g = -c} (\eqn{S = A + B + C} from the
+#'   constant dynamic Jacobian) is solved in the minimum-norm sense, so an
+#'   indeterminate unit-root level is reported at its minimum-norm value; the
+#'   path is accepted only if its dynamic residual is ~0 at two different
+#'   \eqn{t}, otherwise \code{converged = FALSE}. A model whose static system
+#'   IS consistent returns its usual steady state with \code{growth} all zero.
+#'   Nonlinear models are refused (\code{dynhr_error_growth_unsupported}).
+#'   A model returned by \code{solve_model(steady_options = list(growth =
+#'   TRUE))} with non-zero growth carries \code{balanced_growth = TRUE}, and
+#'   every steady-state solve on it (e.g. a posterior evaluation at a new
+#'   parameter vector) solves the balanced-growth path whatever this argument
+#'   says.
 #'
 #' @return An object of class \code{dynhr_steady} (a list) with the named
 #'   steady-state vector in BOTH \code{ss} and \code{values} (the same object
@@ -362,7 +387,12 @@ solve_ss_optim <- function(compiled, params, y0 = NULL,
 #'   which method actually succeeded. **Check \code{converged} before using the
 #'   result**: a non-converged solve is returned rather than raised, so that
 #'   callers sweeping a parameter can inspect the failure instead of aborting
-#'   the sweep.
+#'   the sweep. With \code{growth = TRUE} it also carries \code{growth}, the
+#'   named per-period growth of every endogenous variable (auxiliary lag/lead
+#'   variables included); \code{ss} is then the level \eqn{y_0} at
+#'   \eqn{t = 0}, \code{residuals} the DYNAMIC residual of the path at
+#'   \eqn{t = 0}, and \code{method_used = "linear_growth"} when the path (not
+#'   a static steady state) was solved.
 #'
 #' @seealso \code{\link{compile_model}}, \code{\link{solve_perturbation}}
 #' @examples
@@ -379,7 +409,15 @@ solve_steady_state <- function(model, compiled = NULL, params = NULL,
                                y0 = NULL, method = "auto",
                                exo_init = NULL,
                                max_iter = 1000L, tol = 1e-10,
-                               verbose = FALSE, max_attempts = 3L) {
+                               verbose = FALSE, max_attempts = 3L,
+                               growth = FALSE) {
+  growth <- .ss_growth_requested(growth, model)
+  if (growth && !isTRUE(model$model_options$linear))
+    .dynhr_abort(
+      "solve_steady_state: `growth = TRUE` (the balanced-growth path y0 + g t) ",
+      "is implemented for `model(linear)` only; a nonlinear model's ",
+      "balanced-growth path needs a detrended (stationarised) model.",
+      class = "dynhr_error_growth_unsupported")
   if (is.null(params)) params <- model$param_values
   if (length(params) == 0)
     stop("No parameter values available. Supply params argument.")
@@ -478,6 +516,7 @@ solve_steady_state <- function(model, compiled = NULL, params = NULL,
     ## state) leaves a residual, and is reported as converged = FALSE with a
     ## classed warning -- never as a converged SS with a non-zero residual.
     aff_ok <- TRUE
+    inconsistent_msg <- NULL
     if (!has_ssm && all(is.finite(r)) && is.finite(max_r) && max_r > tol) {
       A <- compiled$static$jacobian_fn(ss, x0, ss_params, ss)
       A_ok <- is.matrix(A) && all(is.finite(A)) && nrow(A) == ncol(A)
@@ -517,14 +556,17 @@ solve_steady_state <- function(model, compiled = NULL, params = NULL,
           r     <- r_aff
           max_r <- max(abs(r_aff))
         }
-        .dynhr_warn(sprintf(paste0(
+        ## Deferred: with growth = TRUE the balanced-growth solve below gets
+        ## its chance first, and only its failure is reported.
+        inconsistent_msg <- sprintf(paste0(
           "solve_steady_state: the linear model's static system A y = -c has ",
           "no solution (max|residual| = %.3e at the least-squares point%s). ",
           "Returning converged = FALSE. A drift term on a unit-root variable ",
-          "(e.g. `y = y(-1) + c + e`) has no steady state."),
+          "(e.g. `y = y(-1) + c + e`) has no steady state; it has a ",
+          "BALANCED-GROWTH path, which `growth = TRUE` solves ",
+          "(solve_model(steady_options = list(growth = TRUE)))."),
           max_r, if (A_ok && !(is.finite(rc) && rc > .Machine$double.eps))
-            "; the static Jacobian is singular" else ""),
-          class = "dynhr_warning_steady_state_inconsistent")
+            "; the static Jacobian is singular" else "")
       }
     }
 
@@ -535,12 +577,43 @@ solve_steady_state <- function(model, compiled = NULL, params = NULL,
     # model never enters it: its residual at 0 is already 0) or flagged the
     # system as inconsistent; `converged` is TRUE only in the former case.
     conv <- if (has_ssm) (max_r < tol * 100) else aff_ok
+
+    ## ---- Balanced-growth path (growth = TRUE) -----------------------------
+    ## Entered only when there is no static steady state: a consistent system
+    ## returns its usual SS with growth 0, unchanged. See R/balanced-growth.R.
+    if (growth && !conv) {
+      bg <- .linear_balanced_growth(compiled, ss_params, endo_names, tol)
+      if (isTRUE(bg$ok)) {
+        if (verbose)
+          .dynhr_cat(sprintf(paste0("  Linear model has no static steady ",
+                                    "state: solved the balanced-growth path ",
+                                    "y0 + g t (max dynamic |r| = %.3e).\n"),
+                             bg$max_residual))
+        result_bg <- list(ss = bg$y0, values = bg$y0, growth = bg$growth,
+                          residuals = bg$residuals, converged = TRUE,
+                          iterations = 0L, max_residual = bg$max_residual,
+                          method_used = "linear_growth")
+        if (has_ssm) result_bg$params <- ss_params
+        return(.as_dynhr_steady(result_bg))
+      }
+      inconsistent_msg <- sprintf(paste0(
+        "solve_steady_state: the linear model has neither a static steady ",
+        "state (max|static residual| = %.3e) nor a balanced-growth path ",
+        "y0 + g t (max|dynamic residual| = %.3e at the minimum-norm ",
+        "candidate). Returning converged = FALSE."),
+        max_r, bg$max_residual)
+    }
+    if (!is.null(inconsistent_msg))
+      .dynhr_warn(inconsistent_msg,
+                  class = "dynhr_warning_steady_state_inconsistent")
+
     if (!conv && verbose)
       .dynhr_cat(sprintf("  Linear SS: max|r| = %.3e > tol; unconverged.\n", max_r))
     result_lin <- list(ss = ss, values = ss, residuals = r,
                        converged = conv,
                        iterations = 0L, max_residual = max_r,
                        method_used = "linear")
+    if (growth) result_lin$growth <- setNames(numeric(n), endo_names)
     if (has_ssm) result_lin$params <- ss_params
     return(.as_dynhr_steady(result_lin))
   }

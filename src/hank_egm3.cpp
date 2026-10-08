@@ -46,6 +46,35 @@ static inline Lottery3 lottery3(const double* grid, int n, double z) {
   return Lottery3{lo, lo + 1, p, 1.0 - p};
 }
 
+// Shape guard for the matrix-free forward exports (review 2026-10-07, F03).
+// These read policies/grids/Pi/state vectors on dims taken from ONE policy's
+// `dim`, so any other argument of a different size was an out-of-bounds read.
+static void egm3_check_forward(const char* fn, const NumericVector& pol0,
+                               const NumericVector* pols, int npol,
+                               const NumericVector& dgr, const NumericVector& fgr,
+                               const NumericVector& agr, int* ne_o, int* nd_o,
+                               int* nf_o, int* na_o) {
+  RObject dim_attr = pol0.attr("dim");
+  if (dim_attr.isNULL())
+    stop("%s: policies must be four-dimensional arrays; no `dim` attribute.", fn);
+  IntegerVector dm(dim_attr);
+  if (dm.size() != 4)
+    stop("%s: policies need four dimensions", fn);
+  const int ne = dm[0], nd = dm[1], nf = dm[2], na = dm[3];
+  if (ne < 1 || nd < 1 || nf < 1 || na < 1)
+    stop("%s: every policy dimension must be >= 1.", fn);
+  const R_xlen_t N = (R_xlen_t)ne * nd * nf * na;
+  for (int k = 0; k < npol; ++k)
+    if (pols[k].size() != N)
+      stop("%s: every policy array must have length n_e*n_d*n_f*n_a = %d.",
+           fn, (int)N);
+  if (dgr.size() != nd || fgr.size() != nf || agr.size() != na)
+    stop("%s: grid lengths (%d, %d, %d) must equal dim(policy)[2:4] = "
+         "(%d, %d, %d).", fn, (int)dgr.size(), (int)fgr.size(),
+         (int)agr.size(), nd, nf, na);
+  *ne_o = ne; *nd_o = nd; *nf_o = nf; *na_o = na;
+}
+
 // Apply the joint Young operator without materializing it.
 // transpose = FALSE: Lambda %*% x (backward expectation application).
 // transpose = TRUE:  t(Lambda) %*% x (forward distribution application).
@@ -59,9 +88,12 @@ NumericVector hank_forward_apply3_cpp(NumericVector d_pol,
                                       NumericMatrix Pi,
                                       NumericVector x,
                                       bool transpose = false) {
-  IntegerVector dm = d_pol.attr("dim");
-  if (dm.size() != 4) stop("hank_forward_apply3_cpp: policies need four dimensions");
-  const int ne = dm[0], nd = dm[1], nf = dm[2], na = dm[3];
+  int ne, nd, nf, na;
+  { const NumericVector ps[3] = {d_pol, f_pol, a_pol};
+    egm3_check_forward("hank_forward_apply3_cpp", d_pol, ps, 3, d_grid,
+                       f_grid, a_grid, &ne, &nd, &nf, &na); }
+  if (Pi.nrow() != ne || Pi.ncol() != ne)
+    stop("hank_forward_apply3_cpp: Pi must be n_e x n_e");
   const std::size_t N = (std::size_t)ne * nd * nf * na;
   if ((std::size_t)x.size() != N) stop("hank_forward_apply3_cpp: x has wrong length");
   NumericVector out(N);
@@ -118,9 +150,12 @@ NumericVector hank_forward_direction3_cpp(NumericVector d_pol,
                                           double delta,
                                           Nullable<NumericMatrix> Pi_p = R_NilValue,
                                           Nullable<NumericMatrix> Pi_m = R_NilValue) {
-  IntegerVector dm = d_pol.attr("dim");
-  if (dm.size() != 4) stop("hank_forward_direction3_cpp: policies need four dimensions");
-  const int ne = dm[0], nd = dm[1], nf = dm[2], na = dm[3];
+  int ne, nd, nf, na;
+  { const NumericVector ps[6] = {d_pol, f_pol, a_pol, dd, df, da};
+    egm3_check_forward("hank_forward_direction3_cpp", d_pol, ps, 6, d_grid,
+                       f_grid, a_grid, &ne, &nd, &nf, &na); }
+  if (Pi.nrow() != ne || Pi.ncol() != ne)
+    stop("hank_forward_direction3_cpp: Pi must be n_e x n_e");
   const std::size_t N = (std::size_t)ne * nd * nf * na;
   if ((std::size_t)dist.size() != N || (std::size_t)dd.size() != N ||
       (std::size_t)df.size() != N || (std::size_t)da.size() != N)
@@ -312,15 +347,17 @@ NumericVector hank_forward_legs3_cpp(NumericVector d_plus,
                                      NumericMatrix Pi_minus,
                                      NumericVector dist,
                                      double step) {
-  IntegerVector dm = d_plus.attr("dim");
-  if (dm.size() != 4)
-    stop("hank_forward_legs3_cpp: policies need four dimensions");
-  const int ne = dm[0], nd = dm[1], nf = dm[2], na = dm[3];
-  const std::size_t N = (std::size_t)ne * nd * nf * na;
+  int ne, nd, nf, na;
   const NumericVector policies[6] =
     {d_plus, f_plus, a_plus, d_minus, f_minus, a_minus};
+  egm3_check_forward("hank_forward_legs3_cpp", d_plus, policies, 6, d_grid,
+                     f_grid, a_grid, &ne, &nd, &nf, &na);
+  const std::size_t N = (std::size_t)ne * nd * nf * na;
   for (int k = 0; k < 6; ++k) {
-    IntegerVector dk = policies[k].attr("dim");
+    RObject dka = policies[k].attr("dim");
+    if (dka.isNULL())
+      stop("hank_forward_legs3_cpp: policy legs must be conformable");
+    IntegerVector dk(dka);
     if (dk.size() != 4 || dk[0] != ne || dk[1] != nd ||
         dk[2] != nf || dk[3] != na || (std::size_t)policies[k].size() != N)
       stop("hank_forward_legs3_cpp: policy legs must be conformable");
@@ -1023,9 +1060,9 @@ List hank_curly_sweep3_cpp(NumericVector Vd_ss_, NumericVector Vf_ss_,
                            double px, NumericVector D_ss_,
                            CharacterVector outputs, double delta_v, int T_h,
                            int threads = 1) {
-  IntegerVector dm = Vd_ss_.attr("dim");
-  if (dm.size() != 4) stop("hank_curly_sweep3_cpp: Vd needs four dimensions");
-  const int ne = dm[0], nd = dm[1], nf = dm[2], na = dm[3];
+  int ne, nd, nf, na;
+  egm3_check_shapes("hank_curly_sweep3_cpp", Vd_ss_, Vf_ss_, Va_ss_, dg_, fg_,
+                    ag_, y_, Pi_, &ne, &nd, &nf, &na);
   const std::size_t N = (std::size_t)ne * nd * nf * na;
   if ((std::size_t)Vf_ss_.size() != N || (std::size_t)Va_ss_.size() != N ||
       (std::size_t)dVd0_.size() != N || (std::size_t)dVf0_.size() != N ||

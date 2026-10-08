@@ -10,6 +10,7 @@ estimation_context(
     "ppf", "copf", "pruned", "sv_rbpf", "global_pf"),
   lik_init = "auto",
   filter_method = "auto",
+  singular_obs = "reject",
   me_extra = NULL,
   shock_scale = NULL,
   freq_band = c(0, pi),
@@ -42,7 +43,9 @@ constraints).}
 
 \item{lik_init}{Kalman filter \code{P0} initialisation (default
 \code{"auto"}).  Forwarded to \code{\link{kalman_filter}} on the
-Gaussian path.  Ignored for cumulant/whittle/tpf likelihoods.}
+Gaussian path.  Ignored for cumulant/whittle/tpf likelihoods.
+\code{"fixed_unknown"} is accepted for the Gaussian likelihood without
+a Markov-switching spec only (see \code{\link{make_log_posterior}}).}
 
 \item{filter_method}{Kalman filter recursion for the Gaussian value path
 (default \code{"auto"}): one of the \code{method} choices of
@@ -51,6 +54,13 @@ what \code{"auto"} means inside the posterior and for the forced
 choices.  A value other than \code{"auto"} with any likelihood but
 \code{"gaussian"}, or with a Markov-switching spec, is an error of class
 \code{dynhr_error_inapplicable_argument}.}
+
+\item{singular_obs}{What the Gaussian value path does when the univariate
+filter would skip an observation component of ~zero forecast variance
+but non-negligible innovation (data the model deems impossible):
+\code{"reject"} (default) makes the log-likelihood \code{-Inf};
+\code{"skip"} is the Dynare convention (finite value, warning). See
+\code{\link{kalman_filter}} \code{singular_obs}.}
 
 \item{me_extra}{\code{n_obs x T} matrix of per-period extra measurement
 error variances (resolved from a \code{filter_tunes} block); \code{NULL}

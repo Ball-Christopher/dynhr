@@ -131,7 +131,7 @@ kf_innovation_diagnostics <- function(data, dr, model, params, obs_vars,
                                       lik_init = c("stationary", "diffuse"),
                                       me_variance = 0) {
   lik_init <- match.arg(lik_init)
-  .refuse_obs_trends(model, "kf_innovation_diagnostics()")
+  .refuse_obs_trends(model, "kf_innovation_diagnostics()", dr = dr)
   if (identical(lik_init, "diffuse"))
     stop("kf_innovation_diagnostics: lik_init = \"diffuse\" is not ",
          "supported by this thin diagnostic (no exact-diffuse phase is ",

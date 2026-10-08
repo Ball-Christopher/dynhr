@@ -149,6 +149,48 @@
 }
 
 
+## Shared input contract for the native boundary (review 2026-10-07, F03).
+## The compiled kernels wrap caller buffers on ASSUMED dims, so every matrix is
+## checked for exact dims and finiteness here, BEFORE backend dispatch, which
+## makes the R and cpp backends fail identically. `positive` additionally
+## requires > 0 (marginal values).
+.hank_check_matrix <- function(x, n_r, n_c, name, caller, positive = FALSE) {
+  if (!is.matrix(x) || !is.numeric(x) || nrow(x) != n_r || ncol(x) != n_c)
+    stop(caller, ": '", name, "' must be a numeric ", n_r, " x ", n_c,
+         " matrix (got ",
+         if (is.matrix(x)) paste0(nrow(x), " x ", ncol(x)) else
+           paste0("a ", class(x)[1L]), ").", call. = FALSE)
+  if (!all(is.finite(x)))
+    stop(caller, ": '", name, "' has non-finite entries.", call. = FALSE)
+  if (positive && any(x <= 0))
+    stop(caller, ": '", name, "' must be strictly positive.", call. = FALSE)
+  invisible(TRUE)
+}
+
+.hank_check_egm1_inputs <- function(a_grid, y, r, beta, eis, tol, maxit,
+                                    caller = "hank_egm_solve") {
+  if (!is.numeric(a_grid) || length(a_grid) < 2L || !all(is.finite(a_grid)))
+    stop(caller, ": 'a_grid' must be a finite numeric vector of length >= 2.",
+         call. = FALSE)
+  if (any(diff(a_grid) <= 0))
+    stop(caller, ": 'a_grid' must be strictly increasing.", call. = FALSE)
+  if (!is.numeric(y) || length(y) < 1L || !all(is.finite(y)))
+    stop(caller, ": 'y' must be a finite numeric vector of length >= 1.",
+         call. = FALSE)
+  for (nm in c("r", "beta", "eis", "tol")) {
+    x <- get(nm)
+    if (!is.numeric(x) || length(x) != 1L || !is.finite(x))
+      stop(caller, ": '", nm, "' must be a finite numeric scalar.",
+           call. = FALSE)
+  }
+  if (eis <= 0) stop(caller, ": 'eis' must be > 0.", call. = FALSE)
+  if (tol <= 0) stop(caller, ": 'tol' must be > 0.", call. = FALSE)
+  if (!is.numeric(maxit) || length(maxit) != 1L || !is.finite(maxit) ||
+      maxit < 1 || maxit != round(maxit))
+    stop(caller, ": 'maxit' must be a positive integer.", call. = FALSE)
+  invisible(TRUE)
+}
+
 #' Solve the household problem to a steady-state policy (fixed prices)
 #'
 #' Iterates the EGM backward step at constant prices \code{(r, y)} until the
@@ -217,7 +259,17 @@ hank_egm_solve <- function(a_grid, y, r, beta, eis, Pi,
                            backend = getOption("dynhr.hank_backend", "cpp"),
                            coh_extra = NULL) {
   backend <- match.arg(backend, c("R", "cpp"))
+  .hank_check_egm1_inputs(a_grid, y, r, beta, eis, tol, maxit)
   n_e <- length(y); n_a <- length(a_grid)
+  if (!is.null(Va_init))
+    .hank_check_matrix(Va_init, n_e, n_a, "Va_init", "hank_egm_solve",
+                       positive = TRUE)
+  if (!is.null(coh_extra))
+    .hank_check_matrix(coh_extra, n_e, n_a, "coh_extra", "hank_egm_solve")
+  if (!is.null(amin) && (!is.numeric(amin) || length(amin) != 1L ||
+                         !is.finite(amin)))
+    stop("hank_egm_solve: 'amin' must be NULL or a finite numeric scalar.",
+         call. = FALSE)
   ## Shared Markov contract (same validator as hank_forward_operator, so all
   ## public HANK routes agree on what a transition matrix is).
   .hank_check_markov(Pi, n_e, caller = "hank_egm_solve")

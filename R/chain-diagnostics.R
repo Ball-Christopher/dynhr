@@ -23,6 +23,23 @@
     ni <- nrow(mats[[1L]]); np <- ncol(mats[[1L]])
     if (!all(vapply(mats, function(m) nrow(m) == ni && ncol(m) == np, TRUE)))
       stop("chain_diagnostics: all chains must have identical dimensions.")
+    cn <- lapply(mats, colnames)
+    has_cn <- !vapply(cn, is.null, TRUE)
+    if (any(has_cn)) {
+      if (!all(has_cn))
+        stop("chain_diagnostics: some chains have column names and others do not; ",
+             "name all chains' parameters or none.")
+      for (k in seq_along(cn)) {
+        if (anyNA(cn[[k]]) || any(!nzchar(cn[[k]])) || anyDuplicated(cn[[k]]))
+          stop("chain_diagnostics: chain ", k,
+               " has missing, empty or duplicated column names.")
+        if (!setequal(cn[[k]], cn[[1L]]))
+          stop("chain_diagnostics: chain ", k, " has different parameter names (",
+               paste(cn[[k]], collapse = ", "), ") than chain 1 (",
+               paste(cn[[1L]], collapse = ", "), ").")
+      }
+      mats <- lapply(mats, function(m) m[, cn[[1L]], drop = FALSE])
+    }
     A <- array(0, dim = c(ni, length(mats), np),
                dimnames = list(NULL, NULL, colnames(mats[[1L]])))
     for (c in seq_along(mats)) A[, c, ] <- mats[[c]]

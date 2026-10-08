@@ -4,7 +4,12 @@
 \alias{hank_kalman_loglik}
 \title{Kalman log-likelihood of aggregate HANK data on a general state space}
 \usage{
-hank_kalman_loglik(data, ss, me_variance = 0)
+hank_kalman_loglik(
+  data,
+  ss,
+  me_variance = 0,
+  singular_obs = c("reject", "skip")
+)
 }
 \arguments{
 \item{data}{\code{T_data x n_obs} matrix (or data frame) of demeaned
@@ -15,6 +20,16 @@ observations, columns in the same order as \code{ss$obs_names}.}
 \item{me_variance}{Measurement-error variance added to every observable's
 diagonal (default 0; needed when \code{n_obs > n_shock}, i.e. stochastic
 singularity).}
+
+\item{singular_obs}{\code{"reject"} (default) or \code{"skip"}: an
+observation component the filter skips because its forecast variance is
+at most \code{kalman_tol} although its innovation is not negligible (data
+the model cannot generate, e.g. more observables than shocks with
+\code{me_variance = 0} and inconsistent data) makes the log-likelihood
+\code{-Inf} under \code{"reject"}; \code{"skip"} keeps the Dynare
+convention (component ignored, finite value). Both raise a
+\code{dynhr_warning_dropped_observations} warning. See
+\code{\link{kalman_filter}}.}
 }
 \value{
 The scalar Gaussian log-likelihood.

@@ -13,7 +13,11 @@ and \code{print} / \code{summary} methods.
     of post-warmup posterior draws.  Column names are parameter names.}
   \item{\code{sampler}}{Character: one of \code{"rwmh"}, \code{"smc"}, or
     \code{"nuts"}.}
-  \item{\code{acceptance_rate}}{Mean acceptance rate (RWMH only).}
+  \item{\code{acceptance_rate}}{Mean acceptance rate: the Metropolis
+    acceptance rate for RWMH; for NUTS the mean post-warmup NUTS acceptance
+    statistic (the quantity \code{target_accept} targets; each chain also
+    carries \code{accept_stat} and \code{move_rate}, the fraction of
+    iterations whose draw moved).}
   \item{\code{log_marginal_lik}}{Log marginal likelihood estimate (SMC
     only).}
   \item{\code{n_divergent}}{Number of divergent transitions (NUTS only).}

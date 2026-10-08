@@ -1078,7 +1078,9 @@ dm_irf <- function(dm, n_periods = 40L, at = c("params", "mode", "posterior_mean
 #'   \code{"params"} the model's parameter values (hence the shock covariance
 #'   of the filter and the forecast) are those at that point.
 #' @param ...        Further arguments for \code{\link{conditional_forecast}}
-#'   (e.g. \code{type}, \code{method}, \code{n_draws}).
+#'   (e.g. \code{type}, \code{method}, \code{n_draws}, and the trend-model
+#'   inputs \code{shock_means}, \code{shock_timing}, \code{a0}, \code{P0}:
+#'   a drift carried as a deterministic shock mean).
 #' @return The updated \code{dynhr_model}, with \code{$forecast} set.
 #' @seealso \code{\link{dynhr_model}}, \code{\link{conditional_forecast}}
 #' @examples

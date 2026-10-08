@@ -4,7 +4,7 @@
 \usage{
 solve_steady(compiled, params, y0 = NULL, endo_names = NULL,
   exo_names = NULL, exo_init = NULL, max_iter = 1000L, tol = 1e-10,
-  verbose = FALSE)
+  verbose = FALSE, growth = FALSE)
 }
 \arguments{
 \item{compiled}{dynhr_compiled from \code{\link{compile_model}}.}
@@ -23,6 +23,10 @@ solve_steady(compiled, params, y0 = NULL, endo_names = NULL,
 \item{max_iter}{Maximum Newton iterations (default 1000).}
 \item{tol}{Convergence tolerance on the residual norm (default 1e-10).}
 \item{verbose}{Print progress messages (default \code{FALSE}).}
+\item{growth}{Logical (default \code{FALSE}): solve the balanced-growth path
+  \eqn{y_0 + g t} of a \code{model(linear)} with no static steady state (a
+  unit root with drift); see \code{\link{solve_steady_state}}. The result
+  then also carries \code{growth}.}
 }
 \value{
 An object of class \code{dynhr_steady} with slots:

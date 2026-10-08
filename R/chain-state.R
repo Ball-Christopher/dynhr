@@ -135,7 +135,7 @@ mcmc_chain_save <- function(state, file) {
                payload = payload)
   tmp <- paste0(file, ".tmp")
   saveRDS(pack, tmp)
-  file.rename(tmp, file)
+  .ckpt_rename_or_stop(tmp, file)
   invisible(file)
 }
 
@@ -257,6 +257,6 @@ mcmc_chain_extend <- function(file, new_draws, new_lp = NULL,
   if (!is.null(done)) obj$done <- done
   tmp <- paste0(file, ".tmp")
   saveRDS(obj, tmp)
-  file.rename(tmp, file)
+  .ckpt_rename_or_stop(tmp, file)
   invisible(obj)
 }

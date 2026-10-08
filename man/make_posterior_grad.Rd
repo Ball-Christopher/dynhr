@@ -25,7 +25,8 @@ make_posterior_grad(
   pruned_order = 2L,
   power = NULL,
   system_priors = NULL,
-  lik_init = c("auto", "stationary", "diffuse", "kappa")
+  lik_init = c("auto", "stationary", "diffuse", "kappa", "fixed_unknown"),
+  singular_obs = c("reject", "skip")
 )
 }
 \arguments{
@@ -188,7 +189,8 @@ system-prior term the forward posterior closure itself evaluates.}
 
 \item{lik_init}{Kalman filter \code{P0} initialization of the Gaussian
 likelihood being differentiated: \code{"auto"} (default),
-\code{"stationary"}, \code{"diffuse"} or \code{"kappa"}, exactly as in
+\code{"stationary"}, \code{"diffuse"}, \code{"kappa"} or
+\code{"fixed_unknown"}, exactly as in
 \code{\link{make_log_posterior}} -- it must match the \code{lik_init} of
 the posterior being sampled or optimized, because the initializations
 are different likelihoods (on a root within \code{1e-6} of the unit
@@ -197,13 +199,20 @@ keeps the stationary one). The analytic kernels follow the init in force
 per draw: the stationary kernels, or the exact-diffuse adjoint where the
 init in force is diffuse; under \code{"stationary"} a draw with a unit
 root (whose log-posterior is \code{-Inf}) gets the prior score only.
-\code{"kappa"} (the big-\code{kappa} approximation) has no analytic
+\code{"kappa"} (the big-\code{kappa} approximation) and
+\code{"fixed_unknown"} (the GLS-estimated unit-root level) have no analytic
 kernel: \code{"implicit"}, \code{"adjoint"} and
 \code{"adjoint_solution"} refuse it (an error of class
 \code{dynhr_error_grad_lik_init}), \code{"auto"} resolves to
 \code{"hybrid"}, and \code{"hybrid"} then differentiates every parameter
-by finite differences of the kappa-initialized likelihood. Ignored by
+by finite differences of that likelihood. Ignored by
 the Whittle, cumulant and pruned likelihoods (as by their posteriors).}
+
+\item{singular_obs}{\code{"reject"} (default) or \code{"skip"}: the
+informative-singular-observation policy of the Gaussian objective being
+differentiated, as in \code{\link{make_log_posterior}}. It must match the
+posterior being sampled. Under \code{"reject"} the fused value is
+\code{-Inf} wherever the objective's is.}
 }
 \value{
 \code{function(theta)} returning the gradient vector, suitable for the
