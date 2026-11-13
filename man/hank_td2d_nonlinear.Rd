@@ -40,7 +40,9 @@ other tier. Default \code{NULL} (constant steady-state \code{Pi}).}
 }
 \value{
 A list with paths \code{B}, \code{A}, \code{C}, \code{CHI},
-  \code{ADJ} (aggregate adjustment probability), and \code{Dpath}.
+  \code{ADJ} (aggregate adjustment probability), and \code{Dpath}
+  (\code{T_h x n_cell}, rows are periods: row \code{t} is the
+  beginning-of-period-\code{t} distribution).
 }
 \description{
 The \code{\link{hank_td2_nonlinear}} analogue for the fixed-cost household:

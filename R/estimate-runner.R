@@ -82,8 +82,11 @@
     elapsed_min = numeric(), stringsAsFactors = FALSE
   )
 
+  ## Chain ch is seeded with child ch of seed_base (stream "mcmc_chains"), the
+  ## same derivation as the parallel chain tasks (see .child_seeds()).
+  chain_seeds <- .child_seeds(config$seed_base, n_chains, "mcmc_chains")
   for (ch in seq_len(n_chains)) {
-    set.seed(config$seed_base + ch)
+    set.seed(chain_seeds[ch])
 
     if (ch == 1) {
       th0 <- theta_mode
@@ -152,9 +155,9 @@ estimate_model <- function(config) {
     n_draws       = 0L,
     n_burn        = 50000L,
     n_chains      = 4L,
-    mh_scale      = 1.50,
-    target_accept = 0.25,
-    adapt_every   = 200L,
+    mh_scale      = NULL,   # NULL = rwmh()'s 2.38 / sqrt(n_par)
+    target_accept = .rwmh_target_rate,
+    adapt_every   = .rwmh_adapt_every,
     seed_base     = 42L,
     nm_maxit      = 3500L,
     lbfgsb_maxit  = 200L,

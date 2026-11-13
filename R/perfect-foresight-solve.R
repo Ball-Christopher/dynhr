@@ -788,6 +788,9 @@ perfect_foresight_solve <- function(compiled,
       } else {
         if (!is.matrix(exo_path)) {
           shock_path_pf <- matrix(exo_path, nrow = T_pf, ncol = n_exo_pf, byrow = TRUE)
+          ## named, so occbin_solve_path()'s rows = periods rule never has to
+          ## read the orientation of a square (T == n_exo) path from its shape
+          colnames(shock_path_pf) <- dyn$exo_names
         } else {
           shock_path_pf <- matrix(0, nrow = T_pf, ncol = n_exo_pf)
           colnames(shock_path_pf) <- dyn$exo_names

@@ -249,7 +249,8 @@ filter_tune <- function(var, periods, values, stderr = NULL) {
 #'       once).}
 #'     \item{Y}{`T x length(obs_vars)` matrix; the appended columns are `NA`
 #'       except at the tune periods, which hold the tuned values.}
-#'     \item{me_extra}{`length(obs_vars) x T` matrix of additional
+#'     \item{me_extra}{`T x length(obs_vars)` matrix (rows = periods, columns
+#'       named by `obs_vars`) of additional
 #'       measurement-error variances to add to the diagonal of `H` at each
 #'       period (0 for hard tunes and for all original observables; `stderr^2`
 #'       for soft tunes at their tune periods). Pass to
@@ -293,7 +294,10 @@ filter_tune <- function(var, periods, values, stderr = NULL) {
   Y_new[, seq_len(n_obs_orig)] <- Y
   colnames(Y_new) <- obs_vars
 
-  me_extra <- matrix(0, nrow = n_obs_new, ncol = n_T)
+  ## T x n_obs (rows = periods), columns named: the orientation every
+  ## time-indexed input takes (R/time-orientation.R).
+  me_extra <- matrix(0, nrow = n_T, ncol = n_obs_new,
+                     dimnames = list(NULL, obs_vars))
 
   for (i in seq_len(nrow(tunes))) {
     v       <- tunes$var[i]
@@ -304,7 +308,7 @@ filter_tune <- function(var, periods, values, stderr = NULL) {
 
     Y_new[pr, col_idx] <- vals
     if (!is.null(se))
-      me_extra[col_idx, pr] <- se^2
+      me_extra[pr, col_idx] <- se^2
   }
 
   list(obs_vars = obs_vars, Y = Y_new, me_extra = me_extra)

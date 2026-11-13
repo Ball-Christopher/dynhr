@@ -950,9 +950,9 @@ hank_model_irf <- function(model, dZ) {
 #'
 #' @return A list with:
 #'   \item{dD}{Named list, one entry per \code{"het"}-kind block in
-#'     \code{model$blocks} (keyed by block name). Each entry is an
-#'     \code{(n_e*n_a) x T_h} matrix; column \code{t} is the distribution
-#'     deviation \code{dD_t} for that block.}
+#'     \code{model$blocks} (keyed by block name). Each entry is a
+#'     \code{T_h x n_cell} matrix (rows are periods); row \code{t} is the
+#'     distribution deviation \code{dD_t} for that block.}
 #'   \item{dsrc}{The per-source (unknowns + exogenous) deviation paths, as
 #'     returned internally by \code{\link{hank_model_irf}} -- exposed here so
 #'     callers can confirm the two functions solved the identical GE system.}
@@ -977,13 +977,13 @@ hank_model_dist_irf <- function(model, dZ, ...) {
   }
 
   ## Contract a distribution Jacobian JD[[input]] (T_h x T_h x n_cell) against
-  ## the realized input deviation paths: dD[,t] = Sum_i Sum_s JD[i][t,s,] *
+  ## the realized input deviation paths: dD[t,] = Sum_i Sum_s JD[i][t,s,] *
   ## dsrc[i][s] -- the SAME contraction for a single het block and for a
   ## het_mixture block (whose JD is already the omega-weighted sum; see
   ## hank_mixture_dist_jacobian), just parameterized by n_cell and the input
   ## deviation-path lookup.
   contract_dist <- function(JD, inputs, n_cell) {
-    dD_b <- matrix(0, n_cell, T_h)
+    dD_b <- matrix(0, T_h, n_cell)   # T x n_cell: rows are periods
     for (i in inputs) {
       ## blk$inputs (e.g. "r", "w") are generally intermediate variables
       ## produced by another block, NOT sources -- so look them up via
@@ -994,7 +994,7 @@ hank_model_dist_irf <- function(model, dZ, ...) {
       dz <- if (!is.null(dsrc[[i]])) dsrc[[i]] else dev_path(i)
       JDi <- JD[[i]]                        # T_h x T_h x n_cell
       for (tt in seq_len(T_h))
-        dD_b[, tt] <- dD_b[, tt] +
+        dD_b[tt, ] <- dD_b[tt, ] +
           as.numeric(crossprod(matrix(JDi[tt, , ], nrow = T_h, ncol = n_cell), dz))
     }
     dD_b

@@ -206,15 +206,15 @@ hank_mixture_dist_jacobian <- function(blocks, omega, T_h, inputs = c("r", "w"))
 #' \code{A^{mix}_t = sum_k omega_k A_{k,t}} (likewise \code{C}) --
 #' regardless of whether the types share an income process.
 #'
-#' The mixture distribution PATH \code{Dpath^{mix}[, t] = sum_k omega_k
-#' Dpath_k[, t]} (matching \code{\link{hank_mixture_dist}} at \code{t = 1})
+#' The mixture distribution PATH \code{Dpath^{mix}[t, ] = sum_k omega_k
+#' Dpath_k[t, ]} (matching \code{\link{hank_mixture_dist}} at \code{t = 1})
 #' additionally requires every type to live on the identical
 #' \code{(a_grid, Pi, e)} cell space -- pooling cell-by-cell is otherwise
 #' semantically invalid (cell \code{j} indexes a different income level per
 #' type). When the blocks differ in their income process, this function does
 #' NOT silently sum the per-type \code{Dpath} arrays: \code{Dpath = NULL} and
-#' \code{Dpath_by_type} (length-K list of per-type \code{(n_e*n_a) x T_h}
-#' paths) is returned instead, with \code{same_income = FALSE}. This is the
+#' \code{Dpath_by_type} (length-K list of per-type \code{T_h x (n_e*n_a)}
+#' paths, rows are periods) is returned instead, with \code{same_income = FALSE}. This is the
 #' genuine nonlinear distribution truth against which the linear snapshot
 #' reweighting \code{\link{hank_dist_response_snapshot}} is validated (when
 #' \code{same_income} holds).
@@ -228,7 +228,7 @@ hank_mixture_dist_jacobian <- function(blocks, omega, T_h, inputs = c("r", "w"))
 #' @param T_h Integer horizon (default from the path lengths).
 #' @return A list with \code{A}, \code{C} (\code{omega}-weighted aggregate
 #'   paths, always valid), \code{same_income} (logical), \code{Dpath}
-#'   (\code{(n_e*n_a) x T_h} mixture distribution path when
+#'   (\code{T_h x (n_e*n_a)} mixture distribution path, rows are periods, when
 #'   \code{same_income} is \code{TRUE}, else \code{NULL}), and
 #'   \code{Dpath_by_type} (length-K list of per-type distribution paths;
 #'   always populated).

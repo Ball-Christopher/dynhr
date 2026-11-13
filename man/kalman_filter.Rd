@@ -32,7 +32,15 @@ kalman_filter(
 )
 }
 \arguments{
-\item{data}{observation matrix (\code{n_obs} x \code{T}).}
+\item{data}{observation matrix, \code{T x n_obs} (rows are periods,
+columns the observables in \code{obs_vars} order). Column names decide
+the orientation when present: columns named by \code{obs_vars} are used
+as given (reordered by name); a matrix whose ROWS carry those names (the
+pre-0.9.4.66 \code{n_obs x T} layout) is transposed with a one-time
+message. An unnamed \code{n_obs x T} matrix is an error with a
+\code{t()} hint, and an unnamed square sample (\code{T == n_obs}) is an
+error asking for column names -- the orientation is never guessed from
+the shape. A plain vector is accepted for a single observable.}
 
 \item{dr}{decision rule (output of \code{\link{solve_perturbation}}).}
 
@@ -85,12 +93,13 @@ See Details. Supplying \code{P0} overrides this and is reported back as
 \code{lik_init = "user"} (except with \code{"fixed_unknown"}, which
 refuses it).}
 
-\item{me_extra}{\code{n_obs x T} matrix of additional per-observable,
+\item{me_extra}{\code{T x n_obs} matrix (rows are periods, columns the
+observables, oriented by name as \code{data} is) of additional per-observable,
 per-period measurement-error variances (default \code{NULL}, no extra
 variance).  Like the scalar \code{me_variance}, \code{me_extra} is TRUE
 per-period measurement noise on all paths: it enters the innovation
 covariance \code{F_t} AND the Joseph-form state-covariance update
-(\code{P += K_t \%*\% (diag(me_variance + me_extra[, t]) \%*\% t(K_t))}), so the
+(\code{P += K_t \%*\% (diag(me_variance + me_extra[t, ]) \%*\% t(K_t))}), so the
 \code{"standard"}, \code{"dare"}/\code{"reference"}, and
 \code{"univariate"} methods agree exactly under any combination of
 \code{me_variance} and \code{me_extra}.
@@ -111,13 +120,16 @@ exact-diffuse phase with missing observations (including NA rows
 introduced by \code{me_extra}) runs on the sequential univariate filter,
 which handles it exactly -- see \code{lik_init} in Details.}
 
-\item{shock_scale}{\code{n_exo x T} matrix of shock standard-deviation
-scale factors (multiplicative, so 1 = baseline).  At period \code{t}
+\item{shock_scale}{\code{T x n_exo} matrix (rows are periods, columns the
+shocks in \code{dr$exo_names} order, oriented by name as \code{data}
+is) of shock standard-deviation scale factors (multiplicative, so 1 =
+baseline).  At period \code{t}
 the effective shock covariance is
 \eqn{\\Sigma_{e,t} = \\mathrm{diag}(s_t)\\,\\Sigma_e\\,\\mathrm{diag}(s_t)}
-where \eqn{s_t} is column \code{t} of \code{shock_scale}.
+where \eqn{s_t} is row \code{t} of \code{shock_scale}.
 \code{NULL} (default) and an all-ones matrix are treated as identity
-(no heteroskedasticity). Rows must be ordered to match \code{dr$exo_names}.
+(no heteroskedasticity). Unnamed columns must be ordered to match
+\code{dr$exo_names}.
 Incompatible with \code{method = "chandrasekhar"}. An exact-diffuse
 initialization (\code{lik_init = "diffuse"}, or \code{"auto"} on a model
 with a unit root) runs on the sequential (univariate) filter, which
@@ -156,7 +168,7 @@ from the steady state} -- the convention the filter's own
 \code{filtered_states} are in. \code{NULL} (default) starts at the steady
 state, i.e. a vector of zeros. Matched BY NAME when named (a same-length
 vector in a different order is a reorder request, not a relabelling); the
-state names are the \code{rownames} of \code{filtered_states}. Composes
+state names are the \code{colnames} of \code{filtered_states}. Composes
 with every \code{lik_init}, including \code{"diffuse"}.}
 
 \item{P0}{Initial state covariance, \code{n_state x n_state} (or a scalar
@@ -169,12 +181,14 @@ prior the Chandrasekhar increment recursion is initialised from, so
 \code{method = "auto"} routes to \code{"standard"} and explicit
 \code{method = "chandrasekhar"} is refused.}
 
-\item{known_shocks}{Known historical shock values: an \code{n_exo x T}
-  matrix carrying the value where a shock is known and \code{NA} where it is
-  not -- the \code{NA}-as-unknown convention \code{data} uses, and the
-  \code{n_exo x T} shape \code{shock_scale} uses. Rows are matched BY NAME
-  when the matrix has rownames. \code{NULL} (default), or a matrix that is
-  all \code{NA}, is a no-op.
+\item{known_shocks}{Known historical shock values: a \code{T x n_exo}
+  matrix (rows are periods) carrying the value where a shock is known and
+  \code{NA} where it is not -- the \code{NA}-as-unknown convention
+  \code{data} uses, and the \code{T x n_exo} shape \code{shock_scale}
+  uses. Columns are matched BY NAME when the matrix has column names, and
+  then may cover only SOME of the shocks (the others are unknown). An
+  unnamed matrix must have one column per shock. \code{NULL} (default), or
+  a matrix that is all \code{NA}, is a no-op.
 
   Use it for a shock you actually know: an announced policy change, a
   measured intervention, a judgemental adjustment carried over from another
@@ -207,16 +221,17 @@ prior the Chandrasekhar increment recursion is initialised from, so
   \code{known_shocks} therefore routes to \code{method = "univariate"}.}
 
 \item{known_shocks_sd}{Optional standard errors for \code{known_shocks},
-same shape (or a scalar). The injection is then SOFT -- the value is an
+same \code{T x n_exo} shape and column-naming rule (or a scalar). The injection is then SOFT -- the value is an
 observation with that standard deviation rather than an exact constraint,
 which is what a judgemental adjustment usually is. \code{NULL} or
 \code{NA} means exact.}
 
-\item{shock_means}{Deterministic shock MEANS: an \code{n_exo x T} matrix of
-  mean shifts, \code{NULL} (default) for none. \code{NA} and \code{0} both
-  mean "no shift here", so the same matrix shape used for
-  \code{known_shocks} works. Rows are matched BY NAME when the matrix has
-  rownames.
+\item{shock_means}{Deterministic shock MEANS: a \code{T x n_exo} matrix
+  (rows are periods) of mean shifts, \code{NULL} (default) for none.
+  \code{NA} and \code{0} both mean "no shift here", so the same matrix
+  shape used for \code{known_shocks} works. Columns are matched BY NAME
+  when the matrix has column names, and may then cover only some of the
+  shocks (the others get no shift).
 
   \strong{This is a different statement from \code{known_shocks}, and the
   difference is the point of having both.} \code{known_shocks} says the
@@ -241,15 +256,15 @@ which is what a judgemental adjustment usually is. \code{NULL} or
   states, so every \code{method} evaluates it identically, and zero-variance
   shocks, missing observations and \code{a0}/\code{P0} are non-events.}
 
-\item{shock_timing}{How to read the columns of \code{shock_means}:
+\item{shock_timing}{How to read the rows of \code{shock_means}:
 \describe{
-  \item{\code{"dated"}}{(default) column \eqn{t} is the shock DATED
+  \item{\code{"dated"}}{(default) row \eqn{t} is the shock DATED
     \eqn{t}. It enters \eqn{s_t} and \eqn{y_t}, the same dating
-    \code{known_shocks} and \code{shock_scale} use for their columns.}
-  \item{\code{"transition_next"}}{column \eqn{t} drives the transition
+    \code{known_shocks} and \code{shock_scale} use for their rows.}
+  \item{\code{"transition_next"}}{row \eqn{t} drives the transition
     OUT of period \eqn{t}, so it enters \eqn{s_{t+1}} and
-    \eqn{y_{t+1}} -- the whole matrix shifted one column right, with the
-    last column falling outside the sample. This is the convention to pass
+    \eqn{y_{t+1}} -- the whole matrix shifted one row down, with the
+    last row falling outside the sample. This is the convention to pass
     when adapting a path written for a package that dates its input by the
     transition rather than by the shock.}
 }
@@ -296,9 +311,11 @@ A list with
   \describe{
     \item{\code{loglik}}{the log-likelihood.}
     \item{\code{updated_states}, \code{predicted_states}}{the two state
-      paths, \code{n_state x T}, with the timing in the names:
-      \code{updated_states[, t]} is \eqn{s_{t|t}} (conditioned on
-      \eqn{y_{1:t}}) and \code{predicted_states[, t]} is \eqn{s_{t|t-1}}
+      paths, \code{T x n_state} (rows are periods, columns the named
+      states -- the orientation \code{\link{kalman_smoother}} uses), with
+      the timing in the names: \code{updated_states[t, ]} is
+      \eqn{s_{t|t}} (conditioned on \eqn{y_{1:t}}) and
+      \code{predicted_states[t, ]} is \eqn{s_{t|t-1}}
       (conditioned on \eqn{y_{1:t-1}}, with \eqn{s_{1|0}} taken from
       \code{a0}). Both only when \code{return_filtered = TRUE}.}
     \item{\code{filtered_states}}{the SAME matrix as
@@ -307,7 +324,7 @@ A list with
     \item{\code{growth_path}}{BALANCED-GROWTH models only (\code{dr$growth}
       non-zero, from \code{solve_model(steady_options = list(growth =
       TRUE))}): the deterministic path \eqn{y_0 + g\,(first\_obs + t - 1)}
-      of the state variables, \code{n_state x T} with the same rows as
+      of the state variables, \code{T x n_state} with the same columns as
       \code{updated_states}, so that LEVELS are \code{growth_path +
       updated_states}. The reported states stay deviations; the growth of
       the observables is subtracted from the data as an observation trend
@@ -475,8 +492,8 @@ forward-looking). The filter runs once, tracking the response
 \eqn{A_t} of the filtered state to \eqn{\delta}; \eqn{\delta} is then the
 GLS estimate \eqn{S^{+} s} (a pseudo-inverse: a direction the data does not
 identify is estimated as 0) and every reported state is corrected:
-\code{updated_states[, t]} \eqn{+ A_t \delta}, \code{predicted_states[,
-t]} \eqn{+ T A_{t-1} \delta}. Unlike \code{"diffuse"}, the early
+\code{updated_states[t, ]} \eqn{+ A_t \delta}, \code{predicted_states[t,
+]} \eqn{+ T A_{t-1} \delta}. Unlike \code{"diffuse"}, the early
 periods therefore use the WHOLE sample's estimate of the initial level --
 which is what IRIS's \code{filter()} reports; the smoothed states are the
 same. \code{loglik} is concentrated over \eqn{\delta},
@@ -520,7 +537,7 @@ with a \code{$diagnostics$routing} row saying so.
 The state space is written in LAGGED form -- \eqn{s_t = T s_{t-1} +
 R \varepsilon_t} and \eqn{y_t = Z s_{t-1} + D \varepsilon_t} -- so
 \eqn{s_t} is the model's state variables dated \eqn{t}, and
-\code{updated_states[, t]} is those variables conditioned on data through
+\code{updated_states[t, ]} is those variables conditioned on data through
 \eqn{t}. \code{predicted_states} is the one-step-ahead pair,
 \eqn{s_{t|t-1}}; it needs nothing extra from the recursion, because
 \eqn{E[\varepsilon_t] = 0} in the deviation system makes
@@ -529,8 +546,8 @@ R \varepsilon_t} and \eqn{y_t = Z s_{t-1} + D \varepsilon_t} -- so
 
 A unit pulse in \code{shock_means} with no data to update on therefore
 traces the model's own impulse response exactly: with
-\code{shock_timing = "dated"} and a pulse in column 1,
-\code{updated_states[, t]} is \eqn{T^{t-1} R e_j}, and the two paths
+\code{shock_timing = "dated"} and a pulse in row 1,
+\code{updated_states[t, ]} is \eqn{T^{t-1} R e_j}, and the two paths
 coincide because there is nothing to update with. That identity is the
 bridge to a package that reports shock responses on a different grid --
 compare against it once, choose the \code{shock_timing} that lines up, and
@@ -573,21 +590,21 @@ needed:
 
 \preformatted{
 Yna <- Y; Yna[] <- NA                  # same shape, no observations
-M   <- matrix(0, n_exo, T, dimnames = list(exo_names, NULL))
-M["e_j", 1] <- 1                       # unit pulse in the FIRST column
+M   <- matrix(0, T, n_exo, dimnames = list(NULL, exo_names))
+M[1, "e_j"] <- 1                       # unit pulse in the FIRST row
 kalman_filter(Yna, dr, model, params, obs_vars = obs,
-              return_filtered = TRUE, shock_means = M)$updated_states[, 1:4]
+              return_filtered = TRUE, shock_means = M)$updated_states[1:4, ]
 }
 
 With no observations there is nothing to update with, so the filtered path
 IS the deterministic path, and the deterministic path of a unit pulse is
 the model's impulse response: under \code{"dated"} that is
-\eqn{T^{t-1} R e_j}, with the IMPACT in column 1 -- the same column as the
+\eqn{T^{t-1} R e_j}, with the IMPACT in row 1 -- the same row as the
 pulse -- and \code{predicted_states} identical to it. Produce the other
 package's response to the same pulse and compare: impact in the same period
 means keep \code{"dated"}; impact one period later means
 \code{"transition_next"}, which is exactly the same as shifting the matrix
-one column right yourself.
+one row down yourself.
 
 Do not infer the answer from a HISTORICAL filtered path, where an offset in
 the shock input and an offset in the state output look alike. The pulse

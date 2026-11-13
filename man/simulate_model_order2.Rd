@@ -21,7 +21,9 @@ simulate_model_order2(
 
 \item{shocks}{Matrix (n_periods + burn_in) x n_exo. If NULL, draws random.}
 
-\item{model}{dynhr_mod (for shock variances)}
+\item{model}{dynhr_mod (for shock skewness, and the shock covariance
+when \code{dr2} carries none): shocks are drawn with \code{dr2$Sigma_e},
+else the model's shocks block, as in \code{\link{simulate_model}}.}
 
 \item{burn_in}{Burn-in periods to discard}
 

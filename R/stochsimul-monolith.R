@@ -143,29 +143,58 @@
   stderr
 }
 
-## Helper: the shock covariance an IRF routine should scale its impulses by.
-##
-## SHARED by compute_irfs() (order 1) and compute_irfs_order2() (order 2) so the
-## two cannot drift apart again: before 0.9.4 the order-1 path preferred
-## `dr$Sigma_e` (with correlations) while the order-2 path always rebuilt a
-## DIAGONAL covariance from `params`, so the same model gave different IRFs at
-## the two orders.
-##
-## Precedence follows the 0.9.3.7 Kalman-path rule -- `params` WINS over
-## `dr$Sigma_e`:
-##   1. caller-supplied `params`  -> .get_shock_cov(model, exo, params)
+## Helper: THE shock covariance of every post-solve function (moments,
+## variance decompositions, HP moments, IRFs / GIRFs at every order,
+## simulation, pruned state spaces, cumulants, the stochastic steady state,
+## lp_estimand, ms_irf, welfare, D13 / D15 / D19).  One rule, one helper, so
+## no two of them can disagree about the same `dr` again (before 0.9.4.75
+## compute_moments() preferred dr$Sigma_e even over `params`, while
+## conditional_variance_decomposition(), hp_filtered_moments(), the
+## simulators, compute_girf() and others ignored dr$Sigma_e entirely):
+##   1. caller-supplied (non-NULL) `params` -> .get_shock_cov(model, exo, params)
 ##   2. else `dr$Sigma_e`, when it carries the right dimension (set by
-##      solve_perturbation(Sigma_e = ))
+##      solve_perturbation(), from its `Sigma_e =` argument or the model)
 ##   3. else .get_shock_cov(model, exo, model$param_values)
-## `params = NULL` therefore keeps the old dr$Sigma_e behaviour.
+## A caller that defaults `params <- model$param_values` must call this with
+## the caller's ORIGINAL argument (resolve before defaulting), or the model
+## would silently beat dr$Sigma_e.  `params` re-reads only the covariance: a
+## decision rule of order >= 2 keeps the risk terms (ghs2, ...) it was solved
+## with.  The Kalman likelihood / filter / smoother / forecast paths do NOT use
+## this rule: they read .get_shock_cov(model, exo, params) only (0.9.3.7).
 ## @noRd
-.irf_shock_scale <- function(dr, model, params = NULL) {
+.resolve_sigma_e <- function(dr, model, params = NULL) {
   exo   <- dr$exo_names
   n_exo <- length(exo)
   if (!is.null(params)) return(.get_shock_cov(model, exo, params))
   if (!is.null(dr$Sigma_e) && all(dim(dr$Sigma_e) == c(n_exo, n_exo)))
     return(dr$Sigma_e)
   .get_shock_cov(model, exo, model$param_values)
+}
+
+## Helper: the IRF impulse matrix shared by EVERY IRF function (orders 1-5,
+## the OBC solvers, the MCP IRF).  Column k is the period-1 shock vector of
+## the IRF to shock k: the k-th column of the lower Cholesky factor of the
+## .resolve_sigma_e() covariance (Dynare's orthogonalisation), times
+## shock_size.  A shock with zero declared variance (all-zero column) gets a
+## UNIT impulse of magnitude shock_size (the M26 rule of compute_irfs()).
+## For a diagonal Sigma_e column k is stderr_k * shock_size * e_k, i.e. the
+## old per-shock scaling to the bit.  `dr = NULL` (no decision rule, e.g.
+## compute_irfs_mcp) reads the covariance from `params` / the model.
+## @noRd
+.irf_impulse_matrix <- function(dr, model, params = NULL, shock_size = 1,
+                                exo = dr$exo_names) {
+  Sigma_e <- if (is.null(dr)) {
+    .get_shock_cov(model, exo,
+                   if (is.null(params)) model$param_values else params)
+  } else {
+    .resolve_sigma_e(dr, model, params)
+  }
+  E <- .sigma_e_chol_lower(Sigma_e) * shock_size
+  if (shock_size != 0) {
+    for (k in seq_along(exo)) if (all(E[, k] == 0)) E[k, k] <- shock_size
+  }
+  dimnames(E) <- list(exo, exo)
+  E
 }
 
 ## Helper: lower-triangular Cholesky factor L of a shock covariance,
@@ -222,63 +251,63 @@
 #'
 #' The law is the one the package's own skew likelihood evaluates
 #' (\code{.get_csn_shock_params()} / \code{.csn_state_noise_lift()} in
-#' \code{R/pskf-likelihood.R}):
-#' \deqn{e \sim CSN(\mu_e, \Sigma_e, \Gamma_e, 0, I_q)}
-#' with \eqn{\Gamma_e} the rows \eqn{\alpha_i/\sigma_i} of the skewed shocks and
-#' the FULL \eqn{\Sigma_e} (off-diagonals included) as the seed covariance. All
-#' cross-shock coupling is carried by \eqn{\Sigma_e}: the truncation latents
-#' inherit its correlation, which is what makes the cross-shock co-skewness
-#' nonzero and sign-matched to \eqn{\rho}.
+#' \code{R/pskf-likelihood.R}), with the package's skewed-shock convention
+#' (the block above \code{.csn_skew_idx()}): \code{Sigma_e} is the TRUE
+#' covariance of the returned draws, which are mean-zero; \code{alpha} sets
+#' the shape. Internally the draws come from
+#' \deqn{x \sim CSN(0, S, \Gamma, 0, I_q), \quad
+#'       S = \code{.csn_scale_from_cov(Sigma_e, alpha)},}
+#' \eqn{\Gamma} with the rows \eqn{\alpha_i/\omega_i} of the skewed shocks,
+#' \eqn{\omega = \sqrt{diag(S)}}, and the FULL \eqn{S} (off-diagonals
+#' included) as the seed covariance. All cross-shock coupling is carried by
+#' \eqn{S}: the truncation latents inherit its correlation, which is what
+#' makes the cross-shock co-skewness nonzero and sign-matched to \eqn{\rho}.
 #'
 #' Sampling uses the stochastic (conditioning) representation of
 #' Gonzalez-Farias, Dominguez-Molina & Gupta (2004) / Arellano-Valle & Azzalini
-#' (2006): draw \eqn{[e; U]} jointly Gaussian with
-#' \deqn{Cov = [[\Sigma_e, \Sigma_e \Gamma_e'], [\Gamma_e \Sigma_e,
-#'              I + \Gamma_e \Sigma_e \Gamma_e']]}
+#' (2006): draw \eqn{[x; U]} jointly Gaussian with
+#' \deqn{Cov = [[S, S \Gamma'], [\Gamma S, I + \Gamma S \Gamma']]}
 #' and keep the draws with \eqn{U \ge 0} componentwise. Acceptance is
-#' \eqn{\Phi_q(0; 0, I + \Gamma_e \Sigma_e \Gamma_e')}, at least \eqn{2^{-q}},
+#' \eqn{\Phi_q(0; 0, I + \Gamma S \Gamma')}, at least \eqn{2^{-q}},
 #' so the vectorised over-draw below needs no per-period loop. Only shocks with
 #' \eqn{\alpha_i \ne 0} contribute a latent, keeping \eqn{q} as small as
 #' possible.
 #'
 #' The returned draws are shifted by the SAME mean correction the filter
-#' applies, the exact mean of the joint CSN law (\code{.csn_shock_mean()} in
-#' \code{R/pskf-likelihood.R}), so the draws are mean-zero and the simulated
-#' data sit where the filter places the steady state. With no skewed shock
-#' correlated to another shock this is the per-shock
-#' \eqn{E[e_i] = \sigma_i \delta_i \sqrt{2/\pi}},
-#' \eqn{\delta_i = \alpha_i/\sqrt{1+\alpha_i^2}}. (Before 0.9.4 that
-#' per-shock shift was applied at \eqn{\rho \ne 0} too, in both the filter
-#' and here, so the draws were NOT mean-zero and the circular DGP/likelihood
-#' agreement hid it.)
-#' Likewise the realised sample CORRELATION of the draws is NOT \eqn{\rho}:
-#' \eqn{\rho} parameterises the SEED covariance of the pre-truncation Gaussian,
-#' and the conditioning step changes it.
+#' applies, the exact mean of the joint CSN law (\code{.csn_shock_mean()}), so
+#' they are mean-zero. With no skewed shock correlated to another shock this
+#' is the per-shock \eqn{\omega_i \delta_i \sqrt{2/\pi}},
+#' \eqn{\delta_i = \alpha_i/\sqrt{1+\alpha_i^2}}, and the variance is
+#' \eqn{\omega_i^2 (1 - 2\delta_i^2/\pi) = \Sigma_{e,ii}}.
+#' (Before 0.9.4.78 \code{Sigma_e} was used as \eqn{S} itself, so the draws'
+#' variance was \eqn{(1 - 2\delta_i^2/\pi)\Sigma_{e,ii}}.)
 #'
 #' @param n_draws  Number of shock vectors (rows) to return.
-#' @param Sigma_e  n_exo x n_exo seed shock covariance (from .get_shock_cov).
+#' @param Sigma_e  n_exo x n_exo TRUE shock covariance (from
+#'   .resolve_sigma_e / .get_shock_cov).
 #' @param alpha    length-n_exo skewness shape vector (from .get_shock_skewness).
-#' @param sigma_e  length-n_exo shock standard deviations (sqrt(diag(Sigma_e))).
 #' @return n_draws x n_exo numeric matrix.
 #' @noRd
-.draw_csn_shocks <- function(n_draws, Sigma_e, alpha, sigma_e) {
+.draw_csn_shocks <- function(n_draws, Sigma_e, alpha) {
   n_exo <- length(alpha)
-  alpha <- as.numeric(alpha); sigma_e <- as.numeric(sigma_e)
+  alpha <- as.numeric(alpha)
+  S     <- .csn_scale_from_cov(Sigma_e, alpha)
+  omega <- sqrt(diag(S))
 
   ## Only genuinely skewed shocks get a truncation latent. A zero-stderr shock
   ## cannot be skewed (alpha/sigma is undefined), so it is excluded too.
-  sk <- which(alpha != 0 & is.finite(alpha) & sigma_e > 0)
+  sk <- .csn_skew_idx(S, alpha)
   q  <- length(sk)
   if (q == 0L)
     return(matrix(rnorm(n_draws * n_exo), n_draws, n_exo) %*%
              t(.sigma_e_chol_lower(Sigma_e)))
 
   Gam <- matrix(0, q, n_exo)
-  Gam[cbind(seq_len(q), sk)] <- alpha[sk] / sigma_e[sk]
+  Gam[cbind(seq_len(q), sk)] <- alpha[sk] / omega[sk]
 
-  SG  <- Sigma_e %*% t(Gam)                       # n_exo x q
-  M_U <- diag(q) + Gam %*% Sigma_e %*% t(Gam)     # q x q
-  J   <- rbind(cbind(Sigma_e, SG), cbind(t(SG), M_U))
+  SG  <- S %*% t(Gam)                             # n_exo x q
+  M_U <- diag(q) + Gam %*% S %*% t(Gam)           # q x q
+  J   <- rbind(cbind(S, SG), cbind(t(SG), M_U))
   J   <- 0.5 * (J + t(J))
   Lj  <- chol(J + diag(1e-12, n_exo + q))         # upper factor: z %*% Lj
 
@@ -302,9 +331,8 @@
   }
 
   ## Filter-matching mean correction (see roxygen above): the exact joint-CSN
-  ## mean. The seed covariance's own diagonal is used for sigma inside, which
-  ## is what sigma_e is at every call site.
-  sweep(acc, 2L, .csn_shock_mean(Sigma_e, alpha), `-`)
+  ## mean of the scale-S law.
+  sweep(acc, 2L, .csn_shock_mean(S, alpha), `-`)
 }
 
 
@@ -365,13 +393,58 @@
 ## 1. IMPULSE RESPONSE FUNCTIONS
 ## ============================================================================
 
+## IRF horizon: a positive whole number (0 / -1 used to fail with a raw
+## dimnames / nrow error, 2.7 was silently truncated). Shared by compute_irfs()
+## and compute_irfs_order2..5(); returns the integer.
+## @noRd
+.check_irf_n_periods <- function(n_periods, fn) {
+  if (length(n_periods) != 1L || !is.numeric(n_periods) ||
+      !is.finite(n_periods) || n_periods < 1 || n_periods != round(n_periods))
+    .dynhr_abort(fn, ": n_periods must be a positive whole number (got ",
+                 paste(format(n_periods), collapse = ", "), ").",
+                 class = "dynhr_error_invalid_argument")
+  as.integer(n_periods)
+}
+
+## A model with shocks but an identically-zero Sigma_e (no `shocks;` block,
+## or every stderr 0) used to give all-zero moments and unit-impulse IRFs with
+## no signal. Warn once per user-level call: inside an open run epoch
+## (stoch_simul() opens one) the warning is deduplicated, so the nested
+## compute_irfs() + compute_moments() produce one; a direct call outside any
+## epoch warns every time (no session-wide latch). Only the stochastic entry
+## points call this; perfect-foresight paths never do.
+## @noRd
+.warn_zero_sigma_e <- function(Sigma_e, what) {
+  if (is.null(Sigma_e) || !length(Sigma_e) || any(abs(Sigma_e) > 0))
+    return(invisible(FALSE))
+  ep <- .dynhr_msg_state$epoch
+  in_run <- !is.null(ep)
+  ## Already warned in this run: skip silently. Going through .dynhr_warn(once
+  ## = TRUE) again would count a suppressed repeat, and the epoch's close then
+  ## printed "repeated messages suppressed ... zero_sigma_e_stoch: 1 further
+  ## occurrence" after every stoch_simul() on such a model.
+  if (in_run && exists("zero_sigma_e_stoch", envir = ep$seen, inherits = FALSE))
+    return(invisible(TRUE))
+  .dynhr_warn(what, ": every shock has zero variance (Sigma_e is identically ",
+              "zero), so the theoretical moments are all zero and IRFs are ",
+              "unit impulses rather than one-standard-deviation shocks. The ",
+              "usual cause is a `.mod` file with no `shocks;` block.",
+              once = in_run, key = "zero_sigma_e_stoch",
+              class = "dynhr_warning_zero_sigma_e")
+  invisible(TRUE)
+}
+
 #' Compute impulse response functions for each shock
 #'
 #' @param dr DecisionRules object from solve_perturbation
 #' @param model dynhr_mod object (for shock variances)
 #' @param n_periods Number of IRF periods (default 40)
 #' @param shock_size Size of shock in std dev units (default 1)
-#' @param params Named numeric parameter vector (default: model$param_values)
+#' @param params Named numeric parameter vector used ONLY to select the shock
+#'   covariance of the impulse (the dynamics are those of \code{dr}; the model
+#'   is not re-solved).  \code{NULL} (default) uses \code{dr$Sigma_e} (set by
+#'   \code{solve_perturbation()}), else the model's shocks block.  The same
+#'   rule applies to the higher-order and OBC IRF functions.
 #' @return An \code{IRFCollection} object: a named list with one entry per
 #'   shock.  Each entry is a \code{T x n_endo} numeric matrix where rows are
 #'   horizons 1…T and columns are endogenous variables in model order.
@@ -388,6 +461,7 @@
 #'     \emph{Review of Economic Studies}, 85(1), 1-49.
 #' @export
 compute_irfs <- function(dr, model, n_periods = 40L, shock_size = 1, params = NULL) {
+  n_periods <- .check_irf_n_periods(n_periods, "compute_irfs")
   ghx <- dr$ghx
   ghu <- dr$ghu
   endo <- dr$endo_names
@@ -402,9 +476,10 @@ compute_irfs <- function(dr, model, n_periods = 40L, shock_size = 1, params = NU
   ## (lower triangular), so correlated shocks propagate to all impact responses.
   ## For a diagonal Sigma_e this reduces to ghu[,k]*sigma_k (backward-compat).
   ## The precedence between caller `params` and a covariance
-  ## carried on `dr` now lives in the shared .irf_shock_scale(), which
+  ## carried on `dr` now lives in the shared .resolve_sigma_e(), which
   ## compute_irfs_order2() uses too -- `params` wins when supplied.
-  Sigma_e_irf <- .irf_shock_scale(dr, model, params)
+  Sigma_e_irf <- .resolve_sigma_e(dr, model, params)
+  .warn_zero_sigma_e(Sigma_e_irf, "compute_irfs")
   if (is.null(params)) params <- model$param_values
   L_chol <- .sigma_e_chol_lower(Sigma_e_irf)
 
@@ -469,8 +544,11 @@ compute_irfs <- function(dr, model, n_periods = 40L, shock_size = 1, params = NU
 #'   drawn from the model's full shock covariance \eqn{\Sigma_e} (from
 #'   \code{\link{shock_cov}}), \strong{including} the \code{corr} /
 #'   \code{var a, b} entries of the shocks block, via its lower Cholesky
-#'   factor. Skewed shocks (\code{alpha != 0}) are still drawn independently
-#'   from their skew-normal marginals and warn when correlations are declared.
+#'   factor. Skewed shocks (\code{skew} alpha != 0) are drawn from the
+#'   package's closed skew-normal law, mean-zero and with covariance exactly
+#'   \eqn{\Sigma_e} (\code{stderr} is the shock's true standard deviation;
+#'   alpha sets only the shape -- see \code{\link{make_log_posterior}}),
+#'   correlations included.
 #' @param n_replications Number of replications for stochastic simulation.
 #'   When \code{1} (default) a plain \code{n_periods x n_endo} matrix is
 #'   returned (backward-compatible).  When \code{> 1} a 3-D array of dimension
@@ -478,7 +556,10 @@ compute_irfs <- function(dr, model, n_periods = 40L, shock_size = 1, params = NU
 #'   \code{[,,r]} is one independent replication drawn with a different random
 #'   seed.  The pre-existing \code{attr(., "levels")} attribute is attached to
 #'   the first slice only (2-D case) or omitted (3-D case).
-#' @param model dynhr_mod (for shock variances)
+#' @param model dynhr_mod (for shock skewness, and the shock covariance when
+#'   \code{dr} carries none). Drawn shocks use \code{dr$Sigma_e} (set by
+#'   \code{\link{solve_perturbation}}, including its \code{Sigma_e} argument),
+#'   else the model's shocks block; the same rule holds at orders 2 and 3.
 #' @param burn_in Burn-in periods to discard
 #' @param init_state Optional named numeric vector of initial state deviations
 #'   (over endogenous names) loaded into the period-1 state; pair with
@@ -581,19 +662,15 @@ simulate_model <- function(dr, n_periods = 200L, shocks = NULL,
 
   total_periods <- n_periods + burn_in
 
-  ## Get shock standard deviations
-  shock_stderr <- .get_shock_stderr(model, exo, params)
-
   if (is.null(shocks)) {
     alpha   <- .get_shock_skewness(model, exo, params)
-    sigma_e <- shock_stderr[exo]   # named vector, length n_exo
 
-    ## The drawn shocks must carry the model's FULL covariance --
-    ## `corr a, b` / `var a, b` entries in the shocks block were previously
-    ## ignored here and every path was drawn with independent innovations,
-    ## which silently contradicted compute_moments()/compute_irfs() and the
-    ## Kalman filter (all of which use .get_shock_cov()).
-    Sigma_e_sim <- .get_shock_cov(model, exo, params)
+    ## The drawn shocks carry the FULL covariance (with `corr` entries) of the
+    ## package-wide rule, .resolve_sigma_e(): dr$Sigma_e (set by
+    ## solve_perturbation(), incl. its `Sigma_e =` argument), else the model.
+    ## Before 0.9.4.75 dr$Sigma_e was ignored here.
+    Sigma_e_sim <- .resolve_sigma_e(dr, model)
+    sigma_e <- setNames(sqrt(diag(Sigma_e_sim)), exo)
     off_sim <- Sigma_e_sim
     diag(off_sim) <- 0
     has_corr <- any(abs(off_sim) > 0)
@@ -606,18 +683,22 @@ simulate_model <- function(dr, n_periods = 200L, shocks = NULL,
       ## law the package's own skew likelihood evaluates.  It now draws from the
       ## joint closed skew-normal that .get_csn_shock_params() (R/pskf-likelihood.R)
       ## builds, so simulate_model() and the PSKF likelihood share one DGP.
-      shocks <- .draw_csn_shocks(total_periods, Sigma_e_sim, alpha, sigma_e)
+      shocks <- .draw_csn_shocks(total_periods, Sigma_e_sim, alpha)
     } else if (any(alpha != 0)) {
       ## Diagonal Sigma_e: the per-shock construction below is the SAME law as
       ## .draw_csn_shocks() (with Sigma_e diagonal the truncation latents are
       ## independent, so the joint CSN factorises into its marginals), and it is
       ## kept because it consumes a fixed RNG stream that seeded regression
       ## tests depend on, and needs no rejection step.
-      ## CSN draw: e_i = sigma_i * (delta_i*|z1| + sqrt(1-delta_i^2)*z2) - mu_i
-      ## where mu_i = sigma_i * delta_i * sqrt(2/pi)  (subtract mean
+      ## CSN draw: e_i = omega_i * (delta_i*|z1| + sqrt(1-delta_i^2)*z2) - mu_i
+      ## where mu_i = omega_i * delta_i * sqrt(2/pi)  (subtract mean
       ## so shocks are mean-zero; sign error here shifts the steady state).
+      ## omega_i is the skew-normal SCALE whose law has variance
+      ## sigma_e[i]^2 (the package convention: Sigma_e is the TRUE covariance;
+      ## .csn_scale_from_cov(), R/pskf-likelihood.R).
       delta <- alpha / sqrt(1 + alpha^2)            # length n_exo
-      mu_e  <- sigma_e * delta * sqrt(2 / pi)       # E[e_i] before correction
+      omega <- sqrt(diag(.csn_scale_from_cov(Sigma_e_sim, alpha)))
+      mu_e  <- omega * delta * sqrt(2 / pi)         # E[e_i] before correction
 
       z1 <- matrix(abs(rnorm(total_periods * n_exo)), total_periods, n_exo)
       z2 <- matrix(    rnorm(total_periods * n_exo),  total_periods, n_exo)
@@ -626,8 +707,8 @@ simulate_model <- function(dr, n_periods = 200L, shocks = NULL,
       ## `delta * z1` would recycle delta down the ROWS (column-major).
       shocks_std <- sweep(z1, 2L, delta, `*`) +
                     sweep(z2, 2L, sqrt(1 - delta^2), `*`)
-      ## Column k scaled by sigma_e[k], then subtract mean correction mu_e[k]
-      shocks <- sweep(sweep(shocks_std, 2L, sigma_e, `*`), 2L, mu_e, `-`)
+      ## Column k scaled by omega[k], then subtract mean correction mu_e[k]
+      shocks <- sweep(sweep(shocks_std, 2L, omega, `*`), 2L, mu_e, `-`)
     } else if (!has_corr) {
       ## Gaussian, diagonal Sigma_e: unchanged (regression-safe, and keeps the
       ## exact RNG stream of every existing seeded test).
@@ -811,7 +892,10 @@ simulate_model <- function(dr, n_periods = 200L, shocks = NULL,
 #' @param dr DecisionRules object
 #' @param model dynhr_mod object (for shock covariance)
 #' @param n_ar Number of autocorrelation lags to compute
-#' @param params Named numeric parameter vector (default: model$param_values)
+#' @param params Named numeric parameter vector, or \code{NULL} (default).
+#'   The shock covariance comes from \code{params} when supplied, else from
+#'   \code{dr$Sigma_e} (set by \code{\link{solve_perturbation}}), else from
+#'   the model's shocks block at \code{model$param_values}.
 #' @return Named list; see Details.
 #' @export
 compute_moments <- function(dr, model, n_ar = 5L, params = NULL) {
@@ -824,20 +908,11 @@ compute_moments <- function(dr, model, n_ar = 5L, params = NULL) {
   n_exo  <- length(exo)
   n_state <- length(state_idx)
 
-  ## FIX: respect caller-supplied params (was unconditionally overwritten)
-  if (is.null(params)) params <- model$param_values
-
-  ## Build shock covariance matrix Sigma_e (handles cross-shock correlations).
-  ## Honour a covariance carried on the decision rules (set when the caller
-  ## passed solve_perturbation(Sigma_e=)) -- including off-diagonal correlations --
-  ## in preference to re-deriving from model$shocks. Falls back to the parsed
-  ## shocks block when dr$Sigma_e is absent (common case, byte-identical to before).
-  Sigma_e <- if (!is.null(dr$Sigma_e) &&
-                 all(dim(dr$Sigma_e) == c(n_exo, n_exo))) {
-    dr$Sigma_e
-  } else {
-    .get_shock_cov(model, exo, params)
-  }
+  ## Shock covariance (with cross-shock correlations): the package-wide rule,
+  ## .resolve_sigma_e() -- caller `params` > dr$Sigma_e > model.  Until
+  ## 0.9.4.75 dr$Sigma_e won here even over a supplied `params`.
+  Sigma_e <- .resolve_sigma_e(dr, model, params)
+  .warn_zero_sigma_e(Sigma_e, "compute_moments")
 
   ## State transition matrix (for state vars only)
   ghx_state <- ghx[state_idx, , drop = FALSE]   # n_state x n_state
@@ -1057,7 +1132,10 @@ compute_moments <- function(dr, model, n_ar = 5L, params = NULL) {
 #' @param horizons Integer or numeric vector of forecast horizons.
 #'   \code{Inf} is allowed and triggers the Lyapunov-based unconditional
 #'   decomposition. Default: \code{c(1L, 4L, 8L, 16L, 40L, Inf)}.
-#' @param params Named numeric parameter vector (default: \code{model$param_values}).
+#' @param params Named numeric parameter vector, or \code{NULL} (default).
+#'   The shock covariance comes from \code{params} when supplied, else from
+#'   \code{dr$Sigma_e} (set by \code{\link{solve_perturbation}}), else from
+#'   the model's shocks block at \code{model$param_values}.
 #'
 #' @return A named list with:
 #'   \describe{
@@ -1085,10 +1163,8 @@ conditional_variance_decomposition <- function(dr, model,
   n_state   <- length(state_idx)
   n_h       <- length(horizons)
 
-  if (is.null(params)) params <- model$param_values
-
-  ## Shock covariance
-  Sigma_e   <- .get_shock_cov(model, exo, params)
+  ## Shock covariance: caller `params` > dr$Sigma_e > model (.resolve_sigma_e)
+  Sigma_e   <- .resolve_sigma_e(dr, model, params)
 
   ## State matrices
   ghx_state <- ghx[state_idx, , drop = FALSE]  # A: n_state x n_state
@@ -1226,7 +1302,10 @@ conditional_variance_decomposition <- function(dr, model,
 #' @param model   dynhr_mod object (for shock covariance).
 #' @param lambda  HP smoothing parameter. Default 1600 (quarterly data).
 #' @param n_freq  Number of quadrature points on \eqn{(0,\pi]}. Default 512.
-#' @param params  Named numeric parameter vector (default: \code{model$param_values}).
+#' @param params Named numeric parameter vector, or \code{NULL} (default).
+#'   The shock covariance comes from \code{params} when supplied, else from
+#'   \code{dr$Sigma_e} (set by \code{\link{solve_perturbation}}), else from
+#'   the model's shocks block at \code{model$param_values}.
 #'
 #' @return A named list:
 #'   \describe{
@@ -1240,7 +1319,6 @@ conditional_variance_decomposition <- function(dr, model,
 #' @export
 hp_filtered_moments <- function(dr, model, lambda = 1600, n_freq = 512L,
                                  params = NULL) {
-  if (is.null(params)) params <- model$param_values
   if (!is.numeric(lambda) || length(lambda) != 1L || lambda < 0)
     stop("hp_filtered_moments: 'lambda' must be a single non-negative number.")
 
@@ -1255,7 +1333,8 @@ hp_filtered_moments <- function(dr, model, lambda = 1600, n_freq = 512L,
   ZZ        <- dr$ghx                              # n_endo x n_state (observe all)
   DD        <- dr$ghu                              # n_endo x n_exo
 
-  Sigma_e   <- .get_shock_cov(model, exo, params)
+  ## Shock covariance: caller `params` > dr$Sigma_e > model (.resolve_sigma_e)
+  Sigma_e   <- .resolve_sigma_e(dr, model, params)
 
   ## Uniform quadrature grid on (0, pi]  (avoid omega=0 for near-unit-root safety)
   omegas <- seq(pi / n_freq, pi, length.out = n_freq)
@@ -1360,7 +1439,10 @@ hp_filtered_moments <- function(dr, model, lambda = 1600, n_freq = 512L,
 #' @param dr DecisionRules2 object (from \code{solve_perturbation(order=2)}).
 #' @param model dynhr_mod object (for shock covariance).
 #' @param n_ar Number of autocorrelation lags to compute (default 5).
-#' @param params Named numeric parameter vector (default: \code{model$param_values}).
+#' @param params Named numeric parameter vector, or \code{NULL} (default).
+#'   The shock covariance comes from \code{params} when supplied, else from
+#'   \code{dr$Sigma_e} (set by \code{\link{solve_perturbation}}), else from
+#'   the model's shocks block at \code{model$param_values}.
 #' @return A list with slots:
 #'   \describe{
 #'     \item{mean}{Named n_endo vector: full unconditional mean in level space.}
@@ -1381,6 +1463,10 @@ compute_moments_order2 <- function(dr, model, n_ar = 5L, params = NULL) {
     stop("compute_moments_order2: dr must be a DecisionRules2 object.")
   }
 
+  ## Shock covariance: the shared precedence (caller params > dr$Sigma_e >
+  ## model), .resolve_sigma_e().  This rebuilt Sigma_e from the model and
+  ## ignored solve_perturbation(Sigma_e = ) (adversarial review 2026-11-11 F2).
+  Sigma_e <- .resolve_sigma_e(dr, model, params)
   if (is.null(params)) params <- model$param_values
 
   ## --- Gaussian-scope guard --------------------------------------------------
@@ -1394,6 +1480,8 @@ compute_moments_order2 <- function(dr, model, n_ar = 5L, params = NULL) {
   }
 
   ## --- Extract matrices ------------------------------------------------------
+  ## ghxu is contracted as (e %x% x): see MIXED-BLOCK LAYOUT CONVENTION
+  dr   <- .with_mixed_layout(dr, "u_slow")
   ghx  <- dr$ghx;  ghu  <- dr$ghu
   ghxx <- dr$ghxx; ghxu <- dr$ghxu
   ghuu <- dr$ghuu; ghss <- dr$ghss
@@ -1412,9 +1500,6 @@ compute_moments_order2 <- function(dr, model, n_ar = 5L, params = NULL) {
   hxu <- ghxu[state_idx, , drop = FALSE]  # n_s x (n_s·n_exo)
   huu <- ghuu[state_idx, , drop = FALSE]  # n_s x n_exo²
   hss <- ghss[state_idx]                  # n_s
-
-  ## Shock covariance
-  Sigma_e <- .get_shock_cov(model, exo, params)
 
   ## --- Exact order-2 moments via the augmented pruned state-space -----------
   ## xi_t = [x1_t; x2_t; x1_t (x) x1_t] is linear in the contemporaneous shock,
@@ -1558,6 +1643,8 @@ compute_moments_order2 <- function(dr, model, n_ar = 5L, params = NULL) {
 
 ## Constant augmented-system matrices for a DecisionRules2 object + Sigma_e.
 .order2_aug_system <- function(dr, Sigma_e) {
+  ## ghxu is contracted as (e %x% x): see MIXED-BLOCK LAYOUT CONVENTION
+  dr <- .with_mixed_layout(dr, "u_slow")
   ghx <- dr$ghx; ghu <- dr$ghu; ghxx <- dr$ghxx; ghxu <- dr$ghxu
   ghuu <- dr$ghuu; ghss <- dr$ghss; ys <- dr$ys
   sidx <- dr$state_idx; endo <- dr$endo_names
@@ -1717,6 +1804,14 @@ stoch_simul <- function(model, compiled = NULL, ss = NULL, params = NULL,
   if (is.character(model) && length(model) == 1 && file.exists(model)) {
     model <- parse_mod(model)
   }
+  ## One epoch for the whole call: the zero-Sigma_e warning fires once even
+  ## though compute_irfs() and compute_moments() both check it.
+  .dynhr_run_epoch <- .dynhr_epoch("stoch_simul")
+  on.exit(.dynhr_close_epoch(.dynhr_run_epoch), add = TRUE)
+  if (length(model$var_names) == 0L)
+    .dynhr_abort("stoch_simul: the model declares no endogenous variables ",
+                 "(no `var` declaration).",
+                 class = "dynhr_error_mod_syntax")
 
   if (is.null(params)) params <- model$param_values
   if (is.null(compiled)) {

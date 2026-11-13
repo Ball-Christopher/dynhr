@@ -11,7 +11,10 @@ compute_third_cumulant(dr, model, params = NULL)
 
 \item{model}{dynhr_mod (for shock variances)}
 
-\item{params}{Named numeric parameter vector}
+\item{params}{Named numeric parameter vector, or \code{NULL} (default).
+The shock covariance comes from \code{params} when supplied, else from
+\code{dr$Sigma_e} (set by \code{\link{solve_perturbation}}), else from
+the model's shocks block at \code{model$param_values}.}
 }
 \value{
 List:

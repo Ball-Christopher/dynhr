@@ -13,7 +13,10 @@ compute_moments(dr, model, n_ar = 5L, params = NULL)
 
 \item{n_ar}{Number of autocorrelation lags to compute}
 
-\item{params}{Named numeric parameter vector (default: model$param_values)}
+\item{params}{Named numeric parameter vector, or \code{NULL} (default).
+The shock covariance comes from \code{params} when supplied, else from
+\code{dr$Sigma_e} (set by \code{\link{solve_perturbation}}), else from
+the model's shocks block at \code{model$param_values}.}
 }
 \value{
 Named list; see Details.

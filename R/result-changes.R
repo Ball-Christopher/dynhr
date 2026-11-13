@@ -77,6 +77,7 @@
   dsmh_streams      = "DSMH chain random streams",
   smc               = "the SMC sampler (target, stage-0 draws, THAMES)",
   parallel_seed     = "parallel chains with a seed other than 42",
+  child_seeds       = "two or more RWMH / PMMH / NUTS chains, or parallel SMC / DIME (per-chain and per-task seeds)",
   sampler_repeat    = "a sampler sequence that repeats a method",
   ## outputs, and tools outside estimation (documenting only)
   chain_summaries   = "a sampler stage (the chains' ESS / R-hat summaries and the THAMES marginal-likelihood SE)",
@@ -411,7 +412,29 @@
     list("0.9.4.59", "kalman",
          "hank_loglik_ss(), hank_kalman_loglik() and hank_reiter_kalman_loglik() (and so make_log_posterior_hank(likelihood = \"kalman\"), hank_mixture_kf_loglik() and the mixture joint log-posterior) return -Inf when the filter skips an informative singular observation (one innovation, several observables, me_variance = 0, data the model cannot generate; was a finite value, silently); singular_obs = \"skip\" restores it, and a dynhr_warning_dropped_observations warning is now raised either way"),
     list("0.9.4.64", c("kalman", "kalman_fixed_unknown"),
-         "lik_init = \"fixed_unknown\" builds its init (zero variance along the unit roots, Lyapunov on their orthogonal complement -- coordinate dependent) on IRIS's state vector (every non-forward-looking, non-measurement variable, static identities included, plus lags; $diagnostics$init_coordinates) instead of dynhr's states: filtered / predicted states and loglik change wherever the two differ (potential-output model: filtered 4e-2 -> 5e-12 and loglik 0.1 nat -> 1e-12 of IRIS); unchanged where they coincide (toy model). A singular innovation covariance (observed exact identities) runs the sequential form with kalman_tol drops (was loglik -Inf / a kalman_smoother() error)"))
+         "lik_init = \"fixed_unknown\" builds its init (zero variance along the unit roots, Lyapunov on their orthogonal complement -- coordinate dependent) on IRIS's state vector (every non-forward-looking, non-measurement variable, static identities included, plus lags; $diagnostics$init_coordinates) instead of dynhr's states: filtered / predicted states and loglik change wherever the two differ (potential-output model: filtered 4e-2 -> 5e-12 and loglik 0.1 nat -> 1e-12 of IRIS); unchanged where they coincide (toy model). A singular innovation covariance (observed exact identities) runs the sequential form with kalman_tol drops (was loglik -Inf / a kalman_smoother() error)"),
+    list("0.9.4.66", c("kalman", "likelihood:gaussian"),
+         "kalman_filter() / kf_innovation_diagnostics() / kalman_filter_student_t() read `data` as T x n_obs by the one orientation rule (names decide; an unnamed square sample is refused) instead of guessing n_obs x T from the shape: a correctly oriented sample with T == n_obs was read transposed (2 x 2 nk sample: -6639.26 instead of -1926.66). Only samples with T == n_obs change; every other result is identical (orientation only)"),
+    list("0.9.4.67", c("ms_struct", "ms_regime_ss", "obc_filter", "obc_ppf", "obc_pf", "ramsey_obc"),
+         "rows = periods in the Markov-switching / OBC / perfect-foresight layer: ms_kim_filter[_struct](), kalman_filter_obc_pkf(), the OBC inversion / PPF filters and make_log_posterior_obc[_pkf|_ppf]() / ppf_reweight_posterior() read `data` as T x n_obs by the one orientation rule (names decide; unnamed square refused) instead of guessing from the shape (a T x n_obs sample with T == n_obs was read transposed); as_obc_regime_path() / d32 read pf_newton_solve()'s regime correctly (it was n_spec x T, read as T x n_constr); ramsey_obc_pf() uses an unnamed T x n_exo shock_path (it was silently replaced by zeros). Every other result is identical (orientation only)"),
+    list("0.9.4.68", c("likelihood:pruned", "likelihood:whittle",
+                       "likelihood:tpf", "likelihood:sv_rbpf",
+                       "likelihood:global_pf", "whittle_lik"),
+         "pruned_ss_loglik() / pruned_ss_loglik3() / the pruned, Whittle, TPF, SV-RBPF and global-PF posteriors, posterior_hessian(), dynhr_smc2() and the HANK likelihoods (hank_loglik_aggregate(_ar), hank_loglik_ss, hank_kalman_loglik, hank_loglik_ar(_grad), make_log_posterior_hank, hank_reiter_*) read `data` as T x n_obs by the one orientation rule instead of a shape guess (or, for HANK, no check): likelihood = \"pruned\"/\"pruned3\" read a T == n_obs sample transposed, Whittle a T < n_obs sample, and the HANK likelihoods read any n_obs x T input transposed (n_obs = 1: -15.9 instead of 44.0) -- the latter is now refused. Correctly oriented samples with T != n_obs are unchanged (orientation only)"),
+    list("0.9.4.73", c("moments_irfs", "posterior_outputs", "girf", "obc_pwl", "obc_mcp", "rfe_options"),
+         "IRFs at orders 3-5 and the OBC / OccBin / MCP IRFs scale the impulse by the lower Cholesky of Sigma_e (they used the diagonal stderr, ignoring corr and dr$Sigma_e); compute_moments_order2() and the pruned state spaces honour a dr$Sigma_e override; compute_irfs_obc() defaults to occbin with two or more constraints and its mcp path no longer re-solves at `params`; parallel RWMH now honours scale / target_rate / adapt_every. Diagonal-Sigma_e, single-constraint and serial results are unchanged"),
+    list("0.9.4.75", c("whittle_lik", "likelihood:whittle", "sampler:rwmh", "sampler:dime", "moments_irfs", "simulation", "girf", "posterior_outputs", "diagnostics", "obc_mcp", "rfe_options"),
+         "the multivariate Whittle likelihood used a conjugated periodogram and a cosine-only debiased expectation (O(T) off the exact loglik with two or more observables); post-solve functions resolve Sigma_e as params > dr$Sigma_e > model everywhere (moments, variance decompositions, HP moments, GIRF, cumulants, welfare, simulators, D13 / D15 used to ignore dr$Sigma_e or let it beat params); RWMH defaults are scale 2.38 / sqrt(d), adapt every 100 on the serial and parallel paths (were 0.5 / 100 and 1.5 / 200); compute_irfs_mcp() solves on a longer internal horizon; parallel DIME scores its initial ensemble with the workers' target"),
+    list("0.9.4.76", c("perturbation_ho", "likelihood:pruned", "likelihood:tpf", "likelihood:cumulant", "simulation", "moments_irfs", "girf", "diagnostics"),
+         "order-3 consumers (simulate_model_order3, the pruned order-3 state space / moments / Kalman loglik, the order-3 TPF, nonlinear historical and variance decompositions, and order-2 functions handed an order-3 rule) contracted ghxu / ghxxu / ghxuu in the order-2 layout although order-3 rules store Dynare's layout: wrong with at least two states and two shocks; order-4/5 rules gain the missing current-shock risk blocks and corrected ghss2 / ghxss2; IRFs at orders 3-5 are the shocked-minus-baseline pruned path with all risk terms"),
+    list("0.9.4.77", c("likelihood:sv_rbpf", "perturbation_ho", "simulation", "moments_irfs", "obc_pwl", "sampler:dime", "sampler:rwmh", "sampler:nuts"),
+         "the SV RB-PF started every particle from the baseline-Sigma_e covariance (ignoring the SV level and vol-of-vol; every SV loglik changes); order-3 policies of skew-declared models now carry ghs3 from the model; orders 4-5 refuse non-Gaussian shocks; the Boehl single_spell fast path found the wrong spell length on non-monotone cases; parallel RWMH/NUTS checkpoint resume re-runs chains lost before their first flush; parallel DIME aborts on daemon errors"),
+    list("0.9.4.78", c("likelihood:pskf", "simulation", "perturbation_ho", "whittle_lik", "likelihood:whittle", "sampler:nuts", "sampler:hmc", "sampler:mala", "sampler:chees"),
+         "Sigma_e (stderr / corr) of skewed shocks is now the TRUE covariance in the simulators, the order-1/2 PSKF and SVAR-ICA (it was read as the skew-normal scale: variance 0.49x at alpha = 2), which re-parameterises every skewed PSKF estimate; the Whittle likelihood defaults to debias = FALSE (the debiased posterior is 1.9-2.8x too narrow on rbc2shock); Whittle sampler gradients now use the same debias setting as the posterior"),
+    list("0.9.4.79", c("likelihood:sv_rbpf", "diagnostics"),
+         "the SV RB-PF pre-sample burn-in now lengthens with the stationary variance of the log-volatility (the 0.9.4.77 length left the loglik high when sigma_eta^2 / (1 - rho^2) is large: +0.2 nats at 18; SV logliks move slightly everywhere); sbc_uniformity_test()'s verdict is now family-wise over every statistic (the fixed-threshold rule is kept as verdict_unadjusted); dynhr_sbc() simulates from the stationary state law, so SBC datasets differ for a given seed"),
+    list("0.9.4.80", "child_seeds",
+         "per-chain, per-replication and per-task seeds are independent children of the seed instead of seed + k (streams from consecutive Mersenne-Twister seeds are dependent in their first draws): for a given seed, RWMH / PMMH / NUTS runs with two or more chains, parallel SMC / SMC2 / DIME, the SBC harnesses, ppf_reweight_posterior(), the estimation passport, mdd_calibration() and the TPF preflight draw different numbers from the same distribution; single-chain runs are unchanged; mdd_calibration() no longer repeats seeds across estimators beyond 100 replications; the parallel SMC stage-0 evaluation is seeded"))
   data.frame(
     version     = vapply(rows, `[[`, "", 1L),
     components  = I(lapply(rows, `[[`, 2L)),
@@ -561,6 +584,11 @@
     if (isTRUE(spec$compute$parallel) && !is.null(seed) && !identical(as.integer(seed), 42L) &&
         any(ms %in% c("rwmh", "pmmh", "nuts", "smc", "dime")))
       tg <- c(tg, "parallel_seed")
+    ## per-chain / per-task seeds are children of the seed since 0.9.4.80
+    multi <- vapply(sl, function(s) s$method %in% c("rwmh", "pmmh", "nuts") &&
+                      isTRUE(s$n_chains > 1L), logical(1))
+    if (any(multi) || (isTRUE(spec$compute$parallel) && any(ms %in% c("smc", "dime"))))
+      tg <- c(tg, "child_seeds")
   }
   if ("outputs" %in% stages) {
     out <- spec$outputs

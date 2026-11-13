@@ -69,7 +69,7 @@
 #'   take \code{log_post_fn}/\code{grad_fn} and add your own log-prior --
 #'   \code{$loglik} is returned separately for exactly that.
 #'
-#' @param data \code{T_data x n_obs} matrix of demeaned observations.
+#' @param data \code{T_data x n_obs} matrix (rows are periods; oriented by the rule in \code{\link{hank_loglik_aggregate}}) of demeaned observations.
 #' @param obs_vars Character vector of observable names, in the column order
 #'   of \code{data}.
 #' @param model A \code{\link{hank_model}}. Required when \code{model_fn} is
@@ -150,7 +150,6 @@ hank_ar_target <- function(data, obs_vars, model = NULL, model_fn = NULL,
            "is supplied (there is no defensible default prior width for a ",
            "structural parameter).")
   }
-  data <- as.matrix(data)
   ## One model is needed up front for the shock names, T_h and the observable
   ## check. If the caller did not hand one over, build it ONCE at `structural`
   ## and seed the memo with it -- never build a throwaway.
@@ -161,6 +160,8 @@ hank_ar_target <- function(data, obs_vars, model = NULL, model_fn = NULL,
   if (length(missing_obs))
     stop("hank_ar_target: observable(s) not produced by model: ",
          paste(missing_obs, collapse = ", "))
+  ## T x n_obs (rows are periods) by the package-wide rule, once, here.
+  data <- .hank_orient_data(data, obs_vars, "hank_ar_target")
 
   rep_named <- function(x, nm, what) {
     if (is.null(x)) return(NULL)

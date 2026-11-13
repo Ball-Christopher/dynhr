@@ -517,7 +517,12 @@ lcp_regime_from_z <- function(z, shock_seq, dr_slack, sys, specs, obs_idx,
 #'   Jacobian of regime flips is assembled (T*n_spec re-simulations), and a QR
 #'   Newton step gives a regime update.
 #'
-#' @param shock_seq        n_exo x T numeric matrix of structural shocks
+#' @param shock_seq        T x n_exo numeric matrix of structural shocks
+#'                         (rows = periods, columns = shocks; name the
+#'                         columns by \code{dr_slack$exo_names} -- a matrix
+#'                         named by shock on its ROWS, the old n_exo x T
+#'                         orientation, is transposed with a message, an
+#'                         unnamed n_exo x T or square one is an error)
 #' @param dr_slack         Slack-regime DecisionRules (from solve_perturbation)
 #' @param sys              System matrices (from extract_system_matrices_fast)
 #' @param specs            OBC spec list (from obc_parse_tags / obc_collect_specs)
@@ -543,7 +548,8 @@ lcp_regime_from_z <- function(z, shock_seq, dr_slack, sys, specs, obs_idx,
 #'                         NULL → zero initial state (standard IRF convention)
 #' @return Named list with:
 #'   $regime_path -- integer vector (length T): final bitfield regime per period
-#'   $paths       -- n_endo x T matrix of simulated endogenous variable paths
+#'   $paths       -- T x n_endo matrix of simulated endogenous variable paths
+#'                   (rows = periods)
 #'   $fb_norm     -- scalar: complementarity mismatch norm at the returned path
 #'   $converged   -- logical
 #'   $n_iter      -- integer: pivot steps (lemke) or Newton iterations (newton),
@@ -566,6 +572,10 @@ solve_obc_lcp <- function(shock_seq, dr_slack, sys, specs,
                            regime_path_init = NULL,
                            state_init       = NULL) {
   method <- match.arg(method)
+  ## Rows = periods (R/time-orientation.R); the solver internals run on the
+  ## n_exo x T transpose and the paths are returned T x n_endo.
+  shock_seq <- t(.orient_time_matrix(shock_seq, dr_slack$exo_names,
+                                     "shock_seq", "solve_obc_lcp"))
   n_T    <- ncol(shock_seq)
 
   if (is.null(obs_idx)) obs_idx <- seq_len(nrow(dr_slack$ghx))
@@ -637,7 +647,7 @@ solve_obc_lcp <- function(shock_seq, dr_slack, sys, specs,
 
   list(
     regime_path = res$regime_path,
-    paths       = res$paths,
+    paths       = t(res$paths),
     fb_norm     = sqrt(sum(res$phi^2)),
     converged   = res$converged,
     n_iter      = res$n_iter

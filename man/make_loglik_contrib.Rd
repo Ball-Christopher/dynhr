@@ -48,11 +48,11 @@ convention to \code{make_log_posterior} / \code{\link{kalman_filter}}.}
 \code{\link{kalman_filter}} (default \code{"auto"}); see
 \code{make_log_posterior}.}
 
-\item{me_extra}{\code{n_obs x T} matrix of additional per-observable,
+\item{me_extra}{\code{T x n_obs} matrix (rows are periods) of additional per-observable,
 per-period measurement-error variance (filter_tunes soft tunes); see
 \code{\link{kalman_filter}}.}
 
-\item{shock_scale}{\code{n_exo x T} heteroskedastic shock-scale matrix;
+\item{shock_scale}{\code{T x n_exo} (rows are periods) heteroskedastic shock-scale matrix;
 see \code{\link{kalman_filter}}.}
 
 \item{likelihood}{Likelihood type. Only \code{"gaussian"} (the default)

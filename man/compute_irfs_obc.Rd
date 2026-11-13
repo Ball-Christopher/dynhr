@@ -32,12 +32,23 @@ NULL → all endo indices}
 
 \item{n_periods}{Number of IRF periods (default 40L)}
 
-\item{shock_size}{Shock size multiplier applied to each shock's stderr
+\item{shock_size}{Shock size multiplier applied to each shock's impulse
 (default 1: one-standard-deviation impulse)}
 
-\item{params}{Named numeric parameter vector; NULL → model$param_values}
+\item{params}{Named numeric parameter vector used ONLY to select the
+shock covariance of the impulse, exactly as in
+\code{\link{compute_irfs}()}; the model is NOT
+re-solved at \code{params} by any solver (the
+dynamics are those of \code{dr_slack} / \code{sys};
+the \code{"mcp"} path uses \code{model$param_values}).
+NULL → \code{dr_slack$Sigma_e}, else the model's
+shocks block.}
 
-\item{obc_solver}{Character: \code{"boehl"} (default), \code{"occbin"}, or \code{"lcp"}}
+\item{obc_solver}{Character: \code{"boehl"}, \code{"occbin"}, \code{"lcp"}
+or \code{"mcp"}.  Default: \code{"boehl"} for one
+constraint, \code{"occbin"} for two or more
+constraints with \code{spell_regime = NULL} (see
+Details).}
 
 \item{spell_regime}{Integer bitfield for the binding block when
 obc_solver = "boehl"; NULL → all specs simultaneously}
@@ -47,22 +58,33 @@ obc_solver = "boehl"; NULL → all specs simultaneously}
 \value{
 Object of class "IRFCollection": a named list (one entry per shock)
   of n_periods x n_endo matrices.  Attributes: n_periods, endo_names,
-  exo_names.  Same structure as compute_irfs().
+  exo_names (same structure as compute_irfs()), plus
+  \code{attr(., "converged")} (named logical vector, one per shock: the
+  solver converged AND the path satisfies every constraint),
+  \code{attr(., "regime_paths")} (named list of the solver's regime /
+  active-set paths) and \code{attr(., "obc_solver")} (the solver used) --
+  the convergence attributes of \code{\link{occbin_compute_irfs}()}.
 }
 \description{
 Extends the standard linear compute_irfs() with OBC-regime switching.
-For each shock, constructs a unit-impulse shock sequence (shock hits at
-t=1, zero thereafter), runs the chosen OBC solver to identify the binding
-regime path, simulates the full n_endo x T path, and packages it as an
-IRFCollection with the same structure as compute_irfs().
+For each shock, constructs an impulse at t=1 (zero thereafter), runs the
+chosen OBC solver to identify the binding regime path, simulates the full
+n_endo x T path, and packages it as an IRFCollection with the same
+structure as compute_irfs().
 }
 \details{
+The impulse of shock k is the k-th column of the lower Cholesky factor of
+the shock covariance times \code{shock_size} -- the same rule as
+\code{\link{compute_irfs}()}, so correlated shocks propagate and, when no
+constraint binds, the OBC IRF equals the linear IRF for every solver.
+
 Four solver options:
 \describe{
   \item{\code{"boehl"}}{Spell-duration fast path (single_spell = TRUE).
     Bisection over the spell length.  Valid when the binding spell is a
-    single contiguous block starting at t=1; \code{converged} is FALSE
-    otherwise.}
+    single contiguous block starting at t=1 in which the constraints of
+    \code{spell_regime} bind; otherwise it falls through (announced) to
+    the \code{"occbin"} guess-and-verify path.}
   \item{\code{"occbin"}}{OccBin guess-and-verify (single_spell = FALSE).
     Handles multi-spell, multi-constraint, and escape-and-rebind
     scenarios.}
@@ -71,6 +93,23 @@ Four solver options:
   \item{\code{"mcp"}}{MCP semi-smooth Newton solver (\code{\link{mcp_solve_path}}).
     Uses the Fischer-Burmeister FB reformulation on the full nonlinear model.
     Works for both linear and nonlinear models.  On linear models, matches
-    the Boehl and LCP solvers to within numerical tolerance.}
+    the Boehl and LCP solvers to within numerical tolerance.  The
+    perfect-foresight problem is solved on an internal horizon of
+    \code{max(2 * n_periods, n_periods + 40)} periods (return to steady
+    state imposed at its end) and truncated to \code{n_periods}, so the
+    returned periods do not depend on \code{n_periods}.}
 }
+
+\strong{Default solver.}  With a single constraint (or an explicit
+\code{spell_regime}) the default is \code{"boehl"}.  With two or more
+constraints and \code{spell_regime = NULL}, the boehl fast path would
+assume every constraint binds in the same contiguous block, which is wrong
+whenever the constraints bind in different periods (or one binds and the
+other does not); the default is then \code{"occbin"}.  \code{"boehl"} stays
+available when requested explicitly.
+
+\strong{Verification.}  Every returned path is checked against every
+constraint; when a bound is violated beyond tolerance, or the solver did
+not converge, a warning of class
+\code{dynhr_warning_obc_path_infeasible} is emitted.
 }

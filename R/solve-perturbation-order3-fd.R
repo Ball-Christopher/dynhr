@@ -90,17 +90,9 @@
          "variables. Use the symbolic solver for this model.")
   }
 
-  # Permute dr2$ghxu from internal convention (state FAST, exo SLOW) to
-  # standard Kron (state SLOW, exo FAST) so `ghxu_std %*% (x %x% u)` is
-  # correct. For nu==1 this is identity; for nu>1 it matters.
-  ghxu_std <- dr2$ghxu
-  if (ns > 0L && nu > 0L) {
-    .pxu_fd <- integer(ns * nu)
-    for (s in seq_len(ns)) for (u in seq_len(nu)) {
-      .pxu_fd[(s-1L)*nu + u] <- (u-1L)*ns + s
-    }
-    ghxu_std <- dr2$ghxu[, .pxu_fd, drop = FALSE]
-  }
+  # dr2$ghxu in the x_slow layout so `ghxu_std %*% (x %x% u)` is correct
+  # (MIXED-BLOCK LAYOUT CONVENTION, R/solve-perturbation-order3.R).
+  ghxu_std <- .mixed_block(dr2, "ghxu", "x_slow")
 
   # Order-2 policy evaluation (no order-3 terms)
   policy_o2 <- function(x, u) {
@@ -286,8 +278,9 @@
   rownames(ghxxx) <- endo; rownames(ghxxu) <- endo
   rownames(ghxuu) <- endo; rownames(ghuuu) <- endo
   colnames(ghxxx) <- triple_names(state_vars, state_vars, state_vars)
-  colnames(ghxxu) <- triple_names(state_vars, state_vars, exo)
-  colnames(ghxuu) <- triple_names(state_vars, exo, exo)
+  ## mixed blocks: x_slow Kronecker layout (shock modes fastest) -- names too
+  colnames(ghxxu) <- .kron_colnames(state_vars, state_vars, exo)
+  colnames(ghxuu) <- .kron_colnames(state_vars, exo, exo)
   colnames(ghuuu) <- triple_names(exo, exo, exo)
 
   # Permute dr2$ghxu to standard Kron convention (state SLOW, exo FAST) on
@@ -299,6 +292,7 @@
   dr3$ghxuu <- ghxuu
   dr3$ghuuu <- ghuuu
   dr3$order <- 3L
+  dr3$mixed_layout <- "x_slow"   # see MIXED-BLOCK LAYOUT CONVENTION (order3.R)
   dr3$sigma_correction <- "not_implemented"
   dr3$solver <- "fd_order3"
   class(dr3) <- c("DecisionRules3", class(dr2))

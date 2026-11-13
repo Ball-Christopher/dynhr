@@ -251,6 +251,8 @@ ramsey_solve <- function(aug_model,
   ramsey$ghxxu <- if (!is.null(dr$ghxxu)) dr$ghxxu[orig_idx, , drop = FALSE] else NULL
   ramsey$ghxuu <- if (!is.null(dr$ghxuu)) dr$ghxuu[orig_idx, , drop = FALSE] else NULL
   ramsey$ghuuu <- if (!is.null(dr$ghuuu)) dr$ghuuu[orig_idx, , drop = FALSE] else NULL
+  ## the copied mixed blocks keep their layout: MIXED-BLOCK LAYOUT CONVENTION
+  ramsey$mixed_layout <- .mixed_layout(dr)
 
   ramsey$ghxss <- if (!is.null(dr$ghxss)) dr$ghxss[orig_idx, , drop = FALSE] else NULL
   ramsey$ghuss <- if (!is.null(dr$ghuss)) dr$ghuss[orig_idx, , drop = FALSE] else NULL

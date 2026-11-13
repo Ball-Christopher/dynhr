@@ -16,7 +16,14 @@ cell counts agree -- the standard package idiom
 \code{hank_aggregate(block$D, block$a)} -- but incompatible sizes are an
 error: R's silent recycling previously let an exactly-dividing mismatch
 (e.g. \code{length(d) = 4}, \code{length(x) = 2}) return a plausible,
-numerically wrong scalar.}
+numerically wrong scalar.
+The orientation of a matrix \code{x} against a VECTOR \code{d} cannot be
+checked (a plain distribution vector carries no \code{n_e x n_a} shape),
+so pass the policy as returned by the package (\code{n_e x n_a}), not
+transposed; two matrices must have identical dimensions.  A \code{d}
+that does not sum to 1 (tolerance 1e-6) or has negative mass draws a
+\code{dynhr_warning_hank_unnormalised} warning (the result is then a
+weighted sum, not a mean).}
 }
 \value{
 The scalar mass-weighted mean \code{sum(d * x)}.

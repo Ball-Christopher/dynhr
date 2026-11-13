@@ -24,7 +24,10 @@ used up to their order-3 terms).}
 
 \item{model}{The parsed model (source of the shock covariance).}
 
-\item{params}{Named parameter vector (default \code{model$param_values}).}
+\item{params}{Named numeric parameter vector, or \code{NULL} (default).
+The shock covariance comes from \code{params} when supplied, else from
+\code{dr$Sigma_e} (set by \code{\link{solve_perturbation}}), else from
+the model's shocks block at \code{model$param_values}.}
 
 \item{order}{Pruning order to decompose at: 1, 2 or 3, at most the order of
 \code{dr}.  Default: the order of \code{dr}, capped at 3.}

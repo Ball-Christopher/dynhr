@@ -1050,6 +1050,15 @@ parse_mod <- function(file_or_text, verbose = FALSE) {
   # ---- 3. Strip comments and macros ------------------------------------
   txt <- strip_comments_and_macros(txt)
   if (verbose) .dynhr_cat("Stripped comments and macros\n")
+  ## An empty .mod FILE (or one holding only comments) used to parse to a
+  ## valid but empty dynhr_mod that then failed downstream with a dimnames
+  ## error. Inline source text is left alone: a comment-only inline "model"
+  ## is a documented degenerate-but-legal input (test-parse-repl-issues.R H7);
+  ## stoch_simul() refuses a model with no endogenous variables instead.
+  if (!is.na(source_file) && !grepl("[^[:space:]]", txt))
+    .dynhr_abort("parse_mod: the model file '", source_file, "' is empty ",
+                 "(nothing but whitespace or comments).",
+                 class = "dynhr_error_mod_syntax")
 
   # ---- 3. Extract declarations -----------------------------------------
   # Strip block constructs to prevent internal 'var' keywords
@@ -1071,25 +1080,28 @@ parse_mod <- function(file_or_text, verbose = FALSE) {
   predet_vars     <- parse_declaration_names(predet_text)
   varobs_names    <- parse_declaration_names(varobs_text)
 
-  # ---- Deduplicate: exo/exo_det names must not appear in endo list ----
-  exo_overlap     <- intersect(var_names, varexo_names)
-  exo_det_overlap <- intersect(var_names, varexo_det_names)
-  if (length(exo_overlap) > 0) {
-    .dynhr_inform(sprintf("Parser: removing %d varexo names from var: %s",
-                    length(exo_overlap), paste(exo_overlap, collapse = ", ")))
-    var_names <- setdiff(var_names, varexo_names)
-  }
-  if (length(exo_det_overlap) > 0) {
-    .dynhr_inform(sprintf("Parser: removing %d varexo_det names from var: %s",
-                    length(exo_det_overlap), paste(exo_det_overlap, collapse = ", ")))
-    var_names <- setdiff(var_names, varexo_det_names)
-  }
-  # Also protect varexo from varexo_det contamination
-  exo_cross <- intersect(varexo_names, varexo_det_names)
-  if (length(exo_cross) > 0) {
-    .dynhr_inform(sprintf("Parser: removing %d varexo_det names from varexo: %s",
-                    length(exo_cross), paste(exo_cross, collapse = ", ")))
-    varexo_names <- setdiff(varexo_names, varexo_det_names)
+  # ---- A symbol is declared ONCE across var / varexo / varexo_det /
+  # parameters (Dynare: "Symbol ... declared twice").  This used to drop a
+  # var/varexo overlap with an info message and accept a var/parameters
+  # overlap (or `var y y;`) silently, giving a model whose symbol table did not
+  # say what the user wrote.  Re-mentions in predetermined_variables, varobs,
+  # var(log)/deflator options and trend_var are not declarations and are not
+  # checked here.
+  .decl_kinds <- c(rep("var", length(var_names)),
+                   rep("varexo", length(varexo_names)),
+                   rep("varexo_det", length(varexo_det_names)),
+                   rep("parameters", length(param_names)))
+  .decl_all <- c(var_names, varexo_names, varexo_det_names, param_names)
+  .dup <- unique(.decl_all[duplicated(.decl_all)])
+  if (length(.dup) > 0L) {
+    .where <- vapply(.dup, function(d)
+      paste0("`", d, "` (", paste(.decl_kinds[.decl_all == d], collapse = ", "),
+             ")"), character(1))
+    .dynhr_abort("parse_mod: symbol(s) declared more than once across ",
+                 "var / varexo / varexo_det / parameters: ",
+                 paste(.where, collapse = "; "),
+                 ". Each name must be declared exactly once.",
+                 class = "dynhr_error_mod_syntax")
   }
 
   all_var_names <- c(var_names, varexo_names, varexo_det_names)
@@ -1099,6 +1111,22 @@ parse_mod <- function(file_or_text, verbose = FALSE) {
   # touches the model: they choose which equations exist and may turn an
   # endogenous variable exogenous or remove symbols.
   model_block <- extract_paired_block(txt, "model")
+  ## An unterminated `model;` block (no `end;`) used to fall through to the
+  ## calibration parser, which then reported its equations as calibration-
+  ## allowlist violations. A missing `end;` followed by a later block makes the
+  ## model body swallow that block's opener up to ITS `end;`; catch that too.
+  .model_open_re <- paste0("(?i)\\bmodel\\b\\s*", .dynhr_opts_re, "\\s*;")
+  .block_in_body_re <- paste0(
+    "(?i)(?:^|;)\\s*(shocks|initval|endval|histval|steady_state_model|",
+    "estimated_params|estimated_params_init|observation_trends|",
+    "filter_tunes|heteroskedastic_shocks|occbin_constraints)\\b\\s*",
+    .dynhr_opts_re, "\\s*;")
+  if ((!model_block$found && grepl(.model_open_re, txt, perl = TRUE)) ||
+      (model_block$found && grepl(.block_in_body_re, model_block$body,
+                                  perl = TRUE)))
+    .dynhr_abort("parse_mod: the `model;` block is not terminated: add ",
+                 "`end;` after its last equation.",
+                 class = "dynhr_error_mod_syntax")
   .edits <- .mod_apply_model_edits(
     txt, if (model_block$found) model_block$body else "",
     list(endo = var_names, exo = varexo_names, exo_det = varexo_det_names,
@@ -1507,6 +1535,12 @@ parse_mod <- function(file_or_text, verbose = FALSE) {
                                     inherits = FALSE))
       assign(.lc_parts[2], .lc_val, envir = local_const_env)
   }
+  ## A declared parameter with no value yet (estimated, or set after parsing)
+  ## is bound to NA so a shocks-block value naming it parses (it is re-read
+  ## against the parameter vector at the draw); only an UNDECLARED symbol is
+  ## refused by parse_shocks_block().
+  for (.lc_p in setdiff(param_names, ls(local_const_env, all.names = TRUE)))
+    assign(.lc_p, NA_real_, envir = local_const_env)
 
   # Parse ALL shocks blocks and merge them cumulatively (M5 fix).
   # `shocks(overwrite)` replaces matching vars; plain `shocks` appends /
@@ -2067,6 +2101,8 @@ parse_mod <- function(file_or_text, verbose = FALSE) {
     shock_paths          = shock_paths,
     controlled_paths     = controlled_paths
   )
+
+  .validate_parsed_shocks(model)
 
   # ---- 13. MCP constraint tags ----------------------------------
   # mcp_parse_tags() reads equation $tag_raw fields and builds MCP spec
@@ -2913,4 +2949,86 @@ parse_mod <- function(file_or_text, verbose = FALSE) {
                    substr(body, close + 1L, nchar(body)))
   }
   body
+}
+
+
+#' Cross-block checks on the parsed shocks / estimated_params / varobs
+#'
+#' Each of these used to be accepted and silently normalised: a shocks-block
+#' entry or a `stderr` / `corr` prior naming something that is not a declared
+#' shock was dropped (or, for `stderr <parameter>`, became a prior on the
+#' structural parameter), a varobs entry naming a non-variable failed later
+#' with an unrelated message, and a calibrated Sigma_e that is not positive
+#' semi-definite reached the solver. Parse time only: a non-PSD Sigma_e at a
+#' SAMPLED theta (an estimated corr) is still an infeasible draw (-Inf), never
+#' an abort.
+#' @noRd
+.validate_parsed_shocks <- function(model) {
+  bad <- function(...) .dynhr_abort("parse_mod: ", ..., class = "dynhr_error_mod_syntax")
+  exo  <- c(model$varexo_names, model$varexo_det_names)
+  endo <- model$var_names
+  what_is <- function(nm) {
+    if (nm %in% model$param_names) "a parameter"
+    else if (nm %in% endo) "an endogenous variable"
+    else "undeclared"
+  }
+  sv <- model$shocks$variances
+  sc <- model$shocks$correlations
+  names_used <- c(if (is.data.frame(sv)) sv$name,
+                  if (is.data.frame(sc)) c(sc$var1, sc$var2))
+  for (nm in unique(names_used))
+    if (!(nm %in% exo))
+      bad("the shocks block sets `", nm, "`, which is ", what_is(nm),
+          " (not a declared shock, varexo).")
+
+  ep <- model$estimated_params
+  if (is.data.frame(ep) && nrow(ep) > 0L && "type" %in% names(ep)) {
+    for (k in seq_len(nrow(ep))) {
+      ty <- ep$type[k]
+      if (!(ty %in% c("stderr", "corr", "skew"))) next
+      nms <- if (identical(ty, "corr")) c(ep$name[k], ep$name2[k]) else ep$name[k]
+      for (nm in nms) {
+        if (is.na(nm) || nm %in% exo) next
+        bad("estimated_params: `", ty, " ", nm, "` -- `", nm, "` is ",
+            what_is(nm), " (not a declared shock).",
+            if (nm %in% c(endo, model$varobs_names))
+              paste0(" Estimated measurement-error standard deviations on ",
+                     "observables are not supported; pass `me_variance =`.")
+            else if (nm %in% model$param_names)
+              paste0(" For a prior on the parameter write `", nm, ", ...;` ",
+                     "without the `", ty, "` keyword.")
+            else "")
+      }
+      if (identical(ty, "corr") && identical(ep$name[k], ep$name2[k]))
+        bad("estimated_params: `corr ", ep$name[k], ", ", ep$name2[k],
+            "` names the same shock twice.")
+    }
+  }
+
+  vo <- model$varobs_names
+  miss <- setdiff(vo, endo)
+  if (length(miss) > 0L)
+    bad("varobs lists ", paste0("`", miss, "`", collapse = ", "),
+        ", which ", if (length(miss) == 1L) "is not a" else "are not",
+        " declared endogenous variable", if (length(miss) > 1L) "s", " (var).")
+
+  ## Calibrated Sigma_e must be positive semi-definite. Checked only when
+  ## every shocks-block value resolved at parse time (an entry that depends
+  ## on a parameter without a value is checked at the draw instead). An
+  ## eigenvalue test with a relative tolerance, not chol(): a singular but
+  ## PSD Sigma_e (perfectly correlated shocks) is legitimate.
+  if (is.data.frame(sc) && nrow(sc) > 0L && length(model$varexo_names) > 0L &&
+      !anyNA(sv$stderr) &&
+      all(!is.na(ifelse(is.na(sc$cov), sc$corr, sc$cov)))) {
+    S <- .get_shock_cov(model, model$varexo_names, model$param_values)
+    if (all(is.finite(S))) {
+      ev  <- eigen((S + t(S)) / 2, symmetric = TRUE, only.values = TRUE)$values
+      tol <- 1e-10 * max(1, max(abs(diag(S))))
+      if (min(ev) < -tol)
+        bad("the calibrated shock covariance (shocks block) is not positive ",
+            "semi-definite: smallest eigenvalue ", signif(min(ev), 4), ". ",
+            "Check the corr / covariance entries.")
+    }
+  }
+  invisible(NULL)
 }

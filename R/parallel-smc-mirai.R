@@ -46,7 +46,7 @@
 #' @param seed_base base RNG seed.
 #' @param n_cores worker count (NULL = auto).
 #' @param me_variance measurement-error variance.
-#' @param me_extra n_obs x T matrix of per-period extra ME variances (filter_tunes).
+#' @param me_extra T x n_obs matrix (rows = periods) of per-period extra ME variances (filter_tunes).
 #' @param log_post_fn optional pre-built log-posterior closure. When supplied,
 #'   the pool ships this closure once via \code{\link{.mirai_pool_closure}}
 #'   instead of recompiling a standard Gaussian posterior per daemon via
@@ -113,6 +113,10 @@ run_smc_mirai <- function(
 
   t_init <- proc.time()
   sh <- NULL
+  ## Reuse daemons the user already set (and leave them running); tear
+  ## down only a pool started here. Flag fixed BEFORE provisioning.
+  owns_pool <- !.mirai_daemons_active()
+  on.exit({ .mirai_daemons_stop(owns_pool); if (!is.null(sh)) rm(sh) }, add = TRUE)
   if (!is.null(log_post_fn)) {
     .mirai_pool_closure(n_cores, log_post_fn)
   } else {
@@ -125,7 +129,6 @@ run_smc_mirai <- function(
                            singular_obs = singular_obs,
                            tpf_options = tpf_options)
   }
-  on.exit({ mirai::daemons(NULL); if (!is.null(sh)) rm(sh) }, add = TRUE)
   if (verbose)
     .dynhr_cat(sprintf("  Daemon init: %.1f sec (load + compile + lp_fn)\n",
                 (proc.time() - t_init)[["elapsed"]]))
@@ -137,7 +140,9 @@ run_smc_mirai <- function(
   ll_floor <- -1e300
 
   ## ---- Stage 0: draw particles on the host, evaluate on the daemons --------
-  set.seed(seed_base)
+  ## .local_seed(): seeded for the whole run, and the caller's RNG stream is
+  ## restored on exit (a bare set.seed() here used to overwrite it).
+  .local_seed(seed_base)
   theta_mat <- t(vapply(seq_len(n_particles), function(i) prior_sampler(),
                         numeric(length(par_names))))
   colnames(theta_mat) <- par_names
@@ -147,8 +152,13 @@ run_smc_mirai <- function(
   ## Return the target's components (see .smc_particle_parts() in
   ## sampler-smc.R): SMC tempers phi = log system prior + power * loglik from
   ## the PARAMETER prior, exactly as the serial dynhr_smc() does.
+  ## Each evaluation is seeded (stage 0 of .smc_stage_seeds()), so a noisy
+  ## (particle-filter) log posterior is reproducible and daemon-count-free; it
+  ## used to run on the daemon's unseeded L'Ecuyer stream.
   eval_task <- function(i) {
     lpf <- get0(".worker_lp", envir = globalenv(), inherits = FALSE)
+    RNGkind("Mersenne-Twister", "Inversion", "Rejection")
+    set.seed(stage_seeds[i])
     th  <- theta_mat[i, ]; names(th) <- par_names
     r   <- lpf(th)
     .smc_particle_parts(r, -1e300, missing_prior = -Inf)
@@ -159,7 +169,9 @@ run_smc_mirai <- function(
   ## bindings shadow any same-named dynhr/base functions); .worker_lp is fetched
   ## from the daemon globalenv inside the task.
   .ev_env <- new.env(parent = asNamespace("dynhr"))
-  list2env(list(theta_mat = theta_mat, par_names = par_names), envir = .ev_env)
+  list2env(list(theta_mat = theta_mat, par_names = par_names,
+                stage_seeds = .smc_stage_seeds(seed_base, 0L, n_particles)),
+           envir = .ev_env)
   environment(eval_task) <- .ev_env
   ev <- mirai::mirai_map(seq_len(n_particles), eval_task)[]
   log_liks <- vapply(ev, function(z) z[["loglik"]], numeric(1))
@@ -233,7 +245,7 @@ run_smc_mirai <- function(
     Sigma_hat <- stats::cov.wt(theta_mat, wt = w_norm, method = "ML")$cov + diag(1e-6, d)
     L_prop <- t(chol(Sigma_hat))
     scale  <- mh_c
-    stage_seed <- seed_base + stage * n_particles
+    stage_seeds <- .smc_stage_seeds(seed_base, stage, n_particles)
 
     ## Herbst-Schorfheide (2014 JAE; 2015 book ch. 5) / FRBNY SMC.jl 3-component
     ## mixture proposal machinery. Only built when mixture_weights is non-NULL,
@@ -252,7 +264,7 @@ run_smc_mirai <- function(
     mutate_task <- function(i) {
       lpf <- get0(".worker_lp", envir = globalenv(), inherits = FALSE)
       RNGkind("Mersenne-Twister", "Inversion", "Rejection")
-      set.seed(stage_seed + i)
+      set.seed(stage_seeds[i])
       theta_i <- theta_mat[i, ]; names(theta_i) <- par_names
       ll_i <- ll_vec[i]; lp_i <- lp_vec[i]; phi_i <- phi_vec[i]
       tlp_i <- lp_i + lambda_next * phi_i
@@ -302,7 +314,7 @@ run_smc_mirai <- function(
     list2env(list(theta_mat = theta_mat, ll_vec = log_liks, lp_vec = log_pris,
                   phi_vec = log_phi, lambda_next = lambda_next, scale = scale, L_prop = L_prop,
                   n_mh_steps = n_mh_steps, d = d, par_names = par_names,
-                  stage_seed = stage_seed, use_mixture = use_mixture,
+                  stage_seeds = stage_seeds, use_mixture = use_mixture,
                   mixture_weights = mixture_weights, theta_bar = theta_bar,
                   chol_S = chol_S, chol_Dg = chol_Dg), envir = .mut_env)
     environment(mutate_task) <- .mut_env

@@ -146,9 +146,10 @@
 #' development).
 #'
 #' @param model      Parsed model (output of \code{\link{parse_mod}}).
-#' @param data       Observation matrix/data.frame (T x n_obs, or n_obs x T --
-#'   passed straight through to \code{\link{run_mode_finding}}), or a path
-#'   readable the same way.
+#' @param data       Observation matrix/data.frame, T x n_obs (rows are
+#'   periods; passed straight through to \code{\link{run_mode_finding}},
+#'   which orients it by the rule \code{\link{kalman_filter}} documents), or
+#'   a path readable the same way.
 #' @param prior_spec Prior-spec data.frame (output of
 #'   \code{extract_prior_spec} / \code{\link{prior_spec}}). If
 #'   \code{NULL}, extracted from \code{model}.
@@ -183,8 +184,8 @@
 #'   parallelism (default \code{NULL} = serial).
 #' @param seed        Integer seed for every stochastic sub-check (prior
 #'   draws, collision draws, multistart perturbations, SBC replications).
-#'   Reused per-check with a small per-check offset so checks are mutually
-#'   reproducible but not identical draws.
+#'   Each check (and each multistart chain) draws from its own seed derived
+#'   from \code{seed}, so checks are mutually reproducible but independent.
 #' @param verbose     Print progress. Default \code{FALSE}.
 #' @param ... Passed through to the internal \code{run_mode_finding()} call
 #'   (e.g. \code{method}, \code{me_variance}, \code{likelihood}).
@@ -228,9 +229,10 @@ run_estimation_passport <- function(model, data,
                   "multistart", "sbc_lite")
   checks <- match.arg(checks, all_checks, several.ok = TRUE)
   run_check <- function(nm) nm %in% checks
-  ## Each check below re-seeds (seed + offset) inside this frame; restore the
-  ## caller's RNG stream when the run exits.
+  ## Each check below re-seeds (its own child seed of `seed`) inside this
+  ## frame; restore the caller's RNG stream when the run exits.
   .local_seed(seed)
+  check_seeds <- .child_seeds(seed, 2L, "passport_checks")   # bk_share, collision
 
   compiled <- compile_model(model, verbose = FALSE)
   if (is.null(prior_spec)) prior_spec <- extract_prior_spec(model, verbose = FALSE)
@@ -320,7 +322,7 @@ run_estimation_passport <- function(model, data,
   ## ---- check 3: BK-feasible share of the prior (Clopper-Pearson) ----------
   if (run_check("bk_share")) {
     r <- .passport_timed(function() {
-      set.seed(seed + 1000L)
+      set.seed(check_seeds[1L])
       sampler <- .smc_make_prior_sampler(prior_spec)
       n <- as.integer(n_prior_draws)
       bk <- logical(n); te <- rep(NA_real_, n)
@@ -358,7 +360,7 @@ run_estimation_passport <- function(model, data,
   if (run_check("collision")) {
     if (!is.null(mf) && !is.null(mf$Sigma_prop)) {
       r <- .passport_timed(function() {
-        set.seed(seed + 2000L)
+        set.seed(check_seeds[2L])
         theta_mode <- mf$theta_mode
         Sig <- mf$Sigma_prop
         Lch <- tryCatch(chol(Sig),
@@ -455,10 +457,11 @@ run_estimation_passport <- function(model, data,
     r <- .passport_timed(function() {
       n_ms <- max(2L, as.integer(n_multistart))
       chains <- vector("list", n_ms)
+      ms_seeds <- .child_seeds(seed, n_ms, "passport_multistart")
       base_theta <- setNames(prior_spec$mean, pnames)
       lp_fn <- make_log_posterior(model, data, prior_spec, obs_vars, compiled)
       for (k in seq_len(n_ms)) {
-        set.seed(seed + 3000L + k)
+        set.seed(ms_seeds[k])
         theta_init <- base_theta
         if (k > 1L) {
           ## Disperse starts 2..n around the prior mean, scaled by prior sd

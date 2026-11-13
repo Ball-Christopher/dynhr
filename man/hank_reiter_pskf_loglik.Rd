@@ -15,7 +15,7 @@ hank_reiter_pskf_loglik(
 )
 }
 \arguments{
-\item{data}{\code{T x n_obs} matrix of DEMEANED observations (deviations from
+\item{data}{\code{T x n_obs} matrix (rows are periods; oriented by the rule in \code{\link{hank_loglik_aggregate}}) of DEMEANED observations (deviations from
 steady state), columns in the order of \code{obs_vars}.}
 
 \item{rss}{A \code{hank_reiter_ss} (build with \code{drop_dist_coord =
@@ -45,14 +45,17 @@ innovation be SKEW-normal with shape \code{alpha_z} instead of Gaussian:
 \deqn{s_{t+1} = T s_t + R \epsilon_{t+1}, \qquad
       \epsilon \sim \mathrm{CSN}(\cdot;\ \sigma_z^2,\ \alpha_z),}
 mean-corrected so \eqn{E[\epsilon] = 0} (the anchored steady state is
-preserved). At \code{alpha_z = 0} this is EXACTLY the Gaussian filter --
+preserved), with \eqn{\sigma_z} the innovation's TRUE standard deviation
+(the package's skewed-shock convention since 0.9.4.78; the CSN scale is
+\eqn{\sigma_z / \sqrt{1 - 2\delta^2/\pi}},
+\eqn{\delta = \alpha_z/\sqrt{1+\alpha_z^2}}). At \code{alpha_z = 0} this is EXACTLY the Gaussian filter --
 \code{\link{hank_reiter_kalman_loglik}} -- up to the shared stationary
 (Lyapunov) initialization, which both use.
 }
 \details{
 The scalar-shock lift is a special case of the package's DSGE CSN
-construction (one skewness dimension, seed covariance \eqn{\sigma_z^2},
-\eqn{\Gamma_e = \alpha_z / \sigma_z}); because the single shock loads
+construction (one skewness dimension, seed covariance \eqn{\omega_z^2},
+\eqn{\Gamma_e = \alpha_z / \omega_z}, \eqn{\omega_z} the CSN scale); because the single shock loads
 fully into the state, the pseudoinverse \eqn{\Gamma_\eta} lift and the
 \eqn{\Delta_\eta = I} Schur fallback are both EXACT here (zero residual
 shock variance off the state range).

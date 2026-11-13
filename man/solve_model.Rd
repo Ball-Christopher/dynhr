@@ -32,7 +32,8 @@ calibrated values from the \code{.mod} file.}
 \item{order}{Perturbation order: 1 (default), 2, 3, 4, or 5.}
 
 \item{Sigma_e}{(order >= 2) \eqn{n_{exo} \times n_{exo}} shock
-covariance matrix.  \code{NULL} uses the model's \code{shocks} block.}
+covariance matrix.  \code{NULL} uses the model's \code{shocks} block.
+Stored as \code{dr$Sigma_e}; the stoch_simul IRFs and moments use it.}
 
 \item{steady_options}{List of options passed to \code{solve_steady()},
 e.g. \code{list(y0 = ..., tol = 1e-10)}. \code{list(growth = TRUE)}

@@ -407,7 +407,9 @@
 #'   Kalman-filter posterior, and return its ranks as \code{ranks_kf}.  In
 #'   the near-linear regime the two rank vectors must agree in distribution
 #'   -- a check of the HARNESS, not of the likelihood.
-#' @param seed Base RNG seed; replication \code{r} uses \code{seed + r}.
+#' @param seed Base RNG seed; replication \code{r} uses the \code{r}-th of a
+#'   family of statistically independent seeds derived from \code{seed} (the
+#'   same for any \code{n_repl >= r} and any \code{cores}).
 #' @param cores Parallel replications via \code{parallel::mclapply}
 #'   (default 1 = serial), matching \code{\link{tpf_order3_sbc}}.
 #' @return A list with \code{ranks} (matrix, one row per successful
@@ -503,7 +505,7 @@ global_pf_sbc <- function(n_repl = 100L, T_obs = 60L, n_particles = 600L,
          "); check me_var_frac and the reference panel.", call. = FALSE)
 
   run_one <- function(r) {
-    set.seed(seed + r)
+    set.seed(rep_seeds[r])
     theta_star <- prior_sampler()[par_nm]
     params <- apply_theta_to_params(model, theta_star)
     sol <- solve_at(params)
@@ -521,6 +523,10 @@ global_pf_sbc <- function(n_repl = 100L, T_obs = 60L, n_particles = 600L,
     Yl <- t(sim$path[, obs_vars, drop = FALSE])          # n_obs x T, LEVELS
     Y  <- Yl + matrix(stats::rnorm(length(Yl), 0, sqrt(me_var_const)),
                       nrow(Yl), ncol(Yl))
+    ## Every consumer below takes the package-wide T x n_obs (rows are
+    ## periods); the noise above is drawn in the n_obs x T order so the
+    ## seeded replications are unchanged.
+    Y  <- t(Y)
 
     lp_pf <- make_log_posterior_global_pf(
       model, Y, priors, obs_vars, compiled,
@@ -572,9 +578,12 @@ global_pf_sbc <- function(n_repl = 100L, T_obs = 60L, n_particles = 600L,
     out
   }
 
-  ## run_one() re-seeds (seed + r) in THIS process on the serial path; restore
-  ## the caller's RNG stream when this function exits (C1).
+  ## run_one() re-seeds (replication r's child seed) in THIS process on the
+  ## serial path; restore the caller's RNG stream when this function exits
+  ## (C1). Child seeds, not seed + r: the first draw after set.seed() is the
+  ## true theta*, dependent across consecutive integer seeds.
   .local_seed(seed)
+  rep_seeds <- .child_seeds(seed, n_repl, "global_sbc_replications")
   reps <- if (cores > 1L) {
     parallel::mclapply(seq_len(n_repl), run_one, mc.cores = cores,
                        mc.preschedule = FALSE)

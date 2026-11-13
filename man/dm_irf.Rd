@@ -18,7 +18,9 @@ solved it there, else the model is solved at that point (at the stored
 order, default solver settings) for this call. See \code{\link{dm_solve}}.}
 
 \item{...}{Further arguments for the underlying IRF routine
-(e.g. \code{shock_size}, and \code{pruning} at order 2).}
+(e.g. \code{shock_size}, and \code{pruning} at order 2). The shock
+covariance is the solution's \code{Sigma_e} (the point's parameters, or
+the \code{Sigma_e} given to \code{\link{dm_solve}}).}
 }
 \value{
 The updated \code{dynhr_model}, with \code{$irf} set.
@@ -27,7 +29,9 @@ The updated \code{dynhr_model}, with \code{$irf} set.
 Calls the impulse-response routine matching the order the object was
 solved at (\code{\link{compute_irfs}} at order 1,
 \code{\link{compute_irfs_order2}} at order 2,
-\code{\link{compute_irfs_order3}} at order 3) and stores the result in
+\code{\link{compute_irfs_order3}} at order 3,
+\code{\link{compute_irfs_order4}} / \code{\link{compute_irfs_order5}} at
+orders 4 / 5) and stores the result in
 \code{$irf} (and the point in \code{$irf_at}).
 }
 \examples{

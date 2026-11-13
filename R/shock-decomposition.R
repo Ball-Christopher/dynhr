@@ -316,8 +316,9 @@ realtime_decomposition <- function(model, dr, data, obs_vars, vintages,
 #' initial-condition component is drawn like any other component but is given
 #' a neutral grey so it reads as "not a shock".
 #'
-#' Handles both orientations: the linear decomposition stores
-#' \code{T x n_endo} matrices, the OBC one \code{n_endo x T}.
+#' The decomposition matrices are \code{T x n_endo} (rows = periods), as
+#' both \code{\link{historical_decomposition}} and
+#' \code{\link{historical_decomposition_obc}} return them.
 #'
 #' @param x        A \code{dynhr_shock_decomposition} object.
 #' @param variable Name (or index) of the endogenous variable to plot;
@@ -327,22 +328,25 @@ realtime_decomposition <- function(model, dr, data, obs_vars, vintages,
 #' @param legend   Draw a legend (default \code{TRUE}).
 #' @param main     Plot title.
 #' @param ...      Passed to \code{barplot()}.
-#' @return Invisibly, the \code{n_component x T} contribution matrix plotted.
+#' @return Invisibly, the \code{T x n_component} contribution matrix plotted
+#'   (rows = periods).
 #' @export
 # ---------------------------------------------------------------------------
 plot.dynhr_shock_decomposition <- function(x, variable = NULL, dates = NULL,
                                            col = NULL, legend = TRUE,
                                            main = NULL, ...) {
 
-  by_time_rows <- identical(x$orientation, "time_endo")
-  vnames <- if (by_time_rows) colnames(x$total) else rownames(x$total)
+  ## Rows are periods (T x n_endo) -- the one orientation rule.
+  if (!is.null(x$orientation) && !identical(x$orientation, "time_endo"))
+    stop("plot.dynhr_shock_decomposition: decomposition orientation '",
+         x$orientation, "' is not supported; the matrices must be T x n_endo ",
+         "(rows = periods, $orientation = \"time_endo\").", call. = FALSE)
+  vnames <- colnames(x$total)
   if (is.null(vnames))
-    vnames <- paste0("var", seq_len(if (by_time_rows) ncol(x$total)
-                                    else nrow(x$total)))
+    vnames <- paste0("var", seq_len(ncol(x$total)))
 
   if (is.null(variable)) {
-    spread <- if (by_time_rows) apply(x$total, 2L, stats::var)
-              else apply(x$total, 1L, stats::var)
+    spread <- apply(x$total, 2L, stats::var)
     variable <- vnames[which.max(spread)]
   }
   vi <- if (is.character(variable)) match(variable[1L], vnames) else as.integer(variable)
@@ -350,12 +354,11 @@ plot.dynhr_shock_decomposition <- function(x, variable = NULL, dates = NULL,
     stop("plot.dynhr_shock_decomposition: variable '", variable[1L],
          "' not found.", call. = FALSE)
 
-  ## comp: n_component x T
-  comp <- t(vapply(x$contributions,
-                   function(C) if (by_time_rows) C[, vi] else C[vi, ],
-                   numeric(if (by_time_rows) nrow(x$total) else ncol(x$total))))
+  ## comp: n_component x T (barplot's layout; returned transposed)
+  comp <- t(vapply(x$contributions, function(C) C[, vi],
+                   numeric(nrow(x$total))))
   rownames(comp) <- names(x$contributions)
-  total <- if (by_time_rows) x$total[, vi] else x$total[vi, ]
+  total <- x$total[, vi]
   n_t   <- ncol(comp)
 
   if (is.null(dates)) dates <- seq_len(n_t)
@@ -391,5 +394,5 @@ plot.dynhr_shock_decomposition <- function(x, variable = NULL, dates = NULL,
                      fill = col, border = NA, bty = "n", cex = 0.8)
   }
 
-  invisible(comp)
+  invisible(t(comp))
 }

@@ -379,8 +379,8 @@ print.hank_het3_block_failed <- function(x, ...) {
 #' @return A list with numeric length-\code{T_h} paths \code{D}, \code{F},
 #'   \code{A}, \code{C} (aggregate liquid, foreign, capital holdings and
 #'   consumption), \code{CHI} and \code{PHI} (aggregate capital and foreign
-#'   adjustment resources), and \code{Dpath} (\code{n_cell x T_h}): column
-#'   \code{t} is the beginning-of-period-\code{t} distribution over which the
+#'   adjustment resources), and \code{Dpath} (\code{T_h x n_cell}, rows are
+#'   periods): row \code{t} is the beginning-of-period-\code{t} distribution over which the
 #'   date-\code{t} aggregates are taken. When \code{keep_policies = TRUE},
 #'   also \code{d_pol}, \code{f_pol}, \code{a_pol}, \code{c_pol},
 #'   \code{chi_pol}, \code{phi_pol} (each a length-\code{T_h} list of
@@ -420,8 +420,8 @@ hank_td3_nonlinear <- function(block,rd_path=NULL,rf_path=NULL,ra_path=NULL,w_pa
   Pi_path<-.hank_pi_path(block,pi_input_paths,T_h);Pi_at<-function(t)if(is.null(Pi_path))block$Pi else Pi_path[[t]]
   dp<-fp<-ap<-cp<-chp<-php<-vector("list",T_h);Vd<-block$Vd;Vf<-block$Vf;Va<-block$Va
   for(t in T_h:1L){s<-.hank_egm3_step(block$d_grid,block$f_grid,block$a_grid,w_path[t]*block$e+Tr_path[t]*omega,Pi_at(t),rd_path[t],rf_path[t],ra_path[t],block$beta,block$eis,block$chi0,block$chi1,block$chi2,block$phi0,block$phi1,block$phi2,Vd,Vf,Va,px_path[t],threads);dp[[t]]<-s$d;fp[[t]]<-s$f;ap[[t]]<-s$a;cp[[t]]<-s$c;chp[[t]]<-s$chi;php[[t]]<-s$phi;Vd<-s$Vd;Vf<-s$Vf;Va<-s$Va}
-  flat<-function(z)as.vector(aperm(z,c(4,3,2,1)));D<-if(is.null(D0))block$D else D0;Dpath<-matrix(0,length(D),T_h);DA<-FA<-AA<-CA<-CHI<-PHI<-numeric(T_h);Lams<-if(keep_policies)vector("list",T_h)else NULL
-  for(t in seq_len(T_h)){Dpath[,t]<-D;DA[t]<-sum(D*flat(dp[[t]]));FA[t]<-sum(D*flat(fp[[t]]));AA[t]<-sum(D*flat(ap[[t]]));CA[t]<-sum(D*flat(cp[[t]]));CHI[t]<-sum(D*flat(chp[[t]]));PHI[t]<-sum(D*flat(php[[t]]));L<-hank_forward_operator3(dp[[t]],fp[[t]],ap[[t]],block$d_grid,block$f_grid,block$a_grid,Pi_at(t));if(keep_policies)Lams[[t]]<-L;D<-as.numeric(Matrix::t(L)%*%D)}
+  flat<-function(z)as.vector(aperm(z,c(4,3,2,1)));D<-if(is.null(D0))block$D else D0;Dpath<-matrix(0,T_h,length(D));DA<-FA<-AA<-CA<-CHI<-PHI<-numeric(T_h);Lams<-if(keep_policies)vector("list",T_h)else NULL
+  for(t in seq_len(T_h)){Dpath[t,]<-D;DA[t]<-sum(D*flat(dp[[t]]));FA[t]<-sum(D*flat(fp[[t]]));AA[t]<-sum(D*flat(ap[[t]]));CA[t]<-sum(D*flat(cp[[t]]));CHI[t]<-sum(D*flat(chp[[t]]));PHI[t]<-sum(D*flat(php[[t]]));L<-hank_forward_operator3(dp[[t]],fp[[t]],ap[[t]],block$d_grid,block$f_grid,block$a_grid,Pi_at(t));if(keep_policies)Lams[[t]]<-L;D<-as.numeric(Matrix::t(L)%*%D)}
   out<-list(D=DA,F=FA,A=AA,C=CA,CHI=CHI,PHI=PHI,Dpath=Dpath);if(keep_policies){out$d_pol<-dp;out$f_pol<-fp;out$a_pol<-ap;out$c_pol<-cp;out$chi_pol<-chp;out$phi_pol<-php;out$Lambda<-Lams};out
 }
 

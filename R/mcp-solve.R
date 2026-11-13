@@ -301,8 +301,11 @@
 #' @param compiled  dynhr_compiled (from \code{\link{compile_model}})
 #' @param y0        Named numeric vector: endogenous state at t=0.
 #' @param y_ss      Named numeric vector: steady state (terminal condition).
-#' @param shock_path  T × n_exo numeric matrix of structural shocks.  Column
-#'   names must match \code{varexo_names}; missing columns are zero.
+#' @param shock_path  T × n_exo numeric matrix of structural shocks (rows =
+#'   periods).  Named columns must be shocks of the model
+#'   (\code{varexo_names}); missing shocks are zero.  An unnamed matrix must
+#'   have exactly n_exo columns (an unnamed n_exo x T or square matrix is an
+#'   error; a matrix named by shock on its ROWS is transposed with a message).
 #' @param params    Named numeric parameter vector.
 #' @param mcp_specs List of MCP specs from \code{\link{mcp_parse_tags}} or
 #'   \code{obc_parse_tags}.  Empty list → no constraints (standard Newton).
@@ -334,7 +337,7 @@
 #'   \item{converged}{Logical: TRUE if Newton converged.}
 #'   \item{n_iter}{Integer: Newton iterations used.}
 #'   \item{max_res}{Numeric: final max|R_stack|.}
-#'   \item{fb_final}{n_spec × T matrix of final FB residuals.}
+#'   \item{fb_final}{T × n_spec matrix (rows = periods) of final FB residuals.}
 #'   \item{active_set}{Integer vector (length T): per-period binding bitfield.}
 #'   \item{endo_names}{Character: variable ordering of Y columns.}
 #'   \item{merit_history}{Numeric vector: merit function value per iteration.}
@@ -382,18 +385,13 @@ mcp_solve_path <- function(compiled,
       " but fewer equations than variables suggests an underdetermined system.")
   }
 
-  # Normalize shock_path
-  if (!is.matrix(shock_path)) shock_path <- matrix(shock_path, nrow = 1L)
-  T <- nrow(shock_path)
-  eps_mat <- matrix(0, nrow = T, ncol = length(dyn$exo_names))
-  colnames(eps_mat) <- dyn$exo_names
-  if (!is.null(colnames(shock_path))) {
-    for (nm in intersect(colnames(shock_path), dyn$exo_names))
-      eps_mat[, nm] <- shock_path[, nm]
-  } else {
-    nc <- min(ncol(shock_path), length(dyn$exo_names))
-    eps_mat[, seq_len(nc)] <- shock_path[, seq_len(nc)]
-  }
+  # Normalize shock_path to T x n_exo in exo_names order by the one
+  # rows = periods rule (R/time-orientation.R): named columns may be a subset
+  # (missing shocks are zero); an unnamed matrix must carry one column per
+  # shock (an n_exo x T matrix is refused, not read as an n_exo-period path).
+  eps_mat <- .kf_time_in(shock_path, dyn$exo_names, "shock_path",
+                         "mcp_solve_path", subset = TRUE, fill = 0)
+  T <- nrow(eps_mat)
 
   # Align y0 and y_ss
   y0_num   <- as.numeric(y0[dyn$endo_names])
@@ -603,7 +601,7 @@ mcp_solve_path <- function(compiled,
     converged     = converged,
     n_iter        = n_iter,
     max_res       = max_res_final,
-    fb_final      = fb_final,
+    fb_final      = t(fb_final),          # T x n_spec (rows = periods)
     active_set    = active_set,
     endo_names    = dyn$endo_names,
     merit_history = merit_hist

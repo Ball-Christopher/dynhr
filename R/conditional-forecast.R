@@ -647,15 +647,17 @@
 ## Internal: resolve conditional_forecast()'s shock_means into the sample part
 ## and the horizon part, both DATED (timing already applied).
 ##
-## `shock_means` is an n_exo x (T + H) matrix (rows by name when named; NA/0 =
-## no shift), or a named numeric vector = a constant mean for every period
-## (unnamed shocks get 0). `shock_timing` is read over the WHOLE T + H axis,
-## exactly as kalman_filter() reads it, so that under "transition_next" the
-## sample's last column lands on forecast period 1. n_T = 0 is the
-## smoother-result case: the sample part is already inside the supplied
-## filtered state and the matrix covers the horizon only.
-## @return list(sample = n_exo x T matrix or NULL, horizon = n_exo x H matrix
-##   or NULL). NULL horizon = no deterministic forecast contribution.
+## `shock_means` is a (T + H) x n_exo matrix (rows = periods; columns by name
+## when named, a subset allowed; NA/0 = no shift), or a named numeric vector =
+## a constant mean for every period (unnamed shocks get 0). `shock_timing` is
+## read over the WHOLE T + H axis, exactly as kalman_filter() reads it, so
+## that under "transition_next" the sample's last row lands on forecast
+## period 1. n_T = 0 is the smoother-result case: the sample part is already
+## inside the supplied filtered state and the matrix covers the horizon only.
+## @return list(sample = T x n_exo matrix (rows = periods, the form
+##   kalman_smoother takes) or NULL, horizon = n_exo x H matrix (the
+##   forecaster's internal layout) or NULL). NULL horizon = no deterministic
+##   forecast contribution.
 ## ---------------------------------------------------------------------------
 .cf_resolve_shock_means <- function(shock_means, shock_timing, shock_names,
                                     n_T, H) {
@@ -664,7 +666,7 @@
   if (is.null(dim(shock_means))) {
     v <- shock_means
     if (!is.numeric(v) || is.null(names(v)) || any(!nzchar(names(v))))
-      .dynhr_abort("conditional_forecast: a vector `shock_means` must be a NAMED numeric vector (shock name -> constant mean); use an n_exo x (T + horizon) matrix for a time-varying path.",
+      .dynhr_abort("conditional_forecast: a vector `shock_means` must be a NAMED numeric vector (shock name -> constant mean); use a (T + horizon) x n_exo matrix (rows = periods) for a time-varying path.",
                    class = "dynhr_error_bad_argument")
     bad <- setdiff(names(v), shock_names)
     if (length(bad))
@@ -673,18 +675,33 @@
                    class = "dynhr_error_bad_argument")
     full <- numeric(n_e); names(full) <- shock_names
     full[names(v)] <- v
-    shock_means <- matrix(full, n_e, n_T + H, dimnames = list(shock_names, NULL))
+    shock_means <- matrix(full, n_T + H, n_e, byrow = TRUE,
+                          dimnames = list(NULL, shock_names))
   }
   M <- .kf_shock_means(shock_means, shock_timing, shock_names, n_T + H,
                        what = "conditional_forecast")
   if (is.null(M)) return(list(sample = NULL, horizon = NULL))
   dimnames(M) <- list(shock_names, NULL)
   list(sample  = if (n_T > 0L && any(M[, seq_len(n_T)] != 0))
-                   M[, seq_len(n_T), drop = FALSE] else NULL,
+                   t(M[, seq_len(n_T), drop = FALSE]) else NULL,
        horizon = if (any(M[, n_T + seq_len(H)] != 0))
                    M[, n_T + seq_len(H), drop = FALSE] else NULL)
 }
 
+
+## conditional_forecast()'s `...` used to swallow anything, so a misspelt
+## argument (`horizn = 40L`) silently left the default in force. Every
+## argument it takes is a formal; anything in `...` is a mistake.
+.cf_check_dots <- function(dots, caller) {
+  if (length(dots) == 0L) return(invisible(NULL))
+  nm <- names(dots) %||% rep("", length(dots))
+  nm[!nzchar(nm)] <- "<unnamed>"
+  .dynhr_abort(caller, ": unknown argument", if (length(nm) > 1L) "s", " ",
+               paste0("`", nm, "`", collapse = ", "), ". conditional_forecast() ",
+               "takes: ", paste(setdiff(names(formals(conditional_forecast)), "..."),
+                               collapse = ", "), ".",
+               class = "dynhr_error_bad_argument")
+}
 
 ## ---------------------------------------------------------------------------
 ## Internal: extract terminal state s_{T|T} and P_{T|T} from Y
@@ -697,7 +714,8 @@
 ##   "pskf" -> PSKF smoother; smoothed mean at T via Gaussian RTS backward pass.
 ##   "pkf"  -> OBC PKF forward pass; filtered state s_{T|T} and P_{T|T}.
 ##
-## @param data     T x n_obs observation matrix (rows = time).
+## @param data     T x n_obs observation matrix (rows = time), oriented and
+##   column-named by conditional_forecast().
 ## @param ss_raw   State-space list from build_dsge_state_space().
 ## @param Q        n_shock x n_shock shock covariance.
 ## @param ctx      estimation_context or NULL.
@@ -706,7 +724,7 @@
 ## @param obs_vars  Character vector of observable names.
 ## @param compiled  Compiled model (dynhr_compiled) — required for pkf path.
 ## @param shock_means_sample,a0,P0  Sample part of conditional_forecast()'s
-##   shock_means (already dated, n_exo x T) and the filter's initial state /
+##   shock_means (already dated, T x n_exo) and the filter's initial state /
 ##   covariance. Only the Gaussian/Whittle smoother can carry them; every other
 ##   dispatch branch refuses (classed) rather than silently ignore them.
 ## @return list(s0 = n_state numeric, P0 = n_state x n_state matrix).
@@ -715,7 +733,8 @@
                                     compiled = NULL, shock_means_sample = NULL,
                                     a0 = NULL, P0 = NULL,
                                     shock_means_given = FALSE,
-                                    lik_init = "auto") {
+                                    lik_init = "auto",
+                                    me_variance = NULL) {
 
   lik <- if (is.null(ctx)) "gaussian" else ctx$likelihood
   ## Only the Gaussian Kalman smoother subtracts a deterministic trend; the
@@ -727,6 +746,11 @@
        !is.null(P0)) && !lik %in% c("gaussian", "whittle"))
     .dynhr_abort(sprintf(
       "conditional_forecast: `shock_means` / `a0` / `P0` are carried only by the Gaussian Kalman terminal-state filter; ctx$likelihood = \"%s\" cannot take them (silently dropping them would forecast from the wrong state).",
+      lik), class = "dynhr_error_bad_argument")
+  if (!is.null(me_variance) && any(me_variance != 0) &&
+      !lik %in% c("gaussian", "whittle"))
+    .dynhr_abort(sprintf(
+      "conditional_forecast: `me_variance` is carried by the Gaussian Kalman terminal-state filter only; ctx$likelihood = \"%s\" reads its measurement error from ctx$me_variance. Set it there.",
       lik), class = "dynhr_error_bad_argument")
   if (!identical(lik_init, "auto") && !lik %in% c("gaussian", "whittle"))
     .dynhr_abort(sprintf(
@@ -761,6 +785,7 @@
     ## conditional_forecast() call needed different data depending on
     ## ctx$likelihood.
     sm <- .kalman_smoother_ss(data, ss_raw, Q = Q,
+                              me_variance = me_variance %||% 0,
                               shock_means = shock_means_sample,
                               shock_timing = "dated", a0 = a0, P0 = P0,
                               lik_init = lik_init)
@@ -927,7 +952,8 @@
         nu_eta    = csn$nu_eta,
         Delta_eta = csn$Delta_eta,
         mu_eps    = csn$mu_eps,
-        Sigma_eps = csn$Sigma_eps
+        Sigma_eps = csn$Sigma_eps,
+        init_cov  = csn$Sigma_eta_init
       ),
       error = function(e) {
         stop(
@@ -1014,9 +1040,9 @@
     regime_cache <- new.env(parent = emptyenv(), hash = TRUE)
     obc_ensure_policy(0L, regime_cache, sys, dr_slack, specs, obs_idx)
 
-    ## Ensure Y is n_obs x T.
-    Y_mat <- if (is.null(dim(data))) matrix(data, nrow = length(obs_vars)) else
-              if (nrow(data) == length(obs_vars)) data else t(data)
+    ## `data` is T x n_obs (oriented by conditional_forecast()), the layout
+    ## the OBC filters take.
+    Y_mat <- data
 
     ## PKF forward pass: collect filtered state and P_{T|T}.
     kf <- kalman_filter_obc_pkf(
@@ -1033,8 +1059,8 @@
       stop("conditional_forecast (pkf): PKF forward pass returned non-finite loglik.",
            call. = FALSE)
 
-    n_T <- ncol(Y_mat)
-    s0  <- as.numeric(kf$filtered_states[, n_T])
+    n_T <- nrow(Y_mat)
+    s0  <- as.numeric(kf$filtered_states[n_T, ])
     P0  <- kf$P_last %||% diag(1e-6, length(s0))
 
     return(list(s0 = s0, P0 = P0))
@@ -1114,9 +1140,9 @@
     }
     obc_ensure_policy(0L, regime_cache, sys, dr_slack, specs, obs_idx, copf_args)
 
-    ## Ensure Y is n_obs x T
-    Y_mat <- if (is.null(dim(data))) matrix(data, nrow = length(obs_vars)) else
-              if (nrow(data) == length(obs_vars)) data else t(data)
+    ## `data` is T x n_obs (oriented by conditional_forecast()), the layout
+    ## the OBC filters take.
+    Y_mat <- data
 
     ## Run PPF/COPF forward pass over the full history, returning the terminal
     ## particle cloud.
@@ -1161,7 +1187,8 @@
 #' @param model       Parsed model object from \code{parse_mod()}.
 #' @param dr          Decision rules from \code{solve_perturbation()}.
 #' @param data        \code{T x n_obs} matrix of observables in
-#'   \strong{levels}, used to anchor the forecast (the filtered terminal
+#'   \strong{levels} (rows are periods; oriented by the rule
+#'   \code{\link{kalman_filter}} documents for its \code{data}), used to anchor the forecast (the filtered terminal
 #'   state \code{s_{T|T}} is extracted internally, subtracting the model's
 #'   steady state as \code{\link{kalman_filter}()} does). May also be a list
 #'   output from \code{\link{kalman_smoother}()} (then its
@@ -1224,26 +1251,27 @@
 #'   on-the-fly (slower).
 #' @param shock_means Deterministic shock MEANS (IRIS \code{vary}): every
 #'   shock is \eqn{\varepsilon = m + u}, \eqn{u \sim N(0, Q)}, \eqn{m}
-#'   deterministic. Either an \code{n_exo x (nrow(data) + horizon)} matrix
-#'   (rows by name when named; \code{NA} or 0 = no shift, as in
+#'   deterministic. Either a \code{(nrow(data) + horizon) x n_exo} matrix
+#'   (rows are periods; columns by name when named, and then a subset of the
+#'   shocks is allowed; \code{NA} or 0 = no shift, as in
 #'   \code{\link{kalman_filter}}), or a NAMED numeric vector giving a constant
 #'   mean for every period (unnamed shocks get 0). This is how a
 #'   trend-with-drift model (no static steady state) is forecast: solve the
 #'   decision rule with the drift switched off, carry the drift as the mean of
 #'   its shock, and start the growth state on its balanced-growth path with
-#'   \code{a0}. The sample columns enter the terminal-state filter; the horizon
-#'   columns enter the forecast baseline through the transition. Conditions
+#'   \code{a0}. The sample rows enter the terminal-state filter; the horizon
+#'   rows enter the forecast baseline through the transition. Conditions
 #'   (hard or soft, anticipated or not, with draws) are solved for the random
 #'   part \eqn{u} around that mean-inclusive baseline; \code{shock_paths}
 #'   reports the TOTAL \eqn{m + u}, and draws add \eqn{u}-noise only. When
 #'   \code{data} is a \code{kalman_smoother()} result the sample part is
 #'   already inside it, so \code{shock_means} then covers the horizon only
-#'   (\code{horizon} columns). Refused (classed error) under a non-Gaussian
+#'   (\code{horizon} rows). Refused (classed error) under a non-Gaussian
 #'   \code{ctx$likelihood} (tpf, pskf, pkf, ppf, copf).
-#' @param shock_timing How to read the columns of \code{shock_means}: as in
-#'   \code{\link{kalman_filter}}, \code{"dated"} (column t enters period t) or
-#'   \code{"transition_next"} (column t drives the transition out of t, so it
-#'   lands on t + 1; the last sample column is the first forecast period).
+#' @param shock_timing How to read the rows of \code{shock_means}: as in
+#'   \code{\link{kalman_filter}}, \code{"dated"} (row t enters period t) or
+#'   \code{"transition_next"} (row t drives the transition out of t, so it
+#'   lands on t + 1; the last sample row is the first forecast period).
 #' @param a0,P0 Initial state mean / covariance of the terminal-state filter,
 #'   as in \code{\link{kalman_smoother}} (e.g. the balanced-growth start of a
 #'   drift model). Not allowed with a \code{kalman_smoother()} result as
@@ -1263,7 +1291,17 @@
 #'   once the unit-root level is identified. Refused (classed error) with a
 #'   \code{kalman_smoother()} result as \code{data} or a non-Gaussian
 #'   \code{ctx$likelihood}.
-#' @param ...         Currently unused.
+#' @param me_variance Measurement-error variance of the observables used by
+#'   the terminal-state filter: \code{NULL} (default; no measurement error), a
+#'   scalar, or one variance per observable (named by \code{obs_vars} or in
+#'   their order), the same contract as \code{\link{kalman_filter}}. Carried by
+#'   the Gaussian / Whittle terminal-state smoother only; with another
+#'   \code{ctx$likelihood} (which reads \code{ctx$me_variance}) or a
+#'   \code{kalman_smoother()} result as \code{data} a value is refused.
+#'   When positive, the result also carries \code{$draws_me}, the forecast
+#'   draws of the measured series.
+#' @param ...         Must be empty: an unrecognised argument (a misspelt
+#'   \code{horizn}) is an error rather than silently ignored.
 #'
 #' @section Trend models:
 #' A model with \code{observation_trends} and/or a balanced-growth decision
@@ -1288,7 +1326,15 @@
 #'     \item{\code{paths_uncond}}{H x n_obs unconditional forecast paths.}
 #'     \item{\code{shock_paths}}{H x n_shock matrix of implied shock paths.}
 #'     \item{\code{draws}}{List of H x n_obs matrices (length \code{n_draws}),
-#'       or \code{NULL} if \code{n_draws = 0}.}
+#'       or \code{NULL} if \code{n_draws = 0}. These are paths of the model's
+#'       observables (the signal), without measurement error.}
+#'     \item{\code{draws_me}}{As \code{draws}, each with an independent
+#'       \eqn{N(0, \code{me_variance})} measurement error added per period and
+#'       observable: predictive paths of the \emph{measured} series (including
+#'       at conditioned cells -- a condition fixes the model concept, not the
+#'       measurement). \code{NULL} unless \code{me_variance > 0} and
+#'       \code{n_draws > 0}. The point paths carry no measurement error (it
+#'       has mean zero).}
 #'     \item{\code{conditions}}{The \code{conditions} data frame (copy).}
 #'     \item{\code{horizon}}{H.}
 #'     \item{\code{type}, \code{method}}{As used.}
@@ -1346,7 +1392,9 @@ conditional_forecast <- function(model, dr, data, conditions = NULL,
                                  units = c("auto", "deviations", "levels"),
                                  lik_init = c("auto", "stationary", "kappa",
                                               "diffuse", "fixed_unknown"),
+                                 me_variance = NULL,
                                  ...) {
+  .cf_check_dots(list(...), "conditional_forecast")
   ## Own the message epoch for this run: repeat-suppressed warnings
   ## (`.dynhr_warn(once = TRUE)`) are keyed within it and re-arm for the
   ## next run, and the close reports what it suppressed. A nested call
@@ -1412,6 +1460,8 @@ conditional_forecast <- function(model, dr, data, conditions = NULL,
       else stop("conditional_forecast: obs_names must be supplied when Y has no colnames.",
                 call. = FALSE)
     }
+    ## Rows are periods: the one orientation rule (R/time-orientation.R).
+    data <- .kf_time_in(data, obs_vars, "data", "conditional_forecast")
   }
 
   ## ---- Build state space ----
@@ -1438,6 +1488,14 @@ conditional_forecast <- function(model, dr, data, conditions = NULL,
                                       ss_raw$shock_names, n_T_sample, H)
   m_path <- sm_split$horizon
 
+  ## ---- Measurement error of the terminal-state filter ----
+  if (!is.null(me_variance)) {
+    me_variance <- .kf_me_variance(me_variance, obs_vars, "conditional_forecast")
+    if (!is.null(smoother_result))
+      .dynhr_abort("conditional_forecast: `me_variance` is a setting of the terminal-state filter, which was already run when `data` is a kalman_smoother() result; pass it to kalman_smoother() instead.",
+                   class = "dynhr_error_bad_argument")
+  }
+
   ## ---- Extract terminal state s_{T|T} and P_{T|T} ----
   if (!is.null(smoother_result)) {
     if (isTRUE(model$balanced_growth) && is.null(smoother_result$growth_path))
@@ -1453,7 +1511,8 @@ conditional_forecast <- function(model, dr, data, conditions = NULL,
                                   shock_means_sample = sm_split$sample,
                                   a0 = a0, P0 = P0,
                                   shock_means_given = !is.null(shock_means),
-                                  lik_init = lik_init)
+                                  lik_init = lik_init,
+                                  me_variance = me_variance)
     s0 <- ts$s0
     P0 <- ts$P0
   }
@@ -1587,13 +1646,28 @@ conditional_forecast <- function(model, dr, data, conditions = NULL,
     }
   }
 
+  draws_out <- if (is.null(res_inner$draws)) NULL
+               else lapply(res_inner$draws, add_trend)
+  ## `draws` are paths of the model's observables Z s_t + D eps_t (the signal).
+  ## With measurement error the MEASURED series is that plus an independent
+  ## N(0, me_variance) error per period and observable, so its predictive
+  ## bands are wider (Dynare reports both, as HPDinf / HPDinf_ME). The noise is
+  ## drawn AFTER every signal draw, so `draws` is unchanged for a given seed.
+  draws_me <- NULL
+  if (!is.null(draws_out) && !is.null(me_variance) && any(me_variance > 0)) {
+    me_sd <- sqrt(as.numeric(me_variance))
+    n_o   <- length(obs_vars)
+    draws_me <- lapply(draws_out, function(d)
+      d + matrix(stats::rnorm(H * n_o), H, n_o) * rep(me_sd, each = H))
+  }
+
   result <- structure(
     list(
       paths_point  = add_trend(res_inner$paths_point),
       paths_uncond = paths_uncond,
       shock_paths  = res_inner$shock_paths,
-      draws        = if (is.null(res_inner$draws)) NULL
-                     else lapply(res_inner$draws, add_trend),
+      draws        = draws_out,
+      draws_me     = draws_me,
       conditions   = conditions,
       horizon      = H,
       type         = type,
@@ -1624,7 +1698,8 @@ print.dynhr_cfcst <- function(x, ...) {
   n_cond <- if (is.data.frame(x$conditions)) nrow(x$conditions) else 0L
   cat(sprintf("  Conditions  : %d\n", n_cond))
   if (!is.null(x$draws))
-    cat(sprintf("  Draws       : %d\n", length(x$draws)))
+    cat(sprintf("  Draws       : %d%s\n", length(x$draws),
+                if (!is.null(x$draws_me)) " (+ $draws_me with measurement error)" else ""))
   u <- x$units %||% "deviations"
   cat(sprintf("  Units       : %s\n", u))
   cat(if (identical(u, "levels"))
@@ -1645,11 +1720,25 @@ print.dynhr_cfcst <- function(x, ...) {
 #' @param vars   Character vector of observable names to plot. Defaults to all.
 #' @param probs  Numeric vector of quantile probabilities for the fan (default
 #'   \code{c(0.1, 0.9)}). Ignored if no draws.
+#' @param measurement \code{FALSE} (default): the fan is that of the model's
+#'   observables (\code{x$draws}). \code{TRUE}: the fan of the measured
+#'   series, including measurement error (\code{x$draws_me}; an error if the
+#'   forecast was made without \code{me_variance > 0}).
 #' @param ...    Additional arguments passed to \code{matplot()}.
 #' @return \code{x}, invisibly.
 #' @export
 ## ---------------------------------------------------------------------------
-plot.dynhr_cfcst <- function(x, vars = NULL, probs = c(0.1, 0.9), ...) {
+plot.dynhr_cfcst <- function(x, vars = NULL, probs = c(0.1, 0.9),
+                             measurement = FALSE, ...) {
+  fan_draws <- x$draws
+  if (isTRUE(measurement)) {
+    if (is.null(x$draws_me))
+      .dynhr_abort("plot.dynhr_cfcst: `measurement = TRUE` needs `$draws_me`, ",
+                   "which conditional_forecast() returns only with ",
+                   "`me_variance > 0` and `n_draws > 0`.",
+                   class = "dynhr_error_invalid_argument")
+    fan_draws <- x$draws_me
+  }
   if (is.null(vars)) vars <- x$obs_names
   bad <- setdiff(vars, x$obs_names)
   if (length(bad))
@@ -1672,8 +1761,8 @@ plot.dynhr_cfcst <- function(x, vars = NULL, probs = c(0.1, 0.9), ...) {
     ylim <- range(c(pt, unc), na.rm = TRUE)
 
     ## Quantile fan from draws
-    if (!is.null(x$draws) && length(x$draws) > 0L) {
-      draw_mat <- sapply(x$draws, function(d) d[, vi])
+    if (!is.null(fan_draws) && length(fan_draws) > 0L) {
+      draw_mat <- sapply(fan_draws, function(d) d[, vi])
       q_lo <- apply(draw_mat, 1, quantile, probs = min(probs), na.rm = TRUE)
       q_hi <- apply(draw_mat, 1, quantile, probs = max(probs), na.rm = TRUE)
       ylim <- range(c(ylim, q_lo, q_hi), na.rm = TRUE)
@@ -1683,7 +1772,7 @@ plot.dynhr_cfcst <- function(x, vars = NULL, probs = c(0.1, 0.9), ...) {
          xlab = "Horizon", ylab = if (identical(x$units, "levels")) "Level" else "Dev. from SS", main = v,
          cex.main = 0.9, ...)
 
-    if (!is.null(x$draws) && length(x$draws) > 0L) {
+    if (!is.null(fan_draws) && length(fan_draws) > 0L) {
       polygon(c(seq_len(H), rev(seq_len(H))), c(q_lo, rev(q_hi)),
               col = "#2166AC30", border = NA)
     }

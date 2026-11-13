@@ -59,7 +59,9 @@ the mis-stated initial level is absorbed as extra persistence — the
 shift (mean_rank_z -3.0, sig_b clean) from exactly this, after the
 obs-tensor fix removed the dominant bias.}
 
-\item{seed}{Base RNG seed; replication r uses \code{seed + r}.}
+\item{seed}{Base RNG seed; replication r uses the r-th of a family of
+statistically independent seeds derived from \code{seed} (the same for
+any \code{n_repl >= r} and any \code{cores}).}
 
 \item{cores}{Parallel replications via \code{parallel::mclapply}
 (default 1 = serial).}

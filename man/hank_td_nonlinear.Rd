@@ -66,11 +66,12 @@ the pre-wedge household exactly.}
 }
 \value{
 A list with numeric length-\code{T} paths \code{A} and \code{C}, and
-  \code{Dpath} (\code{(n_e*n_a) x T} matrix): column \code{t} is the
+  \code{Dpath} (\code{T x (n_e*n_a)} matrix, rows are periods): row
+  \code{t} is the
   beginning-of-period-\code{t} distribution over which \code{A[t]},
   \code{C[t]} are aggregated. When \code{keep_policies = TRUE}, also
   \code{c_pol}, \code{a_pol}, and \code{Lambda} (see above); the exact
-  aggregation identity \code{C[t] == hank_aggregate(Dpath[, t],
+  aggregation identity \code{C[t] == hank_aggregate(Dpath[t, ],
   c_pol[[t]])} holds by construction.
 }
 \description{

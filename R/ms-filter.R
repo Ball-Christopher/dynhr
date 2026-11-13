@@ -45,7 +45,10 @@
 #' structural parameters and decision rules (\code{ghx}, \code{ghu}) are
 #' identical across regimes; only the per-regime shock covariance differs.
 #'
-#' @param data  Observation matrix (\code{n_obs x T}).  May contain \code{NA}s;
+#' @param data  Observation matrix, \code{T x n_obs} (rows = periods; name the
+#'   columns by \code{obs_vars} -- a matrix named by series on its ROWS, the
+#'   old \code{n_obs x T} orientation, is transposed with a message, and an
+#'   unnamed \code{n_obs x T} or square matrix is an error).  May contain \code{NA}s;
 #'   missing observations at period \code{t} are handled by skipping the
 #'   measurement update (propagating the state through transition only).
 #' @param dr  Decision rule (output of \code{\link{solve_perturbation}}).
@@ -56,7 +59,7 @@
 #' @param me_variance  Scalar variance of TRUE i.i.d. measurement error
 #'   (default \code{0}).  See the \emph{Measurement error} section.
 #' @param return_regime_probs  Logical; if \code{TRUE} return a
-#'   \code{n_regimes x T} matrix of filtered regime probabilities
+#'   \code{T x n_regimes} matrix (rows = periods) of filtered regime probabilities
 #'   \code{Pr[s_t = j | y_{1:t}]}.  Default \code{FALSE}.
 #' @param return_state_path  Logical; if \code{TRUE} additionally return the
 #'   per-regime collapsed filtered state moments, the per-path Durbin-Koopman
@@ -75,7 +78,7 @@
 #'   forward pass IS the filter, never a second copy of the recursion.
 #'   Default \code{FALSE}.
 #' @param return_collapse_diag  Logical; if \code{TRUE} additionally return
-#'   \code{collapse_diag} (\code{n_regimes x T}) and \code{collapse_max}, the
+#'   \code{collapse_diag} (length-\code{T} vector) and \code{collapse_max}, the
 #'   GPB(2) COLLAPSE-QUALITY statistic.  See the "Collapse quality" section.
 #'   Default \code{FALSE}.
 #' @param lik_init  Character; state covariance initialisation: \code{"auto"},
@@ -122,7 +125,7 @@
 #' @return A list with:
 #'   \describe{
 #'     \item{\code{loglik}}{Total log-likelihood (scalar).}
-#'     \item{\code{regime_probs}}{\code{n_regimes x T} matrix if
+#'     \item{\code{regime_probs}}{\code{T x n_regimes} matrix (rows = periods) if
 #'       \code{return_regime_probs = TRUE}, otherwise \code{NULL}.}
 #'     \item{\code{n_obs}}{Number of observed variables.}
 #'     \item{\code{n_T}}{Number of time periods.}
@@ -276,6 +279,11 @@ ms_kim_filter <- function(data, dr, model, params, obs_vars, ms_spec,
   ## ---- input checks -------------------------------------------------------
   if (!inherits(ms_spec, "ms_dsge_spec"))
     stop("ms_kim_filter: ms_spec must be an ms_dsge_spec object.", call. = FALSE)
+  ## The Kim recursion implements H = me_variance * I only: a genuine
+  ## per-observable vector is refused (classed), not misread (review
+  ## 2026-11-11 F8: it died with "the condition has length > 1").
+  me_variance <- .kf_me_variance(me_variance, obs_vars, "ms_kim_filter",
+                                 allow_vector = FALSE)
 
   h <- ms_spec$n_regimes
   P <- ms_spec$transition    # h x h, rows sum to 1
@@ -297,14 +305,17 @@ ms_kim_filter <- function(data, dr, model, params, obs_vars, ms_spec,
          paste(obs_vars[is.na(obs_idx)], collapse = ", "), call. = FALSE)
 
   ## Validate that ms_spec shock-scale names match exo names (if names present)
+  ## (every regime: ms_dsge_spec() guarantees one common name set, but a spec
+  ## edited after construction is re-checked here, per regime)
   sc1 <- ms_spec$shock_scales[[1L]]
   if (!is.null(names(sc1))) {
-    if (length(sc1) != n_exo ||
-        !identical(sort(names(sc1)), sort(exo)))
-      stop(sprintf(
-        "ms_kim_filter: shock_scales names (%s) do not match model exo names (%s).",
-        paste(names(sc1), collapse = ","), paste(exo, collapse = ",")),
-        call. = FALSE)
+    for (sc_s in ms_spec$shock_scales)
+      if (length(sc_s) != n_exo || is.null(names(sc_s)) ||
+          !identical(sort(names(sc_s)), sort(exo)))
+        .dynhr_abort(sprintf(
+          "ms_kim_filter: shock_scales names (%s) do not match model exo names (%s).",
+          paste(names(sc_s), collapse = ","), paste(exo, collapse = ",")),
+          class = "dynhr_error_invalid_argument")
     ## Reorder each regime's scale vector to match exo order
     ms_spec$shock_scales <- lapply(ms_spec$shock_scales, function(v) v[exo])
   } else if (length(sc1) != n_exo) {
@@ -327,8 +338,10 @@ ms_kim_filter <- function(data, dr, model, params, obs_vars, ms_spec,
   regime_covs <- .ms_build_regime_covs(RR, DD, Sigma_e, ms_spec$shock_scales)
 
   ## ---- prepare observations -----------------------------------------------
-  if (is.null(dim(data))) data <- matrix(data, nrow = n_obs)
-  if (nrow(data) != n_obs) data <- t(data)
+  ## `data` is T x n_obs (rows = periods; R/time-orientation.R: names decide,
+  ## an unnamed old n_obs x T or square matrix is refused). The recursion
+  ## below runs on its transpose (column t = period t).
+  data <- t(.kf_time_in(data, obs_vars, "data", "ms_kim_filter"))
   n_T <- ncol(data)
   Y_minus_d <- data - d
 
@@ -779,7 +792,7 @@ ms_kim_filter <- function(data, dr, model, params, obs_vars, ms_spec,
 
   out <- list(
     loglik       = loglik,
-    regime_probs = if (return_regime_probs) reg_prob_out else NULL,
+    regime_probs = if (return_regime_probs) t(reg_prob_out) else NULL,
     n_obs        = n_obs,
     n_T          = n_T
   )
@@ -1117,7 +1130,7 @@ ms_kim_filter <- function(data, dr, model, params, obs_vars, ms_spec,
 
   out <- list(
     loglik       = loglik,
-    regime_probs = if (return_regime_probs) reg_prob_out else NULL,
+    regime_probs = if (return_regime_probs) t(reg_prob_out) else NULL,
     n_obs        = n_obs,
     n_T          = n_T
   )
@@ -1162,7 +1175,9 @@ ms_kim_filter <- function(data, dr, model, params, obs_vars, ms_spec,
 #' for shared-\eqn{\Sigma_e} with only structural params switching, supply the
 #' same \code{Sigma_e} for all regimes (the common case).
 #'
-#' @param data          Observation matrix (n_obs x T). May contain \code{NA}s.
+#' @param data          Observation matrix, \code{T x n_obs} (rows = periods;
+#'                   columns named by \code{obs_vars}; see
+#'                   \code{\link{ms_kim_filter}}). May contain \code{NA}s.
 #' @param ms_dr      An \code{MsDecisionRules} object from
 #'                   \code{\link{solve_ms_perturbation}}.
 #' @param model      Compiled model object.
@@ -1185,7 +1200,7 @@ ms_kim_filter <- function(data, dr, model, params, obs_vars, ms_spec,
 #'                   where \code{me_variance} is an \eqn{F}-only regulariser;
 #'                   \code{kalman_filter(method = "univariate")} is the
 #'                   single-regime true-ME oracle.
-#' @param return_regime_probs  Logical; return \code{n_regimes x T} filtered
+#' @param return_regime_probs  Logical; return the \code{T x n_regimes} filtered
 #'                   regime probability matrix (default FALSE).
 #' @param return_state_path  Logical; if \code{TRUE} additionally return the
 #'                   per-regime collapsed filtered moments, the per-path
@@ -1208,7 +1223,7 @@ ms_kim_filter <- function(data, dr, model, params, obs_vars, ms_spec,
 #'                   BIT-IDENTICAL with and without it (pinned in
 #'                   \code{test-ms-smoother-struct.R}).  Default \code{FALSE}.
 #' @param return_collapse_diag  Logical; if \code{TRUE} additionally return
-#'                   \code{collapse_diag} (\code{n_regimes x T}) and
+#'                   \code{collapse_diag} (length-\code{T} vector) and
 #'                   \code{collapse_max}, the GPB(2) COLLAPSE-QUALITY
 #'                   statistic.  See the "Collapse quality" section of
 #'                   \code{\link{ms_kim_filter}}; this filter is where it
@@ -1304,7 +1319,7 @@ ms_kim_filter <- function(data, dr, model, params, obs_vars, ms_spec,
 #' @return A list with:
 #'   \describe{
 #'     \item{\code{loglik}}{Total log-likelihood (scalar).}
-#'     \item{\code{regime_probs}}{\code{n_regimes x T} matrix if
+#'     \item{\code{regime_probs}}{\code{T x n_regimes} matrix (rows = periods) if
 #'       \code{return_regime_probs = TRUE}, otherwise \code{NULL}.}
 #'     \item{\code{n_obs}}{Number of observed variables.}
 #'     \item{\code{n_T}}{Number of time periods.}
@@ -1338,6 +1353,9 @@ ms_kim_filter_struct <- function(data, ms_dr, model, params, obs_vars,
 
   if (!inherits(ms_dr, "MsDecisionRules"))
     stop("ms_kim_filter_struct: ms_dr must be an MsDecisionRules object.", call. = FALSE)
+  ## Scalar H = me_variance * I only (see ms_kim_filter).
+  me_variance <- .kf_me_variance(me_variance, obs_vars, "ms_kim_filter_struct",
+                                 allow_vector = FALSE)
 
   h <- length(ms_dr$dr)
   P <- ms_dr$P
@@ -1404,8 +1422,9 @@ ms_kim_filter_struct <- function(data, ms_dr, model, params, obs_vars,
   }
 
   ## ---- prepare observations -----------------------------------------------
-  if (is.null(dim(data))) data <- matrix(data, nrow = n_obs)
-  if (nrow(data) != n_obs) data <- t(data)
+  ## `data` is T x n_obs (rows = periods; see ms_kim_filter()); the
+  ## recursion runs on its transpose.
+  data <- t(.kf_time_in(data, obs_vars, "data", "ms_kim_filter_struct"))
   n_T <- ncol(data)
 
   ## Each regime has its own observable intercept d_s = dr_s$ys[obs_vars];
@@ -1781,7 +1800,7 @@ ms_kim_filter_struct <- function(data, ms_dr, model, params, obs_vars,
 
   out <- list(
     loglik       = loglik,
-    regime_probs = if (return_regime_probs) reg_prob_out else NULL,
+    regime_probs = if (return_regime_probs) t(reg_prob_out) else NULL,
     n_obs        = n_obs,
     n_T          = n_T
   )

@@ -1576,16 +1576,27 @@ update.dynhr_estimation_spec <- function(object, model = NULL, data = NULL,
 ## the others and refuses these (so they are never silently dropped);
 ## validate_spec() refuses them when the spec is built.
 .spec_parallel_extra_unsupported <- function(method, extra) {
+  if (!length(extra) || is.null(names(extra))) return(character(0))
+  ## Multi-chain RWMH runs rwmh() on each daemon through run_mcmc_mirai(),
+  ## which takes only the tuning arguments of .rwmh_par_arg_map (under its own
+  ## names); everything else rwmh() would take via `...` is refused.
+  if (identical(method, "rwmh"))
+    return(setdiff(names(extra), names(.rwmh_par_arg_map)))
   fn <- .spec_parallel_sampler_fn(method)
-  if (is.null(fn) || !length(extra) || is.null(names(extra))) return(character(0))
+  if (is.null(fn)) return(character(0))
   setdiff(names(extra), names(formals(fn)))
 }
+
+## rwmh() tuning argument -> run_mcmc_mirai() argument (the daemon calls
+## rwmh(scale = mh_scale, target_rate = target_accept, adapt_every = ...)).
+.rwmh_par_arg_map <- c(scale = "mh_scale", target_rate = "target_accept",
+                       adapt_every = "adapt_every")
 
 ## Does the runner take the parallel path for this sampler spec?
 .spec_takes_parallel_path <- function(spec, samp)
   isTRUE(spec$compute$parallel) &&
     (identical(samp$method, "dime") ||
-       (identical(samp$method, "nuts") && isTRUE(samp$n_chains > 1L)))
+       (samp$method %in% c("nuts", "rwmh") && isTRUE(samp$n_chains > 1L)))
 
 ## NUTS takes these metrics by name (a fixed dense one arrives as a matrix).
 .spec_nuts_adapted_metrics <- c("diagonal", "warmup_dense", "lowrank",
@@ -2022,7 +2033,7 @@ validate_spec <- function(spec) {
     .spec_reclass(.kf_me_variance(
       lik$me_variance, spec$obs_vars,
       sprintf("likelihood$me_variance (likelihood = \"%s\")", lik$type),
-      allow_vector = lik$type %in% c("gaussian", "pskf") &&
+      allow_vector = lik$type %in% c("gaussian", "pskf", "pruned") &&
         is.null(lik$ms_spec) && is.null(lik$ms_struct_spec)),
       class = "dynhr_error_me_variance")
 

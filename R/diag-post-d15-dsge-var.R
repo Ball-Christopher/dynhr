@@ -74,11 +74,12 @@
 #'   \code{demean = "none"} if they are already in deviations.
 #' @param obs_names   Observable names (columns of \code{data} and entries of
 #'   \code{dr$endo_names}). Default \code{colnames(data)}.
-#' @param sigma_e     Optional shock covariance. If NULL: from \code{model}
-#'   (at \code{params}), else \code{dr$Sigma_e}; never an identity default.
+#' @param sigma_e     Optional shock covariance. If NULL: from \code{params}
+#'   (with \code{model}) when supplied, else \code{dr$Sigma_e}, else
+#'   \code{model}'s shocks block; never an identity default.
 #' @param model       dynhr_mod object (for the shock covariance).
-#' @param params      Parameter vector at which \code{dr} was solved (default
-#'   \code{model$param_values}).
+#' @param params      Parameter vector at which \code{dr} was solved, or
+#'   \code{NULL} (default; see \code{sigma_e}).
 #' @param var_lag     VAR lag order p (default 2).
 #' @param lambda_grid Lambda values (DS04 units: dummy observations =
 #'   lambda * T). Values below \code{lambda_min = (k + n) / T} are dropped.
@@ -231,9 +232,15 @@ d15_dsge_var <- function(dr            = NULL,
   Sigma_e <- if (!is.null(sigma_e)) {
     as.matrix(sigma_e)
   } else if (!is.null(model)) {
-    p_use <- model$param_values
-    if (!is.null(params)) p_use[names(params)] <- params   # partial vectors allowed
-    .get_shock_cov(model, dr$exo_names, p_use)
+    ## The package rule, .resolve_sigma_e(): `params` (partial vectors
+    ## allowed, merged into the calibration) > dr$Sigma_e > model.  Until
+    ## 0.9.4.75 the model beat dr$Sigma_e here.
+    p_use <- NULL
+    if (!is.null(params)) {
+      p_use <- model$param_values
+      p_use[names(params)] <- params
+    }
+    .resolve_sigma_e(dr, model, p_use)
   } else if (!is.null(dr$Sigma_e)) {
     as.matrix(dr$Sigma_e)
   } else {

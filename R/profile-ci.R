@@ -280,8 +280,12 @@
 #'   Set to 0 to reproduce the naive (mode-seeded-only) profile.
 #' @param n_iter     csminwel iteration budget per re-optimization
 #'   (default 200L).
-#' @param seed       Optional integer RNG seed (sets \code{set.seed()} once
-#'   at the top for reproducible seed draws).
+#' @param seed       Optional integer RNG seed for the prior-draw seed
+#'   starts. Each grid point gets its own child seed derived from it, so a
+#'   seeded run returns the same numbers with \code{cores = 1} and
+#'   \code{cores > 1}, and the caller's random stream is restored on exit.
+#'   With \code{seed = NULL} a serial run draws from the caller's stream and
+#'   a parallel run is not reproducible.
 #' @param cores      Number of cores for \code{parallel::mclapply} over grid
 #'   points (default 1L; not supported on Windows, where it silently
 #'   falls back to serial).
@@ -398,7 +402,15 @@ profile_ci <- function(param,
   n_g  <- length(grid)
 
   ## ---- Per-grid-point re-optimization ------------------------------------
-  one_point <- function(v) {
+  ## One child seed per grid point, so a seeded run gives the same numbers
+  ## serially and under `cores > 1`. Forked workers used to start from a
+  ## clock/pid seed (the prior-draw seeds are drawn inside one_point()), so a
+  ## seeded parallel run was neither reproducible nor equal to the serial one.
+  point_seeds <- if (is.null(seed)) NULL else
+    .child_seeds(seed, n_g, "profile_ci_point")
+  one_point <- function(i) {
+    v <- grid[i]
+    if (!is.null(point_seeds)) set.seed(point_seeds[i])
     ## A per-point progress DOT cannot survive the move to the message stream:
     ## each .dynhr_cat() is its own message, so n_g dots would print as n_g
     ## lines instead of one growing row. Report the point being evaluated
@@ -412,9 +424,9 @@ profile_ci <- function(param,
   use_parallel <- is.numeric(cores) && cores > 1L &&
     .Platform$OS.type != "windows"
   results <- if (use_parallel) {
-    parallel::mclapply(grid, one_point, mc.cores = cores)
+    parallel::mclapply(seq_len(n_g), one_point, mc.cores = cores)
   } else {
-    lapply(grid, one_point)
+    lapply(seq_len(n_g), one_point)
   }
   if (isTRUE(verbose)) .dynhr_cat("\n")
 

@@ -42,8 +42,9 @@
 ##     Parameterises the regime path by a single scalar k (spell length) and
 ##     bisects for the shortest k whose end-of-spell gap is non-negative.
 ##     Assumption: exactly one contiguous binding block [1, k_star] followed
-##     by permanent slack.  converged = FALSE when the resulting path is not
-##     an equilibrium (the assumption fails).
+##     by permanent slack.  When the resulting path is not an equilibrium
+##     (the assumption fails) the solver falls through, with a classed
+##     message (dynhr_obc_spell_fallthrough), to the iterative path.
 ##
 ## Reference: Boehl G. (2022) "Efficient solution and computation of models
 ##   with occasionally binding constraints." J. Econ. Dyn. Control 143, 104495.
@@ -156,7 +157,14 @@ boehl_end_of_spell_gap <- function(k, ctx, spell_regime, shock_seq,
 #'
 #' Special cases:
 #'   f(0) >= 0: no binding at all → k_star = 0 (all slack)
-#'   f(T) < 0: binding through the end of sample → k_star = T
+#'   f(T) < 0: the bisection bracket is invalid. f need NOT be monotone: with
+#'     two or more constraints, holding \code{spell_regime} for long can push
+#'     a constraint OUTSIDE it through its bound (nk_2obc: y pinned at its
+#'     floor for 4+ periods drives r below the ZLB, so f(1..3) > 0 but
+#'     f(4..T) < 0). The smallest k with f(k) >= 0 is then found by a linear
+#'     scan (k_star = T only if there is none). Before 0.9.4.77 this case
+#'     returned k_star = T outright, and the caller reported non-convergence
+#'     for a shock whose path IS a single spell (k_star = 1).
 #'
 #' @param shock_seq    n_exo x T shock matrix (unit shock at t=1 for IRF)
 #' @param ctx          Context from .obc_pwl_context()
@@ -177,8 +185,14 @@ boehl_find_spell_duration <- function(shock_seq, ctx, spell_regime,
   if (g0 >= 0)
     return(list(k_star = 0L, gap_at_kstar = g0, n_bisect = 0L))
   gap_T <- gap(n_T)
-  if (gap_T < 0)
-    return(list(k_star = n_T, gap_at_kstar = gap_T, n_bisect = 0L))
+  if (gap_T < 0) {
+    ## Invalid bracket (non-monotone f): first crossing by linear scan.
+    for (k in seq_len(n_T - 1L)) {
+      g_k <- gap(k)
+      if (g_k >= 0) return(list(k_star = k, gap_at_kstar = g_k, n_bisect = k))
+    }
+    return(list(k_star = n_T, gap_at_kstar = gap_T, n_bisect = n_T - 1L))
+  }
 
   # Invariant: f(lo) < 0, f(hi) >= 0.
   lo <- 0L
@@ -197,6 +211,59 @@ boehl_find_spell_duration <- function(shock_seq, ctx, spell_regime,
     }
   }
   list(k_star = hi, gap_at_kstar = g_hi, n_bisect = n_bisect)
+}
+
+
+#' Validate user-supplied regime inputs of the OBC path solvers
+#'
+#' A regime is a bitfield over the \code{n_spec} constraints (bit j-1 set =
+#' constraint j binds), so a code lies in 0..2^n_spec - 1; a spell regime must
+#' bind at least one constraint. The internals silently REPLACED a
+#' wrong-length \code{state_init} by the zero state and dropped a wrong-length
+#' \code{regime_path_init}; an \code{NA} warm start came back as an all-NA
+#' regime path with \code{converged = TRUE}, and an out-of-range or NA
+#' \code{spell_regime} (a constraint that does not exist) was simulated.
+#'
+#' @param what Caller name for the messages.
+#' @param n_spec Number of constraints.
+#' @param n_T Horizon (NULL: not checked).
+#' @param n_state Number of state variables (NULL: not checked).
+#' @param spell_regime,regime_path_init,state_init The arguments (NULL = unset).
+#' @return \code{invisible(TRUE)}; aborts with class
+#'   \code{dynhr_error_bad_argument} otherwise.
+#' @noRd
+.obc_check_regime_inputs <- function(what, n_spec, n_T = NULL, n_state = NULL,
+                                     spell_regime = NULL,
+                                     regime_path_init = NULL,
+                                     state_init = NULL) {
+  max_code <- 2^n_spec - 1
+  is_code <- function(v, lo)
+    (is.numeric(v) || is.logical(v)) && length(v) > 0L && !anyNA(v) &&
+      all(is.finite(v)) &&
+      all(v == round(v)) && all(v >= lo) && all(v <= max_code)
+  if (!is.null(spell_regime) &&
+      (length(spell_regime) != 1L || !is_code(spell_regime, 1)))
+    .dynhr_abort(sprintf(paste0(
+      "%s: `spell_regime` must be ONE integer bitfield in 1..%d (bit j-1 set = ",
+      "constraint j binds; %d constraint(s))."), what, as.integer(max_code),
+      as.integer(n_spec)), class = "dynhr_error_bad_argument")
+  if (!is.null(regime_path_init) &&
+      (!is_code(regime_path_init, 0) ||
+       (!is.null(n_T) && length(regime_path_init) != n_T)))
+    .dynhr_abort(sprintf(paste0(
+      "%s: `regime_path_init` must be an integer bitfield vector of length ",
+      "%s (one code per period) with codes in 0..%d and no NA."), what,
+      if (is.null(n_T)) "T" else as.character(n_T), as.integer(max_code)),
+      class = "dynhr_error_bad_argument")
+  if (!is.null(state_init) &&
+      (!is.numeric(state_init) || any(!is.finite(state_init)) ||
+       (!is.null(n_state) && length(state_init) != n_state)))
+    .dynhr_abort(sprintf(paste0(
+      "%s: `state_init` must be a finite numeric vector of length %s ",
+      "(the number of state variables)."), what,
+      if (is.null(n_state)) "n_state" else as.character(n_state)),
+      class = "dynhr_error_bad_argument")
+  invisible(TRUE)
 }
 
 
@@ -220,7 +287,7 @@ boehl_find_spell_duration <- function(shock_seq, ctx, spell_regime,
 #' shock the regime path expected from then on is re-solved from the current
 #' state (Dynare's \code{occbin_solver}).  With a single shock in period 1
 #' the result is the exact perfect-foresight piecewise-linear path (slack
-#' after the horizon \code{ncol(shock_seq)}).
+#' after the horizon \code{nrow(shock_seq)}).
 #'
 #' Two dispatch paths:
 #'
@@ -233,10 +300,20 @@ boehl_find_spell_duration <- function(shock_seq, ctx, spell_regime,
 #' \strong{single_spell = TRUE}: spell-duration root-finder (Boehl 2022 §3).
 #'   Parameterises the regime path as a single contiguous block [1, k_star]
 #'   of \code{spell_regime} followed by permanent slack and bisects for
-#'   k_star.  Intended for single-spell ZLB / ELB IRFs; \code{converged} is
-#'   FALSE when the resulting path is not an equilibrium.
+#'   k_star.  Intended for single-spell ZLB / ELB IRFs.  When no spell length
+#'   gives an equilibrium (the constraints bind in different periods, a
+#'   constraint outside \code{spell_regime} binds, or the regime re-binds) it
+#'   falls through to the iterative path, announced by a message of class
+#'   \code{dynhr_obc_spell_fallthrough}; \code{attr(result,
+#'   "obc_path_solver")} is \code{"spell"}, \code{"spell_fallthrough"} or
+#'   \code{"iterative"}.
 #'
-#' @param shock_seq        n_exo x T numeric matrix of structural shocks
+#' @param shock_seq        T x n_exo numeric matrix of structural shocks
+#'                         (rows = periods, columns = shocks; name the
+#'                         columns by \code{dr_slack$exo_names} -- a matrix
+#'                         named by shock on its ROWS, the old n_exo x T
+#'                         orientation, is transposed with a message, an
+#'                         unnamed n_exo x T or square one is an error)
 #' @param dr_slack         Slack-regime DecisionRules (from solve_perturbation)
 #' @param sys              System matrices (from extract_system_matrices_fast)
 #' @param specs            OBC spec list (from obc_parse_tags / obc_collect_specs)
@@ -263,7 +340,8 @@ boehl_find_spell_duration <- function(shock_seq, ctx, spell_regime,
 #'                         (deviations); NULL → zero initial state
 #' @return Named list with:
 #'   $regime_path -- integer vector (length T): final bitfield regime per period
-#'   $paths       -- n_endo x T matrix of simulated paths (deviations)
+#'   $paths       -- T x n_endo matrix of simulated paths (deviations;
+#'                   rows = periods)
 #'   $fb_norm     -- scalar: Fischer-Burmeister residual norm of the returned
 #'                   path (zero to rounding at an equilibrium)
 #'   $converged   -- logical
@@ -278,9 +356,17 @@ boehl_solve_regime_path <- function(shock_seq, dr_slack, sys, specs,
                                      tol              = 1e-8,
                                      regime_path_init = NULL,
                                      state_init       = NULL) {
+  ## Rows = periods (R/time-orientation.R); the solver internals run on the
+  ## n_exo x T transpose and the paths are returned T x n_endo.
+  shock_seq <- t(.orient_time_matrix(shock_seq, dr_slack$exo_names,
+                                     "shock_seq", "boehl_solve_regime_path"))
   n_T    <- ncol(shock_seq)
   n_spec <- length(specs)
   ctx    <- .obc_pwl_context(sys, dr_slack, specs)
+  .obc_check_regime_inputs("boehl_solve_regime_path", n_spec, n_T,
+                           ctx$n_state, spell_regime = spell_regime,
+                           regime_path_init = regime_path_init,
+                           state_init = state_init)
 
   # ------------------------------------------------------------------
   # FAST PATH: spell-duration root-finder (Boehl 2022 §3)
@@ -300,13 +386,28 @@ boehl_solve_regime_path <- function(shock_seq, dr_slack, sys, specs,
     chk   <- .obc_pwl_check(ctx, rules, sim, shock_seq, regime_path,
                             state_init, tol)
 
-    return(list(
-      regime_path = regime_path,
-      paths       = sim$paths,
-      fb_norm     = sqrt(sum(chk$phi^2)),
-      converged   = identical(chk$regime_path, regime_path),
-      n_iter      = spell$n_bisect
-    ))
+    if (identical(chk$regime_path, regime_path)) {
+      out <- list(
+        regime_path = regime_path,
+        paths       = t(sim$paths),
+        fb_norm     = sqrt(sum(chk$phi^2)),
+        converged   = TRUE,
+        n_iter      = spell$n_bisect
+      )
+      attr(out, "obc_path_solver") <- "spell"
+      return(out)
+    }
+    ## The single-spell assumption does not hold for this shock (no k makes
+    ## "spell_regime on [1, k], slack after" an equilibrium: the constraints
+    ## bind in different periods, a constraint outside spell_regime binds, or
+    ## the regime re-binds). Fall through, announced, to the general solver
+    ## below rather than returning a non-equilibrium path.
+    .dynhr_inform(sprintf(paste0(
+      "boehl_solve_regime_path: the single-spell fast path (regime %d on ",
+      "periods 1..k, slack after) has no equilibrium for this shock sequence ",
+      "(best k = %d); falling through to the general OccBin guess-and-verify ",
+      "solver."), spell_regime, k_star),
+      class = "dynhr_obc_spell_fallthrough")
   }
 
   # ------------------------------------------------------------------
@@ -316,13 +417,16 @@ boehl_solve_regime_path <- function(shock_seq, dr_slack, sys, specs,
     .obc_pwl_solve(ctx, e, s, ini, max_iter = max_iter, tol = tol)
   res <- .obc_pwl_solve_surprise(ctx, shock_seq, state_init,
                                  regime_path_init, inner)
-  list(
+  out <- list(
     regime_path = res$regime_path,
-    paths       = res$paths,
+    paths       = t(res$paths),
     fb_norm     = sqrt(sum(res$phi^2)),
     converged   = res$converged,
     n_iter      = res$n_iter
   )
+  attr(out, "obc_path_solver") <- if (single_spell) "spell_fallthrough"
+                                  else "iterative"
+  out
 }
 
 
@@ -333,17 +437,23 @@ boehl_solve_regime_path <- function(shock_seq, dr_slack, sys, specs,
 #' Compute impulse response functions for an OBC model
 #'
 #' Extends the standard linear compute_irfs() with OBC-regime switching.
-#' For each shock, constructs a unit-impulse shock sequence (shock hits at
-#' t=1, zero thereafter), runs the chosen OBC solver to identify the binding
-#' regime path, simulates the full n_endo x T path, and packages it as an
-#' IRFCollection with the same structure as compute_irfs().
+#' For each shock, constructs an impulse at t=1 (zero thereafter), runs the
+#' chosen OBC solver to identify the binding regime path, simulates the full
+#' n_endo x T path, and packages it as an IRFCollection with the same
+#' structure as compute_irfs().
+#'
+#' The impulse of shock k is the k-th column of the lower Cholesky factor of
+#' the shock covariance times \code{shock_size} -- the same rule as
+#' \code{\link{compute_irfs}()}, so correlated shocks propagate and, when no
+#' constraint binds, the OBC IRF equals the linear IRF for every solver.
 #'
 #' Four solver options:
 #' \describe{
 #'   \item{\code{"boehl"}}{Spell-duration fast path (single_spell = TRUE).
 #'     Bisection over the spell length.  Valid when the binding spell is a
-#'     single contiguous block starting at t=1; \code{converged} is FALSE
-#'     otherwise.}
+#'     single contiguous block starting at t=1 in which the constraints of
+#'     \code{spell_regime} bind; otherwise it falls through (announced) to
+#'     the \code{"occbin"} guess-and-verify path.}
 #'   \item{\code{"occbin"}}{OccBin guess-and-verify (single_spell = FALSE).
 #'     Handles multi-spell, multi-constraint, and escape-and-rebind
 #'     scenarios.}
@@ -352,8 +462,25 @@ boehl_solve_regime_path <- function(shock_seq, dr_slack, sys, specs,
 #'   \item{\code{"mcp"}}{MCP semi-smooth Newton solver (\code{\link{mcp_solve_path}}).
 #'     Uses the Fischer-Burmeister FB reformulation on the full nonlinear model.
 #'     Works for both linear and nonlinear models.  On linear models, matches
-#'     the Boehl and LCP solvers to within numerical tolerance.}
+#'     the Boehl and LCP solvers to within numerical tolerance.  The
+#'     perfect-foresight problem is solved on an internal horizon of
+#'     \code{max(2 * n_periods, n_periods + 40)} periods (return to steady
+#'     state imposed at its end) and truncated to \code{n_periods}, so the
+#'     returned periods do not depend on \code{n_periods}.}
 #' }
+#'
+#' \strong{Default solver.}  With a single constraint (or an explicit
+#' \code{spell_regime}) the default is \code{"boehl"}.  With two or more
+#' constraints and \code{spell_regime = NULL}, the boehl fast path would
+#' assume every constraint binds in the same contiguous block, which is wrong
+#' whenever the constraints bind in different periods (or one binds and the
+#' other does not); the default is then \code{"occbin"}.  \code{"boehl"} stays
+#' available when requested explicitly.
+#'
+#' \strong{Verification.}  Every returned path is checked against every
+#' constraint; when a bound is violated beyond tolerance, or the solver did
+#' not converge, a warning of class
+#' \code{dynhr_warning_obc_path_infeasible} is emitted.
 #'
 #' @param dr_slack    Slack-regime DecisionRules (from solve_perturbation)
 #' @param model       dynhr_mod (for shock standard deviations)
@@ -362,16 +489,32 @@ boehl_solve_regime_path <- function(shock_seq, dr_slack, sys, specs,
 #' @param obs_idx     Integer vector: observable positions in endo vector;
 #'                    NULL → all endo indices
 #' @param n_periods   Number of IRF periods (default 40L)
-#' @param shock_size  Shock size multiplier applied to each shock's stderr
+#' @param shock_size  Shock size multiplier applied to each shock's impulse
 #'                    (default 1: one-standard-deviation impulse)
-#' @param params      Named numeric parameter vector; NULL → model$param_values
-#' @param obc_solver  Character: \code{"boehl"} (default), \code{"occbin"}, or \code{"lcp"}
+#' @param params      Named numeric parameter vector used ONLY to select the
+#'                    shock covariance of the impulse, exactly as in
+#'                    \code{\link{compute_irfs}()}; the model is NOT
+#'                    re-solved at \code{params} by any solver (the
+#'                    dynamics are those of \code{dr_slack} / \code{sys};
+#'                    the \code{"mcp"} path uses \code{model$param_values}).
+#'                    NULL → \code{dr_slack$Sigma_e}, else the model's
+#'                    shocks block.
+#' @param obc_solver  Character: \code{"boehl"}, \code{"occbin"}, \code{"lcp"}
+#'                    or \code{"mcp"}.  Default: \code{"boehl"} for one
+#'                    constraint, \code{"occbin"} for two or more
+#'                    constraints with \code{spell_regime = NULL} (see
+#'                    Details).
 #' @param compiled    Optional compiled model (needed by the \code{"mcp"} solver path)
 #' @param spell_regime Integer bitfield for the binding block when
 #'                    obc_solver = "boehl"; NULL → all specs simultaneously
 #' @return Object of class "IRFCollection": a named list (one entry per shock)
 #'   of n_periods x n_endo matrices.  Attributes: n_periods, endo_names,
-#'   exo_names.  Same structure as compute_irfs().
+#'   exo_names (same structure as compute_irfs()), plus
+#'   \code{attr(., "converged")} (named logical vector, one per shock: the
+#'   solver converged AND the path satisfies every constraint),
+#'   \code{attr(., "regime_paths")} (named list of the solver's regime /
+#'   active-set paths) and \code{attr(., "obc_solver")} (the solver used) --
+#'   the convergence attributes of \code{\link{occbin_compute_irfs}()}.
 #' @export
 compute_irfs_obc <- function(dr_slack, model, sys, specs,
                               obs_idx      = NULL,
@@ -381,31 +524,51 @@ compute_irfs_obc <- function(dr_slack, model, sys, specs,
                               obc_solver   = c("boehl", "occbin", "lcp", "mcp"),
                               spell_regime = NULL,
                               compiled     = NULL) {
+  ## Multi-constraint default: the boehl fast path's "all constraints bind in
+  ## one block" assumption is not a safe default (adversarial review
+  ## 2026-11-11 F3), so default to the exact OccBin guess-and-verify.
+  if (missing(obc_solver) && length(specs) > 1L && is.null(spell_regime))
+    obc_solver <- "occbin"
   obc_solver <- match.arg(obc_solver)
-  if (is.null(params)) params <- model$param_values
+  n_periods <- .check_irf_n_periods(n_periods, "compute_irfs_obc")
+  .obc_check_regime_inputs("compute_irfs_obc", length(specs),
+                           spell_regime = spell_regime)
 
   endo      <- dr_slack$endo_names
   exo       <- dr_slack$exo_names
   n_exo     <- length(exo)
 
-  shock_stderr <- .get_shock_stderr(model, exo, params)
+  ## `params` selects the shock covariance only (the compute_irfs() rule).
+  E_imp <- .irf_impulse_matrix(dr_slack, model, params, shock_size)
 
   irfs <- vector("list", n_exo)
   names(irfs) <- exo
+  converged_v  <- stats::setNames(logical(n_exo), exo)
+  regime_paths <- stats::setNames(vector("list", n_exo), exo)
 
-  # For MCP solver, build compiled model once and reuse across shocks
+  ## Internal perfect-foresight horizon for the MCP path: the terminal
+  ## return-to-steady-state condition otherwise bites inside the window.
+  n_solve <- if (obc_solver == "mcp") .pf_irf_horizon(n_periods) else n_periods
+
+  # For MCP solver, build compiled model once and reuse across shocks.
+  # Structural parameters are the model's own (params = shock covariance only).
   mcp_compiled <- NULL
   if (obc_solver == "mcp") {
-    bridge <- .mcp_build_from_obc(model, specs, params, verbose = FALSE)
+    bridge <- .mcp_build_from_obc(model, specs, model$param_values,
+                                  verbose = FALSE)
     mcp_compiled <- bridge$compiled
     mcp_specs_local <- bridge$mcp_specs
-    mcp_y_ss <- bridge$y_ss
   }
 
+  ctx <- .obc_pwl_context(sys, dr_slack, specs)
+  tol <- 1e-6
+  bad <- character(0)
+
   for (k in seq_along(exo)) {
-    # Unit impulse at t=1 only
-    shock_seq <- matrix(0, nrow = n_exo, ncol = n_periods)
-    shock_seq[k, 1L] <- shock_stderr[exo[k]] * shock_size
+    # Impulse at t=1 only (T x n_exo, rows = periods)
+    shock_seq <- matrix(0, nrow = n_solve, ncol = n_exo,
+                        dimnames = list(NULL, exo))
+    shock_seq[1L, ] <- E_imp[, k]
 
     res <- if (obc_solver == "lcp") {
       solve_obc_lcp(shock_seq, dr_slack, sys, specs, obs_idx = obs_idx)
@@ -417,11 +580,12 @@ compute_irfs_obc <- function(dr_slack, model, sys, specs,
         compiled   = mcp_compiled,
         y0         = y0_num,
         y_ss       = y0_num,
-        shock_path = t(shock_seq),
-        params     = params,
+        shock_path = shock_seq,
+        params     = model$param_values,
         mcp_specs  = mcp_specs_local
       )
-      list(paths = t(mcp_res$Y), regime_path = mcp_res$active_set)
+      list(paths = mcp_res$Y, regime_path = mcp_res$active_set,
+           converged = mcp_res$converged)
     } else {
       boehl_solve_regime_path(
         shock_seq, dr_slack, sys, specs,
@@ -431,15 +595,39 @@ compute_irfs_obc <- function(dr_slack, model, sys, specs,
       )
     }
 
-    irf_mat           <- t(res$paths)   # n_periods x n_endo
+    irf_mat           <- res$paths[seq_len(n_periods), , drop = FALSE]
     colnames(irf_mat) <- endo
     rownames(irf_mat) <- paste0("t", seq_len(n_periods))
     irfs[[k]]         <- irf_mat
+
+    ## Verify the returned path against every constraint.
+    x    <- irf_mat[, ctx$var, drop = FALSE]
+    bnd  <- matrix(ctx$bnd, nrow(x), ncol(x), byrow = TRUE)
+    sgn  <- matrix(ctx$sgn, nrow(x), ncol(x), byrow = TRUE)
+    viol <- sgn * (x - bnd) < -tol * (abs(x) + abs(bnd))
+    feasible <- !any(viol)
+    converged_v[[k]]  <- isTRUE(res$converged) && feasible
+    regime_paths[[k]] <- res$regime_path
+    if (!converged_v[[k]]) bad <- c(bad, exo[k])
   }
 
+  if (length(bad) > 0L)
+    .dynhr_warn("compute_irfs_obc(obc_solver = \"", obc_solver, "\"): the ",
+                "path for shock(s) ", paste(bad, collapse = ", "),
+                " did not converge or violates a constraint beyond tolerance, ",
+                "so it is not an equilibrium of the constrained model.",
+                if (obc_solver == "boehl")
+                  " The boehl fast path assumes one contiguous binding block of spell_regime starting at t = 1; use obc_solver = \"occbin\" or \"lcp\"."
+                else "",
+                " See attr(., \"converged\").",
+                class = "dynhr_warning_obc_path_infeasible")
+
   class(irfs) <- "IRFCollection"
-  attr(irfs, "n_periods")  <- n_periods
-  attr(irfs, "endo_names") <- endo
-  attr(irfs, "exo_names")  <- exo
+  attr(irfs, "n_periods")    <- n_periods
+  attr(irfs, "endo_names")   <- endo
+  attr(irfs, "exo_names")    <- exo
+  attr(irfs, "converged")    <- converged_v
+  attr(irfs, "regime_paths") <- regime_paths
+  attr(irfs, "obc_solver")   <- obc_solver
   irfs
 }

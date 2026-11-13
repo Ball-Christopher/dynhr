@@ -1006,8 +1006,8 @@ BEGIN_RCPP
 END_RCPP
 }
 // sv_rbpf_loglik_cpp
-Rcpp::List sv_rbpf_loglik_cpp(const arma::mat& Y, const arma::mat& TT, const arma::mat& ZZ, const arma::mat& RR, const arma::mat& DD, const arma::mat& Sigma_e, const arma::vec& d, const arma::mat& P0, const arma::uvec& sv_idx1, const arma::vec& mu, const arma::vec& rho, const arma::vec& seta, const int n_particles, const arma::vec& me_diag);
-RcppExport SEXP _dynhr_sv_rbpf_loglik_cpp(SEXP YSEXP, SEXP TTSEXP, SEXP ZZSEXP, SEXP RRSEXP, SEXP DDSEXP, SEXP Sigma_eSEXP, SEXP dSEXP, SEXP P0SEXP, SEXP sv_idx1SEXP, SEXP muSEXP, SEXP rhoSEXP, SEXP setaSEXP, SEXP n_particlesSEXP, SEXP me_diagSEXP) {
+Rcpp::List sv_rbpf_loglik_cpp(const arma::mat& Y, const arma::mat& TT, const arma::mat& ZZ, const arma::mat& RR, const arma::mat& DD, const arma::mat& Sigma_e, const arma::vec& d, const arma::mat& P0, const arma::uvec& sv_idx1, const arma::vec& mu, const arma::vec& rho, const arma::vec& seta, const int n_particles, const arma::vec& me_diag, const int n_burn);
+RcppExport SEXP _dynhr_sv_rbpf_loglik_cpp(SEXP YSEXP, SEXP TTSEXP, SEXP ZZSEXP, SEXP RRSEXP, SEXP DDSEXP, SEXP Sigma_eSEXP, SEXP dSEXP, SEXP P0SEXP, SEXP sv_idx1SEXP, SEXP muSEXP, SEXP rhoSEXP, SEXP setaSEXP, SEXP n_particlesSEXP, SEXP me_diagSEXP, SEXP n_burnSEXP) {
 BEGIN_RCPP
     Rcpp::RObject rcpp_result_gen;
     Rcpp::RNGScope rcpp_rngScope_gen;
@@ -1025,7 +1025,8 @@ BEGIN_RCPP
     Rcpp::traits::input_parameter< const arma::vec& >::type seta(setaSEXP);
     Rcpp::traits::input_parameter< const int >::type n_particles(n_particlesSEXP);
     Rcpp::traits::input_parameter< const arma::vec& >::type me_diag(me_diagSEXP);
-    rcpp_result_gen = Rcpp::wrap(sv_rbpf_loglik_cpp(Y, TT, ZZ, RR, DD, Sigma_e, d, P0, sv_idx1, mu, rho, seta, n_particles, me_diag));
+    Rcpp::traits::input_parameter< const int >::type n_burn(n_burnSEXP);
+    rcpp_result_gen = Rcpp::wrap(sv_rbpf_loglik_cpp(Y, TT, ZZ, RR, DD, Sigma_e, d, P0, sv_idx1, mu, rho, seta, n_particles, me_diag, n_burn));
     return rcpp_result_gen;
 END_RCPP
 }
@@ -1150,7 +1151,7 @@ static const R_CallMethodDef CallEntries[] = {
     {"_dynhr_pskf_filter_cpp", (DL_FUNC) &_dynhr_pskf_filter_cpp, 18},
     {"_dynhr_qr_static_transform_implicit_cpp", (DL_FUNC) &_dynhr_qr_static_transform_implicit_cpp, 5},
     {"_dynhr_qr_static_transform_cpp", (DL_FUNC) &_dynhr_qr_static_transform_cpp, 5},
-    {"_dynhr_sv_rbpf_loglik_cpp", (DL_FUNC) &_dynhr_sv_rbpf_loglik_cpp, 14},
+    {"_dynhr_sv_rbpf_loglik_cpp", (DL_FUNC) &_dynhr_sv_rbpf_loglik_cpp, 15},
     {"_dynhr_tpf_propagate_particles", (DL_FUNC) &_dynhr_tpf_propagate_particles, 8},
     {"_dynhr_tpf_run_period_cpp", (DL_FUNC) &_dynhr_tpf_run_period_cpp, 24},
     {"_dynhr_tpf_log_weights", (DL_FUNC) &_dynhr_tpf_log_weights, 9},

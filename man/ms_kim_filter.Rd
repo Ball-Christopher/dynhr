@@ -20,7 +20,10 @@ ms_kim_filter(
 )
 }
 \arguments{
-\item{data}{Observation matrix (\code{n_obs x T}).  May contain \code{NA}s;
+\item{data}{Observation matrix, \code{T x n_obs} (rows = periods; name the
+columns by \code{obs_vars} -- a matrix named by series on its ROWS, the
+old \code{n_obs x T} orientation, is transposed with a message, and an
+unnamed \code{n_obs x T} or square matrix is an error).  May contain \code{NA}s;
 missing observations at period \code{t} are handled by skipping the
 measurement update (propagating the state through transition only).}
 
@@ -38,7 +41,7 @@ measurement update (propagating the state through transition only).}
 (default \code{0}).  See the \emph{Measurement error} section.}
 
 \item{return_regime_probs}{Logical; if \code{TRUE} return a
-\code{n_regimes x T} matrix of filtered regime probabilities
+\code{T x n_regimes} matrix (rows = periods) of filtered regime probabilities
 \code{Pr[s_t = j | y_{1:t}]}.  Default \code{FALSE}.}
 
 \item{return_state_path}{Logical; if \code{TRUE} additionally return the
@@ -59,7 +62,7 @@ forward pass IS the filter, never a second copy of the recursion.
 Default \code{FALSE}.}
 
 \item{return_collapse_diag}{Logical; if \code{TRUE} additionally return
-\code{collapse_diag} (\code{n_regimes x T}) and \code{collapse_max}, the
+\code{collapse_diag} (length-\code{T} vector) and \code{collapse_max}, the
 GPB(2) COLLAPSE-QUALITY statistic.  See the "Collapse quality" section.
 Default \code{FALSE}.}
 
@@ -108,7 +111,7 @@ state covariance (Kim & Nelson 1999); see \code{.ms_init_P0}.}
 A list with:
   \describe{
     \item{\code{loglik}}{Total log-likelihood (scalar).}
-    \item{\code{regime_probs}}{\code{n_regimes x T} matrix if
+    \item{\code{regime_probs}}{\code{T x n_regimes} matrix (rows = periods) if
       \code{return_regime_probs = TRUE}, otherwise \code{NULL}.}
     \item{\code{n_obs}}{Number of observed variables.}
     \item{\code{n_T}}{Number of time periods.}

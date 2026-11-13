@@ -127,13 +127,19 @@
     W[, k] <- fft_k[j_seq + 1L]           # j = 1..j_max  => indices 2..j_max+1
   }
 
-  ## Periodogram matrices: I[,,j] = w_j w_j^H / (2*pi*T)
+  ## Periodogram matrices: I[,,j] = w_j w_j^H / (2*pi*T), w_j the COLUMN
+  ## vector of DFTs, so E[I] -> f(omega) = H(e^{-i omega}) Sigma_e H^H / (2 pi)
+  ## -- the orientation .spectral_density_core() uses. (Until 2026-11-12 this
+  ## was conj(w_j) w_j^T = conj(w_j w_j^H): the CONJUGATE, which flips the
+  ## sign of every quadrature (lead-lag) cross-spectrum. Invisible with one
+  ## observable or a symmetric cross-spectrum; with >= 2 observables the
+  ## Whittle loglik drifted from the exact Gaussian one by O(T).)
   ## We return as a list of n_obs x n_obs Hermitian matrices.
   scale   <- 1.0 / (2.0 * pi * T_len)
   I_list  <- vector("list", j_max)
   for (j in seq_len(j_max)) {
     wj        <- W[j, , drop = FALSE]     # 1 x n_obs
-    I_list[[j]] <- scale * Conj(t(wj)) %*% wj  # n_obs x n_obs
+    I_list[[j]] <- scale * t(wj) %*% Conj(wj)  # n_obs x n_obs = w w^H
   }
 
   list(omega = omega, I = I_list, n_obs = n_obs, T_len = T_len)
@@ -190,9 +196,10 @@
 ## omega_j is not S(omega_j) but a Fejer-kernel convolution:
 ##
 ##   E[I(omega_j)] = (1/2pi) sum_{|tau|<T} (1 - |tau|/T) c(tau) exp(-i omega_j tau)
-##               = (1/2pi) [c(0) + 2 sum_{tau=1}^{T-1} (1-tau/T) c(tau) cos(omega_j tau)]
+##               = (1/2pi) [c(0) + sum_{tau=1}^{T-1} (1-tau/T) {(c(tau) + c(tau)') cos(omega_j tau)
+##                                 - i (c(tau) - c(tau)') sin(omega_j tau)}]
 ##
-## where c(tau) = Cov(y_t, y_{t+tau}) is the autocovariance function of the
+## where c(tau) = Cov(y_{t+tau}, y_t) = E[y_{t+tau} y_t'] is the autocovariance of the
 ## observed process.  The O(1/T) bias of the standard Whittle likelihood arises
 ## because S(omega) != E[I(omega)] at finite T.
 ##
@@ -272,12 +279,22 @@
   }
   tau_seq <- seq_len(T_len - 1L)
   w_tau   <- 1.0 - tau_seq / T_len
-  ## Symmetrised, Fejer-weighted lags (c(-tau) = c(tau)' for a real process,
-  ## so the lag pair contributes c(tau) + c(tau)', not 2 c(tau)): (T-1) x n^2.
+  ## Fejer-weighted lag pairs. With C(tau) = Cov(y_{t+tau}, y_t) and
+  ## C(-tau) = C(tau)', the lag pair contributes
+  ##   C(tau) e^{-i w tau} + C(tau)' e^{i w tau}
+  ##     = (C + C') cos(w tau) - i (C - C') sin(w tau):
+  ## the co-spectrum (A, symmetric part) and the QUADRATURE spectrum (Q,
+  ## antisymmetric part). Both are (T-1) x n^2. Q vanishes for one observable
+  ## (and for a symmetric cross-covariance); the output then stays REAL, as
+  ## before. (Until 2026-11-12 Q was dropped for every n: the debiased E[I] of
+  ## a multivariate model lost its lead-lag information and the debiased
+  ## Whittle loglik drifted from the exact Gaussian one by O(T).)
   L  <- c_arr[,, tau_seq + 1L, drop = FALSE]
-  A  <- matrix(L, nrow = n * n)
+  A0 <- matrix(L, nrow = n * n)
   At <- matrix(aperm(L, c(2L, 1L, 3L)), nrow = n * n)
-  A  <- t(A + At) * w_tau
+  A  <- t(A0 + At) * w_tau
+  Q  <- t(A0 - At) * w_tau
+  has_q <- any(Q != 0)
 
   fgrid <- omega * T_len / (2 * pi)
   on_grid <- all(abs(fgrid - round(fgrid)) < 1e-8)
@@ -286,17 +303,25 @@
   }
   if (identical(method, "fft") && !on_grid) method <- "matrix"
 
+  ## Sq = sum_tau Q(tau) sin(w tau); the quadrature term is -i Sq.
   if (identical(method, "fft")) {
     jj <- as.integer(round(fgrid)) %% T_len
     S  <- matrix(0, J, n * n)
+    Sq <- matrix(0, J, n * n)
     for (k in seq_len(n * n)) {
       S[, k] <- Re(stats::fft(c(0, A[, k])))[jj + 1L]
+      ## fft gives sum x e^{-i w tau}: its imaginary part is -sum x sin(w tau)
+      if (has_q) Sq[, k] <- -Im(stats::fft(c(0, Q[, k])))[jj + 1L]
     }
   } else {
-    S <- cos(outer(omega, tau_seq)) %*% A                    ## J x n^2
+    S  <- cos(outer(omega, tau_seq)) %*% A                   ## J x n^2
+    Sq <- if (has_q) sin(outer(omega, tau_seq)) %*% Q else NULL
   }
   c0v <- as.vector(c0)
-  for (j in seq_len(J)) out[[j]] <- shape(c0v + S[j, ]) * inv2pi
+  for (j in seq_len(J))
+    out[[j]] <- if (has_q) shape(complex(real = c0v + S[j, ],
+                                         imaginary = -Sq[j, ])) * inv2pi
+                else shape(c0v + S[j, ]) * inv2pi
   out
 }
 
@@ -305,10 +330,12 @@
 ##   c_arr: array[n_obs, n_obs, T_len] from .whittle_compute_ctau
 ##   omega: vector of Fourier frequencies (length J)
 ##   T_len: sample length (integer)
-##   -> list of J real symmetric n_obs x n_obs matrices E[I(omega_j)]
+##   -> list of J Hermitian n_obs x n_obs matrices E[I(omega_j)] (complex when the
+##      model has a quadrature cross-spectrum, real for one observable)
 ##
 ## Formula (Fejer kernel):
-##   EI_j = (1/2pi) * [c(0) + 2 sum_{tau=1}^{T-1} (1-tau/T) c(tau) cos(omega_j tau)]
+##   EI_j = (1/2pi) * [c(0) + sum_{tau=1}^{T-1} (1-tau/T) {(c + c') cos(omega_j tau)
+##                                          - i (c - c') sin(omega_j tau)}]   (c = c(tau))
 ##
 ## Eigenvalue clamp: same as in .whittle_loglik (pmax(ev, eps * max(ev)))
 ## ensures EI is numerically PD even for near-cancellation at high frequencies.
@@ -328,8 +355,9 @@
       ## Scalar path: direct clamp
       EI_j <- pmax(EI_j, .Machine$double.eps * max(abs(EI_j)))
     } else {
-      ## Matrix path: symmetrize (should already be symmetric by construction above)
-      EI_j <- 0.5 * (EI_j + t(EI_j))   ## force exact symmetry from roundoff
+      ## Matrix path: Hermitian-symmetrise (exact by construction up to
+      ## roundoff; complex when the quadrature spectrum is non-zero)
+      EI_j <- 0.5 * (EI_j + Conj(t(EI_j)))
       ## (Eigenvalue clamp happens inside .whittle_loglik when eigen() is called)
     }
 
@@ -433,7 +461,7 @@
 ##   dcArr: array[n_obs, n_obs, T_len] from .whittle_compute_dctau
 ##   omega: Fourier frequencies (length J)
 ##   T_len: sample length
-##   -> list of J real symmetric n_obs x n_obs matrices dEI(omega_j)/dtheta_k
+##   -> list of J Hermitian n_obs x n_obs matrices dEI(omega_j)/dtheta_k
 .whittle_compute_dEI <- function(dcArr, omega, T_len, method = "auto") {
   .whittle_fejer_sum(dcArr, omega, T_len, method = method)
 }
@@ -473,7 +501,7 @@
 ## debias:  logical — if TRUE and EI_list is provided, substitute EI_list[[j]]
 ##          for S_fn(omega[j]).  When FALSE, the S_fn path is used and
 ##          EI_list is ignored.
-## EI_list: optional precomputed expected periodogram (list of J real symmetric
+## EI_list: optional precomputed expected periodogram (list of J Hermitian
 ##          matrices from .whittle_compute_EI).  Ignored when debias=FALSE.
 .whittle_loglik <- function(pdgm, S_fn, freq_band = c(0, pi),
                              debias = FALSE, EI_list = NULL) {
@@ -501,14 +529,15 @@
   for (j in in_band) {
     ## Spectral density matrix at this frequency:
     ##   debias=FALSE  -> model S(omega_j)  [complex Hermitian]
-    ##   debias=TRUE   -> E[I(omega_j)]     [real symmetric]
+    ##   debias=TRUE   -> E[I(omega_j)]     [complex Hermitian for >= 2
+    ##                    observables (quadrature spectrum); real for one]
     S <- if (use_debias) EI_list[[j]] else S_fn(omega[j])
 
-    ## Exact complex Hermitian path — works in base R for any n_obs.
-    ## .eigen_hermitian_safe returns real eigenvalues for Hermitian S and
-    ## avoids the zheev segfault under vecLib BLAS (see helper docs);
-    ## for the debiased path S is real symmetric and passes through to
-    ## eigen(symmetric=TRUE) unchanged.
+    ## Exact complex Hermitian path — works in base R for any n_obs, for both
+    ## S(omega_j) and E[I(omega_j)]. .eigen_hermitian_safe returns real
+    ## eigenvalues for Hermitian S and avoids the zheev segfault under vecLib
+    ## BLAS (see helper docs); a real symmetric S (one observable) passes
+    ## through to eigen(symmetric=TRUE) unchanged.
     ev <- tryCatch(.eigen_hermitian_safe(S), error = function(e) NULL)
     if (is.null(ev)) return(-Inf)
     ## Clamp near-zero eigenvalues from roundoff: reject only when S is
@@ -549,6 +578,25 @@
     all(is.finite(freq_band)) && freq_band[1L] >= 0 &&
     freq_band[2L] <= pi && freq_band[1L] < freq_band[2L]
 
+## THE default of the Whittle `debias` switch: make_log_posterior_whittle(),
+## make_log_posterior(likelihood = "whittle"), make_posterior_grad() and
+## every sampler-gradient site resolve through it (the exported
+## make_posterior_grad() spells it literally for its Rd usage line; a test
+## pins the two together). FALSE since review 2026-11-14 -- see the
+## `debias` documentation of make_log_posterior() for the measurements.
+.WHITTLE_DEBIAS_DEFAULT <- FALSE
+
+## The debias setting a Whittle posterior closure was BUILT with (the
+## "whittle_debias" attribute make_log_posterior_whittle() sets), else
+## `extras$debias` (a spec's likelihood / mode extras), else the default. Every
+## gradient built for an existing posterior reads it from here, so the value
+## and the gradient differentiate the same likelihood.
+.whittle_debias_resolve <- function(fn = NULL, extras = NULL) {
+  d <- if (is.function(fn)) attr(fn, "whittle_debias", exact = TRUE)
+  if (is.null(d)) d <- extras$debias
+  if (is.null(d)) .WHITTLE_DEBIAS_DEFAULT else d
+}
+
 #' Create a Whittle-likelihood log-posterior evaluator
 #'
 #' Returns a closure \code{function(theta) -> list(logpost, loglik, logprior)}
@@ -572,14 +620,23 @@
 #' @param power Power-posterior (generalised-Bayes) tempering exponent
 #'   \eqn{\zeta}. \code{NULL} (default) resolves the \code{power_posterior}
 #'   option once, at factory time (see \code{.resolve_power_posterior}).
-#' @return function(theta) -> list(logpost, loglik, logprior)
+#' @param debias Logical; \code{FALSE} (default) the standard Whittle
+#'   likelihood, \code{TRUE} the debiased one (expected periodogram in place
+#'   of the spectral density). See \code{make_log_posterior()}. \code{TRUE}
+#'   with two or more observables warns (class
+#'   \code{dynhr_warning_whittle_debias}, once per run epoch).
+#' @return function(theta) -> list(logpost, loglik, logprior), with attribute
+#'   \code{"whittle_debias"} = the \code{debias} it was built with.
 #' @noRd
 make_log_posterior_whittle <- function(model, data, prior_spec, obs_vars,
                                         compiled, me_variance = 0,
                                         freq_band = c(0, pi),
                                         system_priors = NULL,
-                                        debias = TRUE,
+                                        debias = .WHITTLE_DEBIAS_DEFAULT,
                                         power = NULL) {
+  if (!is.logical(debias) || length(debias) != 1L || is.na(debias))
+    .dynhr_abort("make_log_posterior_whittle: `debias` must be TRUE or FALSE.",
+                 class = "dynhr_error_invalid_argument")
   ## Resolve zeta ONCE here. It used to be re-read from the option store on
   ## EVERY evaluation, so a mid-run dynhr_set_options() silently changed the
   ## target distribution and a mirai daemon (own `.dynhr_opts`) used a
@@ -602,11 +659,30 @@ make_log_posterior_whittle <- function(model, data, prior_spec, obs_vars,
          "0 <= lo < hi <= pi.", call. = FALSE)
 
   ## Prepare data: T x n_obs matrix
-  if (is.null(dim(data))) data <- matrix(data, ncol = 1L)
-  if (nrow(data) < ncol(data)) data <- t(data)        # ensure T x n_obs
-  if (is.null(colnames(data))) colnames(data) <- obs_vars
+  ## (rows are periods) by the package-wide rule -- names decide; an unnamed
+  ## n_obs x T or square sample is refused rather than guessed from the shape
+  ## (the old `nrow < ncol -> t()` read a short sample, T < n_obs, transposed).
+  data <- .orient_time_matrix(data, obs_vars, "data",
+                              "make_log_posterior_whittle")
   T_len <- nrow(data)
   n_obs <- length(obs_vars)
+
+  ## Debiased Whittle with >= 2 observables: measured (review 2026-11-14) to
+  ## give a posterior materially too narrow and loglik differences that drift
+  ## from the exact ones as T grows. Warn once per run epoch at BUILD time.
+  if (isTRUE(debias) && n_obs >= 2L)
+    .dynhr_warn(
+      "Whittle likelihood with debias = TRUE and ", n_obs, " observables: ",
+      "the debiased (expected-periodogram) Whittle likelihood can make the ",
+      "posterior materially too narrow, and understate log-likelihood ",
+      "differences away from the mode, on persistent or strongly co-moving ",
+      "multivariate models. Measured on rbc2shock (c, y): posterior sd of ",
+      "rho_a 1.9-2.8x too small at T = 200 / 100 (standard Whittle 1.3x), and ",
+      "the loglik difference to a distant parameter vector understated by ",
+      "12-23% at T = 200-2000 (standard within 3.4%). debias = FALSE (the ",
+      "default) is the standard Whittle likelihood.",
+      once = TRUE, key = "whittle_debias_multivariate",
+      class = "dynhr_warning_whittle_debias")
 
   ## Demean each observable (Whittle assumes zero mean / stationary data)
   data_col_idx <- match(obs_vars, colnames(data))
@@ -638,7 +714,7 @@ make_log_posterior_whittle <- function(model, data, prior_spec, obs_vars,
   ## and .whittle_loglik(). The stationarity guard is the shared "spectral"
   ## one -- the Whittle spectral density is undefined at a unit root, so
   ## unlike the gaussian path there is no diffuse escape hatch.
-  .make_posterior_closure(
+  lp <- .make_posterior_closure(
     model, data, prior_spec, obs_vars, compiled,
     loglik_fn = function(sol, params, ss, theta, me_floor_check, ...) {
       dr <- sol$dr
@@ -707,6 +783,10 @@ make_log_posterior_whittle <- function(model, data, prior_spec, obs_vars,
     needs_me_floor    = FALSE,
     system_prior      = system_priors,
     system_prior_mode = "lp")
+  ## Gradient builders read this (.whittle_debias_resolve) so they
+  ## differentiate the likelihood this closure evaluates.
+  attr(lp, "whittle_debias") <- debias
+  lp
 }
 
 
@@ -750,7 +830,7 @@ make_log_posterior_whittle <- function(model, data, prior_spec, obs_vars,
 ##          of S_j / dS_j.  The formula is structurally identical (pass-through
 ##          theorem, verified to 1e-14 in the debiased-Whittle scout).
 ##
-## EI_list:  list of J real symmetric n_obs x n_obs matrices (from
+## EI_list:  list of J Hermitian n_obs x n_obs matrices (from
 ##           .whittle_compute_EI), indexed by full frequency grid j=1..J.
 ##           Ignored when debias=FALSE.
 ##
@@ -807,7 +887,7 @@ make_log_posterior_whittle <- function(model, data, prior_spec, obs_vars,
   ## -----------------------------------------------------------------------
   if (use_debias) {
     for (j in in_band) {
-      EI_j <- EI_list[[j]]                  ## real symmetric n_obs x n_obs
+      EI_j <- EI_list[[j]]                  ## Hermitian n_obs x n_obs
       I_j  <- I_list[[j]]
 
       ev_j <- tryCatch(.eigen_hermitian_safe(EI_j), error = function(e) NULL)
@@ -816,12 +896,14 @@ make_log_posterior_whittle <- function(model, data, prior_spec, obs_vars,
       if (ev_max_j <= 0) next
       ev_clamped_j <- pmax(ev_j$values, .Machine$double.eps * ev_max_j)
       V_j   <- ev_j$vectors
-      EIi_j <- V_j %*% diag(1 / ev_clamped_j, nrow = length(ev_clamped_j)) %*% t(V_j)
-      ## Note: EI is real symmetric so t(V) not Conj(t(V))
+      ## Conj(t()): EI_j is complex Hermitian when the model has a quadrature
+      ## (lead-lag) cross-spectrum; for a real EI_j Conj is a no-op.
+      EIi_j <- V_j %*% diag(1 / ev_clamped_j, nrow = length(ev_clamped_j)) %*%
+        Conj(t(V_j))
 
       ## Per-parameter: grad += w_j Re[-tr(EIi dEI) + tr(EIi dEI EIi I)]
       for (k in active) {
-        dEI_k_j <- dEI_per_param[[nm_all[k]]][[j]]   ## by NAME; real symmetric n_obs x n_obs
+        dEI_k_j <- dEI_per_param[[nm_all[k]]][[j]]   ## by NAME; Hermitian n_obs x n_obs
         EIi_dEI <- EIi_j %*% dEI_k_j
         grad[k]  <- grad[k] + w_freq[j] *
           Re(-sum(diag(EIi_dEI)) +

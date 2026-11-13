@@ -127,6 +127,13 @@ solve_ms_perturbation <- function(model, compiled,
     stop(sprintf(
       "solve_ms_perturbation: params_by_regime must be a list of length %d.", h),
       call. = FALSE)
+  ## Every regime vector is a FULL named parameter vector (there is no
+  ## partial-override convention): validate each exactly as
+  ## solve_perturbation() does.  A missing parameter was read as 0 by the
+  ## compiled Jacobian (review 2026-11-11 F4).
+  for (s in seq_len(h))
+    .check_declared_params(model, params_by_regime[[s]],
+                           sprintf("solve_ms_perturbation: params_by_regime[[%d]]", s))
 
   ## ---- cache system structure (shared across all regimes and iterations) ---
   sys_cache <- cache_system_structure(compiled)

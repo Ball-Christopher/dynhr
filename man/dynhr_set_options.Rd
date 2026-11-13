@@ -52,7 +52,8 @@ Registered options (default in parentheses):
   \item{\code{seed_base}}{(\code{42L}) Base RNG seed for the multi-start
     \code{run_mode_parallel()}, and for the parallel (mirai) mode
     starts and RWMH / NUTS chains when no seed is passed (chain k seeds
-    with \code{seed_base + k}); a spec's \code{compute$seed} sets it for
+    with the k-th statistically independent seed derived from
+    \code{seed_base}); a spec's \code{compute$seed} sets it for
     the run.}
   \item{\code{use_exact_hessian}}{(\code{FALSE}) \code{run_mode_finding()}
     builds the RWMH proposal covariance from the analytic exact posterior

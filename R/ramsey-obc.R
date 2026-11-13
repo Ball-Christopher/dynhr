@@ -82,7 +82,8 @@
 #' @return An object of class \code{dynhr_ramsey_obc_pf} containing:
 #'   \item{Y}{T x n_endo_orig matrix: paths of original endogenous variables.}
 #'   \item{Y_full}{T x (n_endo_orig + n_mult) matrix: paths including multipliers.}
-#'   \item{regime}{n_spec x T logical matrix (TRUE = binding).}
+#'   \item{regime}{T x n_spec logical matrix (rows = periods; TRUE =
+#'     binding).}
 #'   \item{ramsey_result}{The underlying \code{dynhr_ramsey_result2} object.}
 #'   \item{converged}{Logical: whether Newton converged.}
 #'   \item{welfare}{List with steady and path-based welfare values.}
@@ -159,20 +160,20 @@ ramsey_obc_pf <- function(model,
     shock_path <- matrix(0, nrow = T_horizon, ncol = length(model$varexo_names))
     colnames(shock_path) <- model$varexo_names
   } else {
-    if (!is.matrix(shock_path)) shock_path <- as.matrix(shock_path)
+    # T x n_exo, rows = periods (R/time-orientation.R): named columns may be
+    # a subset of the shocks (the rest are zero); an unnamed matrix must carry
+    # one column per shock (it was silently zeroed before).
+    shock_path <- .kf_time_in(shock_path, model$varexo_names, "shock_path",
+                              "ramsey_obc_pf", subset = TRUE, fill = 0)
     if (nrow(shock_path) < T_horizon) {
       # Extend with zeros
       ext <- matrix(0, nrow = T_horizon - nrow(shock_path), ncol = ncol(shock_path))
       colnames(ext) <- colnames(shock_path)
       shock_path <- rbind(shock_path, ext)
     }
-    # Ensure all exo names present
-    full_shocks <- matrix(0, nrow = T_horizon, ncol = length(model$varexo_names))
-    colnames(full_shocks) <- model$varexo_names
-    for (nm in intersect(colnames(shock_path), model$varexo_names)) {
-      full_shocks[, nm] <- shock_path[, nm]
-    }
-    shock_path <- full_shocks
+    if (nrow(shock_path) != T_horizon)
+      stop("ramsey_obc_pf: `shock_path` has ", nrow(shock_path), " rows ",
+           "(periods); T_horizon is ", T_horizon, ".", call. = FALSE)
   }
 
   # ---- 5. Map OBC specs to augmented model ----
@@ -346,7 +347,7 @@ print.dynhr_ramsey_obc_pf <- function(x, ...) {
   cat(sprintf("  Steady welfare:     %.6f\n", x$welfare$steady_value))
   cat(sprintf("  Discount factor:    %.4f\n", x$welfare$discount))
 
-  if (!is.null(x$regime) && ncol(x$regime) > 0) {
+  if (!is.null(x$regime) && nrow(x$regime) > 0) {
     n_bind <- sum(x$regime, na.rm = TRUE)
     cat(sprintf("  Binding periods:    %d / %d\n", n_bind, length(x$regime)))
   }
@@ -415,7 +416,7 @@ print.dynhr_ramsey_obc_pf <- function(x, ...) {
 #'   \item{dr_bind}{Binding-regime rule of a period in which every spec binds
 #'     and the next period is slack (the last period of a spell).}
 #'   \item{regime_path}{Integer vector: optimal regime path (bitfield encoding).}
-#'   \item{irf}{n_aug x T matrix of deviations from the Ramsey steady state
+#'   \item{irf}{T x n_aug matrix (rows = periods) of deviations from the Ramsey steady state
 #'     under the Ramsey OBC policy.}
 #'   \item{meta}{Metadata.}
 #' @export
@@ -527,9 +528,9 @@ ramsey_obc_pwlinear <- function(model,
   if (verbose) .dynhr_cat("[ramsey_obc_pwlinear] Running regime search (method = '", method, "')...\n", sep = "")
 
   # Build shock sequence: one std dev impulse to the first shock in period 1.
-  # boehl_simulate()/boehl_solve_regime_path() take an n_exo x T matrix
-  # (shocks in ROWS, periods in COLUMNS); the previous T x n_exo layout was
-  # non-conformable and made this function fail on every call.
+  # The internal boehl_simulate() takes an n_exo x T matrix (shocks in ROWS);
+  # the public boehl_solve_regime_path() takes T x n_exo (rows = periods), so
+  # it gets the transpose.
   n_T <- 40L  # Default horizon
   shock_seq <- matrix(0, nrow = length(aug_model$varexo_names), ncol = n_T)
   rownames(shock_seq) <- aug_model$varexo_names
@@ -561,7 +562,7 @@ ramsey_obc_pwlinear <- function(model,
     }
   }
   regime_search <- boehl_solve_regime_path(
-    shock_seq        = shock_seq,
+    shock_seq        = t(shock_seq),
     dr_slack         = dr_slack,
     sys              = sys,
     specs            = aug_specs,

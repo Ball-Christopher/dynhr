@@ -12,8 +12,12 @@ hank_kalman_loglik(
 )
 }
 \arguments{
-\item{data}{\code{T_data x n_obs} matrix (or data frame) of demeaned
-observations, columns in the same order as \code{ss$obs_names}.}
+\item{data}{\code{T_data x n_obs} matrix (or data frame) (rows are periods; oriented by the rule in \code{\link{hank_loglik_aggregate}}) of demeaned
+observations (rows are periods), columns in the same order as
+\code{ss$obs_names}. Oriented by the package-wide rule (see
+\code{\link{hank_loglik_aggregate}}): names decide; an unnamed
+\code{n_obs x T} or square sample is refused (class
+\code{dynhr_error_orientation}).}
 
 \item{ss}{A \code{\link{hank_state_space}} object.}
 

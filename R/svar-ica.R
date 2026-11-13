@@ -469,15 +469,24 @@ print.svar_ica <- function(x, ...) {
 ## --------------------------------------------------------------------------
 ## Model shocks from FIXED standard draws (common random numbers): the same
 ## CSN law as simulate_model()'s diagonal skew branch,
-##   e_k = sigma_k (delta_k |z1_k| + sqrt(1 - delta_k^2) z2_k) - sigma_k delta_k sqrt(2/pi),
-## delta_k = alpha_k / sqrt(1 + alpha_k^2), applied COLUMN-wise (per shock).
+##   e_k = omega_k (delta_k |z1_k| + sqrt(1 - delta_k^2) z2_k) - omega_k delta_k sqrt(2/pi),
+## delta_k = alpha_k / sqrt(1 + alpha_k^2), applied COLUMN-wise (per shock),
+## omega_k the skew-normal SCALE whose law has standard deviation sigma_k
+## (package convention: stderr is the TRUE sd; .csn_scale_from_cov()).
 ## `z1` holds |N(0,1)| draws, `z2` N(0,1) draws.  With alpha = 0 this is the
 ## Gaussian N(0, sigma_k^2).
 ## --------------------------------------------------------------------------
 .svar_ica_csn_shocks <- function(z1, z2, sigma, alpha) {
   delta <- alpha / sqrt(1 + alpha^2)
+  ## Gaussian columns keep sigma itself (bit-identical); skewed ones take the
+  ## scale of the shared conversion (svar_ica refuses `corr`, so diagonal).
+  omega <- sigma
+  sk <- which(alpha != 0)
+  if (length(sk))
+    omega[sk] <- sqrt(diag(.csn_scale_from_cov(
+      diag(sigma^2, nrow = length(sigma)), alpha)))[sk]
   std <- sweep(z1, 2L, delta, `*`) + sweep(z2, 2L, sqrt(1 - delta^2), `*`)
-  sweep(sweep(std, 2L, sigma, `*`), 2L, sigma * delta * sqrt(2 / pi), `-`)
+  sweep(sweep(std, 2L, omega, `*`), 2L, omega * delta * sqrt(2 / pi), `-`)
 }
 
 

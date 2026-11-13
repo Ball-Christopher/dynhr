@@ -18,7 +18,12 @@ solve_obc_lcp(
 )
 }
 \arguments{
-\item{shock_seq}{n_exo x T numeric matrix of structural shocks}
+\item{shock_seq}{T x n_exo numeric matrix of structural shocks
+(rows = periods, columns = shocks; name the
+columns by \code{dr_slack$exo_names} -- a matrix
+named by shock on its ROWS, the old n_exo x T
+orientation, is transposed with a message, an
+unnamed n_exo x T or square one is an error)}
 
 \item{dr_slack}{Slack-regime DecisionRules (from solve_perturbation)}
 
@@ -55,7 +60,8 @@ NULL → zero initial state (standard IRF convention)}
 \value{
 Named list with:
   $regime_path -- integer vector (length T): final bitfield regime per period
-  $paths       -- n_endo x T matrix of simulated endogenous variable paths
+  $paths       -- T x n_endo matrix of simulated endogenous variable paths
+                  (rows = periods)
   $fb_norm     -- scalar: complementarity mismatch norm at the returned path
   $converged   -- logical
   $n_iter      -- integer: pivot steps (lemke) or Newton iterations (newton),

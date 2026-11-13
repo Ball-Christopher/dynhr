@@ -64,7 +64,9 @@ Kalman-filter posterior, and return its ranks as \code{ranks_kf}.  In
 the near-linear regime the two rank vectors must agree in distribution
 -- a check of the HARNESS, not of the likelihood.}
 
-\item{seed}{Base RNG seed; replication \code{r} uses \code{seed + r}.}
+\item{seed}{Base RNG seed; replication \code{r} uses the \code{r}-th of a
+family of statistically independent seeds derived from \code{seed} (the
+same for any \code{n_repl >= r} and any \code{cores}).}
 
 \item{cores}{Parallel replications via \code{parallel::mclapply}
 (default 1 = serial), matching \code{\link{tpf_order3_sbc}}.}

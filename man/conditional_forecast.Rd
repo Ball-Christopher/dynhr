@@ -25,6 +25,7 @@ conditional_forecast(
   P0 = NULL,
   units = c("auto", "deviations", "levels"),
   lik_init = c("auto", "stationary", "kappa", "diffuse", "fixed_unknown"),
+  me_variance = NULL,
   ...
 )
 }
@@ -34,7 +35,8 @@ conditional_forecast(
 \item{dr}{Decision rules from \code{solve_perturbation()}.}
 
 \item{data}{\code{T x n_obs} matrix of observables in
-\strong{levels}, used to anchor the forecast (the filtered terminal
+\strong{levels} (rows are periods; oriented by the rule
+\code{\link{kalman_filter}} documents for its \code{data}), used to anchor the forecast (the filtered terminal
 state \code{s_{T|T}} is extracted internally, subtracting the model's
 steady state as \code{\link{kalman_filter}()} does). May also be a list
 output from \code{\link{kalman_smoother}()} (then its
@@ -112,27 +114,28 @@ on-the-fly (slower).}
 
 \item{shock_means}{Deterministic shock MEANS (IRIS \code{vary}): every
 shock is \eqn{\varepsilon = m + u}, \eqn{u \sim N(0, Q)}, \eqn{m}
-deterministic. Either an \code{n_exo x (nrow(data) + horizon)} matrix
-(rows by name when named; \code{NA} or 0 = no shift, as in
+deterministic. Either a \code{(nrow(data) + horizon) x n_exo} matrix
+(rows are periods; columns by name when named, and then a subset of the
+shocks is allowed; \code{NA} or 0 = no shift, as in
 \code{\link{kalman_filter}}), or a NAMED numeric vector giving a constant
 mean for every period (unnamed shocks get 0). This is how a
 trend-with-drift model (no static steady state) is forecast: solve the
 decision rule with the drift switched off, carry the drift as the mean of
 its shock, and start the growth state on its balanced-growth path with
-\code{a0}. The sample columns enter the terminal-state filter; the horizon
-columns enter the forecast baseline through the transition. Conditions
+\code{a0}. The sample rows enter the terminal-state filter; the horizon
+rows enter the forecast baseline through the transition. Conditions
 (hard or soft, anticipated or not, with draws) are solved for the random
 part \eqn{u} around that mean-inclusive baseline; \code{shock_paths}
 reports the TOTAL \eqn{m + u}, and draws add \eqn{u}-noise only. When
 \code{data} is a \code{kalman_smoother()} result the sample part is
 already inside it, so \code{shock_means} then covers the horizon only
-(\code{horizon} columns). Refused (classed error) under a non-Gaussian
+(\code{horizon} rows). Refused (classed error) under a non-Gaussian
 \code{ctx$likelihood} (tpf, pskf, pkf, ppf, copf).}
 
-\item{shock_timing}{How to read the columns of \code{shock_means}: as in
-\code{\link{kalman_filter}}, \code{"dated"} (column t enters period t) or
-\code{"transition_next"} (column t drives the transition out of t, so it
-lands on t + 1; the last sample column is the first forecast period).}
+\item{shock_timing}{How to read the rows of \code{shock_means}: as in
+\code{\link{kalman_filter}}, \code{"dated"} (row t enters period t) or
+\code{"transition_next"} (row t drives the transition out of t, so it
+lands on t + 1; the last sample row is the first forecast period).}
 
 \item{a0, P0}{Initial state mean / covariance of the terminal-state filter,
 as in \code{\link{kalman_smoother}} (e.g. the balanced-growth start of a
@@ -156,7 +159,18 @@ once the unit-root level is identified. Refused (classed error) with a
 \code{kalman_smoother()} result as \code{data} or a non-Gaussian
 \code{ctx$likelihood}.}
 
-\item{...}{Currently unused.}
+\item{me_variance}{Measurement-error variance of the observables used by
+the terminal-state filter: \code{NULL} (default; no measurement error), a
+scalar, or one variance per observable (named by \code{obs_vars} or in
+their order), the same contract as \code{\link{kalman_filter}}. Carried by
+the Gaussian / Whittle terminal-state smoother only; with another
+\code{ctx$likelihood} (which reads \code{ctx$me_variance}) or a
+\code{kalman_smoother()} result as \code{data} a value is refused.
+When positive, the result also carries \code{$draws_me}, the forecast
+draws of the measured series.}
+
+\item{...}{Must be empty: an unrecognised argument (a misspelt
+\code{horizn}) is an error rather than silently ignored.}
 }
 \value{
 An object of class \code{"dynhr_cfcst"} with:
@@ -165,7 +179,15 @@ An object of class \code{"dynhr_cfcst"} with:
     \item{\code{paths_uncond}}{H x n_obs unconditional forecast paths.}
     \item{\code{shock_paths}}{H x n_shock matrix of implied shock paths.}
     \item{\code{draws}}{List of H x n_obs matrices (length \code{n_draws}),
-      or \code{NULL} if \code{n_draws = 0}.}
+      or \code{NULL} if \code{n_draws = 0}. These are paths of the model's
+      observables (the signal), without measurement error.}
+    \item{\code{draws_me}}{As \code{draws}, each with an independent
+      \eqn{N(0, \code{me_variance})} measurement error added per period and
+      observable: predictive paths of the \emph{measured} series (including
+      at conditioned cells -- a condition fixes the model concept, not the
+      measurement). \code{NULL} unless \code{me_variance > 0} and
+      \code{n_draws > 0}. The point paths carry no measurement error (it
+      has mean zero).}
     \item{\code{conditions}}{The \code{conditions} data frame (copy).}
     \item{\code{horizon}}{H.}
     \item{\code{type}, \code{method}}{As used.}

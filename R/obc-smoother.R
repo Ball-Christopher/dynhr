@@ -69,15 +69,15 @@
 #' case), and the smoothed shock uses only the \eqn{RR_t' \cdot r_t} future-info term
 #' (there is no gain to correct for: \eqn{K_t = 0} when nothing is observed).
 #'
-#' Note on indexing: smoothed_states[, t] is \eqn{s_{t-1|T}}, the smoothed state
+#' Note on indexing: smoothed_states[t, ] is \eqn{s_{t-1|T}}, the smoothed state
 #' that appeared *lagged* in period t's observation equation.  This differs
-#' from filtered_states[, t] = \eqn{s_{t|t}} returned by kalman_filter_obc_pkf
+#' from filtered_states[t, ] = \eqn{s_{t|t}} returned by kalman_filter_obc_pkf
 #' (the current-period updated state).
 #'
 #' @param kf_store  List returned by kalman_filter_obc_pkf(..., return_store = TRUE)
 #' @return List with:
-#'   \item{smoothed_states}{n_state x T: \eqn{s_{t-1|T}} (lagged state smoothed over all T obs)}
-#'   \item{smoothed_shocks}{n_exo x T: \eqn{\epsilon_{t|T}} (shocks smoothed over all T obs)}
+#'   \item{smoothed_states}{T x n_state (rows = periods): \eqn{s_{t-1|T}} (lagged state smoothed over all T obs)}
+#'   \item{smoothed_shocks}{T x n_exo (rows = periods): \eqn{\epsilon_{t|T}} (shocks smoothed over all T obs)}
 #' @export
 pkf_smoother_obc <- function(kf_store) {
   n_T     <- kf_store$n_T
@@ -137,5 +137,6 @@ pkf_smoother_obc <- function(kf_store) {
   if (!is.null(kf_store$exo_names))
     rownames(smoothed_shocks) <- kf_store$exo_names
 
-  list(smoothed_states = smoothed_states, smoothed_shocks = smoothed_shocks)
+  ## Rows = periods: T x n_state and T x n_exo.
+  list(smoothed_states = t(smoothed_states), smoothed_shocks = t(smoothed_shocks))
 }

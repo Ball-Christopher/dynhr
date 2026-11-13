@@ -48,11 +48,12 @@ A list with:
     lifetime value \code{V_1} (named \code{V0} for the period-0/period-1
     convention shared with \code{\link{hank_welfare_response}}'s
     \code{dV0}: the value as seen from the start of the transition).}
-  \item{V_path}{Numeric \code{(n_e*n_a) x T_h} matrix: column \code{t} is
-    the transition value \code{V_t}.}
+  \item{V_path}{Numeric \code{T_h x (n_e*n_a)} matrix (rows are
+    periods): row \code{t} is the transition value \code{V_t}.}
   \item{V_ss}{Numeric length-\code{n_e*n_a} vector: the terminal/baseline
     stationary value from \code{\link{hank_value_function}}.}
-  \item{dV_path}{\code{V_path - V_ss} (recycled column-wise): the EXACT
+  \item{dV_path}{\code{V_path} minus \code{V_ss} in every row
+    (\code{T_h x (n_e*n_a)}): the EXACT
     (non-marginal) per-period deviation from steady-state value.}
   \item{cev}{Numeric length-\code{n_e*n_a} vector: the exact per-cell
     consumption-equivalent variation, \code{\link{hank_cev}(V_ss, V0,

@@ -153,6 +153,106 @@
 # Main entry points
 # =====================================================================
 
+## Static residual of the model at a caller-supplied steady state: one static
+## evaluation. A finite-but-wrong ss (e.g. the true ss * 1.2) used to be
+## perturbed around silently. Warns (classed) when an equation's residual is
+## large RELATIVE to what rounding the steady state could produce.
+##
+## The rule: equation i warns when |F_i(ss, 0)| > rel_tol * sum_j |J_ij| |ss_j|
+## (J the static Jacobian at ss), floored at abs_floor. The right-hand side is
+## the residual a relative error of rel_tol in every ss entry can produce at
+## most (to first order), so a steady state rounded to 6 significant digits
+## (relative error <= 5e-7, e.g. pasted from Dynare's output) stays 20x below
+## the default rel_tol = 1e-5, while ss * (1 + 1e-3) and ss * 1.2 are 100x and
+## 2e4x above it on any equation the scaling does not leave invariant. The
+## previous absolute 1e-6 warned on such rounded steady states whenever an
+## entry was O(10) or larger.
+## Skipped for `model(linear)`, whose decision rule does not depend on the
+## linearisation point and whose static residual is legitimately non-zero on a
+## balanced-growth path (solve_steady_state(growth = TRUE)). OccBin models are
+## checked on their relax-regime rows, as solve_steady_state() solves them.
+## Non-finite rows are ignored (the Jacobian repair handles x/x at 0).
+## @noRd
+## I2-extended fail-loud, shared by solve_perturbation() and (per regime)
+## solve_ms_perturbation(): `params` must be a NAMED numeric vector carrying
+## every declared parameter that feeds the Jacobian, all finite.  An absent
+## parameter was otherwise read as 0 by the compiled Jacobian (review
+## 2026-11-11 F4: solve_ms_perturbation accepted a regime vector missing
+## `kappa` and gave the kappa = 0 likelihood).  Scope: declared params
+## referenced in an equation / planner objective / inlined #-define
+## (model$equation_param_names; all declared params for older model objects),
+## so shock-only params (a `stderr sigma_e` std) are not required.
+## @noRd
+.check_declared_params <- function(model, params, who) {
+  if (!is.numeric(params) || is.null(names(params)) ||
+      any(!nzchar(names(params))))
+    .dynhr_abort(who, ": the parameter vector must be a NAMED numeric vector ",
+                 "(names = the model's parameter names); got ",
+                 if (!is.numeric(params)) class(params)[1L] else
+                   "an unnamed (or partly unnamed) vector", ".",
+                 class = "dynhr_error_params_invalid")
+  decl <- model$equation_param_names
+  if (is.null(decl)) decl <- model$param_names
+  if (is.null(decl) || length(decl) == 0L) return(invisible(TRUE))
+  absent  <- setdiff(decl, names(params))
+  present <- decl[decl %in% names(params)]
+  nonfin  <- present[!is.finite(params[present])]
+  bad     <- union(absent, nonfin)
+  if (length(bad) > 0L)
+    .dynhr_abort(sprintf(
+      paste0("%s: %d declared parameter(s) are NA or absent ",
+             "at solve time (or non-finite): %s. These are typically computed in an external ",
+             "*_steadystate.m (which dynhr cannot run) or in a ",
+             "steady_state_model block that did not propagate. ",
+             "Use inject_params(model, named_vec) to fill them from an external ",
+             "(possibly superset) vector without errors, or set_param_values() ",
+             "for the exact model-param set, or pass the correct params argument. ",
+             "Cannot build a valid decision rule."),
+      who, length(bad), paste(head(bad, 10L), collapse = ", ")),
+      class = "dynhr_error_params_invalid")
+  invisible(TRUE)
+}
+
+.check_ss_residual <- function(model, compiled, ss, params, rel_tol = 1e-5,
+                               abs_floor = 1e-10) {
+  if (isTRUE(model$model_options$linear) ||
+      isTRUE(compiled$model$model_options$linear))
+    return(invisible(NULL))
+  rfn <- compiled$static$residuals_fn
+  if (!is.function(rfn) || !is.numeric(ss)) return(invisible(NULL))
+  vn <- compiled$model$var_names
+  y  <- ss[vn]
+  x0 <- stats::setNames(numeric(length(compiled$model$varexo_names)),
+                        compiled$model$varexo_names)
+  r <- rfn(y, x0, params, y)
+  jfn <- compiled$static$jacobian_fn
+  J <- if (is.function(jfn)) as.matrix(jfn(y, x0, params, y))
+  rows <- seq_along(r)
+  if (!is.null(compiled$occbin) && length(r) > length(vn))
+    rows <- compiled$occbin$regime_map[[1L]]$eq_indices
+  scale <- if (is.matrix(J) && nrow(J) == length(r) && ncol(J) == length(y))
+    as.numeric(abs(J) %*% abs(y)) else rep(max(1, abs(y)), length(r))
+  r <- r[rows]; scale <- scale[rows]
+  ok <- is.finite(r) & is.finite(scale)
+  r <- r[ok]; scale <- scale[ok]
+  if (length(r) == 0L) return(invisible(NULL))
+  thresh <- pmax(rel_tol * scale, abs_floor)
+  ratio  <- abs(r) / thresh
+  mr <- max(abs(r))
+  if (any(ratio > 1)) {
+    k <- which.max(ratio)
+    .dynhr_warn(sprintf(paste0(
+      "solve_perturbation: the supplied steady state does not solve the ",
+      "static model (equation %d: |residual| = %.3e, %.1fx what a %.0e ",
+      "relative error in the steady state could produce; max|residual| = ",
+      "%.3e); the decision rule is a linearisation around a point that is ",
+      "not a steady state. Use solve_steady() to obtain one."),
+      rows[ok][k], abs(r[k]), ratio[k], rel_tol, mr),
+      class = "dynhr_warning_steady_residual")
+  }
+  invisible(mr)
+}
+
 #' Solve the perturbation of a DSGE model (first to fifth order)
 #'
 #' Uses the Villemot (2011) method for first order: classify variables,
@@ -182,8 +282,21 @@
 #' @param h        Finite-difference step for numerical derivatives.
 #'                 Default 1e-4 for order 2, 1e-2 for order 4, 5e-2 for order 5.
 #' @param sigma3   (order=3 only) Optional n_u^3 vector of third-order shock
-#'                 product moments E[u_i u_j u_k]. Default NULL leaves the
-#'                 third-cumulant correction at zero (Gaussian shocks).
+#'                 product moments E[u_i u_j u_k]. Default NULL uses the
+#'                 model's shock law: zero for Gaussian shocks; for skewed
+#'                 shocks (\code{skew} alpha != 0, at the current
+#'                 \code{params}) the third central moment of the centred
+#'                 closed skew-normal law that \code{simulate_model_order3()}
+#'                 draws (covariance \code{Sigma_e}).  A skewed shock
+#'                 correlated with another shock is refused (class
+#'                 \code{dynhr_error_skew_correlated_order3}); pass
+#'                 \code{sigma3} explicitly then.
+#'                 Orders 4 and 5 are Gaussian-only: a non-zero
+#'                 \code{sigma3}, or a model with skewed shocks (\code{skew}
+#'                 alpha != 0), is refused with an error of class
+#'                 \code{dynhr_error_order45_nongaussian}, because the
+#'                 odd-sigma cross terms and fourth-cumulant terms such shocks
+#'                 require at those orders are not formed.
 #' @param loglinear Logical (default FALSE). When TRUE, returns the first-order
 #'                 decision rule expressed in log-deviations, matching Dynare's
 #'                 \code{loglinear} option. Each variable with a strictly positive
@@ -317,6 +430,18 @@ solve_perturbation <- function(model, compiled, ss, params, verbose = FALSE,
            "Provide an explicit `ss` vector or check the model calibration.")
     }
   } else if (inherits(ss, "dynhr_steady")) {
+    ## A non-converged solve is RETURNED by solve_steady() (so sweeps can
+    ## inspect it), not raised; perturbing around it gave a plausible rule
+    ## with bk_satisfied = TRUE and no warning. The estimation path treats a
+    ## non-converged steady state as infeasible (.solve_dr_for_theta) or
+    ## aborts (.dm_solve_at); do the same here.
+    if (!isTRUE(ss$converged))
+      .dynhr_abort(sprintf(paste0(
+        "solve_perturbation: the supplied steady state did not converge ",
+        "(converged = FALSE, max|residual| = %s). Fix the calibration or the ",
+        "starting values before perturbing around it."),
+        format(signif(ss$max_residual %||% NA_real_, 3))),
+        class = "dynhr_error_steady_not_converged")
     # If ss_result has updated params (from analytical SS filling in NAs),
     # merge them before extracting system matrices
     if (!is.null(ss[["params"]])) {
@@ -348,6 +473,19 @@ solve_perturbation <- function(model, compiled, ss, params, verbose = FALSE,
         length(ss), length(vn)))
     }
     names(ss) <- vn
+  }
+
+  ## A NAMED ss that lacks a model variable used to be zero-filled by name
+  ## lookup downstream, giving a Jacobian at the wrong point (at best a
+  ## "singular ghu system" warning). Refuse it.
+  if (is.numeric(ss)) {
+    .ss_missing <- setdiff(compiled$model$var_names, names(ss))
+    if (length(.ss_missing) > 0L)
+      .dynhr_abort(sprintf(paste0(
+        "solve_perturbation: the named steady state `ss` has no value for ",
+        "%d endogenous variable(s): %s. Supply every model variable."),
+        length(.ss_missing), paste(head(.ss_missing, 10L), collapse = ", ")),
+        class = "dynhr_error_steady_incomplete")
   }
 
   ## M25 fail-fast: a non-finite steady state (solve_steady did not converge, or
@@ -386,27 +524,9 @@ solve_perturbation <- function(model, compiled, ss, params, verbose = FALSE,
   ## declared params for older model objects without the field.  This excludes
   ## shock-only params (e.g. a `stderr sigma_e` std), which are absent from
   ## `params` by design and never enter the decision rule.
-  .decl <- model$equation_param_names
-  if (is.null(.decl)) .decl <- model$param_names
-  if (!is.null(.decl) && length(.decl) > 0L) {
-    .absent  <- setdiff(.decl, names(params))
-    .na_vals <- .decl[.decl %in% names(params) & is.na(params[.decl])]
-    .bad_params <- union(.absent, .na_vals)
-    if (length(.bad_params) > 0L) {
-      stop(sprintf(
-        paste0("solve_perturbation: %d declared parameter(s) are NA or absent ",
-               "at solve time: %s. These are typically computed in an external ",
-               "*_steadystate.m (which dynhr cannot run) or in a ",
-               "steady_state_model block that did not propagate. ",
-               "Use inject_params(model, named_vec) to fill them from an external ",
-               "(possibly superset) vector without errors, or set_param_values() ",
-               "for the exact model-param set, or pass the correct params argument. ",
-               "Cannot build a valid decision rule."),
-        length(.bad_params),
-        paste(head(.bad_params, 10L), collapse = ", ")),
-        call. = FALSE)
-    }
-  }
+  .check_declared_params(model, params, "solve_perturbation")
+
+  .check_ss_residual(model, compiled, ss, params)
 
   ## OccBin relax-regime dynamic Jacobian row selection.
   ## When the model has OccBin constraints, dyn$n_eq > n_endo: the dynamic
@@ -485,6 +605,11 @@ solve_perturbation <- function(model, compiled, ss, params, verbose = FALSE,
 
   dr1 <- .solve_from_system(sys, model, compiled, ss, params, verbose)
 
+  ## Orders 4-5 are Gaussian-only (no odd-sigma / fourth-cumulant terms):
+  ## refuse skewed shocks before the expensive higher-order solves.
+  if (order >= 4L)
+    .refuse_order45_nongaussian(order, sigma3, NULL, model, dr1$exo_names, params)
+
   ## When the user supplied a non-SS linearization center, attach it so
   ## callers can tell where the rule was evaluated.
   if (!is.null(center)) {
@@ -515,6 +640,19 @@ solve_perturbation <- function(model, compiled, ss, params, verbose = FALSE,
     dr3 <- solve_perturbation_order3(model, compiled, ss, params,
                                      dr2 = dr2, verbose = verbose)
     dr3 <- solve_sigma_cross(dr3, compiled, ss, params, Sigma_e = Sigma_e)
+    ## A model with skewed shocks: the third moment of the law the simulators
+    ## draw (covariance = the Sigma_e the rule carries, alpha at the
+    ## current params) -- the policy and simulate_model_order3() then agree.
+    ## An explicit `sigma3` wins.
+    if (is.null(sigma3)) {
+      alpha3 <- .get_shock_skewness(model, dr3$exo_names, params)
+      ## No forward-looking variable -> ghs3 is identically 0 whatever M3
+      ## is (solve_third_cumulant), so nothing to derive (or refuse).
+      if (any(alpha3 != 0) && any(sys$is_fwd | sys$is_mixed)) {
+        Se3 <- Sigma_e %||% .get_shock_cov(model, dr3$exo_names, params)
+        sigma3 <- .csn_shock_third_moment(Se3, alpha3, dr3$exo_names)
+      }
+    }
     if (!is.null(sigma3)) {
       dr3 <- solve_third_cumulant(dr3, compiled, ss, params, sigma3 = sigma3)
     }
@@ -651,7 +789,7 @@ solve_perturbation_fast <- function(model, compiled, ss, params,
 }
 
 .solve_from_system <- function(sys, model, compiled, ss, params, verbose,
-                               pencil_only = FALSE) {
+                               pencil_only = FALSE, qz_fail = "abort") {
   sys <- .reconcile_endo_exo(sys, model)
   n     <- sys$n_endo
   n_exo <- sys$n_exo
@@ -924,11 +1062,12 @@ solve_perturbation_fast <- function(model, compiled, ss, params,
   # ------------------------------------------------------------------
   # Step 5: QZ decomposition and Blanchard-Kahn check
   # ------------------------------------------------------------------
-  qz_result <- .solve_qz(D_mat, E_mat, n_minus, verbose)
-
-  if (is.null(qz_result)) {
-    stop("QZ decomposition failed. Install 'QZ' or 'geigen' package for better support.")
-  }
+  ## A LAPACK failure in the ordered QZ aborts (class dynhr_error_qz_failed);
+  ## qz_fail = "null" returns NULL instead, for the per-draw estimation solve,
+  ## which treats an unsolvable theta as infeasible (.solve_dr_for_theta()).
+  qz_result <- .solve_qz(D_mat, E_mat, n_minus, verbose,
+                         abort = !identical(qz_fail, "null"))
+  if (is.null(qz_result)) return(NULL)
 
   n_unstable_base <- qz_result$n_unstable_finite
   n_on_unit <- qz_result$n_on_unit_circle %||% 0L

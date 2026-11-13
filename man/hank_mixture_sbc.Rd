@@ -62,7 +62,9 @@ rw_shock$r}). Default \code{0.005} (50bps): verified to calibrate
 
 \item{T_data_seed}{Seed for the fixed reference measurement-error series.}
 
-\item{seed}{Base seed; replication \code{rep} uses \code{seed + rep}.}
+\item{seed}{Base seed; replication \code{rep} uses the \code{rep}-th of a
+family of statistically independent seeds derived from \code{seed} (the
+same for any \code{n_rep >= rep}).}
 
 \item{L_ranks}{Integer rank resolution: ranks are integers in
 \code{0..L_ranks-1}.}
@@ -126,7 +128,8 @@ series is simulated at the box centre with \code{set.seed(T_data_seed)}, and
 \code{me_var = (me_frac * min(per-column sd))^2} is fixed from it and shared
 (not truth-dependent) across every replication.
 
-\strong{Per-replication steps} (\code{set.seed(seed + rep)}): (1) direct-GE DGP
+\strong{Per-replication steps} (seeded with replication \code{rep}'s own
+child seed of \code{seed}): (1) direct-GE DGP
 truth at \code{theta*} (nonlinear snapshot \code{D1}, no clipping); (2) simulate a
 macro series \code{Y} from the truth state space, and draw two independent
 size-\code{N} multinomial cross-sections \code{Dhat0, Dhat1} from \code{D0, D1}, forming

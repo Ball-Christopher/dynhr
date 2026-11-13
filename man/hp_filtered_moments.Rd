@@ -15,7 +15,10 @@ hp_filtered_moments(dr, model, lambda = 1600, n_freq = 512L, params = NULL)
 
 \item{n_freq}{Number of quadrature points on \eqn{(0,\pi]}. Default 512.}
 
-\item{params}{Named numeric parameter vector (default: \code{model$param_values}).}
+\item{params}{Named numeric parameter vector, or \code{NULL} (default).
+The shock covariance comes from \code{params} when supplied, else from
+\code{dr$Sigma_e} (set by \code{\link{solve_perturbation}}), else from
+the model's shocks block at \code{model$param_values}.}
 }
 \value{
 A named list:

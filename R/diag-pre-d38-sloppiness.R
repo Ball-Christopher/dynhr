@@ -530,8 +530,10 @@ d38_sloppiness <- function(theta,
 #' @param model       Optional parsed dynhr model (used to build
 #'   \code{log_post_fn} when neither \code{hessian} nor \code{log_post_fn}
 #'   are supplied).
-#' @param data        n_obs x T data matrix (observables x time), required
-#'   when \code{model} is supplied.
+#' @param data        \code{T x n_obs} data matrix (rows are periods, columns
+#'   the \code{obs_vars}), required when \code{model} is supplied. Oriented by
+#'   the rule documented in \code{\link{kalman_filter}} (names decide; an
+#'   unnamed \code{n_obs x T} or square sample is refused).
 #' @param prior_spec  Prior specification list, as from
 #'   \code{make_log_posterior}.
 #' @param obs_vars    Character vector of observable variable names, required
@@ -582,7 +584,8 @@ diag_sloppiness <- function(theta,
       ))
     log_post_fn <- make_log_posterior(
       model        = model,
-      data         = data,
+      data         = .orient_time_matrix(data, obs_vars, "data",
+                                         "diag_sloppiness"),
       prior_spec   = prior_spec,
       obs_vars     = obs_vars,
       compiled     = compiled,

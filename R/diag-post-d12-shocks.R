@@ -46,7 +46,7 @@
     D_mat = ss$D_mat, Sigma_e = ss$Sigma_e,
     n_state = ns + ne, n_shock = ne, n_obs = no,
     state_names = c(ss$state_names, paste0(".d12_eps_", ss$shock_names)),
-    shock_names = ss$shock_names)
+    shock_names = ss$shock_names, obs_names = ss$obs_names)
   ## A hand-built list carries no intercept, so pass the original one.
   d_use <- if (!is.null(d)) d else if (!is.null(ss$d)) ss$d else 0
   sm <- .kalman_smoother_ss(data, sa, d = d_use, me_variance = me_variance,
@@ -58,7 +58,10 @@
                   diag(as.matrix(sm$smoothed_cov[idx, idx, t])), numeric(ne)),
                 nrow = ne)                                   # ne x T
   prior_var <- matrix(diag(as.matrix(ss$Sigma_e)), ne, TT)   # ne x T
-  if (!is.null(shock_scale)) prior_var <- prior_var * as.matrix(shock_scale)^2
+  if (!is.null(shock_scale))                                 # T x ne in
+    prior_var <- prior_var * t(.kf_time_in(shock_scale, ss$shock_names,
+                                           "shock_scale", "D12",
+                                           n_periods = TT))^2
   out <- t(sqrt(pmax(prior_var - V, 0)))                     # T x ne
   colnames(out) <- ss$shock_names
   out

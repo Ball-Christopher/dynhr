@@ -63,8 +63,10 @@
 #' covariance does not exist (the same rule \code{kalman_filter(lik_init =
 #' "auto")} uses to fall back to the diffuse initialisation).
 #'
-#' @param data      Observations: \code{T x n_obs} (columns named by
-#'   \code{obs_vars}; extra columns are ignored) or \code{n_obs x T}.
+#' @param data      Observations: \code{T x n_obs}, rows are periods (columns
+#'   named by \code{obs_vars}; extra named columns are ignored). Unnamed
+#'   data follows \code{\link{kalman_filter}}'s orientation rule (an unnamed
+#'   \code{n_obs x T} or square matrix is refused).
 #' @param dr        Decision rule (output of \code{\link{solve_perturbation}}).
 #' @param model     Parsed model object.
 #' @param params    Named numeric parameter vector (a full vector, or the
@@ -168,9 +170,9 @@ d41_innovation_whiteness <- function(data, dr, model, params, obs_vars,
   ## offset (stale steady state, wrong DD) is invisible to it and reaches its
   ## acf1 only as m^2/(1 + m^2). E[z] = 0 with sd 1/sqrt(T) under the model.
   by_obs <- diag_obj$by_obs
-  zm <- diag_obj$z
-  n_ok <- rowSums(is.finite(zm))
-  by_obs$mean_z <- ifelse(n_ok >= 2L, rowSums(zm, na.rm = TRUE) / pmax(n_ok, 1L),
+  zm <- diag_obj$z                     # T x n_obs
+  n_ok <- colSums(is.finite(zm))
+  by_obs$mean_z <- ifelse(n_ok >= 2L, colSums(zm, na.rm = TRUE) / pmax(n_ok, 1L),
                           NA_real_)
   by_obs$z_mean <- by_obs$mean_z * sqrt(n_ok)
 
@@ -247,7 +249,7 @@ d41_innovation_whiteness <- function(data, dr, model, params, obs_vars,
 
 
 ## Kurtosis-robust z-statistic for "sample variance of the standardised
-## innovations equals 1", per observable (row of `z`).
+## innovations equals 1", per observable (column of the T x n_obs `z`).
 ##
 ##   z_var = (s_i^2 - 1) / sqrt((kappa_i - 1) / T_i),   kappa_i = m4 / m2^2
 ##
@@ -260,7 +262,7 @@ d41_innovation_whiteness <- function(data, dr, model, params, obs_vars,
 .d41_robust_var_z <- function(z, by_obs, n_min = 20L) {
   by_obs$kurt <- NA_real_
   for (i in seq_len(nrow(by_obs))) {
-    zi <- z[i, ]
+    zi <- z[, i]
     zi <- zi[is.finite(zi)]
     n_i <- length(zi)
     if (n_i < 4L) next
@@ -278,22 +280,16 @@ d41_innovation_whiteness <- function(data, dr, model, params, obs_vars,
   by_obs
 }
 
-## Observation matrix in kf_innovation_diagnostics' n_obs x T orientation.
-## Named columns (the orchestrator's T x n_obs convention) are selected by
-## name, so extra columns and T == n_obs are both handled; unnamed input is
-## resolved by dimension, T x n_obs first (the documented orchestrator form).
+## Observation matrix in kf_innovation_diagnostics' T x n_obs orientation
+## (rows = periods). Named columns are selected by name, so extra columns are
+## ignored; anything else goes through the package-wide orientation rule
+## (R/time-orientation.R), which refuses an unnamed old n_obs x T or square
+## matrix instead of guessing from the shape.
 .d41_obs_matrix <- function(data, obs_vars) {
   Y <- as.matrix(data)
-  n_obs <- length(obs_vars)
   if (!is.null(colnames(Y)) && all(obs_vars %in% colnames(Y)))
-    return(t(Y[, obs_vars, drop = FALSE]))
-  if (!is.null(rownames(Y)) && all(obs_vars %in% rownames(Y)))
-    return(Y[obs_vars, , drop = FALSE])
-  if (ncol(Y) == n_obs) return(t(Y))
-  if (nrow(Y) == n_obs) return(Y)
-  .dynhr_abort(sprintf(paste0(
-    "D41: data (%d x %d) matches neither T x %d nor %d x T, and its dimnames ",
-    "do not contain all of obs_vars."), nrow(Y), ncol(Y), n_obs, n_obs))
+    return(Y[, obs_vars, drop = FALSE])
+  .kf_time_in(Y, obs_vars, "data", "D41")
 }
 
 ## Plots: (1) the z-statistics per observable against the flag threshold,
@@ -337,10 +333,10 @@ d41_innovation_whiteness <- function(data, dr, model, params, obs_vars,
         "Shaded/dashed = +/-%g flag threshold."), z_crit),
       x = "z-statistic", y = NULL, colour = NULL, shape = NULL)
 
-  z <- diag_obj$z
-  n_obs <- nrow(z); n_t <- ncol(z)
-  long <- data.frame(Period = rep(seq_len(n_t), each = n_obs),
-                     obs = factor(rep(by_obs$obs_var, n_t),
+  z <- diag_obj$z                      # T x n_obs
+  n_obs <- ncol(z); n_t <- nrow(z)
+  long <- data.frame(Period = rep(seq_len(n_t), times = n_obs),
+                     obs = factor(rep(by_obs$obs_var, each = n_t),
                                   levels = by_obs$obs_var),
                      z = as.numeric(z))
   p_s <- ggplot2::ggplot(long, ggplot2::aes(x = Period, y = z)) +

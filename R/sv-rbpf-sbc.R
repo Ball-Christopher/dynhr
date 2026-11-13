@@ -29,30 +29,39 @@
 #'
 #' Runtime is dominated by \code{n_repl * (n_draws + n_warmup)} RB-PF
 #' evaluations (compiled kernel: ~10ms at the defaults), i.e. roughly
-#' 40s per replication at the defaults. Use \code{cores > 1} to run
+#' 2.5 minutes per replication at the defaults. Use \code{cores > 1} to run
 #' replications in parallel (forked; not on Windows).
 #'
 #' @param n_repl Number of SBC replications (default 100).
 #' @param T_obs Sample length of each simulated panel (default 60).
 #' @param n_particles RB-PF particles per likelihood evaluation (default 500).
 #' @param n_draws,n_warmup Post-warmup / warmup pseudo-marginal RWMH draws
-#'   (defaults 8000 / 1500; the warmup adapts a full proposal COVARIANCE
+#'   (defaults 32000 / 1500; the warmup adapts a full proposal COVARIANCE
 #'   (Haario-style) plus a global scale toward 25\% acceptance, both frozen
-#'   for the sampling phase, and is discarded).
+#'   for the sampling phase, and is discarded). The chain must be long
+#'   enough that the \code{thin_L} kept draws are close to independent:
+#'   at 8000 draws the median effective sample size of \code{mu} and
+#'   \code{rho} is about 150 (worst replications below 50), which
+#'   over-disperses the ranks and shows up as a chi-squared rejection with
+#'   excess saturated ranks at a few hundred replications; at 32000 it is
+#'   about 600. A classed warning (\code{dynhr_warning_sbc_low_ess}) is
+#'   raised when the median effective sample size of any parameter is below
+#'   \code{5 * thin_L}.
 #' @param thin_L Number of (approximately independent) thinned draws used for
 #'   the rank statistic (default 75; ranks take values 0..thin_L).
-#' @param seed Base RNG seed; replication r uses \code{seed + r} (so results
+#' @param seed Base RNG seed; replication seeds are drawn from one stream started at \code{seed} (so results
 #'   are reproducible and independent of \code{cores}).
 #' @param cores Parallel replications via \code{parallel::mclapply}
 #'   (default 1 = serial).
 #' @return A list: \code{ranks} (\code{n_repl x 6} matrix, columns named by
 #'   parameter), \code{uniformity} (from \code{sbc_uniformity_test()}),
 #'   \code{accept_rates}, \code{loglik_sd_at_truth} (per-replication PF noise
-#'   diagnostic), and \code{settings}.
+#'   diagnostic), \code{ess} (\code{n_repl x 6} split-chain effective sample
+#'   size of each post-warmup chain), and \code{settings}.
 #' @seealso \code{\link{make_log_posterior_sv_rbpf}}, \code{sbc_uniformity_test()}
 #' @export
 sv_rbpf_sbc <- function(n_repl = 100L, T_obs = 60L, n_particles = 500L,
-                        n_draws = 8000L, n_warmup = 1500L, thin_L = 75L,
+                        n_draws = 32000L, n_warmup = 1500L, thin_L = 75L,
                         seed = 20260712L, cores = 1L) {
   ## ---- canonical model: 2 AR(1) observables, calibrated dynamics ---------
   phi <- c(0.8, 0.5); sig <- c(1.0, 0.6)
@@ -109,7 +118,7 @@ sv_rbpf_sbc <- function(n_repl = 100L, T_obs = 60L, n_particles = 500L,
   }
 
   run_one <- function(r) {
-    set.seed(seed + r)
+    set.seed(rep_seeds[r])
     ## 1. theta* ~ prior (bounded-support draws are the sampler's job).
     theta_star <- prior_sampler()[par_nm]
     ## 2. data | theta*.
@@ -142,6 +151,7 @@ sv_rbpf_sbc <- function(n_repl = 100L, T_obs = 60L, n_particles = 500L,
     n_tot <- n_warmup + n_draws
     keep_every <- max(1L, floor(n_draws / thin_L))
     kept <- matrix(NA_real_, nrow = ceiling(n_draws / keep_every), ncol = n_par)
+    full <- matrix(NA_real_, n_draws, n_par)
     k_i <- 0L; n_acc <- 0L
     for (it in seq_len(n_tot)) {
       prop <- cur_th + exp(log_scale) * as.numeric(L_prop %*% rnorm(n_par))
@@ -167,6 +177,7 @@ sv_rbpf_sbc <- function(n_repl = 100L, T_obs = 60L, n_particles = 500L,
         }
       } else {
         j <- it - n_warmup
+        full[j, ] <- cur_th
         if (j %% keep_every == 0L) {
           k_i <- k_i + 1L
           kept[k_i, ] <- cur_th
@@ -176,12 +187,20 @@ sv_rbpf_sbc <- function(n_repl = 100L, T_obs = 60L, n_particles = 500L,
     kept <- kept[seq_len(k_i), , drop = FALSE]
     ranks <- vapply(seq_len(n_par),
                     function(j) sum(kept[, j] < theta_star[j]), numeric(1))
-    list(ranks = ranks, accept = n_acc / n_draws, ll_sd = ll_sd, L = k_i)
+    ess <- apply(full, 2L, function(x)
+      if (stats::var(x) > 0) .d5_ess_basic(.d5_split(matrix(x, ncol = 1L))) else 1)
+    list(ranks = ranks, accept = n_acc / n_draws, ll_sd = ll_sd, L = k_i,
+         ess = ess)
   }
 
   ## run_one() re-seeds (seed + r) in THIS process on the serial path; restore
   ## the caller's RNG stream when this function exits.
   .local_seed(seed)
+  ## Per-replication seeds are drawn from ONE stream. Consecutive integer seeds
+  ## (seed + r) are not independent streams under Mersenne-Twister: the first
+  ## normal draw -- here the true mu_1 -- is serially dependent across
+  ## neighbouring seeds (lag-1 correlation -0.05, 23 se at 2e5 seeds).
+  rep_seeds <- sample.int(.Machine$integer.max, n_repl)
   reps <- if (cores > 1L) {
     parallel::mclapply(seq_len(n_repl), run_one, mc.cores = cores,
                        mc.preschedule = FALSE)
@@ -204,10 +223,24 @@ sv_rbpf_sbc <- function(n_repl = 100L, T_obs = 60L, n_particles = 500L,
   ## silently wrong whenever the top rank never appears by chance (#7
   ## one-liner, adversarial review, mirrors the tpf_order3_sbc() fix).
   L_support <- if (length(reps)) reps[[1L]]$L else NULL
+  ess_mat <- do.call(rbind, lapply(reps, function(x) x$ess))
+  colnames(ess_mat) <- par_nm
+  ess_med <- apply(ess_mat, 2L, stats::median)
+  low <- ess_med < 5 * L_support
+  if (any(low))
+    .dynhr_warn(sprintf(paste0(
+      "sv_rbpf_sbc: median chain effective sample size below 5 * L = %d for %s. ",
+      "The %d kept draws are not close to independent, so the ranks are ",
+      "over-dispersed and the uniformity verdict is unreliable; raise n_draws."),
+      as.integer(5 * L_support),
+      paste(sprintf("%s (%.0f)", par_nm[low], ess_med[low]), collapse = ", "),
+      as.integer(L_support)),
+      class = "dynhr_warning_sbc_low_ess", call. = FALSE)
   list(ranks = ranks_mat,
        uniformity = sbc_uniformity_test(ranks_mat, L = L_support),
        accept_rates = vapply(reps, function(x) x$accept, numeric(1)),
        loglik_sd_at_truth = vapply(reps, function(x) x$ll_sd, numeric(1)),
+       ess = ess_mat,
        settings = list(n_repl = n_repl, T_obs = T_obs,
                        n_particles = n_particles, n_draws = n_draws,
                        n_warmup = n_warmup, thin_L = thin_L, seed = seed))

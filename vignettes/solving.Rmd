@@ -377,7 +377,7 @@ two_dr <- solve_perturbation(two, two_cm, two_ss, two$param_values,
 specs  <- obc_parse_tags(two)
 sys    <- dynhr:::extract_system_matrices(two_cm, two_ss, two$param_values)
 
-lcp <- solve_obc_lcp(t(shocks), two_dr, sys, specs)   # shocks: n_exo x T
+lcp <- solve_obc_lcp(shocks, two_dr, sys, specs)   # shocks: T x n_exo
 lcp$converged
 lcp$regime_path[1:5]
 ```
@@ -620,7 +620,9 @@ chain, the filtering, smoothing and IRF stack is regime-aware:
 
 ```{r ms, eval = FALSE}
 # ms_spec declares the regimes, their parameter values and the transition
-# matrix; see ?ms_kim_filter for its structure.
+# matrix; see ?ms_kim_filter for its structure. Y is T x n_obs (rows =
+# periods, columns named by obs_vars); filt$regime_probs and the smoother's
+# probabilities / states come back T x n (rows = periods) as well.
 filt <- ms_kim_filter(data = Y, dr = dr, model = model, params = params,
                       obs_vars = obs_vars, ms_spec = ms_spec,
                       return_regime_probs = TRUE)

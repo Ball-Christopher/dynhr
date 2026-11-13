@@ -442,6 +442,7 @@ solve_steady_state <- function(model, compiled = NULL, params = NULL,
   # We wrap the static residuals_fn and jacobian_fn to select those rows,
   # giving downstream solvers (Newton, nleqslv, optim) a square n_endo system.
   # This is a LOCAL rebinding only - the compiled object on disk is unchanged.
+  relax_rows <- NULL
   if (inherits(compiled, "dynhr_compiled") &&
       !is.null(compiled$occbin) &&
       compiled$static$n_eq > length(endo_names)) {
@@ -617,7 +618,23 @@ solve_steady_state <- function(model, compiled = NULL, params = NULL,
     if (has_ssm) result_lin$params <- ss_params
     return(.as_dynhr_steady(result_lin))
   }
-  
+
+  ## The numerical cascade needs a SQUARE static system. A model with more or
+  ## fewer equations than endogenous variables used to reach nleqslv and die
+  ## there with "Length of fn result <> length of x!". Free-instrument Ramsey /
+  ## discretionary models (fewer equations by design) never get here: their
+  ## entry points either refuse them or bypass this solve (ramsey_policy(),
+  ## discretionary_policy()). OccBin's extra bind rows were selected out above.
+  n_eq_ss <- if (!is.null(relax_rows)) length(relax_rows)
+             else length(model$equations)
+  if (n_eq_ss != n)
+    .dynhr_abort(sprintf(paste0(
+      "solve_steady_state: the model has %d equation(s) but %d endogenous ",
+      "variable(s); the steady-state system must be square. Check the `var` ",
+      "declaration against the model block (a free-instrument policy model ",
+      "is solved by ramsey_model() / discretionary_policy(), not directly)."),
+      n_eq_ss, n), class = "dynhr_error_model_not_square")
+
   # Initial guess
   if (is.null(y0)) {
     if (length(model$initval) > 0) {

@@ -240,8 +240,8 @@ qr_static_transform_cpp <- function(f_static, f_minus_r, f_zero_r, f_plus_r, f_e
     .Call(`_dynhr_qr_static_transform_cpp`, f_static, f_minus_r, f_zero_r, f_plus_r, f_exo_r)
 }
 
-sv_rbpf_loglik_cpp <- function(Y, TT, ZZ, RR, DD, Sigma_e, d, P0, sv_idx1, mu, rho, seta, n_particles, me_diag) {
-    .Call(`_dynhr_sv_rbpf_loglik_cpp`, Y, TT, ZZ, RR, DD, Sigma_e, d, P0, sv_idx1, mu, rho, seta, n_particles, me_diag)
+sv_rbpf_loglik_cpp <- function(Y, TT, ZZ, RR, DD, Sigma_e, d, P0, sv_idx1, mu, rho, seta, n_particles, me_diag, n_burn = 0L) {
+    .Call(`_dynhr_sv_rbpf_loglik_cpp`, Y, TT, ZZ, RR, DD, Sigma_e, d, P0, sv_idx1, mu, rho, seta, n_particles, me_diag, n_burn)
 }
 
 tpf_propagate_particles <- function(particles, shocks, hx, hu, hxx, hxu, huu, hss) {

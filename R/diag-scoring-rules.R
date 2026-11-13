@@ -232,7 +232,9 @@
 .logs_kde <- function(x, y, bw = NULL) {
   x <- as.numeric(x)
   if (is.null(bw)) {
-    bw <- tryCatch(stats::bw.nrd0(x), error = function(e) NA_real_)
+    ## bw.nrd0() stops on < 2 points or an NA; pre-check those instead of
+    ## catching every error (review 2026-11-10 F8).
+    bw <- if (length(x) >= 2L && !anyNA(x)) stats::bw.nrd0(x) else NA_real_
     ## bw.nrd0 returns 0 for a degenerate ensemble; fall back to a tiny
     ## positive bandwidth so the score is Inf-or-finite, never NaN.
     if (!is.finite(bw) || bw <= 0)

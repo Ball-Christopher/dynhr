@@ -15,7 +15,11 @@ compute_irfs(dr, model, n_periods = 40L, shock_size = 1, params = NULL)
 
 \item{shock_size}{Size of shock in std dev units (default 1)}
 
-\item{params}{Named numeric parameter vector (default: model$param_values)}
+\item{params}{Named numeric parameter vector used ONLY to select the shock
+covariance of the impulse (the dynamics are those of \code{dr}; the model
+is not re-solved).  \code{NULL} (default) uses \code{dr$Sigma_e} (set by
+\code{solve_perturbation()}), else the model's shocks block.  The same
+rule applies to the higher-order and OBC IRF functions.}
 }
 \value{
 An \code{IRFCollection} object: a named list with one entry per

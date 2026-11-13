@@ -16,8 +16,12 @@ pruned_ss_loglik(
 \item{pss}{A \code{pruned_ss} object from
 \code{\link{pruned_state_space}}.}
 
-\item{Y}{Observation matrix (\code{n_obs x T} or \code{T x n_obs};
-transposed automatically when \code{ncol(Y) == n_obs}).  \code{NA}
+\item{Y}{Observation matrix, \code{T x n_obs} (rows are periods,
+columns the \code{obs_vars}). Oriented by the package-wide rule: columns
+named by \code{obs_vars} are matched by name; rows named by them (the
+old \code{n_obs x T} layout) are transposed with a message; an unnamed
+\code{n_obs x T} or square matrix is refused (class
+\code{dynhr_error_orientation}) -- never guessed from the shape.  \code{NA}
 entries are handled with an exact PARTIAL measurement update: for each
 period only the non-\code{NA} observables enter the Kalman update (their
 rows/cols of \code{ZZ}/\code{HH}/\code{SS} and the corresponding
@@ -38,8 +42,10 @@ to simulated deviations before filtering.}
 \item{obs_vars}{Character vector of observed variable names (must be a
 subset of \code{pss$endo_names}).}
 
-\item{me_variance}{Scalar measurement-error jitter added to the diagonal
-of the innovation covariance (default 0). CAUTION: when the model
+\item{me_variance}{Measurement-error variance added to the diagonal of
+the observation covariance (default 0): a scalar (\eqn{H = me\,I}) or one
+variance per observable (\eqn{H = \mathrm{diag}(me)}; named entries are
+matched to \code{obs_vars}), as in \code{\link{kalman_filter}}. CAUTION: when the model
 implies a near-degenerate innovation covariance (some combination of
 observables is almost perfectly predictable one step ahead), even a
 tiny floor (1e-8) can dominate the smallest eigenvalue of F and bias
@@ -89,14 +95,15 @@ step.
 \section{Mixed-frequency data}{
 
 The exact partial-NA update makes \code{Y} a natural home for
-mixed-frequency panels: give each observable its own row and set the
+mixed-frequency panels: give each observable its own column and set the
 periods where it is unobserved to \code{NA}.  For example, a "monthly"
 series observed every period alongside a "quarterly" series observed
 only every third period:
 \preformatted{
   T_n <- 120L
-  Y <- rbind(monthly_series, quarterly_series)   # 2 x T_n, levels
-  Y[2, -seq(3L, T_n, by = 3L)] <- NA              # quarterly: keep every 3rd
+  Y <- cbind(monthly_var = monthly_series,
+             quarterly_var = quarterly_series)  # T_n x 2, levels
+  Y[-seq(3L, T_n, by = 3L), 2] <- NA             # quarterly: keep every 3rd
   ll <- pruned_ss_loglik(pss, Y, c("monthly_var", "quarterly_var"))
 }
 Each period's log-density uses only the observables that are non-\code{NA}
@@ -119,8 +126,8 @@ pss <- pruned_state_space(dr2, m, m$param_values)
 T_n <- 120L
 sim <- simulate_model_order2(dr2, n_periods = T_n, burn_in = 1000L,
                               model = m, pruning = TRUE)
-Y <- t(sim[, c("c", "y")]) + dr2$ys[c("c", "y")]
-Y[2, -seq(3L, T_n, by = 3L)] <- NA
+Y <- sweep(sim[, c("c", "y")], 2L, dr2$ys[c("c", "y")], "+")  # T_n x 2
+Y[-seq(3L, T_n, by = 3L), "y"] <- NA
 
 ll <- pruned_ss_loglik(pss, Y, c("c", "y"), me_variance = 1e-4)
 ll

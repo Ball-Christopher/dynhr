@@ -70,7 +70,8 @@ regimes do not depend on the units of the model.}
 An object of class \code{dynhr_ramsey_obc_pf} containing:
   \item{Y}{T x n_endo_orig matrix: paths of original endogenous variables.}
   \item{Y_full}{T x (n_endo_orig + n_mult) matrix: paths including multipliers.}
-  \item{regime}{n_spec x T logical matrix (TRUE = binding).}
+  \item{regime}{T x n_spec logical matrix (rows = periods; TRUE =
+    binding).}
   \item{ramsey_result}{The underlying \code{dynhr_ramsey_result2} object.}
   \item{converged}{Logical: whether Newton converged.}
   \item{welfare}{List with steady and path-based welfare values.}

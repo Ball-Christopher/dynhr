@@ -62,11 +62,11 @@ but non-negligible innovation (data the model deems impossible):
 \code{"skip"} is the Dynare convention (finite value, warning). See
 \code{\link{kalman_filter}} \code{singular_obs}.}
 
-\item{me_extra}{\code{n_obs x T} matrix of per-period extra measurement
+\item{me_extra}{\code{T x n_obs} matrix (rows are periods) of per-period extra measurement
 error variances (resolved from a \code{filter_tunes} block); \code{NULL}
 = no filter tunes.  Must be \code{NULL} when \code{plan} is supplied.}
 
-\item{shock_scale}{\code{n_exo x T} matrix of per-period shock standard
+\item{shock_scale}{\code{T x n_exo} matrix (rows are periods) of per-period shock standard
 deviation scale factors (resolved from a \code{heteroskedastic_shocks}
 block); \code{NULL} = no heteroskedastic shocks.  Must be \code{NULL}
 when \code{plan} is supplied.}

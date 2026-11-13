@@ -31,7 +31,10 @@ make_log_posterior(
 \arguments{
 \item{model}{dynhr_mod (from parse_mod())}
 
-\item{data}{Observation matrix (T x n_obs), columns = obs_vars}
+\item{data}{Observation matrix, \code{T x n_obs} (rows are
+periods), columns = obs_vars. Oriented once, at build time, by the rule
+\code{\link{kalman_filter}} documents for its \code{data} (names decide;
+an unnamed \code{n_obs x T} or square sample is refused).}
 
 \item{prior_spec}{Prior specification data.frame (from extract_prior_spec())}
 
@@ -57,7 +60,21 @@ orders >= 2 provide skewness/kurtosis content.
 The Whittle likelihood requires a stationary, complete (no NA) panel;
 it supports band-restricted estimation via \code{freq_band}.
 The PSKF uses the CSN state-space recursion; set \code{skew} in the
-shocks block (or \code{estimated_params}) to specify shock shapes.}
+shocks block (or \code{estimated_params}) to specify shock shapes.
+\strong{Skewed-shock convention (one rule package-wide, since
+0.9.4.78):} the shock covariance \eqn{\Sigma_e} -- \code{stderr},
+\code{var}, \code{corr}, estimated \code{stderr} / \code{corr} and
+their priors -- is the TRUE covariance of the shocks; the shocks are
+mean-zero; \code{skew} alpha sets only the shape (skew-normal,
+\eqn{\delta = \alpha/\sqrt{1+\alpha^2}}, scale
+\eqn{\omega = \sigma/\sqrt{1 - 2\delta^2/\pi}}). The simulators,
+the PSKF (orders 1 and 2), the order-2/3 risk terms and the order-3
+third moment all use it. (Before 0.9.4.78 the PSKF and the simulators
+read \code{stderr} as the skew-normal scale \eqn{\omega}, so a
+\code{stderr} estimate under skewness was \eqn{\omega}, not the
+shock's standard deviation.) A skewed shock correlated with others is
+supported; a covariance that no skew-normal law with those alphas can
+attain is refused (class \code{dynhr_error_skew_cov_unattainable}).}
 
 \item{lik_init}{Kalman filter \code{P0} initialization, forwarded to
 \code{\link{kalman_filter}} on the \code{likelihood = "gaussian"} path
@@ -116,15 +133,17 @@ Applies to \code{likelihood = "gaussian"}; recorded on the closure as
 \code{attr(, "filter_method")$singular_obs}. Invalid values have class
 \code{dynhr_error_singular_obs}.}
 
-\item{me_extra}{Optional \code{n_obs x T} matrix of ADDITIONAL per-period
+\item{me_extra}{Optional \code{T x n_obs} matrix of ADDITIONAL per-period
 measurement-error variance, added on top of \code{me_variance}. Rows are
-observables in \code{obs_vars} order and columns are periods, so a row
-swap is a different model -- see the multi-value testing note in
-\code{CLAUDE.md}.}
+periods and columns are observables (by name, or in \code{obs_vars}
+order when unnamed), so a column swap is a different model -- see the
+multi-value testing note in \code{CLAUDE.md}. Oriented by the same rule
+as \code{data} (see \code{\link{kalman_filter}}).}
 
-\item{shock_scale}{Optional \code{n_exo x T} matrix of KNOWN per-period
+\item{shock_scale}{Optional \code{T x n_exo} matrix of KNOWN per-period
 shock standard-deviation scale factors (the deterministic-volatility
-path). Rows are shocks in declaration order.}
+path). Rows are periods; columns are shocks (by name, or in declaration
+order when unnamed).}
 
 \item{freq_band}{Numeric(2) \code{c(lo, hi)} in radians (only used when
 \code{likelihood = "whittle"}). Restricts the Whittle sum to Fourier
@@ -234,6 +253,47 @@ spec runner (\code{\link{run_estimation}}, \code{\link{run_mode_finding}},
 \code{\link{run_full_estimation}}) applies every block. The same holds for
 \code{\link{make_posterior}} and \code{\link{dm_posterior}}, which call
 this constructor.
+}
+
+\section{Whittle \code{debias}}{
+
+\code{likelihood = "whittle"} takes \code{debias} through \code{...} (in an
+estimation spec: \code{likelihood_spec("whittle", extra = list(debias =
+TRUE))}). \code{debias = FALSE} (the default; it was \code{TRUE} through
+0.9.4.77) is the
+standard Whittle likelihood, built on the model spectral density
+\eqn{f(\omega_j)}. \code{debias = TRUE} is the debiased Whittle likelihood
+of Sykulski, Olhede, Guillaumin, Lilly and Early (2019, Biometrika), which
+replaces \eqn{f(\omega_j)} by the expected periodogram
+\eqn{E_\theta[I(\omega_j)]} (a Hermitian matrix for two or more
+observables). The analytic gradient (\code{\link{make_posterior_grad}}) and
+every estimation path use the setting of the posterior they differentiate.
+
+Measured against the exact Gaussian log-likelihood (expected values under
+the true parameters, block-Toeplitz covariance of the demeaned sample):
+\itemize{
+  \item Standard: an O(1)-nat error that does not grow with \eqn{T}; its
+    expected maximiser carries the O(1/T) Whittle bias (rbc2shock with
+    observables \code{c}, \code{y}: +0.015 in \code{rho_a} at
+    \eqn{T = 100}); posterior sd of \code{rho_a} 1.3x too small at
+    \eqn{T = 100} and \eqn{200} against the Monte Carlo sd of its estimator.
+  \item Debiased: the expected maximiser is exactly the true value, but with
+    two or more persistent / strongly co-moving observables the error at
+    distant parameter vectors GROWS with \eqn{T} (rbc2shock: loglik
+    difference to \code{(rho_a, rho_b) = (0.8, 0.97)} understated by
+    12-23\% at \eqn{T = 200}-\eqn{2000}, standard within 3.4\%; a bivariate
+    VAR with shock correlation 0.999 loses 84-98\%) and the posterior is
+    too narrow (sd of \code{rho_a} 2.8x too small at \eqn{T = 100}, 1.9x
+    at \eqn{T = 200}).
+  \item Debiasing was the better of the two in these measured cases: a bivariate VAR(1) with
+    uncorrelated shocks at short \eqn{T} (difference error -6.7\% vs -22.7\%
+    at \eqn{T = 100}), the univariate rbc2shock \code{c} (+3.6\% vs
+    -26\% at \eqn{T = 100}), and near the true value (rbc2shock, a vector
+    about one posterior sd away: within 5\% where standard is off by
+    48-98\% at \eqn{T = 100}-\eqn{200}, an absolute error of ~0.5 nats).
+}
+\code{debias = TRUE} with two or more observables therefore warns (class
+\code{dynhr_warning_whittle_debias}, once per run).
 }
 
 \seealso{

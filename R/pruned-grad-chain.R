@@ -144,7 +144,7 @@
 
   ## Base FULL matrices (.order2_aug_system reads these straight off dr2).
   ghu_f  <- dr2$ghu                     # n_endo x n_u
-  ghxu_f <- dr2$ghxu                    # n_endo x (n_s*n_u)
+  ghxu_f <- .mixed_block(dr2, "ghxu", "u_slow")  # n_endo x (n_s*n_u); MIXED-BLOCK LAYOUT CONVENTION
   ghuu_f <- dr2$ghuu                    # n_endo x n_u^2
   huu    <- ghuu_f[sidx, , drop = FALSE]  # n_s x n_u^2  (BASE)
 
@@ -339,7 +339,12 @@
   n_obs <- length(obs_vars)
 
   if (is.null(dim(Y))) Y <- matrix(Y, nrow = n_obs)
-  if (nrow(Y) != n_obs) Y <- t(Y)
+  ## Internal contract: Y is n_obs x T (one column per period) and every
+  ## caller passes that layout -- no shape guess (a square sample, T == n_obs,
+  ## made the old `nrow(Y) != n_obs -> t(Y)` guess read it transposed).
+  if (nrow(Y) != n_obs)
+    stop("internal: Y must be n_obs x T (", n_obs, " rows); got ",
+         nrow(Y), " x ", ncol(Y), ".", call. = FALSE)
 
   Tlin  <- sys$Tlin
   Dxi_f <- sys$Dxi
@@ -356,7 +361,7 @@
 
   QQ <- sys$G %*% Cr0 %*% t(sys$G); QQ <- (QQ + t(QQ)) * 0.5
   HH <- Gv %*% Cr0 %*% t(Gv);       HH <- (HH + t(HH)) * 0.5
-  if (me_variance > 0) HH <- HH + me_variance * diag(n_obs)
+  if (any(me_variance > 0)) HH <- HH + diag(me_variance, n_obs)
   SS <- sys$G %*% Cr0 %*% t(Gv)
 
   mu0  <- as.numeric(solve(diag(d_dim) - Tlin, c_drift))

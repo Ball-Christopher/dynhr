@@ -69,10 +69,15 @@
 #'   observations; \code{NA} marks a missing observation. When it has column
 #'   names they are matched to the observable names.
 #' @param shock_sd Innovation standard deviations: a scalar, a length-\code{J}
-#'   vector (one per shock, matched by name when named), or a \code{J x T}
-#'   matrix of per-period values for the sample periods (pre-sample shocks
-#'   then use the first column), or a \code{J x (T + T_irf - 1)} matrix
-#'   covering the full history from \eqn{t = -(T_{irf}-1)}.
+#'   vector (one per shock, matched by name when named), or a \code{T x J}
+#'   matrix (rows are periods, columns the shocks) of per-period values for
+#'   the sample periods (pre-sample shocks then use the first row), or a
+#'   \code{(T + T_irf - 1) x J} matrix covering the full history from
+#'   \eqn{t = -(T_{irf}-1)}. A matrix follows the package-wide orientation
+#'   rule: columns named by the shocks are matched by name; rows named by the
+#'   shocks (the old \code{J x T} layout) are transposed with a message; an
+#'   unnamed \code{J x T} or square matrix is refused (class
+#'   \code{dynhr_error_orientation}).
 #' @param me_variance Measurement-error VARIANCES (the package-wide
 #'   convention; standard deviations are their square roots): a scalar, a
 #'   length-\code{n_obs} vector (matched by name when named) or a
@@ -325,23 +330,20 @@ hank_filter_shocks <- function(model_or_irfs, data, shock_sd, me_variance = 0,
 }
 
 ## Shock standard deviations as a J x n_per matrix over the filtered periods
-## (the last n_T columns are the sample periods).
+## (the last n_T columns are the sample periods). The USER-facing matrix is
+## T x J (rows are periods; R/time-orientation.R); it is transposed here into
+## the internal shock-major layout the stacking below uses.
 .hsf_shock_sd <- function(shock_sd, shock_names, n_T, T_irf, n_pre, what) {
   J <- length(shock_names)
   n_full <- n_T + T_irf - 1L
-  if (is.matrix(shock_sd)) {
-    if (nrow(shock_sd) != J || !(ncol(shock_sd) %in% c(n_T, n_full)))
-      .dynhr_abort(what, ": a matrix `shock_sd` must be ", J, " x ", n_T,
-                   " (sample periods) or ", J, " x ", n_full,
-                   " (full history from t = -(T_irf - 1)).",
+  if (is.matrix(shock_sd) || is.data.frame(shock_sd)) {
+    shock_sd <- .orient_time_matrix(shock_sd, shock_names, "shock_sd", what)
+    if (!(nrow(shock_sd) %in% c(n_T, n_full)))
+      .dynhr_abort(what, ": a matrix `shock_sd` must be ", n_T, " x ", J,
+                   " (sample periods) or ", n_full, " x ", J,
+                   " (full history from t = -(T_irf - 1)); rows are periods.",
                    class = "dynhr_error_input")
-    if (!is.null(rownames(shock_sd))) {
-      if (!setequal(rownames(shock_sd), shock_names))
-        .dynhr_abort(what, ": rownames of `shock_sd` must be the shock names {",
-                     paste(shock_names, collapse = ", "), "}.",
-                     class = "dynhr_error_input")
-      shock_sd <- shock_sd[shock_names, , drop = FALSE]
-    }
+    shock_sd <- t(shock_sd)                       # internal J x periods
     full <- if (ncol(shock_sd) == n_full) shock_sd else
       cbind(shock_sd[, rep(1L, T_irf - 1L), drop = FALSE], shock_sd)
   } else {

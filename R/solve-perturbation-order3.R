@@ -397,7 +397,11 @@ solve_perturbation_order3 <- function(model, compiled, ss, params, dr2,
   exo_names  <- dr2$exo_names
 
   ghx  <- dr2$ghx;  ghu  <- dr2$ghu
-  ghxx <- dr2$ghxx; ghxu <- dr2$ghxu; ghuu <- dr2$ghuu
+  ## the order-3 forcing below is written against the u_slow layout of the
+  ## order-2 ghxu (its own output is re-laid to x_slow at the end): see
+  ## MIXED-BLOCK LAYOUT CONVENTION
+  ghxx <- dr2$ghxx; ghuu <- dr2$ghuu
+  ghxu <- .mixed_block(dr2, "ghxu", "u_slow")
 
   hx  <- ghx[state_idx, , drop = FALSE]
   hu  <- ghu[state_idx, , drop = FALSE]
@@ -897,8 +901,12 @@ solve_perturbation_order3 <- function(model, compiled, ss, params, dr2,
     out
   }
   colnames(ghxxx) <- triple_names(state_vars, state_vars, state_vars)
-  colnames(ghxxu) <- triple_names(state_vars, state_vars, exo_names)
-  colnames(ghxuu) <- triple_names(state_vars, exo_names, exo_names)
+  ## Mixed blocks are stored in the standard Kronecker layout (state modes
+  ## slow, shock modes fast -- the permutation above), so their names must be
+  ## generated last-mode-fastest too.  triple_names() is first-mode-fastest
+  ## and mislabelled every off-diagonal state/shock column (review 2026-11).
+  colnames(ghxxu) <- .kron_colnames(state_vars, state_vars, exo_names)
+  colnames(ghxuu) <- .kron_colnames(state_vars, exo_names, exo_names)
   colnames(ghuuu) <- triple_names(exo_names,  exo_names,  exo_names)
 
   dr3       <- unclass(dr2)
@@ -908,6 +916,7 @@ solve_perturbation_order3 <- function(model, compiled, ss, params, dr2,
   dr3$ghxuu <- ghxuu
   dr3$ghuuu <- ghuuu
   dr3$order <- 3L                                # override dr2$order = 2L
+  dr3$mixed_layout <- "x_slow"   # see MIXED-BLOCK LAYOUT CONVENTION
   dr3$third_order_method <- "deterministic_binning_2013"
   dr3$sigma_correction   <- "not_implemented"
   class(dr3) <- c("DecisionRules3", "DecisionRules2", "DecisionRules")
@@ -959,6 +968,7 @@ solve_perturbation_order3 <- function(model, compiled, ss, params, dr2,
   dr3$ghxuu <- make_zero(n_s*n_u^2,  xuu_nms)
   dr3$ghuuu <- make_zero(n_u^3,      uuu_nms)
   dr3$order <- 3L
+  dr3$mixed_layout <- "x_slow"   # all mixed blocks zero; layout nominal
   dr3$third_order_method <- "linear_shortcircuit"
   dr3$sigma_correction   <- "not_implemented"
   class(dr3) <- c("DecisionRules3", "DecisionRules2", "DecisionRules")
@@ -1006,6 +1016,244 @@ print.DecisionRules3 <- function(x, ...) {
 }
 
 
+## =====================================================================
+## MIXED-BLOCK LAYOUT CONVENTION  (single source of truth; every consumer of
+## ghxu / ghxxu / ghxuu and their state-row slices hxu / hxxu / hxuu refers
+## here -- do not hand-roll a Kronecker order against dr$gh*u* directly)
+## =====================================================================
+## A mixed block g_{x^a u^b} (a state modes, b current-shock modes) is stored
+##
+##   "x_slow" (canonical; Dynare's ghxu layout): columns in the Kronecker
+##            order x^{(x)a} (x) u^{(x)b} -- shock modes FASTEST.  Every
+##            order >= 3 rule (DecisionRules3/4/5) stores ALL its mixed blocks
+##            this way, including the inherited ghxu and the sigma blocks
+##            ghxuss, ghxxuss, ... .  Contract with (x %x% u), (x %x% x %x% u),
+##            (x %x% u %x% u).
+##   "u_slow" (legacy order-2 layout): columns in the order u^{(x)b} (x)
+##            x^{(x)a} -- state modes FASTEST.  An order-2 rule
+##            (DecisionRules2 only) stores ghxu this way.  Contract with
+##            (e %x% x), (e %x% x %x% x), (e %x% e %x% x).
+##
+## The stored layout is dr$mixed_layout (set by the producers:
+## solve_perturbation_order2 -> "u_slow", the order-3 solvers -> "x_slow");
+## an object without the field falls back to its class.  A consumer reads a
+## block in the layout its contraction assumes with
+##     .mixed_block(dr, "ghxu", layout = "u_slow")
+## which permutes only when the stored layout differs.  Before the 2026-11
+## review most order-2/3 consumers contracted a DecisionRules3's x_slow
+## blocks with the u_slow vectors: transposed state-shock cross terms
+## whenever n_state > 1 and n_exo > 1 (simulate_model_order3, the order-3
+## TPF and pruned Kalman filter / moments, ...).
+## @noRd
+.mixed_layout <- function(dr) {
+  lay <- dr$mixed_layout
+  if (is.character(lay) && length(lay) == 1L && lay %in% c("x_slow", "u_slow"))
+    return(lay)
+  if (inherits(dr, "DecisionRules3")) "x_slow" else "u_slow"
+}
+
+## Re-lay a mixed block G (rows x ns^a nu^b) between the two layouts.
+## R arrays are first-index-fastest, so x_slow columns have dims
+## (u_b..u_1, x_a..x_1) and u_slow columns (x_a..x_1, u_b..u_1); the two
+## mode groups swap places (within a group the block is symmetric).
+## @noRd
+.relayout_mixed <- function(G, ns, nu, a, b, from, to) {
+  if (identical(from, to) || a == 0L || b == 0L || ns == 1L || nu == 1L ||
+      length(G) == 0L)
+    return(G)
+  G <- as.matrix(G)
+  dims_from <- if (from == "x_slow") c(rep(nu, b), rep(ns, a)) else c(rep(ns, a), rep(nu, b))
+  first <- if (from == "x_slow") b else a           # size of the fastest group
+  rest  <- length(dims_from) - first
+  ## column permutation (names travel with their columns)
+  idx <- aperm(array(seq_len(ncol(G)), dims_from), c(first + seq_len(rest), seq_len(first)))
+  G[, as.vector(idx), drop = FALSE]
+}
+
+## Mixed block `field` of rule `dr` in the requested layout (optionally only
+## the given rows).  Works for every gh{x^a}{u^b}{s...} name; blocks with no
+## state or no shock mode are returned unchanged.
+## @noRd
+.mixed_block <- function(dr, field, layout = c("x_slow", "u_slow"), rows = NULL) {
+  layout <- match.arg(layout)
+  G <- dr[[field]]
+  if (is.null(G)) return(NULL)
+  if (!is.null(rows)) G <- G[rows, , drop = FALSE]
+  core <- sub("s+[23]?$", "", sub("^gh", "", field))
+  a <- nchar(gsub("[^x]", "", core)); b <- nchar(gsub("[^u]", "", core))
+  .relayout_mixed(G, length(dr$state_idx), length(dr$exo_names), a, b,
+                  .mixed_layout(dr), layout)
+}
+
+## The whole rule with EVERY mixed block (gh{x..}{u..}, incl. sigma blocks
+## such as ghxuss) re-laid to `layout`, and dr$mixed_layout set to match.
+## Consumers whose many internal reads all assume one contraction normalise
+## once at their entry point with this.  Class and other fields untouched.
+## @noRd
+.with_mixed_layout <- function(dr, layout = c("x_slow", "u_slow")) {
+  layout <- match.arg(layout)
+  from <- .mixed_layout(dr)
+  if (identical(from, layout)) {
+    if (!identical(dr$mixed_layout, layout)) dr$mixed_layout <- layout
+    return(dr)
+  }
+  for (f in grep("^gh(x+)(u+)(s+[23]?)?$", names(dr), value = TRUE))
+    dr[[f]] <- .mixed_block(dr, f, layout)
+  dr$mixed_layout <- layout
+  dr
+}
+
+## Column names of a policy block in the Kronecker layout the order-3+
+## solvers store: the LAST mode varies fastest, i.e. the column of
+## g %*% (v1 %x% v2 %x% ... %x% vk).  One name vector per mode.
+## @noRd
+.kron_colnames <- function(...) {
+  modes <- list(...)
+  grid  <- expand.grid(rev(modes), stringsAsFactors = FALSE)   # first col fastest
+  apply(grid[, rev(seq_along(modes)), drop = FALSE], 1L, paste, collapse = "__x__")
+}
+
+
+# =====================================================================
+# Pruned IRF at orders 3-5 (shared engine)
+# =====================================================================
+
+## Policy blocks of an order-K rule as (field, a = #state modes, b = #shock
+## modes, c = #sigma modes).  Taylor weight 1/(a! b! c!); Kronecker layout
+## x^{(x)a} (x) u^{(x)b} (last mode fastest), the layout the order-3+ solvers
+## store (verified entry-by-entry against a closed-form Lucas tree, see
+## tests/testthat/test-review-order45.R).  Blocks a solve did not produce are
+## skipped (= 0).
+## @noRd
+.pruned_policy_blocks <- function(dr, K) {
+  dr <- .with_mixed_layout(dr, "x_slow")   # (x %x% u) contraction below
+  spec <- list()
+  for (k in seq_len(K)) for (a in k:0)
+    spec[[length(spec) + 1L]] <- list(paste0("gh", strrep("x", a), strrep("u", k - a)),
+                                      a, k - a, 0L)
+  sig <- list(list("ghss", 0L, 0L, 2L), list("ghs3", 0L, 0L, 3L),
+              list("ghxss", 1L, 0L, 2L), list("ghuss", 0L, 1L, 2L),
+              list("ghxxss", 2L, 0L, 2L), list("ghxuss", 1L, 1L, 2L),
+              list("ghuuss", 0L, 2L, 2L), list("ghss2", 0L, 0L, 4L),
+              list("ghxxxss", 3L, 0L, 2L), list("ghxxuss", 2L, 1L, 2L),
+              list("ghxuuss", 1L, 2L, 2L), list("ghuuuss", 0L, 3L, 2L),
+              list("ghxss2", 1L, 0L, 4L), list("ghuss2", 0L, 1L, 4L))
+  spec <- c(spec, sig)
+  out <- list()
+  for (s in spec) {
+    G <- dr[[s[[1L]]]]; a <- s[[2L]]; b <- s[[3L]]; cs <- s[[4L]]
+    if (is.null(G) || length(G) == 0L || a + b + cs > K) next
+    if (is.null(dim(G))) G <- matrix(as.numeric(G), ncol = 1L)
+    out[[length(out) + 1L]] <- list(G = G, a = a, b = b, c = cs,
+                                    w = 1 / (factorial(a) * factorial(b) * factorial(cs)))
+  }
+  out
+}
+
+## Ordered compositions of `total` into `parts` positive integers (matrix,
+## one composition per row).
+## @noRd
+.int_compositions <- function(total, parts) {
+  if (parts == 0L) return(if (total == 0L) matrix(integer(0), 1L, 0L) else NULL)
+  if (total < parts) return(NULL)
+  if (parts == 1L) return(matrix(as.integer(total), 1L, 1L))
+  rows <- list()
+  for (f in seq_len(total - parts + 1L)) {
+    rest <- .int_compositions(total - f, parts - 1L)
+    if (!is.null(rest)) rows[[length(rows) + 1L]] <- cbind(f, rest, deparse.level = 0L)
+  }
+  do.call(rbind, rows)
+}
+
+## One step of the order-K pruned recursion.  `X` = list of K state layers at
+## t-1 (layer j = coefficient of s^j when shocks and sigma are scaled jointly
+## by s; Lombardo-Uhlig / Andreasen et al. pruning), `e` = shock at t.  Returns
+## the K output layers (all rows); the new state layers are their state rows.
+## @noRd
+.pruned_layer_step <- function(blocks, X, e, K, n) {
+  Y <- vector("list", K)
+  ezero <- all(e == 0)
+  for (j in seq_len(K)) {
+    yj <- numeric(n)
+    for (bl in blocks) {
+      if (bl$b > 0L && ezero) next
+      rem <- j - bl$b - bl$c
+      if (rem < bl$a || (bl$a == 0L && rem != 0L)) next
+      ek <- if (bl$b > 0L) Reduce(`%x%`, rep(list(e), bl$b)) else 1
+      cmp <- .int_compositions(rem, bl$a)
+      v <- 0
+      for (r in seq_len(nrow(cmp))) {
+        xi <- if (bl$a > 0L) Reduce(`%x%`, X[cmp[r, ]]) else 1
+        v <- v + (xi %x% ek)
+      }
+      yj <- yj + bl$w * as.numeric(bl$G %*% v)
+    }
+    Y[[j]] <- yj
+  }
+  Y
+}
+
+## Pruned order-K impulse responses (K = 3, 4, 5) -- the shared engine of
+## compute_irfs_order3/4/5.
+##
+## DEFINITION.  IRF_t = y_t(impulse) - y_t(no impulse), t = 1..n_periods,
+## where both paths are the order-K PRUNED simulation (state layers x^(1..K):
+## the s^j-coefficients of the path when the shocks AND sigma are scaled
+## jointly by s -- Andreasen et al. 2018 / Lombardo-Uhlig pruning) started at
+## the deterministic steady state, the impulse hits at t = 1, and no other
+## shock is realised (the policy still carries its risk terms, sigma = 1).
+## At order 3 this is exactly simulate_model_order3(shocked) -
+## simulate_model_order3(baseline).  Every sigma block of the rule enters --
+## ghss/ghs3 (constants, which cancel only to leading order), ghxss/ghuss
+## (order 3), ghxxss/ghxuss/ghuuss/ghss2 (order 4), ghxxxss/ghxxuss/ghxuuss/
+## ghuuuss/ghxss2/ghuss2 (order 5) -- as do the interactions of the impulse
+## with the baseline's risk-driven drift (e.g. hxx (x^(1) (x) x^(2)_baseline)),
+## which the pre-review order-3 code omitted and the order-4/5 code dropped
+## along with every sigma term.  The order-K IRF is therefore the order-K
+## Taylor expansion, jointly in (shock size, sigma), of the exact IRF, and
+## orders 3, 4, 5 differ by O(s^4), O(s^5) (tests/testthat/test-review-order45.R).
+## @noRd
+.compute_irfs_pruned_k <- function(dr, model, K, n_periods, shock_size, params) {
+  endo      <- dr$endo_names
+  exo       <- dr$exo_names
+  state_idx <- dr$state_idx
+  n         <- length(endo)
+  n_s       <- length(state_idx)
+  E_imp     <- .irf_impulse_matrix(dr, model, params, shock_size)
+  blocks    <- .pruned_policy_blocks(dr, K)
+  e0        <- numeric(length(exo))
+
+  ## Baseline: pruned no-shock path from the deterministic steady state.
+  base <- matrix(0, n_periods, n)
+  X <- rep(list(numeric(n_s)), K)
+  for (t in seq_len(n_periods)) {
+    Y <- .pruned_layer_step(blocks, X, e0, K, n)
+    base[t, ] <- Reduce(`+`, Y)
+    X <- lapply(Y, function(y) y[state_idx])
+  }
+
+  irfs <- list()
+  for (k in seq_along(exo)) {
+    irf_mat <- matrix(0, n_periods, n,
+                      dimnames = list(paste0("t", seq_len(n_periods)), endo))
+    X <- rep(list(numeric(n_s)), K)
+    e <- as.numeric(E_imp[, k])
+    for (t in seq_len(n_periods)) {
+      Y <- .pruned_layer_step(blocks, X, if (t == 1L) e else e0, K, n)
+      irf_mat[t, ] <- Reduce(`+`, Y) - base[t, ]
+      X <- lapply(Y, function(y) y[state_idx])
+    }
+    irfs[[exo[k]]] <- irf_mat
+  }
+  class(irfs) <- "IRFCollection"
+  attr(irfs, "n_periods")  <- n_periods
+  attr(irfs, "endo_names") <- endo
+  attr(irfs, "exo_names")  <- exo
+  attr(irfs, "order")      <- as.integer(K)
+  irfs
+}
+
+
 # =====================================================================
 # Pruned third-order IRF
 # =====================================================================
@@ -1013,20 +1261,32 @@ print.DecisionRules3 <- function(x, ...) {
 #' Compute impulse response functions at third order (pruned state space)
 #'
 #' Implements the Andreasen, Fernandez-Villaverde & Rubio-Ramirez (2018)
-#' pruning scheme truncated at third order.  IRFs are deviations from the
-#' stochastic steady state: the constant \code{ghss}/\code{ghs3} terms are
-#' absorbed into the baseline and cancel, so only the shock-driven deviations
-#' are returned.
+#' pruning scheme truncated at third order.  The IRF is the difference
+#' between the pruned path with the impulse at \eqn{t = 1} and the pruned
+#' path without it, both started at the deterministic steady state with no
+#' other shock realised -- exactly
+#' \code{simulate_model_order3(shocked) - simulate_model_order3(baseline)}.
+#' Every risk term of the rule enters: \code{ghxss}/\code{ghuss} directly,
+#' and the constants \code{ghss}/\code{ghs3} through the baseline's drift,
+#' which interacts with the impulse (e.g. \eqn{h_{xx}(x^f \otimes x^s)}).
+#' This is the third-order Taylor expansion, jointly in the shock size and
+#' \eqn{\sigma}, of the exact IRF; \code{\link{compute_irfs_order4}} and
+#' \code{\link{compute_irfs_order5}} use the same definition one and two
+#' orders further.  (Before the 2026-11 review the drift interaction terms
+#' were omitted from \eqn{t = 2} on, an \eqn{O(\sigma^2)} times impulse
+#' error.)
 #'
 #' The pruned state tracks three additive layers \eqn{x^f, x^s, x^{rd}}:
 #' \itemize{
 #'   \item \eqn{x^f} -- first-order (linear) state response
 #'   \item \eqn{x^s} -- second-order correction driven by \eqn{(x^f)^2}
+#'     and \eqn{\sigma^2}
 #'   \item \eqn{x^{rd}} -- third-order correction driven by
-#'     \eqn{(x^f)^3} and \eqn{x^f \otimes x^s} cross terms
+#'     \eqn{(x^f)^3}, \eqn{x^f \otimes x^s} and \eqn{\sigma^2 x^f}
 #' }
 #'
-#' Output at each horizon: \eqn{y = y^{(1)} + y^{(2)} + y^{(3)}}.
+#' Output at each horizon: \eqn{y = y^{(1)} + y^{(2)} + y^{(3)}} on the
+#' impulse path minus the same on the baseline path.
 #'
 #' @param dr3       \code{DecisionRules3} object from
 #'   \code{\link{solve_perturbation}(order = 3)}.
@@ -1047,109 +1307,8 @@ compute_irfs_order3 <- function(dr3, model, n_periods = 40L,
   if (!inherits(dr3, "DecisionRules3")) {
     stop("dr3 must be a DecisionRules3 object from solve_perturbation(order = 3).")
   }
-
-  ghx   <- dr3$ghx;   ghu   <- dr3$ghu
-  ghxx  <- dr3$ghxx;  ghuu  <- dr3$ghuu
-  ghxxx <- dr3$ghxxx; ghuuu <- dr3$ghuuu
-
-  # Sigma^2 cross-term matrices (present when solve_perturbation(order=3) was
-  # used; NULL when only solve_perturbation_order3() was called directly).
-  # ghuss: n_endo x n_exo  — shock x sigma^2 cross term
-  # ghxss: n_endo x n_state — state x sigma^2 cross term
-  has_uss <- !is.null(dr3$ghuss)
-  has_xss <- !is.null(dr3$ghxss)
-
-  endo      <- dr3$endo_names
-  exo       <- dr3$exo_names
-  state_idx <- dr3$state_idx
-  n_endo    <- length(endo)
-  n_exo     <- length(exo)
-  n_s       <- length(state_idx)
-
-  if (is.null(params)) params <- model$param_values
-  shock_stderr <- .get_shock_stderr(model, exo, params)
-
-  # State-row submatrices
-  hx   <- ghx  [state_idx, , drop = FALSE]   # n_s x n_s
-  hu   <- ghu  [state_idx, , drop = FALSE]   # n_s x n_u
-  hxx  <- ghxx [state_idx, , drop = FALSE]   # n_s x n_s^2
-  huu  <- ghuu [state_idx, , drop = FALSE]   # n_s x n_u^2
-  huuu <- ghuuu[state_idx, , drop = FALSE]   # n_s x n_u^3
-  hxxx <- ghxxx[state_idx, , drop = FALSE]   # n_s x n_s^3
-  huss <- if (has_uss) dr3$ghuss[state_idx, , drop = FALSE] else NULL  # n_s x n_u
-  hxss <- if (has_xss) dr3$ghxss[state_idx, , drop = FALSE] else NULL  # n_s x n_s
-
-  irfs <- list()
-  for (k in seq_along(exo)) {
-    shock_name <- exo[k]
-    irf_mat    <- matrix(0, n_periods, n_endo)
-    colnames(irf_mat) <- endo
-    rownames(irf_mat) <- paste0("t", seq_len(n_periods))
-
-    eps    <- numeric(n_exo)
-    eps[k] <- shock_stderr[shock_name] * shock_size
-
-    # --- Period 1: impact (all previous states are zero) -------------------
-    # ghss and ghs3 (constant sigma^2 terms) are absorbed in the baseline and
-    # cancel in deviation IRFs.  But ghuss (shock x sigma^2) and ghxss
-    # (state x sigma^2) do NOT cancel: ghuss*eps is nonzero at t=1 in the
-    # shocked path but zero in the baseline.  See Andreasen, Fernandez-
-    # Villaverde & Rubio-Ramirez (2018, RES) pruning Appendix.
-
-    eps2 <- eps %x% eps           # length n_u^2
-    eps3 <- eps %x% eps %x% eps   # length n_u^3
-
-    x1 <- as.numeric(hu   %*% eps)
-    x2 <- as.numeric(0.5 * huu  %*% eps2)
-    # x3 at t=1: (1/6) huuu eps^3 + 0.5 huss eps  (x1_prev=0 so hxss term=0)
-    x3 <- as.numeric((1/6) * huuu %*% eps3)
-    if (has_uss) x3 <- x3 + 0.5 * as.numeric(huss %*% eps)
-
-    y1 <- as.numeric(ghu  %*% eps)
-    y2 <- as.numeric(0.5 * ghuu  %*% eps2)
-    # y3 at t=1: (1/6) ghuuu eps^3 + 0.5 ghuss eps
-    y3 <- as.numeric((1/6) * ghuuu %*% eps3)
-    if (has_uss) y3 <- y3 + 0.5 * as.numeric(dr3$ghuss %*% eps)
-
-    irf_mat[1, ] <- y1 + y2 + y3
-
-    # --- Periods 2..n_periods: no further shocks ---------------------------
-    if (n_periods >= 2L) for (t in 2:n_periods) {
-      x1p <- x1; x2p <- x2; x3p <- x3
-
-      x1 <- as.numeric(hx %*% x1p)
-      x2 <- as.numeric(hx %*% x2p + 0.5 * hxx %*% (x1p %x% x1p))
-      # (1/2)(hxx(x1⊗x2 + x2⊗x1)) = hxx(x1⊗x2) by Schwarz symmetry of hxx
-      # x3 propagation: add 0.5 hxss x1p (state x sigma^2 cross term)
-      x3 <- as.numeric(
-        hx  %*% x3p +
-        hxx %*% (x1p %x% x2p) +
-        (1/6) * hxxx %*% (x1p %x% x1p %x% x1p)
-      )
-      if (has_xss) x3 <- x3 + 0.5 * as.numeric(hxss %*% x1p)
-
-      y1 <- as.numeric(ghx  %*% x1p)
-      y2 <- as.numeric(ghx  %*% x2p + 0.5 * ghxx %*% (x1p %x% x1p))
-      # y3 propagation: add 0.5 ghxss x1p (state x sigma^2 cross term)
-      y3 <- as.numeric(
-        ghx  %*% x3p +
-        ghxx %*% (x1p %x% x2p) +
-        (1/6) * ghxxx %*% (x1p %x% x1p %x% x1p)
-      )
-      if (has_xss) y3 <- y3 + 0.5 * as.numeric(dr3$ghxss %*% x1p)
-
-      irf_mat[t, ] <- y1 + y2 + y3
-    }
-
-    irfs[[shock_name]] <- irf_mat
-  }
-
-  class(irfs) <- "IRFCollection"
-  attr(irfs, "n_periods")  <- n_periods
-  attr(irfs, "endo_names") <- endo
-  attr(irfs, "exo_names")  <- exo
-  attr(irfs, "order")      <- 3L
-  irfs
+  n_periods <- .check_irf_n_periods(n_periods, "compute_irfs_order3")
+  .compute_irfs_pruned_k(dr3, model, 3L, n_periods, shock_size, params)
 }
 
 
@@ -1172,8 +1331,10 @@ compute_irfs_order3 <- function(dr3, model, n_periods = 40L,
 #' @param shocks Optional \code{(n_periods + burn_in) x n_exo} matrix of
 #'   pre-drawn shocks (in model units, i.e. already scaled by stderr).  If
 #'   \code{NULL}, shocks are drawn from \eqn{N(0, \sigma_e^2)}.
-#' @param model Optional model object used to retrieve shock standard
-#'   deviations when \code{shocks = NULL}.
+#' @param model Optional model object (shock skewness, and the shock
+#'   covariance when \code{dr3} carries none): with \code{shocks = NULL},
+#'   shocks are drawn with \code{dr3$Sigma_e}, else the model's shocks
+#'   block, as in \code{\link{simulate_model}}.
 #' @param burn_in Integer.  Number of initial periods to discard.
 #' @param pruning Logical.  If \code{TRUE} (default), run the full pruned
 #'   three-layer recursion.  \code{FALSE} runs the genuine \strong{unpruned}
@@ -1199,6 +1360,8 @@ simulate_model_order3 <- function(dr3, n_periods = 200L, shocks = NULL,
   if (!inherits(dr3, "DecisionRules3")) {
     stop("dr3 must be a DecisionRules3 object.")
   }
+  ## contracts mixed blocks as (e %x% x): see MIXED-BLOCK LAYOUT CONVENTION
+  dr3 <- .with_mixed_layout(dr3, "u_slow")
 
   # ---- Extract DR2 matrices (needed for all three layers) ----------------
   ghx  <- dr3$ghx;  ghu  <- dr3$ghu
@@ -1245,8 +1408,10 @@ simulate_model_order3 <- function(dr3, n_periods = 200L, shocks = NULL,
   # ---- Shocks ------------------------------------------------------------
   total_periods <- n_periods + burn_in
 
-  shock_stderr <- .get_shock_stderr(model, exo, params)
   if (is.null(shocks)) {
+    ## Covariance rule of simulate_model(): dr3$Sigma_e, else the model.
+    Sigma_e_sim  <- .resolve_sigma_e(dr3, model)
+    shock_stderr <- setNames(sqrt(diag(Sigma_e_sim)), exo)
     ## L2 follow-up: a `skew` alpha used to be ignored here entirely --
     ## the order-3 simulator drew GAUSSIAN shocks even for a model whose
     ## declared shocks are skewed.  Route those through the shared joint-CSN
@@ -1255,16 +1420,13 @@ simulate_model_order3 <- function(dr3, n_periods = 200L, shocks = NULL,
     ## keep their exact RNG stream on the branch below.
     alpha_sim <- .get_shock_skewness(model, exo, params)
     if (any(alpha_sim != 0)) {
-      Sigma_e_sim <- .get_shock_cov(model, exo, params)
-      shocks <- .draw_csn_shocks(total_periods, Sigma_e_sim, alpha_sim,
-                                 sqrt(diag(Sigma_e_sim)))
+      shocks <- .draw_csn_shocks(total_periods, Sigma_e_sim, alpha_sim)
     } else {
       ## Gaussian path: honour the declared cross-shock correlations exactly as
       ## simulate_model() / simulate_model_order2() do (Dynare lower Cholesky
       ## in declared order).  For a diagonal Sigma_e the per-column scaling
       ## below is kept because it is bit-identical to the pre-0.9.4 stream
       ## that seeded regression tests depend on.
-      Sigma_e_sim <- .get_shock_cov(model, exo, params)
       off <- Sigma_e_sim; diag(off) <- 0
       shocks <- matrix(rnorm(total_periods * n_exo), ncol = n_exo)
       if (any(abs(off) > 0)) {

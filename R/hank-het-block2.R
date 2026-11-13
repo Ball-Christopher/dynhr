@@ -359,8 +359,8 @@ hank_het2_block <- function(b_grid, a_grid, Pi, e, beta, eis, rb, ra, w,
 #'   this is a speed knob only.  Ignored by \code{backend = "R"}.
 #'
 #' @return A list with numeric length-\code{T_h} paths \code{B}, \code{A},
-#'   \code{C}, \code{CHI}, and \code{Dpath} (\code{n_cell x T_h}): column
-#'   \code{t} is the beginning-of-period-\code{t} distribution over which the
+#'   \code{C}, \code{CHI}, and \code{Dpath} (\code{T_h x n_cell}, rows are
+#'   periods): row \code{t} is the beginning-of-period-\code{t} distribution over which the
 #'   date-\code{t} aggregates are taken.
 #' @seealso \code{\link{hank_td_nonlinear}} (one-asset),
 #'   \code{\link{hank_het2_block}}
@@ -446,10 +446,10 @@ hank_td2_nonlinear <- function(block, rb_path = NULL, ra_path = NULL,
   if (coll && theta_path[1L] != th_ss)
     D <- .hank2_shift_x(D, theta_path[1L] - th_ss, block)
   B <- numeric(T_h); A <- numeric(T_h); C <- numeric(T_h); CHI <- numeric(T_h)
-  Dpath <- matrix(0, length(D), T_h)
+  Dpath <- matrix(0, T_h, length(D))   # T x n_cell: rows are periods
   Lam_keep <- if (keep_policies) vector("list", T_h) else NULL
   for (t in seq_len(T_h)) {
-    Dpath[, t] <- D
+    Dpath[t, ] <- D
     B[t]   <- hank_aggregate2(D, if (coll) b_pol[[t]] - theta_path[t] * a_pol[[t]]
                                  else b_pol[[t]])
     A[t]   <- hank_aggregate2(D, a_pol[[t]])

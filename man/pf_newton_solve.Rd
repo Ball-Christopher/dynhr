@@ -27,8 +27,12 @@ conditions). Length n_endo. Names must match var_names.}
 
 \item{y_ss}{Named numeric vector: steady state (terminal condition).}
 
-\item{shock_path}{T × n_exo numeric matrix of structural shocks. Column
-names must match varexo_names; missing columns are zero.}
+\item{shock_path}{T × n_exo numeric matrix of structural shocks (rows =
+periods). Named columns must be shocks of the model
+(varexo_names); missing shocks are zero. An unnamed
+matrix must have exactly n_exo columns (an unnamed
+n_exo x T or square matrix is an error; a matrix named
+by shock on its ROWS is transposed with a message).}
 
 \item{params}{Named numeric parameter vector.}
 
@@ -70,7 +74,8 @@ and regime-switch progress (matches perfect_foresight_solve()).}
 List with:
   \itemize{
     \item \code{Y} — T x n_endo solution matrix (rows = periods, cols = variables)
-    \item \code{regime} — n_spec x T logical matrix (TRUE = binding)
+    \item \code{regime} — T x n_spec logical matrix (rows = periods;
+      TRUE = binding)
     \item \code{irf} — T x n_endo deviation from steady state
     \item \code{converged} — Logical: TRUE if Newton converged on the final
       regime AND that regime satisfies complementarity in every period

@@ -55,7 +55,8 @@ Rcpp::List sv_rbpf_loglik_cpp(const arma::mat& Y,        // n_obs x T
                           const arma::vec& rho,
                           const arma::vec& seta,
                           const int n_particles,
-                          const arma::vec& me_diag)  // n_obs or empty
+                          const arma::vec& me_diag,  // n_obs or empty
+                          const int n_burn = 0)      // pre-sample steps
 {
   const int n_T   = Y.n_cols;
   const int n_obs = Y.n_rows;
@@ -87,6 +88,26 @@ Rcpp::List sv_rbpf_loglik_cpp(const arma::mat& Y,        // n_obs x T
   for (int i = 0; i < N; ++i) P.slice(i) = P0;
 
   arma::vec scale_full(n_e, arma::fill::ones);
+
+  // ---- pre-sample burn-in (no observation, no weighting) ------------------
+  // Each particle's (h, P) is advanced n_burn periods so that at t = 0 its P
+  // is the covariance of s_0 CONDITIONAL on that particle's own volatility
+  // history (s_0 | h-history is exactly N(0, P) under the model), instead of
+  // one covariance shared by every particle. Same R draw order as the
+  // reference in R/sv-rbpf.R.
+  for (int b = 0; b < n_burn; ++b) {
+    for (int i = 0; i < N; ++i)
+      for (int k = 0; k < n_sv; ++k)
+        h(k, i) = mu(k) + rho(k) * (h(k, i) - mu(k)) + R::rnorm(0.0, seta(k));
+    for (int i = 0; i < N; ++i) {
+      for (int k = 0; k < n_sv; ++k)
+        scale_full(sv_idx(k)) = std::exp(h(k, i) / 2.0);
+      arma::mat Se = Sigma_e % (scale_full * scale_full.t());
+      arma::mat Pb = TT * P.slice(i) * TT.t() + RR * Se * RR.t();
+      P.slice(i) = 0.5 * (Pb + Pb.t());
+    }
+  }
+
   arma::vec ll_t(N);
   arma::mat s_new(n_s, N);
   arma::cube P_new(n_s, n_s, N);

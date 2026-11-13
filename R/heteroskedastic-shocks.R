@@ -208,13 +208,14 @@ shock_scale_entry <- function(var, periods, scales) {
 #'
 #' @param model     A \code{dynhr_mod}; uses
 #'   \code{model$heteroskedastic_shocks$scales} and checks against
-#'   \code{dr$exo_names} (Landmine 9: row order = dr$exo_names, NOT
+#'   \code{dr$exo_names} (Landmine 9: column order = dr$exo_names, NOT
 #'   model$varexo_names).
 #' @param exo_names Character vector of shock names in dr$exo_names order.
 #' @param n_T       Number of sample periods.
 #' @return If \code{model$heteroskedastic_shocks} is NULL or has zero rows,
 #'   returns \code{NULL} (identity -- no heteroskedasticity). Otherwise an
-#'   \code{n_exo x T} matrix of scale factors (1 = baseline).
+#'   \code{T x n_exo} matrix (rows = periods, columns named by
+#'   \code{exo_names}) of scale factors (1 = baseline).
 #' @noRd
 .build_shock_scale_matrix <- function(model, exo_names, n_T) {
   spec <- model$heteroskedastic_shocks
@@ -223,8 +224,10 @@ shock_scale_entry <- function(var, periods, scales) {
   if (is.null(df) || nrow(df) == 0L) return(NULL)
 
   n_exo <- length(exo_names)
-  mat   <- matrix(1, nrow = n_exo, ncol = n_T)
-  rownames(mat) <- exo_names
+  ## T x n_exo (rows = periods), columns named: the orientation every
+  ## time-indexed input takes (R/time-orientation.R).
+  mat   <- matrix(1, nrow = n_T, ncol = n_exo,
+                  dimnames = list(NULL, exo_names))
 
   for (i in seq_len(nrow(df))) {
     v  <- df$var[i]
@@ -243,7 +246,7 @@ shock_scale_entry <- function(var, periods, scales) {
         ".build_shock_scale_matrix: shock '%s' has periods outside [1, %d]: %s (ignored).",
         v, n_T, paste(pr[bad], collapse = ", ")), call. = FALSE)
     ok_pr <- pr[!bad]; ok_sc <- sc[!bad]
-    if (length(ok_pr) > 0L) mat[ri, ok_pr] <- ok_sc
+    if (length(ok_pr) > 0L) mat[ok_pr, ri] <- ok_sc
   }
 
   mat

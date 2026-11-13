@@ -93,8 +93,29 @@
 
 .ckpt_meta_write <- function(path, sampler, fingerprint) {
   saveRDS(list(sampler = sampler, fingerprint = fingerprint,
-               dynhr_ckpt_version = .ckpt_version), path)
+               dynhr_ckpt_version = .ckpt_version,
+               seed_scheme = .child_seed_scheme), path)
   invisible(NULL)
+}
+
+## A resume continues every saved chain from its saved .Random.seed, so it is
+## exact whatever seed derivation wrote the checkpoint. Only randomness that is
+## DERIVED from the base seed after the resume point -- chains re-run fresh
+## because they saved no state, and the per-iteration DIME daemon seeds --
+## depends on the derivation. A checkpoint written before the child-seed
+## derivation (no `seed_scheme` field) therefore resumes into a valid run that
+## is NOT bit-identical to the run the old build would have finished: say so.
+.ckpt_warn_seed_scheme <- function(meta, what) {
+  if (identical(meta$seed_scheme, .child_seed_scheme)) return(invisible(FALSE))
+  .dynhr_warn(sprintf(paste0(
+    "checkpoint resume: this checkpoint was written with seed-derivation ",
+    "scheme %s, this build uses scheme %d (independent child seeds instead of ",
+    "seed + k). Saved chains continue exactly, but %s draw(s) from the new ",
+    "seeds, so the result is a valid run that is not bit-identical to the ",
+    "uninterrupted run under the build that wrote the checkpoint."),
+    format(meta$seed_scheme %||% 1L), .child_seed_scheme, what),
+    class = "dynhr_warning_checkpoint_seed_scheme")
+  invisible(TRUE)
 }
 
 ## md5 of any R object (used for data / covariance fingerprints).

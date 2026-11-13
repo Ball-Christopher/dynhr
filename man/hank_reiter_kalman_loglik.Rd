@@ -13,7 +13,7 @@ hank_reiter_kalman_loglik(
 )
 }
 \arguments{
-\item{data}{\code{T x n_obs} matrix of DEMEANED observations (deviations from
+\item{data}{\code{T x n_obs} matrix (rows are periods; oriented by the rule in \code{\link{hank_loglik_aggregate}}) of DEMEANED observations (deviations from
 steady state), columns in the order of \code{obs_vars}.}
 
 \item{rss}{A \code{hank_reiter_ss} (build with \code{drop_dist_coord = TRUE};

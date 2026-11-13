@@ -97,12 +97,20 @@
 #' @param me_diag    Optional length-n_obs baseline ME variances (NULL = none).
 #'   TRUE i.i.d. observation noise: it enters F AND the Joseph state-covariance
 #'   term, matching \code{\link{kf_step}} and \code{\link{kalman_filter}}.
+#' @param n_burn     Pre-sample periods (default 0). Each particle's h and P
+#'   are advanced \code{n_burn} unobserved periods
+#'   (\eqn{P \leftarrow TT P TT' + RR \Sigma_e(h) RR'}) before period 1, so
+#'   that P is the covariance of \eqn{s_0} conditional on the particle's own
+#'   volatility history. The factory passes \code{\link{.sv_burn_in_length}}
+#'   with \code{P0 = .sv_stationary_P0()}; 0 reproduces the shared-P0 start
+#'   (used by the filter-mechanics tests and the grid/Chan oracles).
 #' @return Scalar log-likelihood estimate, or \code{-Inf} if every particle is
 #'   infeasible at some period.
 #' @noRd
 .sv_rbpf_loglik <- function(Y, TT, ZZ, RR, DD, Sigma_e, d, P0,
                             sv_idx, hyper, n_exo, n_particles,
-                            me_diag = NULL) {
+                            me_diag = NULL, n_burn = 0L) {
+  n_burn <- as.integer(n_burn)
   ## Compiled full-sweep kernel (same RNG draw order as the R reference below,
   ## so a given set.seed produces the same particle cloud; parity-tested).
   if (.HAS_RCPP_SV_RBPF()) {
@@ -113,7 +121,8 @@
       as.numeric(hyper[, "mu"]), as.numeric(hyper[, "rho"]),
       as.numeric(hyper[, "sigma_eta"]),
       as.integer(n_particles),
-      if (is.null(me_diag)) numeric(0) else as.numeric(me_diag))
+      if (is.null(me_diag)) numeric(0) else as.numeric(me_diag),
+      n_burn)
     ## The kernel REPORTS a fully infeasible cloud instead of warning from
     ## C++: Rcpp::warning() under options(warn = 2) becomes an R error, and
     ## R errors longjmp -- straight past ~RNGScope, leaving .Random.seed
@@ -151,6 +160,21 @@
   P_p <- rep(list(P0), N)
 
   scale_full <- rep(1, n_exo)                 # non-SV shocks stay at scale 1
+
+  ## Pre-sample burn-in: per-particle P becomes Var(s_0 | own h history).
+  ## Same draw order as src/sv_rbpf.cpp.
+  for (b in seq_len(n_burn)) {
+    h_p <- mu + rho * (h_p - mu) +
+      matrix(stats::rnorm(n_sv * N, sd = rep(seta, N)), nrow = n_sv, ncol = N)
+    for (i in seq_len(N)) {
+      scale_full[sv_idx] <- exp(h_p[, i] / 2)
+      Pb <- TT %*% P_p[[i]] %*% t(TT) +
+        RR %*% (Sigma_e * outer(scale_full, scale_full)) %*% t(RR)
+      P_p[[i]] <- (Pb + t(Pb)) * 0.5
+    }
+  }
+  scale_full[] <- 1
+
   loglik <- 0
   n_degenerate <- 0
 
@@ -195,6 +219,93 @@
   }
 
   .sv_rbpf_finish(loglik, n_degenerate, n_particles, n_T)
+}
+
+
+#' Unconditional stationary state covariance under SV-on-shocks (internal)
+#'
+#' The RB-PF starts every particle from the same Gaussian
+#' \eqn{s_0 \sim N(0, P_0)}. Under the SV model
+#' \eqn{s_t = TT s_{t-1} + RR\, D_t e_t}, \eqn{D_t = diag(\exp(h_t/2))}
+#' (non-SV shocks at scale 1), with \eqn{e_t} and the \eqn{h} paths mutually
+#' independent and serially independent shocks,
+#' \eqn{Var(s_0) = \sum_k TT^k RR\, E[D \Sigma_e D]\, RR' TT^{k\prime}}: the
+#' Lyapunov solution with \eqn{\Sigma_e} replaced by
+#' \eqn{\Sigma_e \circ W}, \eqn{W_{ii} = E[e^{h_i}] = e^{\mu_i + v_i/2}},
+#' \eqn{W_{ij} = E[e^{h_i/2}] E[e^{h_j/2}]} (\eqn{i \ne j}, independent
+#' AR(1) log-variances), \eqn{E[e^{h_i/2}] = e^{\mu_i/2 + v_i/8}},
+#' \eqn{v_i = \sigma_{\eta,i}^2 / (1 - \rho_i^2)}. Using the baseline
+#' \eqn{\Sigma_e} (the pre-0.9.4.77 behaviour) is this with \eqn{W = 1}, i.e.
+#' it pretended \eqn{\mu = 0} and \eqn{\sigma_\eta = 0}.
+#'
+#' @param TT,RR,Sigma_e State transition, shock impact, baseline shock cov.
+#' @param sv_idx Positions of the SV shocks in the shock vector.
+#' @param hyper n_sv x 3 matrix with columns mu, rho, sigma_eta.
+#' @param n_exo Number of shocks.
+#' @return n_s x n_s covariance.
+#' @noRd
+.sv_stationary_P0 <- function(TT, RR, Sigma_e, sv_idx, hyper, n_exo) {
+  v  <- hyper[, "sigma_eta"]^2 / (1 - hyper[, "rho"]^2)
+  m1 <- rep(1, n_exo); m2 <- rep(1, n_exo)
+  m1[sv_idx] <- exp(hyper[, "mu"] / 2 + v / 8)   # E[exp(h/2)]
+  m2[sv_idx] <- exp(hyper[, "mu"] + v / 2)       # E[exp(h)]
+  W <- outer(m1, m1)
+  diag(W) <- m2
+  kf_stationary_init(TT, RR, Sigma_e * W)
+}
+
+
+#' Pre-sample burn-in length for the RB-PF (internal)
+#'
+#' Starting the burn-in at the unconditional \code{.sv_stationary_P0()}, the
+#' error left in each particle's \eqn{Var(s_0 \mid h)} after \eqn{B} steps is
+#' \eqn{TT^B \Delta TT^{B\prime}}: a fraction \eqn{r^{2B}} of the
+#' UNCONDITIONAL variance, with \eqn{r} the spectral radius of \code{TT}.
+#' That variance is an average of \eqn{\exp(h)}, which sits far above a
+#' typical particle's own when the log-volatility has a large stationary
+#' variance \eqn{v = \sigma_\eta^2 / (1 - \rho^2)} (mean scale
+#' \eqn{\exp(\mu + v/2)} against \eqn{\exp(\mu - v/2)} for a quiet particle:
+#' a factor \eqn{\exp(v)}). \eqn{B} is therefore chosen so that
+#' \eqn{r^{2B} \exp(v_{max}) \le} \code{tol}, with \eqn{v_{max}} the largest
+#' \eqn{v} across the SV shocks. (A rule that ignored \eqn{v} left the
+#' log-likelihood 0.2 nats high at \eqn{v = 18}.) \eqn{B} is at least 1 (with
+#' \eqn{TT = 0} one step is exact: \eqn{Var(s_0 \mid h_0) = RR \Sigma_e(h_0)
+#' RR'}) and at most \code{max_burn}; hitting the cap is announced once
+#' (classed message \code{dynhr_sv_rbpf_burn_capped}) with the residual.
+#' @param TT State transition.
+#' @param tol Relative residual target.
+#' @param max_burn Cap on the burn-in length.
+#' @param hyper SV hyper-parameter matrix (columns \code{rho},
+#'   \code{sigma_eta}); \code{NULL} takes \eqn{v_{max} = 0}.
+#' @return Integer burn-in length.
+#' @noRd
+.sv_burn_in_length <- function(TT, tol = 1e-4, max_burn = 1000L, hyper = NULL) {
+  if (length(TT) == 0L) return(0L)
+  r <- max(Mod(eigen(TT, only.values = TRUE)$values))
+  if (!is.finite(r) || r < 1e-12) return(1L)
+  if (r >= 1) return(as.integer(max_burn))   # non-stationary: P0 already fails
+  v_max <- 0
+  if (!is.null(hyper) && nrow(hyper) > 0L) {
+    v <- hyper[, "sigma_eta"]^2 / (1 - hyper[, "rho"]^2)
+    v_max <- max(v[is.finite(v)], 0)
+    if (any(!is.finite(v))) return(as.integer(max_burn))
+  }
+  ## In logs: exp(-v_max) underflows for v_max beyond ~700.
+  log_resid <- function(B) 2 * B * log(r) + v_max     # log of r^(2B) exp(v_max)
+  B_need <- max(1, ceiling((log(tol) - v_max) / (2 * log(r))))
+  if (B_need > max_burn) {
+    .dynhr_inform(
+      sprintf(paste0("sv_rbpf: state persistence %.6f with log-volatility ",
+                     "variance %.3g needs a %.0f-period pre-sample burn-in for ",
+                     "the initial-state law; capped at %d (residual relative ",
+                     "error 1e%+.0f in Var(s_0 | h))."),
+              r, v_max, B_need, as.integer(max_burn),
+              log_resid(max_burn) / log(10)),
+      once = TRUE, key = "sv_rbpf_burn_capped",
+      class = "dynhr_sv_rbpf_burn_capped")
+    return(as.integer(max_burn))
+  }
+  as.integer(B_need)
 }
 
 
@@ -254,7 +365,10 @@
 #' cloud — reusing one cloud across proposals would break the PMMH invariance.
 #'
 #' @param model       dynhr_mod from \code{\link{parse_mod}}.
-#' @param data        Observation matrix (n_obs x T); columns are time periods.
+#' @param data        Observation matrix, \code{T x n_obs} (rows are periods,
+#'   columns the \code{obs_vars}); oriented by the rule documented in
+#'   \code{\link{make_log_posterior_tpf}} (names decide; an unnamed
+#'   \code{n_obs x T} or square sample is refused).
 #' @param prior_spec  Prior specification from \code{extract_prior_spec}.
 #' @param obs_vars    Character vector of observed variable names.
 #' @param compiled    dynhr_compiled from \code{\link{compile_model}}.
@@ -318,6 +432,12 @@ make_log_posterior_sv_rbpf <- function(model, data, prior_spec, obs_vars,
     stop("make_log_posterior_sv_rbpf: 'me_variance' must be a non-negative ",
          "finite scalar.", call. = FALSE)
 
+  ## Particle count: a positive whole number. 0 / negative / NA used to reach
+  ## the kernel and come back as a silent -Inf at every theta (and 2.5 was
+  ## truncated, "10" coerced).
+  n_particles <- .check_particle_count(n_particles, "make_log_posterior_sv_rbpf",
+                                       "n_particles")
+
   ## Hard stop on missing observations: kf_step has no missing-data handling,
   ## so an NA would silently poison every particle's weight and collapse the
   ## whole marginal likelihood to -Inf. Fail loud instead of silently wrong.
@@ -345,7 +465,11 @@ make_log_posterior_sv_rbpf <- function(model, data, prior_spec, obs_vars,
       !is.null(compiled$model$lead_lag_incidence))
     compiled$lead_lag_incidence <- compiled$model$lead_lag_incidence
 
-  if (is.null(dim(data))) data <- matrix(data, nrow = length(obs_vars))
+  ## `data` is T x n_obs (rows are periods), oriented by the package-wide
+  ## rule (R/time-orientation.R); the RB-PF runs on its transpose
+  ## (n_obs x T, one column per period).
+  data <- t(.orient_time_matrix(data, obs_vars, "data",
+                                "make_log_posterior_sv_rbpf"))
   n_obs   <- length(obs_vars)
   me_diag <- if (me_variance > 0) rep(me_variance, n_obs) else NULL
 
@@ -377,16 +501,24 @@ make_log_posterior_sv_rbpf <- function(model, data, prior_spec, obs_vars,
       hyper  <- .sv_resolve_hyperparams(sv_spec, params)
       if (is.character(hyper)) return(NULL)   # domain-infeasible hyperparams
 
-      P0 <- tryCatch(kf_stationary_init(TT, RR, Sigma_e),
+      ## Initial state law: the SV-unconditional stationary covariance
+      ## (Sigma_e weighted by E[exp(h/2) exp(h'/2)], see .sv_stationary_P0),
+      ## then a per-particle pre-sample burn-in so each particle starts from
+      ## Var(s_0 | its own volatility history). Pre-0.9.4.77 every particle
+      ## started from the BASELINE-Sigma_e Lyapunov P0 -- as if mu = 0 and
+      ## sigma_eta = 0 -- a loglik bias of ~0.2-0.8 nats that moved with mu.
+      P0 <- tryCatch(.sv_stationary_P0(TT, RR, Sigma_e, sv_idx, hyper,
+                                       length(exo)),
                      error = function(e) .dynhr_reraise_bug(e, NULL))
       if (is.null(P0) || !all(is.finite(P0))) return(NULL)
+      n_burn <- .sv_burn_in_length(TT, hyper = hyper)
 
-      Y <- if (nrow(data) != n_obs) t(data) else data
+      Y <- data                               # n_obs x T (oriented at build)
 
       loglik <- tryCatch(
         .sv_rbpf_loglik(Y, TT, ZZ, RR, DD, Sigma_e, d, P0,
                         sv_idx, hyper, length(exo), n_particles,
-                        me_diag = me_diag),
+                        me_diag = me_diag, n_burn = n_burn),
         error = function(e) .dynhr_reraise_bug(e, -Inf))
       loglik <- as.numeric(loglik)            # drop the diagnostic attribute
       if (!is.finite(loglik)) return(NULL)

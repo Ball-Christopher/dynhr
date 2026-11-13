@@ -725,7 +725,8 @@ OBC path:
 
 ```{r obc, eval = FALSE, purl = FALSE}
 ## occbin_result: a Boehl / OccBin solver result (bitfield regime_path,
-## n_endo x T paths); specs: the model's OBC specs (names, variables, bounds)
+## T x n_endo paths, rows = periods); specs: the model's OBC specs (names,
+## variables, bounds)
 obc_diag <- dynhr:::d32_obc_binding_summary(
   regime_path = occbin_result$regime_path,
   obc_specs   = specs,

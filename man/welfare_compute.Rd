@@ -23,7 +23,10 @@ welfare_compute(
 
 \item{model}{dynhr_mod object.}
 
-\item{params}{Named parameter vector.}
+\item{params}{Named parameter vector, or \code{NULL}. The shock
+covariance (moments and simulation alike) comes from \code{params} when
+supplied, else from \code{dr$Sigma_e}, else from the model's shocks
+block.}
 
 \item{planner_objective}{Character: planner objective expression.}
 

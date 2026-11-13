@@ -307,15 +307,33 @@ sbc_ranks <- function(theta_tilde, draws_mat, thin = 1L) {
 #'     endpoints).}
 #' }
 #'
-#' \strong{Verdict logic (composite).} \code{"miscalibrated"} if EITHER the
-#' chi-squared p-value is Bonferroni-significant for any parameter, OR
-#' \code{|mean_rank_z| > 3}, OR \code{|tail_asym_z| > 3} for any parameter.
-#' \code{"suspect"} (new) if none of those trip but any of
-#' \code{|mean_rank_z|}, \code{|tail_asym_z|} lies in \code{[2, 3]} for some
-#' parameter. Else \code{"calibrated"}. This composite catches shift/tail
-#' patterns the chi-squared alone can miss at moderate \code{n_repl} (see the
-#' P2c motivation above), while still flagging anything the chi-squared alone
-#' would have caught. \code{"insufficient"} (new) if the input carries no
+#' \strong{Verdict logic (family-wise).} Each parameter contributes up to
+#' three statistics: the chi-squared p-value and two-sided normal p-values
+#' for \code{mean_rank_z} and \code{tail_asym_z} (table columns
+#' \code{p_mean_rank}, \code{p_tail_asym}). The headline \code{verdict}
+#' applies a Bonferroni correction over ALL \code{n_tests} (up to
+#' \code{3 * d}) statistics: \code{"miscalibrated"} if any p-value is at or
+#' below \code{alpha / n_tests} (\code{alpha = 0.05}), \code{"suspect"} if
+#' none is but one is at or below \code{alpha_suspect / n_tests}
+#' (\code{alpha_suspect = 0.20}), else \code{"calibrated"}. A calibrated
+#' sampler is therefore called \code{"miscalibrated"} about 5\% of the time
+#' and \code{"suspect"} or worse about 20\%, whatever the number of
+#' parameters. The table's \code{flag} column marks the parameters
+#' responsible.
+#'
+#' \strong{Unadjusted screen.} \code{verdict_unadjusted} is the rule used up
+#' to 0.9.4.78, kept as a more sensitive per-parameter screen:
+#' \code{"miscalibrated"} if the chi-squared p-value is significant after a
+#' Bonferroni correction over the \code{d} parameters only, or
+#' \code{|mean_rank_z| > 3}, or \code{|tail_asym_z| > 3}; \code{"suspect"}
+#' if either \code{|z|} lies in \code{[2, 3]}. Its thresholds do not depend
+#' on \code{d}, so its false-alarm rate grows with the number of parameters:
+#' on exactly uniform ranks with 12 parameters it returns
+#' \code{"calibrated"} about 40\% of the time, \code{"suspect"} about 50\%
+#' and \code{"miscalibrated"} about 10\%. Read it as a prompt to look at
+#' the histograms, not as a finding.
+#'
+#' \code{"insufficient"} if the input carries no
 #' usable rank-uniformity signal: either every observed rank is identical
 #' (\code{L == 0}, e.g. a single posterior draw or too few replications to
 #' see any spread) or every parameter's chi-squared test degenerated to
@@ -352,16 +370,26 @@ sbc_ranks <- function(theta_tilde, draws_mat, thin = 1L) {
 #' @return A list with class \code{"dynhr_sbc_uniformity"}:
 #'   \describe{
 #'     \item{table}{\code{data.frame(parameter, chisq, df, p_value,
-#'       mean_rank_z, tail_asym_z, extreme_frac)}.}
+#'       mean_rank_z, tail_asym_z, extreme_frac, p_mean_rank, p_tail_asym,
+#'       flag)}.}
 #'     \item{n_bins}{Number of bins used.}
-#'     \item{alpha}{Nominal family-wise significance level (0.05).}
-#'     \item{alpha_bonferroni}{Bonferroni-adjusted per-test threshold,
-#'       \code{alpha / d}.}
-#'     \item{alpha_sidak}{Sidak-adjusted per-test threshold,
-#'       \code{1 - (1 - alpha)^(1/d)}.}
-#'     \item{verdict}{\code{"calibrated"}, \code{"suspect"},
+#'     \item{alpha, alpha_suspect}{Family-wise levels of the headline
+#'       verdict (0.05 and 0.20).}
+#'     \item{n_tests}{Number of usable statistics the headline correction
+#'       runs over.}
+#'     \item{alpha_per_test, alpha_suspect_per_test}{The per-statistic
+#'       thresholds \code{alpha / n_tests} and
+#'       \code{alpha_suspect / n_tests}.}
+#'     \item{alpha_bonferroni}{\code{alpha / d}, the chi-squared threshold
+#'       of the unadjusted screen.}
+#'     \item{alpha_sidak}{\code{1 - (1 - alpha)^(1/d)}.}
+#'     \item{verdict}{Headline: \code{"calibrated"}, \code{"suspect"},
 #'       \code{"miscalibrated"}, or \code{"insufficient"} -- see "Verdict
 #'       logic" above.}
+#'     \item{verdict_unadjusted}{The fixed-threshold screen -- see
+#'       "Unadjusted screen" above.}
+#'     \item{note}{One-paragraph statement of the correction applied and
+#'       the thresholds it implies for this input.}
 #'     \item{ess}{Named numeric vector of per-parameter chain ESS, or
 #'       \code{NULL} if \code{draws} was not supplied.}
 #'   }
@@ -445,15 +473,22 @@ sbc_uniformity_test <- function(ranks_mat, L = NULL, n_bins = NULL, draws = NULL
     tab <- data.frame(parameter = par_names, chisq = NA_real_, df = NA_integer_,
                        p_value = NA_real_, mean_rank_z = NA_real_,
                        tail_asym_z = NA_real_, extreme_frac = NA_real_,
-                       stringsAsFactors = FALSE)
+                       p_mean_rank = NA_real_, p_tail_asym = NA_real_,
+                       flag = "", stringsAsFactors = FALSE)
     return(structure(
       list(
         table            = tab,
         n_bins           = n_bins,
         alpha            = 0.05,
+        alpha_suspect    = 0.20,
+        n_tests          = 0L,
+        alpha_per_test   = NA_real_,
+        alpha_suspect_per_test = NA_real_,
         alpha_bonferroni = NA_real_,
         alpha_sidak      = NA_real_,
         verdict          = "insufficient",
+        verdict_unadjusted = "insufficient",
+        note             = "No usable rank spread: no test was run.",
         ess              = NULL,
         L_effective      = L_eff
       ),
@@ -526,33 +561,72 @@ sbc_uniformity_test <- function(ranks_mat, L = NULL, n_bins = NULL, draws = NULL
   tab <- do.call(rbind, rows)
 
   alpha <- 0.05
+  alpha_suspect <- 0.20
   alpha_bonf  <- alpha / d
   alpha_sidak <- 1 - (1 - alpha)^(1 / d)
 
-  ## NA-safe backstop: a per-parameter p_value can still be NA here (e.g.
-  ## df < 1 for a pathologically bin-starved parameter column, guarded
-  ## above) even when the overall L_eff >= 1 gate passed. Treat NA flags as
-  ## FALSE (no evidence, not a miscalibration signal) rather than let them
-  ## propagate into any(...) -- any(NA) is NA and would crash the if()
-  ## below (the original bug report's exact symptom).
-  chisq_flag <- isTRUE_vec(tab$p_value <= alpha_bonf)
-  shift_flag <- isTRUE_vec(abs(tab$mean_rank_z) > 3 | abs(tab$tail_asym_z) > 3)
-  suspect_flag <- !(chisq_flag | shift_flag) &
+  ## Two-sided normal p-values for the two z diagnostics, so all three
+  ## per-parameter statistics sit on one scale for the family-wise rule.
+  tab$p_mean_rank <- 2 * stats::pnorm(-abs(tab$mean_rank_z))
+  tab$p_tail_asym <- 2 * stats::pnorm(-abs(tab$tail_asym_z))
+
+  ## HEADLINE verdict: Bonferroni over EVERY statistic examined (chisq,
+  ## mean-rank z and tail z for each parameter: up to 3 * d tests), so the
+  ## chance of a false "miscalibrated" on a calibrated sampler is <= alpha
+  ## whatever the number of parameters, and of a false "suspect or worse"
+  ## <= alpha_suspect. NA p-values (no evidence) are not counted and never
+  ## flag.
+  p_all   <- cbind(tab$p_value, tab$p_mean_rank, tab$p_tail_asym)
+  n_tests <- sum(!is.na(p_all))
+  alpha_per_test         <- if (n_tests > 0L) alpha / n_tests else NA_real_
+  alpha_suspect_per_test <- if (n_tests > 0L) alpha_suspect / n_tests else NA_real_
+  p_min_par <- apply(p_all, 1L, function(r) if (all(is.na(r))) NA_real_ else min(r, na.rm = TRUE))
+  miscal_flag  <- isTRUE_vec(p_min_par <= alpha_per_test)
+  suspect_flag <- !miscal_flag & isTRUE_vec(p_min_par <= alpha_suspect_per_test)
+  tab$flag <- ifelse(miscal_flag, "miscalibrated", ifelse(suspect_flag, "suspect", ""))
+
+  ## DETAILED (unadjusted) verdict: the pre-0.9.4.79 rule, kept as a
+  ## per-parameter-level screen. Its thresholds are fixed (chisq Bonferroni
+  ## over d only; |z| > 3; |z| >= 2), so its false-alarm rate GROWS with d.
+  ## NA flags are treated as FALSE (no evidence).
+  chisq_flag_u   <- isTRUE_vec(tab$p_value <= alpha_bonf)
+  shift_flag_u   <- isTRUE_vec(abs(tab$mean_rank_z) > 3 | abs(tab$tail_asym_z) > 3)
+  suspect_flag_u <- !(chisq_flag_u | shift_flag_u) &
     isTRUE_vec(abs(tab$mean_rank_z) >= 2 | abs(tab$tail_asym_z) >= 2)
 
   ## If EVERY parameter's chisq test was unusable (all p_value NA), there is
   ## no uniformity evidence at all -- report "insufficient" rather than the
   ## misleadingly confident "calibrated" a naive all-FALSE flag vector would
   ## otherwise produce.
-  verdict <- if (all(is.na(tab$p_value))) {
+  insufficient <- all(is.na(tab$p_value))
+  verdict <- if (insufficient) {
     "insufficient"
-  } else if (any(chisq_flag | shift_flag)) {
+  } else if (any(miscal_flag)) {
     "miscalibrated"
   } else if (any(suspect_flag)) {
     "suspect"
   } else {
     "calibrated"
   }
+  verdict_unadjusted <- if (insufficient) {
+    "insufficient"
+  } else if (any(chisq_flag_u | shift_flag_u)) {
+    "miscalibrated"
+  } else if (any(suspect_flag_u)) {
+    "suspect"
+  } else {
+    "calibrated"
+  }
+  note <- sprintf(paste0(
+    "Headline verdict is family-wise: Bonferroni over the %d statistics ",
+    "examined (chisq, mean-rank z, tail z per parameter). 'miscalibrated' ",
+    "if any p <= %.2g (family-wise %.2f; |z| > %.2f), 'suspect' if any ",
+    "p <= %.2g (family-wise %.2f; |z| > %.2f). `verdict_unadjusted` is the ",
+    "fixed-threshold screen (chisq Bonferroni over parameters only, |z| > 3, ",
+    "|z| >= 2); its false-alarm rate grows with the number of parameters."),
+    n_tests, alpha_per_test, alpha, stats::qnorm(1 - alpha_per_test / 2),
+    alpha_suspect_per_test, alpha_suspect,
+    stats::qnorm(1 - alpha_suspect_per_test / 2))
 
   ## Optional ESS diagnostic. `draws` can be a single n_draws x d chain
   ## matrix (representative chain) or a list of such matrices (one per
@@ -582,9 +656,15 @@ sbc_uniformity_test <- function(ranks_mat, L = NULL, n_bins = NULL, draws = NULL
       table            = tab,
       n_bins           = n_bins,
       alpha            = alpha,
+      alpha_suspect    = alpha_suspect,
+      n_tests          = n_tests,
+      alpha_per_test   = alpha_per_test,
+      alpha_suspect_per_test = alpha_suspect_per_test,
       alpha_bonferroni = alpha_bonf,
       alpha_sidak      = alpha_sidak,
       verdict          = verdict,
+      verdict_unadjusted = verdict_unadjusted,
+      note             = note,
       ess              = ess,
       L_effective      = L_eff
     ),
@@ -606,14 +686,15 @@ print.dynhr_sbc_uniformity <- function(x, ...) {
   tab$mean_rank_z <- round(tab$mean_rank_z, 3)
   tab$tail_asym_z <- round(tab$tail_asym_z, 3)
   tab$extreme_frac <- signif(tab$extreme_frac, 3)
+  tab$p_mean_rank <- signif(tab$p_mean_rank, 3)
+  tab$p_tail_asym <- signif(tab$p_tail_asym, 3)
   print(tab, row.names = FALSE)
 
-  cat(sprintf("\nBonferroni-adjusted alpha: %.5f (Sidak: %.5f)\n",
-              x$alpha_bonferroni, x$alpha_sidak))
-  cat(sprintf("Verdict: %s\n", x$verdict))
-  cat("(miscalibrated: Bonferroni-significant chisq OR |mean_rank_z| > 3 OR\n")
-  cat(" |tail_asym_z| > 3; suspect: none of those, but one lies in [2, 3];\n")
-  cat(" insufficient: no usable rank spread/GOF signal -- more replications\n")
+  cat(sprintf("\nVerdict: %s\n", x$verdict))
+  if (!is.null(x$note)) cat(strwrap(x$note, width = 76), sep = "\n")
+  if (!is.null(x$verdict_unadjusted))
+    cat(sprintf("Unadjusted (fixed-threshold) verdict: %s\n", x$verdict_unadjusted))
+  cat("(insufficient: no usable rank spread/GOF signal -- more replications\n")
   cat(" needed, not a calibration finding)\n")
 
   if (!is.null(x$ess)) {
@@ -715,6 +796,23 @@ print.dynhr_sbc_uniformity <- function(x, ...) {
 ## LAYER 2: pipeline driver
 ## ===========================================================================
 
+#' Draw the latent state from its stationary Gaussian law (internal)
+#'
+#' \eqn{s_0 \sim N(0, P_0)} with \eqn{P_0} the Lyapunov solution for
+#' \code{(TT, RR, Sigma_e)}; the symmetric square root handles a singular
+#' \eqn{P_0}.
+#' @param TT,RR State transition and shock loading.
+#' @param Sigma_e Shock covariance.
+#' @return Numeric vector of length \code{nrow(TT)}.
+#' @noRd
+.sbc_stationary_state_draw <- function(TT, RR, Sigma_e) {
+  n_state <- nrow(TT)
+  if (n_state == 0L) return(numeric(0))
+  eg <- eigen(kf_stationary_init(TT, RR, Sigma_e), symmetric = TRUE)
+  as.numeric(eg$vectors %*% (sqrt(pmax(eg$values, 0)) * stats::rnorm(n_state)))
+}
+
+
 #' Single SBC replication: prior draw -> simulate -> posterior -> ranks
 #'
 #' Structured as a single function so a future parallel driver can dispatch
@@ -743,7 +841,7 @@ print.dynhr_sbc_uniformity <- function(x, ...) {
 #'   \code{likelihood = "tpf"} the DGP should be order 2 (pruned) to match
 #'   the likelihood order; default 1 matches the Kalman filter.
 #' @param seed          RNG seed for this replication (caller passes
-#'   \code{seed_base + i}).
+#'   \code{.child_seeds(seed_base, n, "sbc_replications")[i]}).
 #' @return A list with either \code{$ok = TRUE, $ranks = <named integer
 #'   vector>, $L_effective = <int>} or \code{$ok = FALSE, $reason =
 #'   <character>}.
@@ -882,7 +980,13 @@ print.dynhr_sbc_uniformity <- function(x, ...) {
 
   } else {
     ## Order-1 DGP: linear state-space simulation (original SBC code)
-    s <- numeric(n_state)
+    ## Start the latent state from its stationary law, N(0, P0), rather than
+    ## from zero: after `presample` periods from s = 0 a persistent draw has
+    ## not reached it (root 0.98: Var(y_1) is ~18% short after 50 periods),
+    ## while the likelihood (lik_init = "stationary") assumes it has. The
+    ## presample periods are still run; they leave the Gaussian law unchanged
+    ## and let a skewed-shock (pskf) state settle from its Gaussian start.
+    s <- .sbc_stationary_state_draw(TT, RR, Sigma_e)
 
     if (likelihood == "pskf") {
       ## PSKF DGP: draw CSN shocks consistent with the drawn alpha.
@@ -890,8 +994,8 @@ print.dynhr_sbc_uniformity <- function(x, ...) {
       ## shocks; Gaussian shocks would cause a DGP-likelihood mismatch and
       ## the SBC rank distribution would be degenerate.
       ##
-      ## JOINT CSN draw: e ~ CSN(mu_e, Sigma_e, Gamma_e, 0, I)
-      ## with Gamma_e = diag(alpha_i / sigma_i), seed cov = FULL Sigma_e.  This
+      ## JOINT CSN draw: e ~ CSN(mu_e, S, Gamma_e, 0, I), S the CSN scale of
+      ## Sigma_e, Gamma_e = diag(alpha_i / omega_i), seed cov = FULL S.  This
       ## is the SAME law the likelihood builds in .get_csn_shock_params (off-
       ## diagonals carried entirely by the seed Sigma_e), so the DGP and the
       ## likelihood are consistent for correlated + skewed shocks (no refusal).
@@ -905,9 +1009,9 @@ print.dynhr_sbc_uniformity <- function(x, ...) {
       ## 64-draw rejection loop per period) and applies the same closed-form
       ## mean shift the filter uses, so the DGP data level is exactly where the
       ## filter places its steady state.
-      sigma_e <- sqrt(diag(Sigma_e))          # length n_exo
+      ## Sigma_e is the TRUE shock covariance (0.9.4.78 convention).
       alpha_e <- .get_shock_skewness(model, exo, params)  # length n_exo (named)
-      e_draws <- .draw_csn_shocks(n_total, Sigma_e, alpha_e, sigma_e)
+      e_draws <- .draw_csn_shocks(n_total, Sigma_e, alpha_e)
 
       for (t in seq_len(n_total)) {
         e_t <- e_draws[t, ]
@@ -944,6 +1048,11 @@ print.dynhr_sbc_uniformity <- function(x, ...) {
   ## (posterior below the truth, the signature of variance attributed to
   ## measurement error that the data never contained).
   Y <- .sbc_add_me(Y, me_variance)
+  ## Simulated n_obs x T above; every consumer below takes the package-wide
+  ## T x n_obs (rows = periods), columns named so a short square sample
+  ## (T == n_obs) is never ambiguous.
+  Y <- t(Y)
+  colnames(Y) <- obs_vars
 
   ## ---- Step 3b (optional): per-draw KF innovation whiteness fast-fail ----
   ## Y was simulated from exactly this (dr, params) state-space -- this is
@@ -1039,7 +1148,9 @@ print.dynhr_sbc_uniformity <- function(x, ...) {
         compiled    = compiled,
         me_variance = me_variance,
         likelihood  = "whittle",
-        freq_band   = list(...)$freq_band %||% c(0, pi)
+        freq_band   = list(...)$freq_band %||% c(0, pi),
+        ## the debias log_post_fn was built with (was: always the default)
+        debias      = .whittle_debias_resolve(log_post_fn)
       )
     } else NULL
 
@@ -1117,7 +1228,9 @@ print.dynhr_sbc_uniformity <- function(x, ...) {
         freq_band  = list(...)$freq_band %||% c(0, pi),
         ## the init of log_post_fn above: without it the sampler moved on the
         ## gradient of the "auto" likelihood under lik_init = "diffuse"/"kappa"
-        lik_init   = lik_init)
+        lik_init   = lik_init,
+        ## the Whittle debias log_post_fn was built with
+        debias     = .whittle_debias_resolve(log_post_fn))
     } else NULL
 
     mcmc <- if (sampler == "hmc") {
@@ -1235,7 +1348,11 @@ print.dynhr_sbc_uniformity <- function(x, ...) {
 #' @param adapt_cov        Logical (default \code{FALSE}): if \code{TRUE},
 #'   use Haario et al. (2001) adaptive proposal covariance in \code{rwmh()}.
 #' @param seed             Base RNG seed (default 1L). Replication \code{i}
-#'   uses seed \code{seed + i} for reproducibility.
+#'   uses the \code{i}-th of a family of statistically independent seeds
+#'   derived from \code{seed} (the same on the serial and the parallel path,
+#'   and the same for every \code{n_replications >= i}). Earlier builds
+#'   used \code{seed + i}, whose consecutive seeds made the first prior draw
+#'   -- the true parameter -- dependent across neighbouring replications.
 #' @param n_cores          Number of parallel workers when running replications
 #'   in parallel (\code{NULL} = auto-detect).  Currently reserved for a future
 #'   mirai-based parallel path; replications are run serially in this version.
@@ -1448,11 +1565,12 @@ dynhr_sbc <- function(model, obs_vars, T_obs = 100L, n_replications = 50L,
       list(...)
     }
 
-    ## .sbc_one_replication() re-seeds (seed + i) in this process; restore the
-    ## caller's RNG stream when dynhr_sbc() exits.
+    ## .sbc_one_replication() re-seeds (replication i's child seed) in this
+    ## process; restore the caller's RNG stream when dynhr_sbc() exits.
     .local_seed(seed)
+    rep_seeds <- .child_seeds(seed, n_replications, "sbc_replications")
     for (i in seq_len(n_replications)) {
-      rep_seed <- seed + i
+      rep_seed <- rep_seeds[i]
       res <- do.call(.sbc_one_replication, c(
         list(
           i = i, model = model, compiled = compiled, prior_spec = prior_spec,

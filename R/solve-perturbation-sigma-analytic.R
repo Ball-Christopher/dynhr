@@ -1,13 +1,15 @@
 ## R/solve-perturbation-sigma-analytic.R
 ## --------------------------------------------------------------------------
 ## Analytic, moment-based forcing for the order-4/5 sigma-correction terms
-## (ghxxss, ghss2, ghxxxss, ghxss2).  Replaces the slow finite-difference
+## (ghxxss, ghxuss, ghuuss, ghss2; ghxxxss, ghxxuss, ghxuuss, ghuuuss,
+## ghxss2, ghuss2).  Replaces the slow finite-difference
 ## Gauss-Hermite path (.build_phi_fd_sigma): exact for Gaussian shocks and
 ## machine-precision accurate (the FD path was 4%-200%+ off on strongly
 ## nonlinear models -- see the exp closed-form golden, test-sigma-exp-golden.R).
 ##
 ## Architecture ("compose THEN fold").  Carry the future shock `e` as explicit
-## perturbation modes  w = (x_1..x_ns, sigma, e_1..e_nu),  compose F o dy to
+## perturbation modes  w = (x_1..x_ns, u_1..u_nu, sigma, e_1..e_nu)  (u = the
+## CURRENT shock, a policy argument; e = the t+1 shock),  compose F o dy to
 ## order K = k_x + 2m, then fold the e-moments at the END via the binomial
 ## identity (h(sigma)=E_eps[R(x,sigma,sigma*eps)], e=sigma*eps linear in sigma):
 ##
@@ -57,22 +59,6 @@
     A <- array(0, dim = rep(full, k))
     A[idxg] <- M_sub[a, ]
     out[a, ] <- as.numeric(A)
-  }
-  out
-}
-
-#' Select the same subset `sel` of modes on every axis of a symmetric k-tensor.
-#' M: n x full^k  ->  n x length(sel)^k  (sub-modes in the order of `sel`).
-#' @noRd
-.select_modes <- function(M, k, full, sel) {
-  n <- nrow(M); p <- length(sel)
-  if (k == 0L) return(M)
-  out <- matrix(0, n, p^k)
-  selL <- rep(list(sel), k)
-  for (a in seq_len(n)) {
-    A <- array(M[a, ], dim = rep(full, k))
-    sub <- do.call(`[`, c(list(A), selL, list(drop = FALSE)))
-    out[a, ] <- as.numeric(sub)
   }
   out
 }
@@ -185,14 +171,25 @@
       G[[3L]][j, ] <- as.numeric(A)
     }
   }
-  # k=4: ghxxss (state,state,sig,sig), ghss2 (sig^4)   [order-5 build only]
+  # k=4: ghxxss (state,state,sig,sig), ghxuss (state,shock,sig,sig),
+  #      ghuuss (shock,shock,sig,sig), ghss2 (sig^4)   [order-5 build only]
   if (K >= 4L && K - 1L >= 4L) {
     ghxxss <- dr$ghxxss; ghss2 <- as.numeric(dr$ghss2)
+    ghxuss <- dr$ghxuss %||% matrix(0, n, ns * nu)
+    ghuuss <- dr$ghuuss %||% matrix(0, n, nu * nu)
     for (j in seq_len(n)) {
       A <- array(G[[4L]][j, ], dim = rep(qa, 4L))
       Mxx <- matrix(ghxxss[j, ], ns, ns)                  # [s2 fast, s1] symmetric
       for (s1 in seq_len(ns)) for (s2 in seq_len(ns)) {
         v <- Mxx[s2, s1]; if (v != 0) A <- add_perm(A, c(s1, s2, sig, sig), v)
+      }
+      Mxu <- matrix(ghxuss[j, ], nu, ns)                  # kron(x, u): [u fast, s]
+      for (s1 in seq_len(ns)) for (l in seq_len(nu)) {
+        v <- Mxu[l, s1]; if (v != 0) A <- add_perm(A, c(s1, ns + l, sig, sig), v)
+      }
+      Muu <- matrix(ghuuss[j, ], nu, nu)                  # symmetric
+      for (l1 in seq_len(nu)) for (l2 in l1:nu) {
+        v <- Muu[l2, l1]; if (v != 0) A <- add_perm(A, c(ns + l1, ns + l2, sig, sig), v)
       }
       A[matrix(rep(sig, 4L), 1L)] <- A[matrix(rep(sig, 4L), 1L)] + ghss2[j]
       G[[4L]][j, ] <- as.numeric(A)
@@ -201,40 +198,44 @@
   G
 }
 
-#' Separable lead-block composition  GLEAD[[k]] = D^k_w [ g(x_now(x,sigma), e, sigma) ].
+#' Separable lead-block composition
+#' GLEAD[[k]] = D^k_w [ g(x_now(x, u_t, sigma), e, sigma) ].
 #'
 #' The future shock e enters the lead policy g ONLY as its shock-argument, and
 #' that dependence is linear and identity (A_shock = e); nothing else depends on
 #' e (x_now and sigma do not).  Hence in the Faa-di-Bruno expansion every e w-slot
 #' is forced to be a singleton block mapping (via the identity) to one of g's
-#' shock-arguments, while the (x,sigma) w-slots compose through the reduced inner
-#' map Mr : (x,sigma) -> (x_now(x,sigma), sigma).  So for a canonical w-column with
-#' `b` e-modes (shock multi-index S) and `a = k-b` reduced modes,
+#' shock-arguments, while the (x, u_t, sigma) w-slots compose through the inner
+#' map Mr : (x, u_t, sigma) -> (x_now(x, u_t, sigma), sigma).  So for a canonical
+#' w-column with `b` e-modes (shock multi-index S) and `a = k-b` inner modes,
 #'
-#'   GLEAD[j, v] = [ D^a_{(x,sigma)} ( G^{(S)} o Mr ) ]_j  at reduced column v_reduced,
+#'   GLEAD[j, v] = [ D^a_{(x,u_t,sigma)} ( G^{(S)} o Mr ) ]_j  at inner column v_inner,
 #'
-#' where G^{(S)}[[p]][j; R] = g^{(p+b)}_j[ R (reduced args), S (shock args) ] is g's
-#' (p+b)-th derivative with b of its arguments fixed to the shock modes S.  This
-#' composes over ns+1 reduced modes instead of rp = ns+1+nu, the analog of the
-#' deterministic .restrict_input_modes (nz -> ns) win.  Value-identical to the
-#' dense GFULL o MINNER compose (the e-slots contribute factor 1).
+#' where G^{(S)}[[p]][j; R] = g^{(p+b)}_j[ R (x_now/sigma args), S (shock args) ]
+#' is g's (p+b)-th derivative with b of its arguments fixed to the shock modes S.
+#' This composes over ns+nu+1 inner modes instead of rp = ns+2nu+1, the analog
+#' of the deterministic .restrict_input_modes (nz -> ns) win.  Value-identical
+#' to the dense GFULL o MINNER compose (the e-slots contribute factor 1).
 #' @noRd
 .build_glead_separated <- function(K, GFULL_d, state_idx, ns, nu, n, lead_rows) {
   qa    <- ns + nu + 1L
-  nr    <- ns + 1L                          # reduced modes: x(1..ns), sigma(=nr)
+  nr    <- ns + 1L                          # outer reduced args of g: x_now(1..ns), sigma(=nr)
+  ni    <- qa                               # inner modes: x(1..ns), u_t(ns+1..ns+nu), sigma(=qa)
   sig_A <- qa
-  rp    <- ns + 1L + nu
-  red2qa   <- c(seq_len(ns), sig_A)         # reduced mode r -> qa A-mode
+  rp    <- qa + nu                          # w-modes: (x, u_t, sigma) then e (t+1 shock)
+  red2qa   <- c(seq_len(ns), sig_A)         # outer reduced arg -> qa A-mode of g
   shock2qa <- ns + seq_len(nu)              # shock index s  -> qa A-mode
 
-  # Reduced inner map Mr[[s]] : nr x nr^s  (state rows = x_now reduced derivs;
-  # sigma row = identity at order 1, zero higher).
+  # Inner map Mr[[s]] : nr x ni^s.  x_now = h(x, u_t, sigma) depends on the
+  # lagged state, the CURRENT shock and sigma (state rows of the policy over
+  # all qa A-modes); the sigma row is the identity at order 1, zero higher.
+  # (The current shock used to be absent from the modes, so no
+  # g_{x^a u^b sigma^2m} with b > 0 beyond order 3 could be formed.)
   Mr <- vector("list", K)
   for (s in seq_len(K)) {
-    CURr_s <- .select_modes(GFULL_d[[s]], s, qa, red2qa)      # n x nr^s
-    Ms <- matrix(0, nr, nr^s)
-    Ms[seq_len(ns), ] <- CURr_s[state_idx, , drop = FALSE]
-    if (s == 1L) Ms[nr, nr] <- 1
+    Ms <- matrix(0, nr, ni^s)
+    Ms[seq_len(ns), ] <- GFULL_d[[s]][state_idx, , drop = FALSE]
+    if (s == 1L) Ms[nr, ni] <- 1
     Mr[[s]] <- Ms
   }
 
@@ -250,11 +251,10 @@
     for (b in 0:k) {
       a    <- k - b
       Sset <- if (b == 0L) matrix(integer(0), 1L, 0L) else .sorted_multiindices(nu, b)
-      Sw_pw <- if (b > 0L) (ns + 1L) else 0L
       for (si in seq_len(nrow(Sset))) {
         S   <- if (b > 0L) Sset[si, ] else integer(0)
         Sqa <- if (b > 0L) shock2qa[S] else integer(0)
-        Sw  <- if (b > 0L) (ns + 1L) + S else integer(0)      # e w-modes (sorted)
+        Sw  <- if (b > 0L) qa + S else integer(0)             # e w-modes (sorted)
 
         if (a == 0L) {
           # all e-modes: GLEAD value = g^{(k)}[j; S] directly (no reduced compose)
@@ -287,10 +287,10 @@
                            val  = valv)
         }
 
-        red        <- .fdb_compose_folded(a, G_S, Mr, n, nr)  # n x C(nr+a-1,a)
-        red_combos <- .sorted_multiindices(nr, a)
+        red        <- .fdb_compose_folded(a, G_S, Mr, n, ni)  # n x C(ni+a-1,a)
+        red_combos <- .sorted_multiindices(ni, a)
         for (rc in seq_len(nrow(red_combos))) {
-          v  <- c(red_combos[rc, ], Sw)                       # already sorted (reduced < e)
+          v  <- c(red_combos[rc, ], Sw)                       # already sorted (inner < e)
           cc <- col_of_flat[sum((v - 1L) * pw_rp) + 1L]
           Dfold[, cc] <- Dfold[, cc] + red[, rc]
         }
@@ -309,8 +309,10 @@
                                   endo_names, exo_names, ns, nu, n,
                                   K, res_perm) {
   qa <- ns + nu + 1L; sig_A <- qa
-  rp <- ns + 1L + nu                       # w-modes
-  # w-modes: x (1..ns), sigma (ns+1), e (ns+2..rp; the t+1 shock, lead block only)
+  rp <- qa + nu                            # w-modes
+  # w-modes: x (1..ns), u_t (ns+1..ns+nu; the CURRENT shock, a policy argument),
+  # sigma (qa), e (qa+1..rp; the t+1 shock, lead block only).  The first qa
+  # w-modes coincide with the A-modes of the policy tensors.
 
   GFULL_d  <- .build_GFULL_dense(dr, ns, nu, n, K)
 
@@ -327,12 +329,9 @@
   lead_rows <- sort(unique(lead_rows))
   if (length(lead_rows) == 0L) lead_rows <- seq_len(n)
 
-  # CUR: current shock-free policy g(x,0,sigma) over w  (n x rp^k)
+  # CUR: current policy g(x, u_t, sigma) over w  (n x rp^k)
   CUR <- vector("list", K)
-  for (k in seq_len(K)) {
-    sub <- .select_modes(GFULL_d[[k]], k, qa, c(seq_len(ns), sig_A))   # (ns+1) sub-modes
-    CUR[[k]] <- .embed_first(sub, k, ns + 1L, rp)                      # first ns+1 w-modes
-  }
+  for (k in seq_len(K)) CUR[[k]] <- .embed_first(GFULL_d[[k]], k, qa, rp)
 
   # lead block g(x_now(x,sigma), e, sigma) = GFULL o M  (n x rp^k).  The future
   # shock e enters g ONLY as its (linear) shock-argument and nothing else depends
@@ -351,14 +350,15 @@
     if (nm %in% exo_names) {
       # The dynamic-residual shock columns hold the CURRENT shock u_t (the
       # parser turns every exogenous lead/lag into an AUX endogenous, so
-      # lead_lag is always 0 here).  A sigma-correction term g_{x^k sigma^2m}
-      # is a derivative of the policy at u_t = 0: u_t is a policy ARGUMENT,
-      # not the random future shock.  The e w-modes are the t+1 shock, which
-      # enters ONLY through the lead block (GLEAD's shock-arguments), so the
-      # shock columns stay identically zero in every DY[[k]].  (Mapping them
-      # to e_w -- the pre-0.9.3.41 behaviour -- made u_t = sigma*eps_{t+1}
-      # and folded E[eps^2], E[eps^4] into every F_uu.. term: y = exp(e)
-      # got ghss2 = 3 s^4 although the policy has no sigma dependence.)
+      # lead_lag is always 0 here).  u_t is a policy ARGUMENT -- its own
+      # w-mode, linear identity -- not the random future shock.  The e
+      # w-modes are the t+1 shock, which enters ONLY through the lead block
+      # (GLEAD's shock-arguments).  (Mapping these columns to e_w -- the
+      # pre-0.9.3.41 behaviour -- made u_t = sigma*eps_{t+1} and folded
+      # E[eps^2], E[eps^4] into every F_uu.. term: y = exp(e) got
+      # ghss2 = 3 s^4 although the policy has no sigma dependence.)
+      kk <- which(exo_names == nm)
+      if (length(kk) == 1L) DY[[1L]][c, ns + kk] <- 1
       next
     }
     j <- which(endo_names == nm); if (length(j) != 1L) next
@@ -381,40 +381,44 @@
   Phi[res_perm, , drop = FALSE]                      # -> declaration order
 }
 
-#' Fold the e-moments out of the full Phi tensor for target g_{x^k_x sigma^2m}.
-#' Column order over x: last-state-fastest (FD odometer) via aperm(.,k_x:1), so
-#' the result matches the FD path's Phi column layout exactly.
+#' Fold the e-moments out of the full Phi tensor for target
+#' g_{x^k_x u^k_u sigma^2m} (u = the CURRENT shock).  Column order is the
+#' Kronecker order x^{(x)k_x} (x) u^{(x)k_u} -- the LAST mode fastest -- the
+#' layout the order-3+ policy tensors are stored in (for k_u = 0 this is the
+#' FD path's last-state-fastest odometer).
 #' @noRd
-.extract_sigma_block2 <- function(Phi_full, K, ns, nu, k_x, twom, n, M2, M4) {
-  rp    <- ns + 1L + nu
-  sig_w <- ns + 1L
-  e_w   <- if (nu > 0L) (ns + 2L):(ns + 1L + nu) else integer(0)
+.extract_sigma_block2 <- function(Phi_full, K, ns, nu, k_x, twom, n, M2, M4,
+                                  k_u = 0L) {
+  qa    <- ns + nu + 1L
+  rp    <- qa + nu
+  sig_w <- qa
+  e_w   <- if (nu > 0L) (qa + 1L):rp else integer(0)
   x_w   <- seq_len(ns)
-  ncols <- if (k_x == 0L) 1L else ns^k_x
+  u_w   <- ns + seq_len(nu)
+  zdim  <- c(rep(ns, k_x), rep(nu, k_u))
+  ncols <- if (length(zdim)) prod(zdim) else 1L
   out   <- matrix(0, n, ncols)
   i_seq <- seq(0L, twom, by = 2L)
   for (i in i_seq) {
     j_sig <- twom - i
     cf <- choose(twom, i)
     Mom <- if (i == 0L) 1 else if (i == 2L) M2 else M4
-    sel <- c(rep(list(x_w), k_x), rep(list(sig_w), j_sig), rep(list(e_w), i))
+    sel <- c(rep(list(x_w), k_x), rep(list(u_w), k_u), rep(list(sig_w), j_sig),
+             rep(list(e_w), i))
     for (e in seq_len(n)) {
       A   <- array(Phi_full[e, ], dim = rep(rp, K))
-      sub <- do.call(`[`, c(list(A), sel, list(drop = FALSE)))   # ns(xk_x),1(xj_sig),nu(xi)
-      adim <- c(rep(ns, k_x), rep(nu, i))
-      sub  <- if (length(adim)) array(sub, dim = adim) else as.numeric(sub)
+      sub <- do.call(`[`, c(list(A), sel, list(drop = FALSE)))   # z modes, 1(xj_sig), nu(xi)
       if (i == 0L) {
-        valx <- as.numeric(sub)
+        valz <- as.numeric(sub)
       } else {
-        mat  <- matrix(sub, nrow = ncols, ncol = nu^i)           # rows=x (col-major), cols=e
-        valx <- as.numeric(mat %*% Mom)
+        mat  <- matrix(sub, nrow = ncols, ncol = nu^i)           # rows=z (col-major), cols=e
+        valz <- as.numeric(mat %*% Mom)
       }
-      if (k_x == 0L) {
-        out[e, ] <- out[e, ] + cf * valx
-      } else {
-        ax <- array(valx, dim = rep(ns, k_x))                    # x_1 fastest
-        out[e, ] <- out[e, ] + cf * as.numeric(aperm(ax, k_x:1))
+      if (length(zdim) > 1L) {
+        az   <- array(valz, dim = zdim)                          # first z mode fastest
+        valz <- as.numeric(aperm(az, rev(seq_along(zdim))))      # -> last mode fastest
       }
+      out[e, ] <- out[e, ] + cf * valz
     }
   }
   out

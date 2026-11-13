@@ -20,7 +20,10 @@ make_log_posterior_sv_rbpf(
 \arguments{
 \item{model}{dynhr_mod from \code{\link{parse_mod}}.}
 
-\item{data}{Observation matrix (n_obs x T); columns are time periods.}
+\item{data}{Observation matrix, \code{T x n_obs} (rows are periods,
+columns the \code{obs_vars}); oriented by the rule documented in
+\code{\link{make_log_posterior_tpf}} (names decide; an unnamed
+\code{n_obs x T} or square sample is refused).}
 
 \item{prior_spec}{Prior specification from \code{extract_prior_spec}.}
 

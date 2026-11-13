@@ -156,6 +156,34 @@
 }
 
 
+## Evaluate a differentiated steady_state_model RHS at (ys, params), or NA when
+## it cannot be evaluated there. The ONLY recoverable case is a symbol the
+## point does not carry -- an SSM temporary that is neither an endogenous
+## variable nor a parameter, or a model-local `#` variable: the analytic chain
+## cannot see through it, the caller returns NULL and the gradient falls back
+## to finite differences. That is checked explicitly and reported once per
+## run (the fallback is a large slowdown and used to be silent). Any other
+## ast_eval() error is a bug and propagates -- this used to be a
+## tryCatch(..., error = NA) that hid both.
+## @noRd
+.ssm_eval_or_na <- function(node, vv, params, stmt = NA_character_) {
+  syms <- unique(.ast_leaf_syms(node))
+  miss <- syms[!(paste0(syms, "__0") %in% names(vv)) & !(syms %in% names(params))]
+  if (length(miss) > 0L) {
+    .dynhr_warn(
+      "analytic steady_state_model derivative unavailable: the assignment of `",
+      stmt, "` depends on ", paste0("`", miss, "`", collapse = ", "),
+      ", which is neither an endogenous variable nor a parameter (an SSM ",
+      "temporary?). The gradient falls back to finite differences for the ",
+      "steady-state chain, which is slower; declare the temporary as a ",
+      "parameter to keep the analytic path.",
+      once = TRUE, key = paste0("ssm_chain_fd_fallback:", stmt),
+      class = "dynhr_warning_ssm_chain_fallback")
+    return(NA_real_)
+  }
+  ast_eval(node, vv, params)
+}
+
 #' Total parameter/variable derivatives of steady_state_model-computed parameters.
 #'
 #' Walks the SSM assignment list IN ORDER, carrying forward, for every assigned
@@ -224,8 +252,8 @@
         ast_differentiate(ex, s, 0L, wrt = "variable")
       else
         ast_differentiate(ex, s, 0L, wrt = "parameter")
-      pv <- tryCatch(ast_eval(ds, vv, params), error = function(e) NA_real_)
-      if (is.na(pv) || !is.finite(pv)) return(NULL)   # non-differentiable / eval fail
+      pv <- .ssm_eval_or_na(ds, vv, params, a$name)
+      if (is.na(pv) || !is.finite(pv)) return(NULL)   # non-differentiable / not evaluable
       if (pv != 0) total <- total + pv * get_d(s)
     }
     dmap[[a$name]] <- total
@@ -307,13 +335,13 @@
     for (s in syms) {
       ds <- ast_differentiate(ex, s, 0L, wrt = wrt(s))
       ds_cache[[s]] <- ds
-      pv <- tryCatch(ast_eval(ds, vv, params), error = function(e) NA_real_)
+      pv <- .ssm_eval_or_na(ds, vv, params, a$name)
       if (is.na(pv) || !is.finite(pv)) return(NULL)
       if (pv != 0) { t1 <- t1 + pv * g1(s); t2 <- t2 + pv * g2(s) }
     }
     for (s in syms) for (t in syms) {
       dst  <- ast_differentiate(ds_cache[[s]], t, 0L, wrt = wrt(t))
-      pvst <- tryCatch(ast_eval(dst, vv, params), error = function(e) NA_real_)
+      pvst <- .ssm_eval_or_na(dst, vv, params, a$name)
       if (is.na(pvst) || !is.finite(pvst)) return(NULL)
       if (pvst != 0) t2 <- t2 + pvst * outer(g1(s), g1(t))
     }

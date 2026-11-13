@@ -87,6 +87,9 @@ d19_second_order_accuracy <- function(dr2, model = NULL,
       llm_summary = "[FAIL] d19_second_order: input not DecisionRules2"
     ))
   }
+  ## ghxu read as matrix(ghxu[i, ], n_s, n_u) (state fastest): u_slow layout,
+  ## see MIXED-BLOCK LAYOUT CONVENTION
+  dr2 <- .with_mixed_layout(dr2, "u_slow")
 
   endo      <- dr2$endo_names
   exo       <- dr2$exo_names

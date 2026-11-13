@@ -20,7 +20,9 @@ ms_kim_filter_struct(
 )
 }
 \arguments{
-\item{data}{Observation matrix (n_obs x T). May contain \code{NA}s.}
+\item{data}{Observation matrix, \code{T x n_obs} (rows = periods;
+columns named by \code{obs_vars}; see
+\code{\link{ms_kim_filter}}). May contain \code{NA}s.}
 
 \item{ms_dr}{An \code{MsDecisionRules} object from
 \code{\link{solve_ms_perturbation}}.}
@@ -50,7 +52,7 @@ where \code{me_variance} is an \eqn{F}-only regulariser;
 \code{kalman_filter(method = "univariate")} is the
 single-regime true-ME oracle.}
 
-\item{return_regime_probs}{Logical; return \code{n_regimes x T} filtered
+\item{return_regime_probs}{Logical; return the \code{T x n_regimes} filtered
 regime probability matrix (default FALSE).}
 
 \item{return_state_path}{Logical; if \code{TRUE} additionally return the
@@ -75,7 +77,7 @@ BIT-IDENTICAL with and without it (pinned in
 \code{test-ms-smoother-struct.R}).  Default \code{FALSE}.}
 
 \item{return_collapse_diag}{Logical; if \code{TRUE} additionally return
-\code{collapse_diag} (\code{n_regimes x T}) and
+\code{collapse_diag} (length-\code{T} vector) and
 \code{collapse_max}, the GPB(2) COLLAPSE-QUALITY
 statistic.  See the "Collapse quality" section of
 \code{\link{ms_kim_filter}}; this filter is where it
@@ -116,7 +118,7 @@ faster than in the shock-variance-only model.  Default
 A list with:
   \describe{
     \item{\code{loglik}}{Total log-likelihood (scalar).}
-    \item{\code{regime_probs}}{\code{n_regimes x T} matrix if
+    \item{\code{regime_probs}}{\code{T x n_regimes} matrix (rows = periods) if
       \code{return_regime_probs = TRUE}, otherwise \code{NULL}.}
     \item{\code{n_obs}}{Number of observed variables.}
     \item{\code{n_T}}{Number of time periods.}

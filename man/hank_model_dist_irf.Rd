@@ -28,9 +28,9 @@ tunable FD deltas exposed here.}
 \value{
 A list with:
   \item{dD}{Named list, one entry per \code{"het"}-kind block in
-    \code{model$blocks} (keyed by block name). Each entry is an
-    \code{(n_e*n_a) x T_h} matrix; column \code{t} is the distribution
-    deviation \code{dD_t} for that block.}
+    \code{model$blocks} (keyed by block name). Each entry is a
+    \code{T_h x n_cell} matrix (rows are periods); row \code{t} is the
+    distribution deviation \code{dD_t} for that block.}
   \item{dsrc}{The per-source (unknowns + exogenous) deviation paths, as
     returned internally by \code{\link{hank_model_irf}} -- exposed here so
     callers can confirm the two functions solved the identical GE system.}

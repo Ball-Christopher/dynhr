@@ -89,7 +89,12 @@
   n_par   <- length(d_ss_list)
 
   if (is.null(dim(Y))) Y <- matrix(Y, nrow = n_obs)
-  if (nrow(Y) != n_obs) Y <- t(Y)
+  ## Internal contract: Y is n_obs x T (one column per period) and every
+  ## caller passes that layout -- no shape guess (a square sample, T == n_obs,
+  ## made the old `nrow(Y) != n_obs -> t(Y)` guess read it transposed).
+  if (nrow(Y) != n_obs)
+    stop("internal: Y must be n_obs x T (", n_obs, " rows); got ",
+         nrow(Y), " x ", ncol(Y), ".", call. = FALSE)
   n_T <- ncol(Y)
 
   ## ---- Regime-boundary detection (computed R-side regardless of fast path) --

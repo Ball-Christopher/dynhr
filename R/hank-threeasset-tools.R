@@ -131,7 +131,7 @@ hank_walras3 <- function(block, td,
   if (is.null(td$Dpath))
     stop("hank_walras3: 'td' must be a hank_td3_nonlinear result (no Dpath ",
          "found).")
-  T_h <- ncol(td$Dpath)
+  T_h <- nrow(td$Dpath)
   fill <- function(p, v) if (is.null(p)) rep(v, T_h) else {
     if (length(p) != T_h)
       stop("hank_walras3: every supplied path must have length ", T_h,
@@ -155,7 +155,7 @@ hank_walras3 <- function(block, td,
   omega <- .hank_block_omega(block)
   om_st <- rep(omega, each = nd * nf * na)
 
-  agg <- function(x) as.numeric(crossprod(td$Dpath, x))
+  agg <- function(x) as.numeric(td$Dpath %*% x)
   e_bar <- agg(e_st); om_bar <- agg(om_st)
   D_in  <- agg(d_st); F_in <- agg(f_st); A_in <- agg(a_st)
 

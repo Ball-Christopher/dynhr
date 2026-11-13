@@ -443,14 +443,15 @@ d31_obc_scenario_comparison <- function(pf_constrained    = NULL,
   e <- matrix(0, length(exo), n_T)
   e[k, 1L] <- size
   u <- boehl_simulate(e, dr_slack, cache, integer(n_T))$paths
-  sol <- boehl_solve_regime_path(e, dr_slack, sys, obc_specs, obs_idx = obs_idx,
+  sol <- boehl_solve_regime_path(`colnames<-`(t(e), exo), dr_slack, sys,
+                                 obc_specs, obs_idx = obs_idx,
                                  single_spell = FALSE, max_iter = 50L)
   to_level <- function(p) {
     m <- t(p) + matrix(ys_v, n_T, length(endo), byrow = TRUE)
     colnames(m) <- endo
     m
   }
-  list(paths_c = to_level(sol$paths), paths_u = to_level(u),
+  list(paths_c = to_level(t(sol$paths)), paths_u = to_level(u),
        constraints = constraints,
        scenario = list(shock = exo[k], shock_sd = sgn * shock_scale,
                        shock_size = size, converged = isTRUE(sol$converged),

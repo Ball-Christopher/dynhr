@@ -679,8 +679,11 @@ occbin_build_regime_fns <- function(compiled, regime_map) {
 #' @param compiled       dynhr_compiled (from compile_model)
 #' @param y0             Named numeric vector: endogenous state at t=0
 #' @param y_ss           Named numeric vector: steady state (terminal condition)
-#' @param shock_path     T × n_exo numeric matrix of structural shocks.
-#'                       Column names must match varexo_names.
+#' @param shock_path     T × n_exo numeric matrix of structural shocks (rows =
+#'                       periods). Named columns must be shocks of the model
+#'                       (varexo_names; missing shocks are zero); an unnamed
+#'                       matrix must have exactly n_exo columns (an unnamed
+#'                       n_exo x T or square matrix is an error).
 #' @param params         Named numeric parameter vector
 #' @param constraints    Constraint list from occbin_parse_bind_relax(); if NULL
 #'                       or zero-length, solves the unrestricted path (all slack)
@@ -736,18 +739,13 @@ occbin_solve_path <- function(compiled,
   n_endo <- length(dyn$endo_names)
   n_eq   <- dyn$n_eq
 
-  # Normalise shock_path
-  if (!is.matrix(shock_path)) shock_path <- matrix(shock_path, nrow = 1L)
-  T <- nrow(shock_path)
-  eps_mat <- matrix(0, nrow = T, ncol = length(dyn$exo_names))
-  colnames(eps_mat) <- dyn$exo_names
-  if (!is.null(colnames(shock_path))) {
-    for (nm in intersect(colnames(shock_path), dyn$exo_names))
-      eps_mat[, nm] <- shock_path[, nm]
-  } else {
-    nc <- min(ncol(shock_path), length(dyn$exo_names))
-    eps_mat[, seq_len(nc)] <- shock_path[, seq_len(nc)]
-  }
+  # Normalise shock_path to T x n_exo in exo_names order by the one
+  # rows = periods rule (R/time-orientation.R): named columns may be a subset
+  # (missing shocks are zero); an unnamed matrix must carry one column per
+  # shock (an n_exo x T matrix is refused, not read as an n_exo-period path).
+  eps_mat <- .kf_time_in(shock_path, dyn$exo_names, "shock_path",
+                         "occbin_solve_path", subset = TRUE, fill = 0)
+  T <- nrow(eps_mat)
 
   # Align y0 and y_ss.
   # Keep names on y_ss_num so steady_state(X) → ss["X"] look-ups in compiled
@@ -1166,7 +1164,8 @@ occbin_compute_irfs <- function(compiled, y_ss, model, params = NULL,
   exo   <- compiled$dynamic$exo_names
   n_exo <- length(exo)
 
-  shock_stderr <- .get_shock_stderr(model, exo, params)
+  ## Shared impulse rule (lower Cholesky of the full Sigma_e at `params`).
+  E_imp <- .irf_impulse_matrix(NULL, model, params, shock_size, exo = exo)
 
   irfs         <- vector("list", n_exo)
   regime_paths <- vector("list", n_exo)
@@ -1180,13 +1179,13 @@ occbin_compute_irfs <- function(compiled, y_ss, model, params = NULL,
 
   for (k in seq_along(exo)) {
     shock_seq <- matrix(0, nrow = n_exo, ncol = n_periods)
-    shock_seq[k, 1L] <- shock_stderr[exo[k]] * shock_size
+    shock_seq[, 1L] <- E_imp[, k]
 
     res <- occbin_solve_path(
       compiled     = compiled,
       y0           = y0_num,
       y_ss         = y0_num,
-      shock_path   = t(shock_seq),
+      shock_path   = `colnames<-`(t(shock_seq), exo),
       params       = params,
       constraints  = constraints,
       method       = method,

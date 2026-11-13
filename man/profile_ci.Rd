@@ -84,8 +84,12 @@ Set to 0 to reproduce the naive (mode-seeded-only) profile.}
 \item{n_iter}{csminwel iteration budget per re-optimization
 (default 200L).}
 
-\item{seed}{Optional integer RNG seed (sets \code{set.seed()} once
-at the top for reproducible seed draws).}
+\item{seed}{Optional integer RNG seed for the prior-draw seed
+starts. Each grid point gets its own child seed derived from it, so a
+seeded run returns the same numbers with \code{cores = 1} and
+\code{cores > 1}, and the caller's random stream is restored on exit.
+With \code{seed = NULL} a serial run draws from the caller's stream and
+a parallel run is not reproducible.}
 
 \item{cores}{Number of cores for \code{parallel::mclapply} over grid
 points (default 1L; not supported on Windows, where it silently

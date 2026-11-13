@@ -7,28 +7,18 @@
 ## The matrix-level helper was removed 2026-09 (unused).
 ## --------------------------------------------------------------------------
 
-## Orientation of a native decomposition's matrices: "time_endo" (T x n_endo,
-## what historical_decomposition() returns) or "endo_time" (n_endo x T, what
-## historical_decomposition_obc() returns). Stated by `$orientation` when
-## present; otherwise read from the dimnames, and refused when ambiguous.
+## Orientation of a native decomposition's matrices: always "time_endo"
+## (T x n_endo, rows = periods) -- what historical_decomposition() and, since
+## the orientation standardisation, historical_decomposition_obc() return.
+## The old n_endo x T ("endo_time") layout is refused with a t() hint.
 .d11_orientation <- function(hd) {
-  if (!is.null(hd$orientation)) {
-    if (!hd$orientation %in% c("time_endo", "endo_time"))
-      .dynhr_abort(sprintf("D11: unknown decomposition orientation '%s'.",
-                           hd$orientation))
-    return(hd$orientation)
-  }
-  tot <- hd$total
-  en  <- hd$endo_names
-  if (!is.null(colnames(tot)) && is.null(rownames(tot))) return("time_endo")
-  if (!is.null(rownames(tot)) && is.null(colnames(tot))) return("endo_time")
-  if (!is.null(en)) {
-    if (ncol(tot) == length(en) && nrow(tot) != length(en)) return("time_endo")
-    if (nrow(tot) == length(en) && ncol(tot) != length(en)) return("endo_time")
-  }
-  .dynhr_abort(paste0(
-    "D11: cannot tell whether the decomposition matrices are T x n_endo or ",
-    "n_endo x T. Set `$orientation` (\"time_endo\" or \"endo_time\")."))
+  if (!is.null(hd$orientation) && !identical(hd$orientation, "time_endo"))
+    .dynhr_abort(sprintf(paste0(
+      "D11: decomposition orientation '%s' is not supported. Decomposition ",
+      "matrices are T x n_endo (rows = periods, $orientation = \"time_endo\"); ",
+      "transpose n_endo x T matrices with t()."), hd$orientation),
+      class = "dynhr_error_orientation")
+  "time_endo"
 }
 
 ## Native dynhr decomposition -> per-variable [component x T] list plus the
@@ -37,10 +27,9 @@
 ## series -- and otherwise `$total`, which is the component sum by
 ## construction and so checks nothing.
 .d11_from_native <- function(hd, var_names, max_vars) {
-  orient <- .d11_orientation(hd)
-  as_te  <- function(M) if (orient == "time_endo") M else t(M)
-  contribs <- lapply(hd$contributions, function(C) as_te(as.matrix(C)))
-  total    <- as_te(as.matrix(hd$total))
+  .d11_orientation(hd)
+  contribs <- lapply(hd$contributions, as.matrix)
+  total    <- as.matrix(hd$total)
   en <- colnames(total) %||% hd$endo_names
   if (is.null(en) || length(en) != ncol(total))
     .dynhr_abort(sprintf("D11: decomposition has %d variables but %d names.",

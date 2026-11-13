@@ -311,7 +311,7 @@ solution_derivatives_order2 <- function(model, compiled, dr2, params, param_name
   ghx    <- dr2$ghx        # n x n_s
   ghu    <- dr2$ghu        # n x n_u
   ghxx   <- dr2$ghxx       # n x n_s^2
-  ghxu   <- dr2$ghxu       # n x n_s*n_u
+  ghxu   <- .mixed_block(dr2, "ghxu", "u_slow")  # n x n_s*n_u (MIXED-BLOCK LAYOUT CONVENTION)
   ghuu   <- dr2$ghuu       # n x n_u^2
   ghss   <- dr2$ghss       # n
   Sigma_e <- dr2$Sigma_e   # n_u x n_u

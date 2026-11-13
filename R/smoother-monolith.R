@@ -64,7 +64,25 @@
 # ---------------------------------------------------------------------------
 build_dsge_state_space <- function(m, dr, obs_vars, verbose = TRUE,
                                    params = m$param_values, Sigma_e = NULL) {
-  
+  ## Exported: swapped or wrong-class arguments used to fail deep inside
+  ## with "argument is of length zero" / "non-conformable arguments".
+  if (!is.list(m) || !is.character(m$var_names))
+    .dynhr_abort("build_dsge_state_space: `m` must be a parsed model (parse_mod()), ",
+                 "got ", if (is.list(m) && !is.null(m$ghx)) "decision rules -- are `m` and `dr` swapped?"
+                 else paste0("an object of class ", class(m)[1L], "."),
+                 class = "dynhr_error_bad_argument")
+  if (!is.list(dr) || !is.matrix(dr$ghx) || !is.matrix(dr$ghu))
+    .dynhr_abort("build_dsge_state_space: `dr` must be decision rules ",
+                 "(solve_perturbation()) carrying ghx / ghu matrices, got ",
+                 if (is.list(dr) && is.character(dr$var_names))
+                   "a parsed model -- are `m` and `dr` swapped?"
+                 else paste0("an object of class ", class(dr)[1L], "."),
+                 class = "dynhr_error_bad_argument")
+  if (!is.character(obs_vars) || length(obs_vars) == 0L || anyNA(obs_vars))
+    .dynhr_abort("build_dsge_state_space: `obs_vars` must be a non-empty ",
+                 "character vector of observable names.",
+                 class = "dynhr_error_bad_argument")
+
   endo_names <- m$var_names
   n_endo     <- length(endo_names)
   n_state    <- ncol(dr$ghx)
@@ -375,9 +393,9 @@ build_dsge_state_space <- function(m, dr, obs_vars, verbose = TRUE,
 #' \preformatted{
 #'   sm <- kalman_smoother(Y, dr_at_mode, model, params_at_mode,
 #'                         obs_vars = obs)
-#'   se <- sqrt(apply(sm$smoothed_cov, 3, diag))   # n_state x T
-#'   lo <- t(sm$smoothed_states) - 1.96 * se       # 95\% bands
-#'   hi <- t(sm$smoothed_states) + 1.96 * se
+#'   se <- t(sqrt(apply(sm$smoothed_cov, 3, diag)))  # T x n_state
+#'   lo <- sm$smoothed_states - 1.96 * se            # 95\% bands
+#'   hi <- sm$smoothed_states + 1.96 * se
 #' }
 #' \code{smoothed_cov} is \eqn{V_{t|T} = \mathrm{Var}(s_t \mid y_{1:T})}
 #' at those parameters -- Dynare's \code{smoothed_state_uncertainty} -- so
@@ -385,8 +403,10 @@ build_dsge_state_space <- function(m, dr, obs_vars, verbose = TRUE,
 #' (which is what the posterior-draw smoother adds).  It is always
 #' returned; there is no option to switch on.
 #'
-#' @param data   \code{T x n_obs} matrix of observables in \strong{levels},
-#'   in the column order of \code{obs_vars}. The model's own steady state is
+#' @param data   \code{T x n_obs} matrix of observables in \strong{levels}
+#'   (rows are periods), columns named by -- or in the order of --
+#'   \code{obs_vars}; oriented by the same rule as \code{\link{kalman_filter}}'s
+#'   \code{data} (an unnamed square sample is refused). The model's own steady state is
 #'   subtracted, exactly as \code{\link{kalman_filter}()} does; pass
 #'   \code{d = 0} for series already in deviations.
 #' @param dr     Decision rules from \code{\link{solve_perturbation}()} --
@@ -524,12 +544,13 @@ build_dsge_state_space <- function(m, dr, obs_vars, verbose = TRUE,
 #'   is the unconditional covariance, and (since 0.9.3.2) exact on a unit-root
 #'   model too, where it inherits the exact diffuse initialisation rather than
 #'   the kappa fallback's arbitrary constant.
-#' @param known_shocks Known historical shock values: an \code{n_exo x T}
-#'   matrix carrying the value where a shock is known and \code{NA} where it is
-#'   not -- the \code{NA}-as-unknown convention \code{data} uses, and the
-#'   \code{n_exo x T} shape \code{shock_scale} uses. Rows are matched BY NAME
-#'   when the matrix has rownames. \code{NULL} (default), or a matrix that is
-#'   all \code{NA}, is a no-op.
+#' @param known_shocks Known historical shock values: a \code{T x n_exo}
+#'   matrix (rows are periods) carrying the value where a shock is known and
+#'   \code{NA} where it is not -- the \code{NA}-as-unknown convention
+#'   \code{data} uses, and the \code{T x n_exo} shape \code{shock_scale}
+#'   uses. Columns are matched BY NAME when the matrix has column names, and
+#'   may then cover only SOME of the shocks (the others are unknown).
+#'   \code{NULL} (default), or a matrix that is all \code{NA}, is a no-op.
 #'
 #'   Use it for a shock you actually know: an announced policy change, a
 #'   measured intervention, a judgemental adjustment carried over from another
@@ -542,9 +563,9 @@ build_dsge_state_space <- function(m, dr, obs_vars, verbose = TRUE,
 #'   they are inputs, not estimates. \code{loglik} is the CONDITIONAL
 #'   \eqn{\log p(y \mid \varepsilon = v)}; see \code{\link{kalman_filter}}
 #'   for the joint.
-#' @param shock_means Deterministic shock MEANS, an \code{n_exo x T} matrix of
-#'   mean shifts (\code{NA} and \code{0} both mean "no shift here"), rows
-#'   matched by name. The same argument \code{\link{kalman_filter}} takes, with
+#' @param shock_means Deterministic shock MEANS, a \code{T x n_exo} matrix
+#'   (rows are periods) of mean shifts (\code{NA} and \code{0} both mean "no
+#'   shift here"), columns matched by name (a subset of the shocks allowed). The same argument \code{\link{kalman_filter}} takes, with
 #'   the same meaning and the same mechanism -- see there for the distinction
 #'   from \code{known_shocks}, which is the point of having both.
 #'
@@ -555,7 +576,7 @@ build_dsge_state_space <- function(m, dr, obs_vars, verbose = TRUE,
 #'   smoothed deviation around it. A smoother that returned the mean unrevised
 #'   would be ignoring the data; one that ignored the mean would be ignoring
 #'   the input.
-#' @param shock_timing How to read the columns of \code{shock_means}:
+#' @param shock_timing How to read the rows of \code{shock_means}:
 #'   \code{"dated"} (default) or \code{"transition_next"}. See
 #'   \code{\link{kalman_filter}}, whose \emph{Matching another package's
 #'   shock timing} section gives the experiment that settles which one a given
@@ -567,10 +588,12 @@ build_dsge_state_space <- function(m, dr, obs_vars, verbose = TRUE,
 #'   responses, so the identity is only correct when every shock has
 #'   \code{stderr 1}; falls back to the identity (with a warning) only for
 #'   hand-built state spaces lacking \code{Sigma_e}.
-#' @param me_extra  \code{n_obs x T} matrix of per-period additive
+#' @param me_extra  \code{T x n_obs} matrix (rows are periods, columns the
+#'   observables) of per-period additive
 #'   measurement-error variances (from a \code{filter_tunes} block), or
 #'   \code{NULL} (no filter tunes).
-#' @param shock_scale  \code{n_exo x T} matrix of per-period shock
+#' @param shock_scale  \code{T x n_exo} matrix (rows are periods, columns
+#'   the shocks) of per-period shock
 #'   standard-deviation scale factors (from a \code{heteroskedastic_shocks}
 #'   block), or \code{NULL} (constant shock variances).
 #' @return List with \code{smoothed_states} (\eqn{T \times n_{state}}, row
@@ -579,8 +602,10 @@ build_dsge_state_space <- function(m, dr, obs_vars, verbose = TRUE,
 #'   \code{updated_states} (row \eqn{t} is \eqn{s_{t|t}}) and
 #'   \code{predicted_states} (row \eqn{t} is \eqn{s_{t|t-1}}), the mean
 #'   counterpart of \code{predicted_cov}. \code{filtered_states} is the same
-#'   matrix as \code{updated_states}. Note the orientation differs from the
-#'   filter's: here rows are periods. Also
+#'   matrix as \code{updated_states}. Every state and shock path is
+#'   \code{T x n} -- rows are periods -- exactly as \code{\link{kalman_filter}}
+#'   returns its \code{updated_states} / \code{predicted_states}, so the two
+#'   agree field by field. Also
 #'   \code{filtered_cov} / \code{predicted_cov} / \code{smoothed_cov},
 #'   \code{smoothed_initial} (\eqn{s_{0|T}}),
 #'   \code{smoothed_initial_cov} (\eqn{V_{0|T}}), \code{loglik}, and
@@ -680,6 +705,11 @@ kalman_smoother <- function(data, dr, model, params = NULL,
          "columns of `data` correspond to).", call. = FALSE)
   if (is.null(params)) params <- model$param_values
 
+  ## Rows are periods: the one orientation rule (R/time-orientation.R) --
+  ## names decide, an unnamed old n_obs x T or square sample is refused. The
+  ## per-period inputs (me_extra, shock_scale, known_shocks, shock_means) are
+  ## resolved by the same rule inside .kalman_smoother_ss().
+  data <- .kf_time_in(data, obs_vars, "data", "kalman_smoother")
   ss <- build_dsge_state_space(model, dr, obs_vars, verbose = FALSE,
                                params = params)
   res <- .kalman_smoother_ss(data, ss, d = d, me_variance = me_variance, Q = Q,
@@ -731,6 +761,30 @@ kalman_smoother <- function(data, dr, model, params = NULL,
   method <- match.arg(method)
   lik_init_orig <- lik_init        # for $diagnostics (R4)
 
+  ## ---- Time-indexed inputs: T x n (rows = periods) ------------------------
+  ## The same rule kalman_filter() applies (.kf_time_in -> R/time-orientation
+  ## .R): columns by name (known_shocks / shock_means may name a SUBSET of the
+  ## shocks), an unnamed old n x T or square matrix refused. me_extra and
+  ## shock_scale are turned into the recursion's internal n x T layout once,
+  ## after the pre-sample padding below.
+  n_T_in <- NROW(data)
+  obs_nm <- ss$obs_names %||% NCOL(data)
+  shk_nm <- ss$shock_names %||% ss$n_shock
+  if (!is.null(me_extra))
+    me_extra <- .kf_time_in(me_extra, obs_nm, "me_extra", "kalman_smoother",
+                            n_periods = n_T_in)
+  if (!is.null(shock_scale))
+    shock_scale <- .kf_time_in(shock_scale, shk_nm, "shock_scale",
+                               "kalman_smoother", n_periods = n_T_in)
+  if (!is.null(known_shocks))
+    known_shocks <- .kf_time_in(known_shocks, shk_nm, "known_shocks",
+                                "kalman_smoother", n_periods = n_T_in,
+                                subset = TRUE, fill = NA_real_)
+  if (!is.null(shock_means))
+    shock_means <- .kf_time_in(shock_means, shk_nm, "shock_means",
+                               "kalman_smoother", n_periods = n_T_in,
+                               subset = TRUE, fill = 0)
+
   ## ---- Deterministic observation trends (Dynare `observation_trends`) ----
   ## Same statement kalman_filter() makes: the trend is a time-varying part of
   ## the observation intercept, so it comes off the data (row t is period
@@ -769,32 +823,28 @@ kalman_smoother <- function(data, dr, model, params = NULL,
     data <- rbind(matrix(NA_real_, pre_sample, n_obs_in,
                          dimnames = list(NULL, colnames(data))),
                   as.matrix(data))
-    ## me_extra is n_obs x T and shock_scale is n_shk x T: pad on the LEFT with
-    ## the neutral value, or the per-period columns silently shift by k.
-    if (!is.null(me_extra))
-      me_extra <- cbind(matrix(0, nrow(me_extra), pre_sample), me_extra)
-    if (!is.null(shock_scale))
-      shock_scale <- cbind(matrix(1, nrow(shock_scale), pre_sample), shock_scale)
-    ## known_shocks is n_exo x T on the CALLER's sample, and the validation
+    ## me_extra and shock_scale are T x n (rows = periods): pad on TOP with
+    ## the neutral value, or the per-period rows silently shift by k.
+    pad_top <- function(x, v)
+      rbind(matrix(v, pre_sample, ncol(x), dimnames = list(NULL, colnames(x))),
+            x)
+    if (!is.null(me_extra))    me_extra    <- pad_top(me_extra, 0)
+    if (!is.null(shock_scale)) shock_scale <- pad_top(shock_scale, 1)
+    ## known_shocks is T x n_exo on the CALLER's sample, and the validation
     ## below runs against the padded one -- so pad it here with "unknown"
     ## rather than making the caller pad by hand (and then wonder why the
     ## injected periods moved).
-    if (!is.null(known_shocks)) {
-      known_shocks <- as.matrix(known_shocks)
-      known_shocks <- cbind(matrix(NA_real_, nrow(known_shocks), pre_sample,
-                                   dimnames = list(rownames(known_shocks), NULL)),
-                            known_shocks)
-    }
+    if (!is.null(known_shocks)) known_shocks <- pad_top(known_shocks, NA_real_)
     ## Same for a mean path: zero is "no shift", so the padded periods are
     ## unforced -- which is what a backcast of the history before the sample
     ## means when the sample's own inputs are known.
-    if (!is.null(shock_means)) {
-      shock_means <- as.matrix(shock_means)
-      shock_means <- cbind(matrix(0, nrow(shock_means), pre_sample,
-                                  dimnames = list(rownames(shock_means), NULL)),
-                           shock_means)
-    }
+    if (!is.null(shock_means)) shock_means <- pad_top(shock_means, 0)
   }
+
+  ## The recursions below index periods by COLUMN of these two (n x T); the
+  ## internal copies carry no dimnames (matched by name already).
+  if (!is.null(me_extra))    me_extra    <- unname(t(me_extra))
+  if (!is.null(shock_scale)) shock_scale <- unname(t(shock_scale))
 
   ## Observation intercept. kalman_filter() subtracts d = dr$ys[obs_vars] from
   ## the data; so does this, via the state space's own `d` field.
@@ -1037,8 +1087,9 @@ kalman_smoother <- function(data, dr, model, params = NULL,
   .kf_warn_zero_shock_cov(Q, "kalman_smoother")
 
   ## ---- me_extra validation ------------------------------------------------
-  ## me_extra (n_obs x T) holds per-period per-observable extra ME variances
-  ## (filter_tunes soft tunes: stderr^2 at tune periods, 0 elsewhere).
+  ## me_extra (held n_obs x T here; the caller passes T x n_obs) holds
+  ## per-period per-observable extra ME variances (filter_tunes soft tunes:
+  ## stderr^2 at tune periods, 0 elsewhere).
   if (!is.null(me_extra)) {
     if (!is.matrix(me_extra) || nrow(me_extra) != n_obs || ncol(me_extra) != TT)
       stop(sprintf(
@@ -1073,7 +1124,8 @@ kalman_smoother <- function(data, dr, model, params = NULL,
   has_me_var <- any(me_variance > 0)
 
   ## ---- shock_scale validation ----------------------------------------------
-  ## shock_scale (n_shk x T) holds per-period shock std scale factors.
+  ## shock_scale (held n_shk x T here; the caller passes T x n_shk) holds
+  ## per-period shock std scale factors.
   if (!is.null(shock_scale)) {
     if (!is.matrix(shock_scale) || nrow(shock_scale) != n_shk || ncol(shock_scale) != TT)
       stop(sprintf(
@@ -1720,10 +1772,9 @@ kalman_smoother <- function(data, dr, model, params = NULL,
 #'
 #' \strong{Orientation.} \code{smoothed_shocks} is \code{T x n_shock} and
 #' \code{smoothed_states} is \code{T x n_state}: \strong{rows are periods}.
-#' That is what \code{\link{kalman_smoother}} returns. Note
-#' \code{\link{kalman_filter}}'s state matrices are the other way round
-#' (\code{n_state x T}) and need \code{t()}; a transposed argument is
-#' detected and refused rather than silently reinterpreted.
+#' That is what \code{\link{kalman_smoother}} and \code{\link{kalman_filter}}
+#' return; a transposed argument is detected and refused rather than silently
+#' reinterpreted.
 #'
 #' \strong{Names.} Columns are matched to \code{ss$shock_names} /
 #' \code{ss$state_names} by name when the matrix has dimnames, and \code{s0}
@@ -1860,9 +1911,8 @@ historical_decomposition <- function(smoothed_shocks, ss, s0 = NULL,
     if (nrow(x) == n_col)
       stop(sprintf(paste0("historical_decomposition: `%s` looks transposed -- ",
                           "it is %d x %d and this function takes T x %s (rows ",
-                          "are periods). kalman_smoother() returns it that way ",
-                          "already; kalman_filter()'s state matrices are the ",
-                          "other way round (n_state x T) and need t()."),
+                          "are periods), the orientation kalman_smoother() ",
+                          "and kalman_filter() return; transpose it with t()."),
                    what, nrow(x), ncol(x), kind), call. = FALSE)
     stop(sprintf("historical_decomposition: `%s` has %d columns, expected %d (%s).",
                  what, ncol(x), n_col, kind), call. = FALSE)

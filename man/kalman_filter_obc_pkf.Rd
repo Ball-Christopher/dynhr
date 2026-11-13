@@ -25,7 +25,11 @@ kalman_filter_obc_pkf(
 )
 }
 \arguments{
-\item{data}{n_obs x T observation matrix}
+\item{data}{T x n_obs observation matrix (rows = periods;
+columns named by \code{obs_vars} -- a matrix named
+by series on its ROWS is transposed with a
+message; an unnamed n_obs x T or square matrix is
+an error)}
 
 \item{dr_slack}{Slack-regime DecisionRules}
 
@@ -60,9 +64,10 @@ observable (default 1e-8)}
 200, Dynare's \code{check_ahead_periods}); doubled
 while a solution binds in its last period}
 
-\item{return_filtered}{Logical: return the n_state x T filtered states}
+\item{return_filtered}{Logical: return the T x n_state filtered states
+(rows = periods)}
 
-\item{return_shocks}{Logical: return the n_exo x T shocks
+\item{return_shocks}{Logical: return the T x n_exo shocks
 \eqn{\epsilon_{t|t}}}
 
 \item{return_store}{Logical: return the per-period quantities needed by

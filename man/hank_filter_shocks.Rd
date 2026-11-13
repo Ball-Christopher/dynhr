@@ -36,10 +36,15 @@ observations; \code{NA} marks a missing observation. When it has column
 names they are matched to the observable names.}
 
 \item{shock_sd}{Innovation standard deviations: a scalar, a length-\code{J}
-vector (one per shock, matched by name when named), or a \code{J x T}
-matrix of per-period values for the sample periods (pre-sample shocks
-then use the first column), or a \code{J x (T + T_irf - 1)} matrix
-covering the full history from \eqn{t = -(T_{irf}-1)}.}
+vector (one per shock, matched by name when named), or a \code{T x J}
+matrix (rows are periods, columns the shocks) of per-period values for
+the sample periods (pre-sample shocks then use the first row), or a
+\code{(T + T_irf - 1) x J} matrix covering the full history from
+\eqn{t = -(T_{irf}-1)}. A matrix follows the package-wide orientation
+rule: columns named by the shocks are matched by name; rows named by the
+shocks (the old \code{J x T} layout) are transposed with a message; an
+unnamed \code{J x T} or square matrix is refused (class
+\code{dynhr_error_orientation}).}
 
 \item{me_variance}{Measurement-error VARIANCES (the package-wide
 convention; standard deviations are their square roots): a scalar, a

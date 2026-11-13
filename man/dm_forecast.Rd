@@ -23,14 +23,17 @@ forecast)}
 \item{horizon}{Forecast horizon (default \code{8L})}
 
 \item{at}{\code{"params"} (default), \code{"mode"} or
-\code{"posterior_mean"}, as in \code{\link{dm_irf}}. Away from
-\code{"params"} the model's parameter values (hence the shock covariance
-of the filter and the forecast) are those at that point.}
+\code{"posterior_mean"}, as in \code{\link{dm_irf}}. The model's
+parameter values (hence the shock covariance of the filter and the
+forecast) are those at that point -- \code{dm$params} at
+\code{"params"}.}
 
 \item{...}{Further arguments for \code{\link{conditional_forecast}}
 (e.g. \code{type}, \code{method}, \code{n_draws}, and the trend-model
 inputs \code{shock_means}, \code{shock_timing}, \code{a0}, \code{P0}:
-a drift carried as a deterministic shock mean).}
+a drift carried as a deterministic shock mean). The object's
+\code{me_variance} is forwarded as \code{conditional_forecast}'s
+\code{me_variance} unless given here.}
 }
 \value{
 The updated \code{dynhr_model}, with \code{$forecast} set.

@@ -15,12 +15,11 @@
   stop("Cannot find DecisionRules in the supplied object")
 }
 
-.get_ss_vector <- function(ss) {
+## Numeric steady-state vector from a vector / dynhr_steady-like list, or NULL.
+.ss_vector_or_null <- function(ss) {
   if (is.numeric(ss) && !is.list(ss)) return(ss)
-  if (is.list(ss) && !is.null(ss$values)) return(ss$values)
-  if (is.list(ss) && !is.null(ss$ss))     return(ss$ss)
-  if (is.list(ss) && !is.null(ss$ys))     return(ss$ys)
-  stop("Cannot extract numeric steady-state vector")
+  if (is.list(ss)) return(ss$values %||% ss$ss %||% ss$ys)
+  NULL
 }
 
 .get_model_object <- function(x) {
@@ -117,10 +116,16 @@ model_structure_summary <- function(model, dr = NULL, ss = NULL) {
   # Steady state - try to extract numeric vector.  Tolerant: a missing or
   # unrecognised `ss` must not crash the structural summary (L32) -- the rest
   # of the report is still useful without a steady-state vector.
-  ss_values <- tryCatch(if (!is.null(ss)) .get_ss_vector(ss) else NULL,
-                        error = function(e) NULL)
+  # The tolerance is now an explicit conditional (no tryCatch), and a `ss`
+  # the caller DID supply but that is unrecognised is reported, not dropped
+  # silently (review 2026-11-10 F8).
+  ss_values <- if (!is.null(ss)) .ss_vector_or_null(ss) else NULL
+  if (!is.null(ss) && is.null(ss_values))
+    .dynhr_warn("model_structure_summary: the supplied `ss` is not a numeric ",
+                "vector or a list with $values / $ss / $ys; it is ignored.",
+                class = "dynhr_warning_invalid_argument")
   if (is.null(ss_values) && !is.null(dr) && !is.null(dr$ss)) {
-    ss_values <- tryCatch(.get_ss_vector(dr$ss), error = function(e) NULL)
+    ss_values <- .ss_vector_or_null(dr$ss)
   }
   # Ensure ss_values is a plain numeric vector, not a list
   if (is.list(ss_values)) ss_values <- unlist(ss_values)

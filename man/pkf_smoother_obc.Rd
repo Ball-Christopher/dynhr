@@ -11,8 +11,8 @@ pkf_smoother_obc(kf_store)
 }
 \value{
 List with:
-  \item{smoothed_states}{n_state x T: \eqn{s_{t-1|T}} (lagged state smoothed over all T obs)}
-  \item{smoothed_shocks}{n_exo x T: \eqn{\epsilon_{t|T}} (shocks smoothed over all T obs)}
+  \item{smoothed_states}{T x n_state (rows = periods): \eqn{s_{t-1|T}} (lagged state smoothed over all T obs)}
+  \item{smoothed_shocks}{T x n_exo (rows = periods): \eqn{\epsilon_{t|T}} (shocks smoothed over all T obs)}
 }
 \description{
 Implements the Durbin-Koopman (2003) backward recursion for the lag-1
@@ -66,8 +66,8 @@ to pure backward propagation: \eqn{r_{t-1} = TT_t' \cdot r_t} (\eqn{L_t = TT_t} 
 case), and the smoothed shock uses only the \eqn{RR_t' \cdot r_t} future-info term
 (there is no gain to correct for: \eqn{K_t = 0} when nothing is observed).
 
-Note on indexing: smoothed_states[, t] is \eqn{s_{t-1|T}}, the smoothed state
+Note on indexing: smoothed_states[t, ] is \eqn{s_{t-1|T}}, the smoothed state
 that appeared *lagged* in period t's observation equation.  This differs
-from filtered_states[, t] = \eqn{s_{t|t}} returned by kalman_filter_obc_pkf
+from filtered_states[t, ] = \eqn{s_{t|t}} returned by kalman_filter_obc_pkf
 (the current-period updated state).
 }

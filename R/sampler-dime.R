@@ -14,7 +14,14 @@
 ##   After all walkers are updated: update running mean/cov with exponential
 ##   decay rho (logspace weighted average, as in the Python reference).
 ##
-## Key parameter defaults (match reference exactly):
+## Update scheme: ALL walkers propose from one snapshot and are accepted
+## together. The reference DIMEMove is an emcee RedBlueMove (two halves, each
+## updated against the other); the simultaneous update is exact only as the
+## ensemble grows -- see .dime_min_ensemble for the measured bias and the
+## warning floor. The running AIMH statistics are weighted by log(n_chain)
+## per iteration (the reference weights by the ensemble's posterior mass).
+##
+## Key parameter defaults (match reference):
 ##   gamma    = 2.38 / sqrt(2 * n_par)
 ##   sigma    = 1e-5  (DE noise std)
 ##   aimh_prob = 0.1
@@ -103,6 +110,24 @@
 ## Core serial sampler
 ## --------------------------------------------------------------------------
 
+#' Abort: a walker found no feasible start in its prior draws
+#'
+#' Walkers are initialised from the prior and REDRAWN until the log-posterior
+#' is finite, so an infeasible start never enters the ensemble; this is the
+#' refusal when \code{tries} prior draws in a row were all infeasible (e.g. a
+#' log-posterior that is -Inf everywhere, or a prior almost entirely outside
+#' the region where the model solves).
+#' @noRd
+.dime_abort_no_feasible_start <- function(walker, tries) {
+  .dynhr_abort(sprintf(paste0("DIME: walker %d found no finite log-posterior in %d ",
+                              "draws from the prior. The initial ensemble is drawn ",
+                              "from the prior and every walker needs a feasible ",
+                              "start; check that the log-posterior is finite on ",
+                              "a non-negligible part of the prior support."),
+                       as.integer(walker), as.integer(tries)),
+               class = "dynhr_error_dime_no_feasible_start")
+}
+
 ## --------------------------------------------------------------------------
 ## DIME argument checker
 ## --------------------------------------------------------------------------
@@ -149,6 +174,51 @@
 }
 
 
+#' Warn when the DIME ensemble is small enough to bias the stationary law
+#'
+#' Every walker is updated from ONE snapshot of the ensemble. The reference
+#' dime_sampler (DIMEMove is an emcee RedBlueMove, default nsplits = 2) updates
+#' each half against the other half instead; the dynhr port has always used
+#' the simultaneous update, which is exact only as the ensemble grows. It is
+#' kept (changing it would change every DIME result) because at the
+#' recommended size (>= 5 * n_par; default max(5 * n_par, 20)) the bias is at
+#' or below Monte Carlo error. Measured on N(mu, diag(sd^2)) with distinct
+#' sd in (0.2, 5), 12 replicates x 1e6 draws per cell, pooled variance ratio
+#' est / true (MCSE 0.0004-0.0011 unless noted):
+#'   aimh_prob = 0.1 (default)
+#'     n_par = 2 : n_chain 3 1.034 | 4 1.010 | 6 1.001 | 8 1.001 | 10 0.998 | 20 1.000
+#'     n_par = 5 : n_chain 6 0.981 | 10 0.996 | 25 1.000
+#'     n_par = 10: n_chain 11 0.994 | 20 0.999 | 50 1.000 | 100 1.000
+#'   aimh_prob = 0 (pure DE)
+#'     n_par = 2 : n_chain 3 ~3 (unstable) | 4 1.148 | 6 1.007 | 8 1.000 | 10 1.000 | 20 0.999
+#'     n_par = 5 : n_chain 6 ~1.3 (unstable) | 10 0.978 | 25 0.999
+#'     n_par = 10: n_chain 11 0.724 | 20 0.986 | 50 0.998 | 100 1.000
+#' Means were unbiased within MCSE in every stable cell. Warning floor (bias
+#' of ~1% or more below it): max(2 * n_par, 6) walkers with the default
+#' independence proposal (aimh_prob >= 0.1), max(5 * n_par, 8) without it.
+#' @noRd
+.dime_min_ensemble <- function(n_par, aimh_prob = 0.1) {
+  n_par <- as.integer(n_par)
+  if (isTRUE(aimh_prob >= 0.1)) max(2L * n_par, 6L) else max(5L * n_par, 8L)
+}
+
+.dime_warn_small_ensemble <- function(n_chain, n_par, aimh_prob = 0.1) {
+  floor_n <- .dime_min_ensemble(n_par, aimh_prob)
+  if (n_chain < floor_n)
+    .dynhr_warn(sprintf(paste0("DIME: %d walkers for %d parameters (aimh_prob = %g) is below ",
+                               "%d, the smallest ensemble with a measured stationary-variance ",
+                               "error under 1%%. All walkers are updated from one snapshot ",
+                               "of the ensemble, which is exact only as the ensemble grows ",
+                               "(measured: +3%% at 3 walkers for 2 parameters; with ",
+                               "aimh_prob = 0, +15%% at 4 walkers and -28%% at 11 walkers ",
+                               "for 10 parameters). Use n_chain >= %d (default ",
+                               "max(5 * n_par, 20))."),
+                        as.integer(n_chain), as.integer(n_par), aimh_prob, floor_n, floor_n),
+                class = "dynhr_warning_dime_small_ensemble")
+  invisible(NULL)
+}
+
+
 #' DIME MCMC ensemble sampler (serial)
 #'
 #' Differential-Independence Mixture Ensemble MCMC (Boehl 2022/2024).
@@ -159,7 +229,11 @@
 #'   draw initial ensemble from the prior. Also accepted: a prior_sampler
 #'   function via \code{prior_sampler} argument.
 #' @param n_chain      Number of ensemble walkers. Recommended: >= 5 * n_par.
-#'   Minimum: 3. Default: NULL (set to max(5 * n_par, 20)).
+#'   Minimum: max(3, n_par + 1) (error). Below max(2 * n_par, 6) walkers
+#'   (max(5 * n_par, 8) when aimh_prob < 0.1) a classed warning: all walkers
+#'   are updated from one ensemble snapshot, and the measured stationary
+#'   variance error there is 1\% or more (+3\% at n_par = 2, 3 walkers) --
+#'   see \code{.dime_min_ensemble}. Default: NULL (set to max(5 * n_par, 20)).
 #' @param n_iter       Post-warmup iterations PER WALKER, so the kept draws
 #'   number `n_iter * n_chain` (one row per walker per iteration). Default 1000.
 #' @param n_burn       Burn-in (warm-up) iterations. Default 500.
@@ -228,6 +302,7 @@ run_dime <- function(log_post_fn,
          aimh_prob = aimh_prob, sigma = sigma, rho = rho, df = df),
     n_par = n_par))
   n_chain <- as.integer(n_chain)
+  .dime_warn_small_ensemble(n_chain, n_par, aimh_prob)
   n_iter  <- as.integer(n_iter)
   n_burn  <- as.integer(n_burn)
 
@@ -263,8 +338,7 @@ run_dime <- function(log_post_fn,
         if (is.finite(lp) || tries >= max_tries) break
       }
       if (!is.finite(lp))
-        stop(sprintf("DIME: walker %d could not find finite log-posterior in %d tries.",
-                     i, max_tries))
+        .dime_abort_no_feasible_start(i, max_tries)
       ensemble[i, ] <- th
       lp_vec[i]     <- lp
     }
@@ -518,6 +592,18 @@ run_dime <- function(log_post_fn,
 ## Parallel variant: farm ensemble log-posterior evaluations to mirai pool
 ## --------------------------------------------------------------------------
 
+#' Per-walker daemon seeds of one DIME iteration
+#'
+#' @param seed_base base seed of the run.
+#' @param t iteration index (1-based, burn-in included).
+#' @param n_chain number of walkers.
+#' @return integer vector of length \code{n_chain}: child i of iteration t's
+#'   child seed (see \code{.child_seeds()}).
+#' @noRd
+.dime_iter_seeds <- function(seed_base, t, n_chain) {
+  .child_seeds(.child_seed_at(seed_base, t, "dime_iter"), n_chain, "dime_walker")
+}
+
 #' Run DIME MCMC on a pre-provisioned mirai daemon pool.
 #'
 #' Like run_dime() but farms the per-iteration ensemble log-posterior
@@ -532,7 +618,8 @@ run_dime <- function(log_post_fn,
 #'   daemons use their .worker_lp).
 #' @param prior_sampler function() -> named numeric from prior.
 #' @param n_chain,n_iter,n_burn,aimh_prob,sigma,rho,df,par_names same as run_dime().
-#' @param seed_base  base seed; iteration t uses seed_base + t * n_chain + i.
+#' @param seed_base  base seed; walker i of iteration t is seeded with
+#'   \code{.dime_iter_seeds(seed_base, t, n_chain)[i]}.
 #' @return same structure as run_dime().
 #' @noRd
 .run_dime_mirai_inner <- function(
@@ -591,7 +678,7 @@ run_dime <- function(log_post_fn,
         if (is.finite(lp) || tries >= 200L) break
       }
       if (!is.finite(lp))
-        stop(sprintf("DIME: walker %d: no finite log-posterior in 200 prior draws.", i))
+        .dime_abort_no_feasible_start(i, 200L)
       ensemble[i, ] <- th
       lp_vec[i]     <- lp
     }
@@ -618,7 +705,10 @@ run_dime <- function(log_post_fn,
   if (ckpt) {
     if (ckpt_resume) {
       ## Verify everything BEFORE any file is touched (see run_dime()).
-      .ckpt_meta_verify(ckpt_paths$meta, "dime", checkpoint$fingerprint)
+      meta <- .ckpt_meta_verify(ckpt_paths$meta, "dime", checkpoint$fingerprint)
+      .ckpt_warn_seed_scheme(meta, paste0(
+        "the daemon log-posterior evaluations after the resume point (only a ",
+        "noisy, particle-filter likelihood consumes them)"))
       st <- .ckpt_load_state(ckpt_paths$state)
       if (!isFALSE(checkpoint$lp_check))
         .dime_verify_resume_lp(st, log_post_fn, par_names)
@@ -679,12 +769,18 @@ run_dime <- function(log_post_fn,
     }
 
     ## Evaluate all proposals in parallel on the pool
-    iter_seed <- seed_base + t * n_chain
-    ## proposals / par_names / iter_seed are free variables -> pass via `...`
+    ## Walker i of iteration t: child i of iteration t's own child seed. It was
+    ## seed_base + t * n_chain + i, whose consecutive integer seeds made the
+    ## first particle-filter draws of neighbouring walkers dependent. Derived
+    ## from (seed_base, t) alone, so a checkpoint resume at t is unaffected.
+    iter_seeds <- .dime_iter_seeds(seed_base, t, n_chain)
+    ## proposals / par_names / iter_seeds are free variables -> pass via `...`
     eval_task <- function(i) {
       lpf <- get0(".worker_lp", envir = globalenv(), inherits = FALSE)
+      if (!is.function(lpf))
+        stop("no `.worker_lp` log-posterior on this daemon (pool not provisioned)")
       RNGkind("Mersenne-Twister", "Inversion", "Rejection")
-      set.seed(iter_seed + i)
+      set.seed(iter_seeds[i])
       th <- proposals[i, ]; names(th) <- par_names
       lp <- tryCatch(lpf(th)$logpost, error = function(e) .dynhr_reraise_bug(e, -Inf))
       if (is.na(lp) || !is.finite(lp)) -Inf else lp
@@ -693,10 +789,10 @@ run_dime <- function(log_post_fn,
     ## eval_task) so the frame isn't serialised per task.
     .ev_env <- new.env(parent = asNamespace("dynhr"))
     list2env(list(proposals = proposals, par_names = par_names,
-                  iter_seed = iter_seed), envir = .ev_env)
+                  iter_seeds = iter_seeds), envir = .ev_env)
     environment(eval_task) <- .ev_env
     ev <- mirai::mirai_map(seq_len(n_chain), eval_task)[]
-    lp_prop <- vapply(ev, function(x) if (is.numeric(x)) x else -Inf, numeric(1))
+    lp_prop <- .dime_collect_lp(ev, t)
     n_eval <- n_eval + n_chain
 
     ## Accept/reject on host
@@ -826,7 +922,7 @@ run_dime <- function(log_post_fn,
 #' @param seed_base base RNG seed.
 #' @param n_cores worker count (NULL = auto, capped at n_chain).
 #' @param me_variance measurement-error variance.
-#' @param me_extra n_obs x T matrix of per-period extra ME variances.
+#' @param me_extra T x n_obs matrix (rows = periods) of per-period extra ME variances.
 #' @param log_post_fn optional pre-built log-posterior closure.
 #' @param verbose print progress.
 #' @return same structure as run_dime().
@@ -878,6 +974,7 @@ run_dime_mirai <- function(
          aimh_prob = aimh_prob, sigma = sigma, rho = rho, df = df),
     n_par = n_par))
   n_chain <- as.integer(n_chain)
+  .dime_warn_small_ensemble(n_chain, n_par, aimh_prob)
 
   ## Cap daemons at n_chain (can't usefully have more daemons than walkers)
   n_cores <- .mirai_n_cores(n_cores, n_chain)
@@ -887,6 +984,10 @@ run_dime_mirai <- function(
 
   t_init <- proc.time()
   sh <- NULL
+  ## Reuse daemons the user already set (and leave them running); tear
+  ## down only a pool started here. Flag fixed BEFORE provisioning.
+  owns_pool <- !.mirai_daemons_active()
+  on.exit({ .mirai_daemons_stop(owns_pool); if (!is.null(sh)) rm(sh) }, add = TRUE)
   if (!is.null(log_post_fn)) {
     .mirai_pool_closure(n_cores, log_post_fn)
   } else {
@@ -899,7 +1000,6 @@ run_dime_mirai <- function(
                            singular_obs = singular_obs,
                            tpf_options = tpf_options)
   }
-  on.exit({ mirai::daemons(NULL); if (!is.null(sh)) rm(sh) }, add = TRUE)
   if (verbose)
     .dynhr_cat(sprintf("  Daemon init: %.1f sec\n",
                 (proc.time() - t_init)[["elapsed"]]))
@@ -911,17 +1011,15 @@ run_dime_mirai <- function(
     ## .mirai_pool_init compiled the model; we also need a host-side closure.
     ## Build it the same way run_smc_mirai does (if not OBC, rebuild on host).
     if (!is.null(parsed_model) && !is.null(Y)) {
-      .mk_lp  <- utils::getFromNamespace("make_log_posterior", "dynhr")
-      .cmpl   <- utils::getFromNamespace("compile_model", "dynhr")
-      .hcm    <- .cmpl(parsed_model, verbose = FALSE)
-      ## tpf_options entries are spread as individual `...` args (matching
-      ## .mirai_pool_init); make_log_posterior has no `tpf_options` parameter.
-      log_post_fn <- do.call(.mk_lp,
-        c(list(parsed_model, Y, prior_spec, obs_names,
-               .hcm, me_variance = me_variance,
-               me_extra = me_extra,
-               lik_init = lik_init),
-          tpf_options))
+      log_post_fn <- .dime_host_lp(parsed_model, Y, prior_spec, obs_names,
+                                   me_variance = me_variance,
+                                   me_extra = me_extra,
+                                   shock_scale = shock_scale,
+                                   system_priors = system_priors,
+                                   lik_init = lik_init,
+                                   filter_method = filter_method,
+                                   singular_obs = singular_obs,
+                                   tpf_options = tpf_options)
     } else {
       stop("run_dime_mirai: must supply either log_post_fn or parsed_model + Y.")
     }
@@ -943,6 +1041,62 @@ run_dime_mirai <- function(
     checkpoint    = checkpoint
   )
   res
+}
+
+#' Host-side log-posterior for parallel DIME
+#'
+#' The host closure scores the INITIAL ensemble (and re-checks a resumed one);
+#' the daemons' \code{.worker_lp} scores every proposal. They must be the SAME
+#' posterior, so this passes exactly what \code{.mirai_pool_init} passes to
+#' \code{make_log_posterior()} (\code{tpf_options} spread as individual
+#' arguments). It used to drop \code{shock_scale} / \code{system_priors} /
+#' \code{filter_method} / \code{singular_obs}: the first accept/reject of
+#' every walker then compared two different targets (a host lp tens of nats
+#' too high froze the ensemble at its prior draws) and a checkpoint resume was
+#' refused.
+#' @noRd
+.dime_host_lp <- function(parsed_model, Y, prior_spec, obs_names,
+                          me_variance, me_extra, shock_scale, system_priors,
+                          lik_init, filter_method, singular_obs, tpf_options) {
+  hcm <- compile_model(parsed_model, verbose = FALSE)
+  do.call(make_log_posterior,
+          c(list(parsed_model, Y, prior_spec, obs_names, hcm,
+                 me_variance = me_variance, me_extra = me_extra,
+                 shock_scale = shock_scale, system_priors = system_priors,
+                 lik_init = lik_init, filter_method = filter_method,
+                 singular_obs = singular_obs),
+            tpf_options))
+}
+
+#' Collect one iteration's daemon log-posteriors for parallel DIME
+#'
+#' The daemon task already maps a NUMERICAL failure of the log-posterior (an
+#' infeasible theta: a non-finite value, or an error that is not a programming
+#' error -- the same rule as serial run_dime()) to -Inf. Anything that still
+#' comes back as a mirai error value is a programming error or a broken daemon
+#' (missing object, dead daemon, a log-posterior that cannot run there). It
+#' used to be read as -Inf too, so a broken setup ran to completion looking
+#' like "every proposal rejected"; it now aborts with the daemon's message.
+#' @param ev the collected \code{mirai_map()} result, one element per walker.
+#' @param iter the DIME iteration (for the message).
+#' @return numeric vector of log-posteriors (-Inf where infeasible).
+#' @noRd
+.dime_collect_lp <- function(ev, iter) {
+  bad <- vapply(ev, function(x) mirai::is_error_value(x) ||
+                  !is.numeric(x) || length(x) != 1L, logical(1))
+  if (any(bad)) {
+    k <- which(bad)
+    msg <- vapply(ev[k], function(x) paste(as.character(x), collapse = " "),
+                  character(1))
+    .dynhr_abort(sprintf(paste0("parallel DIME: the log-posterior failed on the ",
+                                "daemons for %d of %d walkers at iteration %d ",
+                                "(walker %d: %s). This is a programming error or a ",
+                                "broken daemon, not an infeasible parameter (those ",
+                                "return -Inf)."),
+                         length(k), length(ev), as.integer(iter), k[1L], msg[1L]),
+                 class = "dynhr_error_dime_daemon")
+  }
+  vapply(ev, function(x) x, numeric(1))
 }
 
 ## Resume guard for DIME: re-evaluate the target at EVERY saved walker position

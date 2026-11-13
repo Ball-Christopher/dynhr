@@ -15,8 +15,12 @@ historical_decomposition_obc(
 )
 }
 \arguments{
-\item{smoothed_shocks}{n_exo x T matrix from pkf_smoother_obc()
-(rows = shocks, columns = time periods)}
+\item{smoothed_shocks}{T x n_exo matrix from pkf_smoother_obc()
+(rows = periods, columns = the shocks named as
+\code{dr_slack$exo_names}; a matrix named by
+shock on its ROWS -- the old n_exo x T orientation
+-- is transposed with a message, an unnamed
+n_exo x T or square one is an error)}
 
 \item{regime_path}{Integer vector length T (accepted regime per period)}
 
@@ -43,10 +47,13 @@ source of \code{shock_groups}.}
 }
 \value{
 List with:
-  $contributions  Named list of n_endo x T matrices, one per shock (or
-                  group) plus $constraint for the binding-constant
-                  contribution and $initial for the initial condition
-  $total          n_endo x T matrix: sum of all contributions
+  $contributions  Named list of T x n_endo matrices (rows = periods), one
+                  per shock (or group) plus $constraint for the
+                  binding-constant contribution and $initial for the
+                  initial condition
+  $total          T x n_endo matrix: sum of all contributions
+  $initial        T x n_endo matrix: the initial-condition contribution
+  $orientation    \code{"time_endo"} (as \code{\link{historical_decomposition}})
   $endo_names     Character vector
   $exo_names      Character vector (with "constraint", "initial" last)
 }

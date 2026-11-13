@@ -36,7 +36,8 @@
 #'   - n_obs == n_exo  (exactly identified)
 #'   - DD must be square and non-singular at every period
 #'
-#' @param Y             n_obs x T observation matrix (n_obs must equal n_exo)
+#' @param Y             T x n_obs observation matrix, rows = periods (n_obs
+#'                      must equal n_exo)
 #' @param dr_slack      Slack-regime DecisionRules (from solve_perturbation)
 #' @param regime_cache  R environment seeded by obc_ensure_policy() (as
 #'                      returned by obc_guess_verify())
@@ -47,7 +48,7 @@
 #' @param regime_path   Integer vector (length T): bitfield regime per period
 #' @return List with:
 #'   $loglik      scalar log-likelihood
-#'   $shocks      n_exo x T matrix of recovered shocks
+#'   $shocks      T x n_exo matrix of recovered shocks (rows = periods)
 #'   $n_obs       integer
 #'   $n_T         integer
 #' @noRd
@@ -74,8 +75,9 @@ kalman_filter_obc_inversion <- function(Y, dr_slack, regime_cache,
          paste(obs_vars[is.na(obs_idx)], collapse = ", "))
 
   ## Data orientation
-  if (is.null(dim(Y))) Y <- matrix(Y, nrow = n_obs)
-  if (nrow(Y) != n_obs) Y <- t(Y)
+  ## `Y` is T x n_obs (rows = periods; R/time-orientation.R); the loop runs
+  ## on its transpose.
+  Y <- t(.kf_time_in(Y, obs_vars, "Y", "kalman_filter_obc_inversion"))
   n_T <- ncol(Y)
 
   if (length(regime_path) != n_T)
@@ -150,5 +152,5 @@ kalman_filter_obc_inversion <- function(Y, dr_slack, regime_cache,
   }
 
   rownames(shocks) <- exo
-  list(loglik = loglik, shocks = shocks, n_obs = n_obs, n_T = n_T)
+  list(loglik = loglik, shocks = t(shocks), n_obs = n_obs, n_T = n_T)
 }

@@ -28,8 +28,11 @@
 #'   is a named numeric vector of length \code{n_exo} giving the shock
 #'   standard-deviation scale factors for that regime.  Regime 1 is
 #'   conventionally fixed to all 1s for identification, but this is not
-#'   enforced (any strictly positive values are valid).  Names must match the
-#'   model's exogenous variable names (checked when the filter is called).
+#'   enforced (any strictly positive values are valid).  Either every
+#'   regime's vector is named by the same distinct shock names (checked here)
+#'   which must be the model's exogenous variable names (checked when the
+#'   filter is called), or none is named (positional, in the model's exo
+#'   order); a mix is refused.
 #' @param pi0  Optional numeric vector of length \code{n_regimes}: initial
 #'   regime probability distribution.  Defaults to the ergodic (stationary)
 #'   distribution of \code{transition}.  Must sum to 1 and be non-negative.
@@ -77,6 +80,25 @@ ms_dsge_spec <- function(n_regimes,
       stop(sprintf(
         "ms_dsge_spec: shock_scales[[%d]] must have strictly positive finite values.",
         s), call. = FALSE)
+  }
+  ## Names: every regime named by the SAME set of distinct shock names
+  ## (matched to the model's exo names when the filter is called), or no
+  ## regime named (positional, model exo order).  A mix used to pass here and
+  ## die inside ms_kim_filter's P0 build with "missing value where TRUE/FALSE
+  ## needed" (review 2026-11-11 F8).
+  nm1 <- names(shock_scales[[1L]])
+  for (s in seq_len(n_regimes)) {
+    nm <- names(shock_scales[[s]])
+    if (is.null(nm) && is.null(nm1)) next
+    if (is.null(nm) || is.null(nm1) || any(!nzchar(nm)) || anyDuplicated(nm) ||
+        !setequal(nm, nm1))
+      .dynhr_abort(sprintf(paste0(
+        "ms_dsge_spec: shock_scales[[%d]] is named (%s) but regime 1 is named ",
+        "(%s): name every regime's vector by the same distinct shock names ",
+        "(the model's exogenous variables), or name none of them."),
+        s, if (is.null(nm)) "unnamed" else paste(nm, collapse = ", "),
+        if (is.null(nm1)) "unnamed" else paste(nm1, collapse = ", ")),
+        class = "dynhr_error_invalid_argument")
   }
 
   ## ---- initial distribution pi0 (default: ergodic) -----------------------

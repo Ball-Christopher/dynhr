@@ -32,8 +32,9 @@ A list with \code{lpd} (total), \code{mc_se}, \code{p_waic},
   \code{elpd_waic}, \code{pointwise} (data frame: \code{period},
   \code{lpd}, \code{mc_se}, \code{p_waic}; its \code{lpd} column sums to
   \code{lpd}), \code{per_observable} (\code{NULL} or the \eqn{T \times J}
-  matrix described above), \code{loglik} (the \eqn{S \times T} matrix of
-  contributions), \code{draw_index} (rows of the draws used) and
+  matrix described above), \code{loglik} (the \eqn{T \times S} matrix of
+  contributions: rows are periods, columns the draws used),
+  \code{draw_index} (rows of the draws used) and
   \code{n_draws}.
 }
 \description{

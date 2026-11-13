@@ -1534,9 +1534,11 @@ solve_perturbation_order4 <- function(model, compiled, ss, params, dr3,
     out
   }
   colnames(ghxxxx) <- quad_names(state_vars, state_vars, state_vars, state_vars)
-  colnames(ghxxxu) <- quad_names(state_vars, state_vars, state_vars, exo_names)
-  colnames(ghxxuu) <- quad_names(state_vars, state_vars, exo_names, exo_names)
-  colnames(ghxuuu) <- quad_names(state_vars, exo_names, exo_names, exo_names)
+  ## Mixed blocks: Kronecker layout, last mode fastest (quad_names() is
+  ## first-mode-fastest and mislabelled the off-diagonal columns).
+  colnames(ghxxxu) <- .kron_colnames(state_vars, state_vars, state_vars, exo_names)
+  colnames(ghxxuu) <- .kron_colnames(state_vars, state_vars, exo_names, exo_names)
+  colnames(ghxuuu) <- .kron_colnames(state_vars, exo_names, exo_names, exo_names)
   colnames(ghuuuu) <- quad_names(exo_names, exo_names, exo_names, exo_names)
 
   dr4 <- unclass(dr3)
@@ -1661,12 +1663,19 @@ print.DecisionRules4 <- function(x, ...) {
 
 #' Compute impulse response functions at fourth order (pruned state space)
 #'
-#' Implements the Andreasen, Fernandez-Villaverde & Rubio-Ramirez (2018)
-#' pruning scheme truncated at fourth order. Tracks four additive layers:
-#' \eqn{x^{(1)}} (linear), \eqn{x^{(2)}} (quadratic), \eqn{x^{(3)}} (cubic),
-#' \eqn{x^{(4)}} (quartic). The constant mean-correction terms
-#' (\code{ghss}, \code{ghs3}) are absorbed into the baseline and cancel
-#' in deviation IRFs.
+#' Pruned (Andreasen, Fernandez-Villaverde & Rubio-Ramirez 2018) impulse
+#' responses truncated at fourth order, with the same definition as
+#' \code{\link{compute_irfs_order3}}: the difference between the pruned path
+#' with the impulse at \eqn{t = 1} and the pruned path without it, both
+#' started at the deterministic steady state with no other shock realised.
+#' The state layers are the coefficients of the path when the shocks and
+#' \eqn{\sigma} are scaled jointly, so every risk term of the rule enters
+#' (\code{ghss}, \code{ghxss}, \code{ghuss}, \code{ghxxss}, \code{ghxuss},
+#' \code{ghuuss}, \code{ghss2})
+#' and the result is the order-4 Taylor expansion, jointly in the shock
+#' size and \eqn{\sigma}, of the exact IRF.  (Before the 2026-11 review this
+#' function dropped every sigma term and mis-weighted the cross-layer
+#' products.)
 #'
 #' @param dr4       \code{DecisionRules4} object.
 #' @param model     \code{dynhr_mod} from \code{\link{parse_mod}}.
@@ -1681,116 +1690,6 @@ compute_irfs_order4 <- function(dr4, model, n_periods = 40L,
   if (!inherits(dr4, "DecisionRules4")) {
     stop("dr4 must be a DecisionRules4 object.")
   }
-
-  ghx   <- dr4$ghx;   ghu   <- dr4$ghu
-  ghxx  <- dr4$ghxx;  ghxu  <- dr4$ghxu;  ghuu  <- dr4$ghuu
-  ghxxx <- dr4$ghxxx; ghxxu <- dr4$ghxxu
-  ghxuu <- dr4$ghxuu; ghuuu <- dr4$ghuuu
-  ghxxxx <- dr4$ghxxxx; ghxxxu <- dr4$ghxxxu
-  ghxxuu <- dr4$ghxxuu; ghxuuu <- dr4$ghxuuu; ghuuuu <- dr4$ghuuuu
-
-  endo      <- dr4$endo_names
-  exo       <- dr4$exo_names
-  state_idx <- dr4$state_idx
-  n_endo    <- length(endo)
-  n_exo     <- length(exo)
-  n_s       <- length(state_idx)
-
-  if (is.null(params)) params <- model$param_values
-  shock_stderr <- .get_shock_stderr(model, exo, params)
-
-  # State-row submatrices
-  hx   <- ghx  [state_idx, , drop = FALSE]
-  hu   <- ghu  [state_idx, , drop = FALSE]
-  hxx  <- ghxx [state_idx, , drop = FALSE]
-  huu  <- ghuu [state_idx, , drop = FALSE]
-  hxxx <- ghxxx[state_idx, , drop = FALSE]
-  huuu <- ghuuu[state_idx, , drop = FALSE]
-  hxxxx <- ghxxxx[state_idx, , drop = FALSE]
-  huuuu <- ghuuuu[state_idx, , drop = FALSE]
-
-  irfs <- list()
-  for (k in seq_along(exo)) {
-    shock_name <- exo[k]
-    irf_mat    <- matrix(0, n_periods, n_endo)
-    colnames(irf_mat) <- endo
-    rownames(irf_mat) <- paste0("t", seq_len(n_periods))
-
-    eps    <- numeric(n_exo)
-    eps[k] <- shock_stderr[shock_name] * shock_size
-
-    # State layers at t=0: all zero (start from SS)
-    x1 <- numeric(n_s)  # first-order
-    x2 <- numeric(n_s)  # second-order
-    x3 <- numeric(n_s)  # third-order
-    x4 <- numeric(n_s)  # fourth-order
-
-    # --- Period 1: impact ---
-    eps_vec <- as.numeric(eps)
-
-    x1 <- as.numeric(hu %*% eps_vec)
-    x2 <- as.numeric(0.5 * huu %*% (eps_vec %x% eps_vec))
-    x3 <- as.numeric((1/6) * huuu %*% (eps_vec %x% eps_vec %x% eps_vec))
-    x4 <- as.numeric((1/24) * huuuu %*% (eps_vec %x% eps_vec %x% eps_vec %x% eps_vec))
-
-    y1 <- as.numeric(ghu  %*% eps_vec)
-    y2 <- as.numeric(0.5 * ghuu  %*% (eps_vec %x% eps_vec))
-    y3 <- as.numeric((1/6) * ghuuu %*% (eps_vec %x% eps_vec %x% eps_vec))
-    y4 <- as.numeric((1/24) * ghuuuu %*% (eps_vec %x% eps_vec %x% eps_vec %x% eps_vec))
-
-    irf_mat[1, ] <- y1 + y2 + y3 + y4
-
-    # --- Periods 2..n_periods: pure propagation ---
-    for (t in 2:n_periods) {
-      x1p <- x1; x2p <- x2; x3p <- x3; x4p <- x4
-
-      # First-order: linear
-      x1 <- as.numeric(hx %*% x1p)
-
-      # Second-order: hx·x2 + 0.5·hxx·(x1⊗x1)
-      x2 <- as.numeric(hx %*% x2p + 0.5 * hxx %*% (x1p %x% x1p))
-
-      # Third-order: hx·x3 + hxx·(x1⊗x2) + (1/6)·hxxx·(x1⊗x1⊗x1)
-      x3 <- as.numeric(
-        hx  %*% x3p +
-        hxx %*% (x1p %x% x2p) +
-        (1/6) * hxxx %*% (x1p %x% x1p %x% x1p)
-      )
-
-      # Fourth-order (pruned):
-      # x4 = hx·x4p + hxx·(x1⊗x3 + x2⊗x2) + hxxx·(x1⊗x1⊗x2) + (1/24)·hxxxx·(x1⊗x1⊗x1⊗x1)
-      x4 <- as.numeric(
-        hx    %*% x4p +
-        hxx   %*% (x1p %x% x3p + x2p %x% x2p) +
-        hxxx  %*% (x1p %x% x1p %x% x2p) +
-        (1/24) * hxxxx %*% (x1p %x% x1p %x% x1p %x% x1p)
-      )
-
-      # Output layers
-      y1 <- as.numeric(ghx  %*% x1p)
-      y2 <- as.numeric(ghx  %*% x2p + 0.5 * ghxx %*% (x1p %x% x1p))
-      y3 <- as.numeric(
-        ghx  %*% x3p +
-        ghxx %*% (x1p %x% x2p) +
-        (1/6) * ghxxx %*% (x1p %x% x1p %x% x1p)
-      )
-      y4 <- as.numeric(
-        ghx     %*% x4p +
-        ghxx    %*% (x1p %x% x3p + x2p %x% x2p) +
-        ghxxx   %*% (x1p %x% x1p %x% x2p) +
-        (1/24) * ghxxxx %*% (x1p %x% x1p %x% x1p %x% x1p)
-      )
-
-      irf_mat[t, ] <- y1 + y2 + y3 + y4
-    }
-
-    irfs[[shock_name]] <- irf_mat
-  }
-
-  class(irfs) <- "IRFCollection"
-  attr(irfs, "n_periods")  <- n_periods
-  attr(irfs, "endo_names") <- endo
-  attr(irfs, "exo_names")  <- exo
-  attr(irfs, "order")      <- 4L
-  irfs
+  n_periods <- .check_irf_n_periods(n_periods, "compute_irfs_order4")
+  .compute_irfs_pruned_k(dr4, model, 4L, n_periods, shock_size, params)
 }

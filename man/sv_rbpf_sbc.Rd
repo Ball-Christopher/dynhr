@@ -8,7 +8,7 @@ sv_rbpf_sbc(
   n_repl = 100L,
   T_obs = 60L,
   n_particles = 500L,
-  n_draws = 8000L,
+  n_draws = 32000L,
   n_warmup = 1500L,
   thin_L = 75L,
   seed = 20260712L,
@@ -23,14 +23,22 @@ sv_rbpf_sbc(
 \item{n_particles}{RB-PF particles per likelihood evaluation (default 500).}
 
 \item{n_draws, n_warmup}{Post-warmup / warmup pseudo-marginal RWMH draws
-(defaults 8000 / 1500; the warmup adapts a full proposal COVARIANCE
+(defaults 32000 / 1500; the warmup adapts a full proposal COVARIANCE
 (Haario-style) plus a global scale toward 25\% acceptance, both frozen
-for the sampling phase, and is discarded).}
+for the sampling phase, and is discarded). The chain must be long
+enough that the \code{thin_L} kept draws are close to independent:
+at 8000 draws the median effective sample size of \code{mu} and
+\code{rho} is about 150 (worst replications below 50), which
+over-disperses the ranks and shows up as a chi-squared rejection with
+excess saturated ranks at a few hundred replications; at 32000 it is
+about 600. A classed warning (\code{dynhr_warning_sbc_low_ess}) is
+raised when the median effective sample size of any parameter is below
+\code{5 * thin_L}.}
 
 \item{thin_L}{Number of (approximately independent) thinned draws used for
 the rank statistic (default 75; ranks take values 0..thin_L).}
 
-\item{seed}{Base RNG seed; replication r uses \code{seed + r} (so results
+\item{seed}{Base RNG seed; replication seeds are drawn from one stream started at \code{seed} (so results
 are reproducible and independent of \code{cores}).}
 
 \item{cores}{Parallel replications via \code{parallel::mclapply}
@@ -40,7 +48,8 @@ are reproducible and independent of \code{cores}).}
 A list: \code{ranks} (\code{n_repl x 6} matrix, columns named by
   parameter), \code{uniformity} (from \code{sbc_uniformity_test()}),
   \code{accept_rates}, \code{loglik_sd_at_truth} (per-replication PF noise
-  diagnostic), and \code{settings}.
+  diagnostic), \code{ess} (\code{n_repl x 6} split-chain effective sample
+  size of each post-warmup chain), and \code{settings}.
 }
 \description{
 Runs \code{n_repl} SBC replications on a canonical 2-shock linear panel
@@ -52,7 +61,7 @@ statistics and the package's composite uniformity verdict.
 \details{
 Runtime is dominated by \code{n_repl * (n_draws + n_warmup)} RB-PF
 evaluations (compiled kernel: ~10ms at the defaults), i.e. roughly
-40s per replication at the defaults. Use \code{cores > 1} to run
+2.5 minutes per replication at the defaults. Use \code{cores > 1} to run
 replications in parallel (forked; not on Windows).
 }
 \seealso{

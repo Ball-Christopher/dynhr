@@ -97,10 +97,9 @@ dimension still correct.
 
 \strong{Orientation.} \code{smoothed_shocks} is \code{T x n_shock} and
 \code{smoothed_states} is \code{T x n_state}: \strong{rows are periods}.
-That is what \code{\link{kalman_smoother}} returns. Note
-\code{\link{kalman_filter}}'s state matrices are the other way round
-(\code{n_state x T}) and need \code{t()}; a transposed argument is
-detected and refused rather than silently reinterpreted.
+That is what \code{\link{kalman_smoother}} and \code{\link{kalman_filter}}
+return; a transposed argument is detected and refused rather than silently
+reinterpreted.
 
 \strong{Names.} Columns are matched to \code{ss$shock_names} /
 \code{ss$state_names} by name when the matrix has dimnames, and \code{s0}

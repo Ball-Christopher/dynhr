@@ -522,8 +522,10 @@ opp_optimal_intervention <- function(instrument_irf,
 #' @param instrument_shock Character: name of the exogenous shock that
 #'   affects the policy instrument (e.g., \code{"eps_r"}). If NULL,
 #'   attempts auto-detection based on common naming conventions.
-#' @param params        Named numeric parameter vector. Defaults to
-#'   \code{model$param_values}.
+#' @param params        Named numeric parameter vector, or \code{NULL}
+#'   (default). The shock covariance comes from \code{params} when supplied,
+#'   else from \code{dr$Sigma_e}, else from the model's shocks block (as in
+#'   \code{\link{compute_irfs}}).
 #' @param n_periods     Number of IRF periods (default 40).
 #' @param shock_size    Size of the instrument shock in standard deviation
 #'   units (default 1, i.e., a one-standard-deviation shock).
@@ -577,8 +579,6 @@ opp_estimate_instrument_irf <- function(dr,
   if (missing(target_vars) || length(target_vars) == 0) {
     stop("'target_vars' must be a character vector of variable names.")
   }
-
-  if (is.null(params)) params <- model$param_values
 
   # ---- 1. Identify the instrument shock ----
   exo_names <- dr$exo_names %||% model$varexo_names
@@ -715,7 +715,9 @@ opp_estimate_instrument_irf <- function(dr,
 #' @param discount        Discount factor. Defaults to \code{params["beta"]}
 #'   or 0.99.
 #' @param params          Named numeric parameter vector. Defaults to
-#'   \code{model$param_values}.
+#'   \code{model$param_values}. The instrument IRF's shock covariance comes
+#'   from \code{params} only when supplied, else from \code{dr$Sigma_e},
+#'   else from the model (as in \code{\link{compute_irfs}}).
 #' @param normalise_irf   If TRUE, normalise the IRF so the instrument's own
 #'   impact response is 1.
 #' @param verbose         Print progress and results.
@@ -783,6 +785,9 @@ opp_sufficient_stats <- function(model,
     stop("'model' must be a dynhr_mod or a policy result object.")
   }
 
+  ## The IRF's shock covariance follows .resolve_sigma_e() on the CALLER's
+  ## `params` (NULL lets a supplied dr$Sigma_e count), not the default.
+  params_shock <- params
   if (is.null(params)) params <- dynare_model$param_values
 
   # ---- 2. Get decision rules ----
@@ -825,7 +830,7 @@ opp_sufficient_stats <- function(model,
     model = dynare_model,
     target_vars = target_vars,
     instrument_shock = instrument_shock,
-    params = params,
+    params = params_shock,
     n_periods = n_periods,
     shock_size = 1,
     normalise = normalise_irf,

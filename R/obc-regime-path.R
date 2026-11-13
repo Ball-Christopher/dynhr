@@ -6,7 +6,9 @@
 ## PF-Newton) whose returns encode "which constraints bind when" three different
 ## ways -- an integer bitfield (\code{regime_path}), the same bitfield under a
 ## different name (\code{active_set}), and a logical matrix (\code{regime}) --
-## and store the solved paths in two orientations (n_endo x T vs T x n_endo).
+## and (before the 2026-10 orientation standardisation) stored the solved
+## paths in two orientations.  Every solver now returns T x n_endo paths and a
+## T x n_constr `regime` (rows = periods, R/time-orientation.R).
 ##
 ## This module provides ONE canonical object and adapters onto it.  It is
 ## ADDITIVE: it does not modify any solver.  Later increments
@@ -84,21 +86,19 @@ new_obc_regime_path <- function(binding, paths = NULL, converged = NA,
 #'
 #' Normalizes the fragmented solver returns: the binding sequence from
 #' \code{regime_path} / \code{active_set} (integer bitfield) or \code{regime}
-#' (logical matrix), and the solved paths to the canonical \code{T x n_endo}
-#' orientation.
+#' (\code{T x n_constr} logical matrix).  The solved paths (\code{res$paths}
+#' or \code{res$Y}) must be \code{T x n_endo} (rows = periods), as every
+#' dynhr OBC solver returns them; an \code{n_endo x T} matrix is an error
+#' (its orientation is no longer inferred from the period count).
 #'
 #' @param res A list returned by an OBC solver (Boehl/LCP/MCP/OccBin/PF-Newton).
 #' @param n_constr Number of constraints (required when the binding sequence is
 #'   an integer bitfield).
-#' @param paths_endo_by_T Optional logical: set \code{TRUE} if \code{res$paths}
-#'   is stored as \code{n_endo x T} (as in the DR-based solvers), \code{FALSE}
-#'   if \code{T x n_endo}.  If \code{NULL}, inferred from the period count.
 #' @param constraints Optional character vector naming the constrained variables.
 #'
 #' @return An \code{\link{new_obc_regime_path}} object.
 #' @export
-as_obc_regime_path <- function(res, n_constr = NULL, paths_endo_by_T = NULL,
-                               constraints = NULL) {
+as_obc_regime_path <- function(res, n_constr = NULL, constraints = NULL) {
   if (!is.null(res$regime) && is.matrix(res$regime) && is.logical(res$regime)) {
     binding <- res$regime
   } else {
@@ -113,9 +113,13 @@ as_obc_regime_path <- function(res, n_constr = NULL, paths_endo_by_T = NULL,
   paths <- res$paths %||% res$Y
   if (!is.null(paths)) {
     n_per <- nrow(binding)
-    transpose <- if (!is.null(paths_endo_by_T)) isTRUE(paths_endo_by_T)
-                 else (nrow(paths) != n_per && ncol(paths) == n_per)
-    if (transpose) paths <- t(paths)
+    if (!is.matrix(paths) || nrow(paths) != n_per)
+      .dynhr_abort("as_obc_regime_path(): the solved paths have ",
+                   NROW(paths), " row(s) but the regime path has ", n_per,
+                   " period(s). Paths are T x n_endo (rows = periods)",
+                   if (is.matrix(paths) && ncol(paths) == n_per)
+                     "; transpose an n_endo x T matrix with t()." else ".",
+                   class = "dynhr_error_orientation")
   }
   new_obc_regime_path(binding, paths = paths,
                       converged = res$converged %||% NA,

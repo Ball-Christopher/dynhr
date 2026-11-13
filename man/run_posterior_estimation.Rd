@@ -56,7 +56,7 @@ the number of walkers.}
 \item{n_chains}{Number of MCMC chains per method (for RWMH and NUTS).
 Recycled. Default \code{4}. Several NUTS chains run on a worker pool when
 \code{parallel = TRUE} and in sequence otherwise (chain \code{k} is
-seeded \code{seed + k}, as on the pool).}
+seeded with the k-th child seed of \code{seed}, as on the pool).}
 
 \item{n_particles}{Number of SMC particles (only for \code{"SMC"}), or
 the DSMH cloud size \eqn{N G} (only for \code{"DSMH"}).
@@ -250,8 +250,14 @@ daemons' base seed (before 0.9.3.105 they ignored it and always used
 their fixed default, so different seeds gave identical parallel draws);
 with \code{seed = NULL} they keep that default.}
 
-\item{...}{Additional arguments forwarded to each sampler
-(e.g. \code{target_accept = 0.25}, \code{adapt_every = 100}).}
+\item{...}{Additional arguments forwarded to each sampler, under
+that sampler's own argument names (e.g. for \code{"RWMH"}
+\code{scale = 0.3}, \code{target_rate = 0.25}, \code{adapt_every = 100};
+for \code{"NUTS"} \code{target_accept = 0.9}). On the parallel (mirai)
+multi-chain RWMH path \code{scale}, \code{target_rate} and
+\code{adapt_every} are forwarded (as \code{run_mcmc_mirai()}'s
+\code{mh_scale}, \code{target_accept}, \code{adapt_every}); any other
+extra is refused there rather than silently ignored.}
 }
 \value{
 An object of class \code{"dynhr_posterior_result"} containing:

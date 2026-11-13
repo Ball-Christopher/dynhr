@@ -19,6 +19,9 @@
 ##  1. ghu EXCLUDES Sigma_e (it is the loading matrix R in x_t = G x_{t-1} + R e_t).
 ##     Sigma_eta = RR Sigma_e RR'; Sigma_eps = DD Sigma_e DD' + me_variance*I.
 ##  4. Sigma_eps is assembled as ONE matrix (HH + me_variance*I).
+##  5. Sigma_e is the TRUE shock covariance (0.9.4.78); the CSN law is built
+##     from its scale matrix .csn_scale_from_cov(Sigma_e, alpha) -- see the
+##     skewed-shock convention block above .csn_skew_idx().
 ##  6. mu_eta is mean-corrected so E[eta] = 0: mu_eta = -RR E[e], with E[e] the
 ##     mean of the JOINT CSN shock law (.csn_shock_mean). For uncorrelated
 ##     skewed shocks E[e_i] = sigma_i delta_i sqrt(2/pi); under correlation the
@@ -617,6 +620,10 @@ dim_red4_r <- function(Gamma, nu, Delta, Sigma, cut_tol = 0.01, max_q = 5L,
 ##   TT, ZZ, chi_idx, state_pos, obs_pos : the state space to filter with
 ##
 ## DERIVATION (CSN linear-transform convention; file-header convention 1):
+##   NOTE (0.9.4.78): in this derivation Sigma_e / sigma_i denote the CSN
+##   SCALE matrix S = .csn_scale_from_cov(Sigma_e, alpha) and its diagonal,
+##   NOT the model's Sigma_e, which is the TRUE shock covariance (see the
+##   skewed-shock convention block above .csn_skew_idx).
 ##   The shock vector in model space is e ~ skewNormal(alpha_i, sigma_i) for
 ##   each component i.  Each scalar skew-normal can be written as:
 ##     e_i = mu_i + sigma_i * Z_i,
@@ -878,53 +885,73 @@ dim_red4_r <- function(Gamma, nu, Delta, Sigma, cut_tol = 0.01, max_q = 5L,
 }
 
 
-#' Mean of the package's joint skew-normal shock law
-#'
-#' The skewed shocks are \eqn{e \sim CSN_{n,q}(0, \Sigma_e, \Gamma_e, 0, I_q)}
-#' (closed skew-normal, Gonzalez-Farias, Dominguez-Molina and Gupta 2004), with
-#' one truncation latent per skewed shock: \eqn{\Gamma_e} has the rows
-#' \eqn{(\alpha_j/\sigma_j) e_j'} and the seed covariance is the FULL
-#' \eqn{\Sigma_e}. This is NOT Azzalini's multivariate \eqn{SN(\Omega, \alpha)}
-#' (which has a single latent, \eqn{q = 1}); the two coincide only for one
-#' skewed shock. The stochastic representation is \eqn{e = x | U \ge 0} with
-#' \eqn{[x; U] \sim N(0, [[\Sigma_e, \Sigma_e\Gamma_e'], [\Gamma_e\Sigma_e,
-#' V]])}, \eqn{V = I + \Gamma_e \Sigma_e \Gamma_e'}, and its mean is
-#' \deqn{E[e] = \Sigma_e \Gamma_e' g, \quad g_j = \phi(0; V_{jj})
-#'   \Phi_{q-1}(0; V_{-j|j}) / \Phi_q(0; V),}
-#' the gradient of the log normaliser with respect to the truncation point.
-#'
-#' When no skewed shock is correlated with any other shock, \eqn{V} is
-#' diagonal, \eqn{g_j = \sqrt{2/\pi}/\sqrt{1+\alpha_j^2}} and the formula
-#' reduces to the per-shock \eqn{\sigma_j \delta_j \sqrt{2/\pi}}; that case
-#' returns the per-shock expression itself (bit-identical to the pre-0.9.4
-#' code). Under correlation the per-shock formula is wrong twice: \eqn{V}'s
-#' off-diagonals \eqn{\alpha_i \alpha_j \rho_{ij}} change \eqn{g}, and the
-#' off-diagonal \eqn{\Sigma_e} gives a skewed shock's correlates -- even
-#' Gaussian ones -- a nonzero mean.
-#'
-#' @param Sigma_e n_exo x n_exo seed covariance.
-#' @param alpha   length-n_exo shape vector (0 = Gaussian shock).
-#' @return length-n_exo numeric vector \eqn{E[e]}.
-#' @noRd
-.csn_shock_mean <- function(Sigma_e, alpha) {
-  alpha <- as.numeric(alpha)
-  n     <- length(alpha)
-  Sigma_e <- as.matrix(Sigma_e)
-  sigma <- sqrt(diag(Sigma_e))
-  delta <- alpha / sqrt(1 + alpha^2)
-  diag_mean <- sigma * delta * sqrt(2 / pi)
-  ## A zero-stderr shock cannot be skewed (alpha/sigma undefined): no latent.
-  sk <- which(alpha != 0 & is.finite(alpha) & sigma > 0)
-  if (length(sk) == 0L) return(diag_mean)
-  cross <- Sigma_e[, sk, drop = FALSE]
-  cross[cbind(sk, seq_along(sk))] <- 0
-  if (all(cross == 0)) return(diag_mean)
+## ===========================================================================
+## SKEWED-SHOCK CONVENTION (one rule for the whole package, 0.9.4.78)
+## ===========================================================================
+## `Sigma_e` -- the shocks block's `stderr` / `var` / `corr`, an estimated
+## `stderr` or `corr`, `dr$Sigma_e`, `.resolve_sigma_e()`, `shock_cov()` -- is
+## the TRUE covariance of the shocks, whatever their skewness:
+##     E[e] = 0,   Cov(e) = Sigma_e,   `skew` alpha sets the SHAPE only.
+## (Before 0.9.4.78 the simulators, the PSKF likelihood and the order-3 third
+## moment read Sigma_e as the skew-normal SCALE, so a shock with stderr s and
+## alpha = 2 had standard deviation 0.70 s; the order-2/3 risk terms read it
+## as the variance. Measured: the order-1 PSKF density of y = e implied
+## Var(y) = 0.4907 s^2 at alpha = 2, 0.5593 s^2 at alpha = -1.5.)
+##
+## The law itself is the package's closed skew-normal with one truncation
+## latent per skewed shock (Gonzalez-Farias, Dominguez-Molina & Gupta 2004):
+##     e = x - E[x | U >= 0],   x | U >= 0,
+##     [x; U] ~ N(0, [[S, S G'], [G S, V]]),   V = I_q + G S G',
+## G with rows (alpha_j / omega_j) e_j' for the skewed shocks j,
+## omega = sqrt(diag(S)). S is the CSN SCALE (seed) matrix. It is NOT Sigma_e:
+##     Cov(e) = S + S G' (F2 - g g') G S                    (*)
+## with g, F2 the first and second truncation moments of N(0, V) on U >= 0
+## (.csn_orthant_moments). For a skewed shock uncorrelated with every other
+## shock (*) is the univariate omega_i^2 (1 - 2 delta_i^2 / pi),
+## delta_i = alpha_i / sqrt(1 + alpha_i^2), and S differs from Sigma_e only on
+## that diagonal entry.
+##
+## EVERY consumer that builds the CSN law (the shock samplers, the PSKF
+## state-noise lift at orders 1 and 2, the order-3 third moment, svar_ica's
+## simulated shocks) converts with .csn_scale_from_cov(Sigma_e, alpha) and
+## nothing else; the inverse map is .csn_cov_from_scale(). At alpha = 0
+## S = Sigma_e (the same object), so Gaussian results are bit-identical.
+## ===========================================================================
 
-  q   <- length(sk)
-  Gam <- matrix(0, q, n)
-  Gam[cbind(seq_len(q), sk)] <- alpha[sk] / sigma[sk]
-  V <- diag(q) + Gam %*% Sigma_e %*% t(Gam)
-  V <- 0.5 * (V + t(V))
+## Indices of the shocks that carry a truncation latent. A zero-scale shock
+## cannot be skewed (alpha / omega undefined), so it gets none.
+#' @noRd
+.csn_skew_idx <- function(S, alpha) {
+  om <- sqrt(pmax(diag(as.matrix(S)), 0))
+  which(alpha != 0 & is.finite(alpha) & om > 0)
+}
+
+## TRUE when some skewed shock is correlated with another shock (then S has
+## off-diagonals in the skewed rows, the latents couple, and the closed
+## per-shock forms below no longer apply).
+#' @noRd
+.csn_skew_correlated <- function(M, sk) {
+  if (!length(sk)) return(FALSE)
+  cross <- as.matrix(M)[, sk, drop = FALSE]
+  cross[cbind(sk, seq_along(sk))] <- 0
+  any(cross != 0)
+}
+
+#' Truncation moments of N(0, V) on the positive orthant
+#'
+#' For \eqn{U \sim N(0, V)} conditioned on \eqn{U \ge 0} (q-dimensional):
+#' \deqn{E[U] = V g, \quad E[UU'] = V + V F_2 V,}
+#' \deqn{g_j = \phi(0; V_{jj}) \Phi_{q-1}(0; V_{-j|j}) / \Phi_q(0; V),}
+#' \deqn{F_{2,km} = \phi_2(0, 0; V_{\{k,m\}}) \Phi_{q-2}(0; V_{-km|km}) /
+#'   \Phi_q(0; V) \ (k \ne m), \quad
+#'   F_{2,kk} = -\sum_{m \ne k} V_{km} F_{2,km} / V_{kk}}
+#' (Tallis 1961; Manjunath and Wilhelm 2021, with the lower truncation
+#' points at zero). \code{F2} is only computed when \code{second = TRUE}.
+#' Verified against a deterministic 2-D grid integration of the CSN density
+#' and 1e6-draw rejection sampling (test-review-2026-11-14-skew-sigma-e.R).
+#' @noRd
+.csn_orthant_moments <- function(V, second = FALSE) {
+  q <- nrow(V)
   log_Z <- .csn_log_orthant0(V)
   g <- numeric(q)
   for (j in seq_len(q)) {
@@ -937,10 +964,198 @@ dim_red4_r <- function(Gamma, nu, Delta, Sigma, cut_tol = 0.01, max_q = 5L,
     }
     g[j] <- exp(l_phi + l_cond - log_Z)
   }
+  if (!second) return(list(g = g))
+  F2 <- matrix(0, q, q)
+  if (q > 1L) {
+    for (k in seq_len(q - 1L)) for (m in (k + 1L):q) {
+      km  <- c(k, m)
+      Vkm <- V[km, km]
+      dt  <- Vkm[1L, 1L] * Vkm[2L, 2L] - Vkm[1L, 2L]^2
+      l_phi2 <- -log(2 * pi) - 0.5 * log(dt)
+      l_cond <- 0
+      if (q > 2L) {
+        Sc <- V[-km, -km, drop = FALSE] - V[-km, km, drop = FALSE] %*%
+          solve(Vkm, V[km, -km, drop = FALSE])
+        l_cond <- .csn_log_orthant0(0.5 * (Sc + t(Sc)))
+      }
+      F2[k, m] <- F2[m, k] <- exp(l_phi2 + l_cond - log_Z)
+    }
+    for (k in seq_len(q))
+      F2[k, k] <- -sum(V[k, -k] * F2[k, -k]) / V[k, k]
+  }
+  list(g = g, F2 = F2)
+}
+
+## G (q x n) and V (q x q) of the CSN law with scale matrix S.
+#' @noRd
+.csn_latent_system <- function(S, alpha, sk) {
+  n   <- length(alpha)
+  q   <- length(sk)
+  om  <- sqrt(diag(S))
+  Gam <- matrix(0, q, n)
+  Gam[cbind(seq_len(q), sk)] <- alpha[sk] / om[sk]
+  V <- diag(q) + Gam %*% S %*% t(Gam)
+  list(Gam = Gam, V = 0.5 * (V + t(V)))
+}
+
+#' Mean of the package's CSN shock law with SCALE matrix S
+#'
+#' \eqn{E[x | U \ge 0] = S G' g} (see the convention block above), the
+#' amount every sampler and the PSKF lift subtract so the shocks are
+#' mean-zero. Takes the CSN SCALE matrix \code{S} -- convert a covariance
+#' with \code{.csn_scale_from_cov()} first. When no skewed shock is
+#' correlated with another shock this is the per-shock
+#' \eqn{\omega_j \delta_j \sqrt{2/\pi}}, returned in that closed form.
+#' Under correlation the per-shock formula is wrong twice: \eqn{V}'s
+#' off-diagonals change \eqn{g}, and the off-diagonal \eqn{S} gives a skewed
+#' shock's correlates -- even Gaussian ones -- a nonzero mean.
+#'
+#' @param S     n_exo x n_exo CSN scale (seed) matrix.
+#' @param alpha length-n_exo shape vector (0 = Gaussian shock).
+#' @return length-n_exo numeric vector.
+#' @noRd
+.csn_shock_mean <- function(S, alpha) {
+  alpha <- as.numeric(alpha)
+  S     <- as.matrix(S)
+  omega <- sqrt(diag(S))
+  delta <- alpha / sqrt(1 + alpha^2)
+  diag_mean <- omega * delta * sqrt(2 / pi)
+  sk <- .csn_skew_idx(S, alpha)
+  if (length(sk) == 0L || !.csn_skew_correlated(S, sk)) return(diag_mean)
+  ls <- .csn_latent_system(S, alpha, sk)
+  g  <- .csn_orthant_moments(ls$V)$g
   if (!all(is.finite(g)))
     .dynhr_abort(".csn_shock_mean(): non-finite skew-normal mean; the shock ",
                  "covariance is not usable.", class = "dynhr_error_pskf")
-  as.numeric(Sigma_e %*% t(Gam) %*% g)
+  as.numeric(S %*% t(ls$Gam) %*% g)
+}
+
+#' Covariance of the package's CSN shock law with SCALE matrix S
+#'
+#' Formula (*) of the convention block. The inverse of
+#' \code{.csn_scale_from_cov()}.
+#' @noRd
+.csn_cov_from_scale <- function(S, alpha) {
+  alpha <- as.numeric(alpha)
+  S     <- as.matrix(S)
+  sk    <- .csn_skew_idx(S, alpha)
+  if (!length(sk)) return(S)
+  ls  <- .csn_latent_system(S, alpha, sk)
+  mom <- .csn_orthant_moments(ls$V, second = TRUE)
+  A   <- S %*% t(ls$Gam)
+  C   <- S + A %*% (mom$F2 - tcrossprod(mom$g)) %*% t(A)
+  0.5 * (C + t(C))
+}
+
+#' CSN scale (seed) matrix whose shock law has covariance Sigma_e
+#'
+#' THE conversion of the skewed-shock convention block: every consumer that
+#' builds the CSN law calls this with the model's (true) \code{Sigma_e}.
+#' \itemize{
+#'   \item no skewed shock: returns \code{Sigma_e} itself (bit-identical
+#'     Gaussian paths);
+#'   \item every skewed shock uncorrelated with the others: closed form,
+#'     \eqn{S_{ii} = \Sigma_{ii} / (1 - 2\delta_i^2/\pi)} on the skewed
+#'     diagonal entries, \eqn{S = \Sigma_e} elsewhere;
+#'   \item a skewed shock correlated with another: (*) is scale-equivariant,
+#'     \eqn{Cov(D R D) = D K(R) D} with \eqn{K} depending only on the scale
+#'     CORRELATION \eqn{R} and alpha, so \eqn{R} is solved from
+#'     \eqn{corr(K(R)) = corr(\Sigma_e)} (Newton on the Fisher-z scale, finite
+#'     -difference Jacobian, step-halving) and \eqn{D} then matches the
+#'     variances. Only the block of shocks that are skewed or correlated with
+#'     a skewed shock is solved; every other entry of \eqn{S} is
+#'     \eqn{\Sigma_e}'s (their rows of \eqn{S G'} are zero, so (*) leaves
+#'     them unchanged). A covariance no CSN law with these alphas attains (no
+#'     positive-definite solution, or no convergence) is refused with class
+#'     \code{dynhr_error_skew_cov_unattainable}.
+#' }
+#' @param Sigma_e n_exo x n_exo shock covariance (true).
+#' @param alpha   length-n_exo shape vector.
+#' @return n_exo x n_exo scale matrix S.
+#' @noRd
+.csn_scale_from_cov <- function(Sigma_e, alpha) {
+  alpha   <- as.numeric(alpha)
+  Sigma_e <- as.matrix(Sigma_e)
+  sk <- .csn_skew_idx(Sigma_e, alpha)
+  if (!length(sk)) return(Sigma_e)
+  delta <- alpha[sk] / sqrt(1 + alpha[sk]^2)
+  S <- Sigma_e
+  S[cbind(sk, sk)] <- Sigma_e[cbind(sk, sk)] / (1 - 2 * delta^2 / pi)
+  if (!.csn_skew_correlated(Sigma_e, sk)) return(S)
+
+  ## The affected block: skewed shocks and the shocks correlated with them.
+  A  <- sort(unique(c(sk, which(rowSums(Sigma_e[, sk, drop = FALSE] != 0) > 0))))
+  aA <- alpha[A]
+  sA <- sqrt(diag(Sigma_e)[A])
+  if (any(!(sA > 0)))
+    .dynhr_abort("A shock correlated with a skewed shock has zero variance; ",
+                 "the skewed shock law is not defined.",
+                 class = "dynhr_error_skew_cov_unattainable")
+  CT <- Sigma_e[A, A] / outer(sA, sA)
+  nA <- length(A)
+  up <- which(upper.tri(CT))
+  zT <- atanh(pmin(pmax(CT[up], -1 + 1e-15), 1 - 1e-15))
+  Rof <- function(z) {
+    R <- diag(nA); R[up] <- tanh(z); R[lower.tri(R)] <- t(R)[lower.tri(R)]; R
+  }
+  pd <- function(R) {
+    ch <- suppressWarnings(chol(R, pivot = TRUE))
+    identical(attr(ch, "rank"), nA) && min(abs(diag(ch))) > 1e-8
+  }
+  resid <- function(z) {
+    R <- Rof(z)
+    if (!pd(R)) return(NULL)
+    K <- .csn_cov_from_scale(R, aA)
+    if (!all(is.finite(K)) || any(diag(K) <= 0)) return(NULL)
+    ck <- (K / sqrt(outer(diag(K), diag(K))))[up]
+    if (any(abs(ck) >= 1)) return(NULL)
+    atanh(ck) - zT
+  }
+  z <- zT
+  r <- resid(z)
+  ok <- !is.null(r)
+  it <- 0L
+  while (ok && max(abs(r)) > 1e-12 && it < 100L) {
+    it <- it + 1L
+    J  <- matrix(0, length(up), length(up))
+    h  <- 1e-6
+    for (k in seq_along(up)) {
+      zk <- z; zk[k] <- zk[k] + h
+      rk <- resid(zk)
+      if (is.null(rk)) { zk[k] <- z[k] - h; rk <- resid(zk); if (!is.null(rk)) rk <- -rk + 2 * r }
+      if (is.null(rk)) { ok <- FALSE; break }
+      J[, k] <- (rk - r) / h
+    }
+    if (!ok) break
+    dz <- qr.solve(J, -r, tol = 1e-12)
+    if (!all(is.finite(dz))) { ok <- FALSE; break }
+    step <- 1; improved <- FALSE
+    for (hh in seq_len(40L)) {
+      rn <- resid(z + step * dz)
+      if (!is.null(rn) && max(abs(rn)) < max(abs(r))) { improved <- TRUE; break }
+      step <- step / 2
+    }
+    if (!improved) break
+    z <- z + step * dz
+    r <- rn
+  }
+  ## Converged, or stalled at the evaluator's own accuracy (the orthant
+  ## probabilities are lattice-evaluated beyond q = 3 skewed shocks).
+  if (ok && max(abs(r)) <= 1e-9) {
+    R <- Rof(z)
+    K <- .csn_cov_from_scale(R, aA)
+    d <- sA / sqrt(diag(K))
+    S[A, A] <- R * outer(d, d)
+    return(0.5 * (S + t(S)))
+  }
+  .dynhr_abort(
+    "The shock covariance cannot be attained by correlated skewed shocks: ",
+    "with these `skew` alphas and `corr` entries no skew-normal law has ",
+    "covariance Sigma_e (no positive-definite scale matrix solves it",
+    if (ok) sprintf("; residual %.2g in the correlations", max(abs(r))), "). ",
+    "Reduce the correlation of the skewed shock(s) in positions ",
+    paste(sk, collapse = ", "), " or their |alpha|.",
+    class = "dynhr_error_skew_cov_unattainable")
 }
 
 
@@ -950,23 +1165,38 @@ dim_red4_r <- function(Gamma, nu, Delta, Sigma, cut_tol = 0.01, max_q = 5L,
 #' (\code{.get_csn_shock_params}, which extracts \code{RR}/\code{DD} from a
 #' perturbation solution) and non-DSGE linear state spaces (e.g. the Reiter
 #' HANK adapter \code{hank_reiter_pskf_loglik}): given state loading
-#' \code{eta = RR e}, observation feedthrough \code{DD e}, seed covariance
-#' \code{Sigma_e} and per-shock skewness \code{alpha}, build the CSN
+#' \code{eta = RR e}, observation feedthrough \code{DD e}, shock COVARIANCE
+#' \code{Sigma_e} (the true covariance -- see the skewed-shock convention
+#' block above) and per-shock skewness \code{alpha}, build the CSN
 #' parameters of \code{eta} consumed by \code{.pskf_filter}. All derivation
 #' notes live at the (single) call site above.
+#'
+#' The CSN parameters are built from the SCALE matrix
+#' \code{.csn_scale_from_cov(Sigma_e, alpha)}; the returned
+#' \code{Sigma_eta_init = RR Sigma_e RR'} (the true innovation covariance) is
+#' what the filter's Gaussian stationary initialisation must use, so the
+#' initial state carries the model's true stationary covariance.
 #' @noRd
 .csn_state_noise_lift <- function(RR, DD, Sigma_e, alpha, me_variance = 0) {
   n_exo <- ncol(RR)
   n_obs <- nrow(DD)
 
+  ## Sigma_e is the TRUE shock covariance; the CSN law is parameterised by its
+  ## scale matrix (convention block above). From here on `Sigma_e` is that
+  ## scale matrix; `Sigma_cov` keeps the covariance. alpha = 0: same object.
+  Sigma_cov <- as.matrix(Sigma_e)
+  Sigma_e   <- .csn_scale_from_cov(Sigma_cov, alpha)
+
   ## State noise covariance (header convention 1: ghu excludes Sigma_e)
-  Sigma_eta <- RR %*% Sigma_e %*% t(RR)   # n_state x n_state
+  Sigma_eta <- RR %*% Sigma_e %*% t(RR)   # n_state x n_state (CSN scale)
+  Sigma_eta_init <- RR %*% Sigma_cov %*% t(RR)   # true innovation covariance
 
   ## Obs noise covariance (header convention 4: assembled as ONE matrix). me_variance is
   ## a scalar (H = me I) or one variance per observable (H = diag(me)).
+  ## The filter treats eps as Gaussian, so it carries the TRUE covariance.
   H_me <- if (length(me_variance) == 1L) me_variance * diag(n_obs)
           else diag(as.numeric(me_variance), nrow = n_obs)
-  Sigma_eps <- DD %*% Sigma_e %*% t(DD) + H_me
+  Sigma_eps <- DD %*% Sigma_cov %*% t(DD) + H_me
 
   ## Mean correction (header convention 6): mu_eta is chosen s.t. E[eta] = 0
   ## (preserves the model steady state). E[e] is the mean of the JOINT CSN
@@ -1044,6 +1274,7 @@ dim_red4_r <- function(Gamma, nu, Delta, Sigma, cut_tol = 0.01, max_q = 5L,
 
   list(
     Sigma_eta = Sigma_eta,
+    Sigma_eta_init = Sigma_eta_init,
     Sigma_eps = Sigma_eps,
     Gamma_eta = Gamma_eta,   # n_exo x n_state
     nu_eta    = nu_eta,
@@ -1193,7 +1424,8 @@ dim_red4_r <- function(Gamma, nu, Delta, Sigma, cut_tol = 0.01, max_q = 5L,
                           fast_solve = TRUE,
                           use_cpp = TRUE,
                           keep_override = NULL,
-                          store_keep = FALSE) {
+                          store_keep = FALSE,
+                          init_cov = NULL) {
   q_eta <- nrow(as.matrix(Gamma_eta))
   if (!is.null(keep_override) &&
       !.pskf_keep_override_ok(keep_override, ncol(Y), q_eta))
@@ -1219,7 +1451,7 @@ dim_red4_r <- function(Gamma, nu, Delta, Sigma, cut_tol = 0.01, max_q = 5L,
   ll <- .pskf_filter_run(Y, TT, ZZ, mu_eta, Sigma_eta, Gamma_eta, nu_eta,
                          Delta_eta, mu_eps, Sigma_eps, cut_tol, max_q,
                          offset_miwa_qmax, store_path, fast_solve, use_cpp,
-                         keep_override, store_keep)
+                         keep_override, store_keep, init_cov)
   if (slot > 0L && is.null(keep_override)) {
     kp <- attr(ll, "keep_path")
     if (!is.null(kp)) st$paths[[slot]] <- kp
@@ -1434,7 +1666,8 @@ dim_red4_r <- function(Gamma, nu, Delta, Sigma, cut_tol = 0.01, max_q = 5L,
 .pskf_filter_run <- function(Y, TT, ZZ, mu_eta, Sigma_eta, Gamma_eta, nu_eta,
                               Delta_eta, mu_eps, Sigma_eps,
                               cut_tol, max_q, offset_miwa_qmax, store_path,
-                              fast_solve, use_cpp, keep_override, store_keep) {
+                              fast_solve, use_cpp, keep_override, store_keep,
+                              init_cov = NULL) {
   ## Y: n_obs x T matrix
   n_obs   <- nrow(Y)
   n_T     <- ncol(Y)
@@ -1459,7 +1692,14 @@ dim_red4_r <- function(Gamma, nu, Delta, Sigma, cut_tol = 0.01, max_q = 5L,
   ## (no stationary P0 exists) it returned a divergent iterate, which the old
   ## `!is.finite` guard then replaced by Sigma_eta -- fabricating a finite
   ## likelihood for an infeasible draw. A NaN P0 now rejects the draw.
-  P0 <- solve_lyapunov(TT, Sigma_eta)
+  ##
+  ## `init_cov` (0.9.4.78): the TRUE innovation covariance for that Gaussian
+  ## stationary law, when it differs from Sigma_eta -- with skewed shocks
+  ## Sigma_eta is the CSN SCALE (.csn_state_noise_lift()'s Sigma_eta_init is
+  ## the covariance), and the Gaussian initial law must carry the model's
+  ## true stationary covariance. NULL = Sigma_eta (direct callers that pass
+  ## raw CSN parameters).
+  P0 <- solve_lyapunov(TT, if (is.null(init_cov)) Sigma_eta else init_cov)
   if (is.null(P0) || any(!is.finite(P0))) {
     if (store_path) return(list(ll = -Inf))
     return(-Inf)
@@ -1901,42 +2141,6 @@ dim_red4_r <- function(Gamma, nu, Delta, Sigma, cut_tol = 0.01, max_q = 5L,
 
 
 ## ---------------------------------------------------------------------------
-## .pskf_orient_data: resolve the T x n_obs / n_obs x T orientation
-## ---------------------------------------------------------------------------
-#' Orient an observation matrix as n_obs x T
-#'
-#' Accepts either \code{T x n_obs} (columns = observables) or
-#' \code{n_obs x T}. A non-square matrix is oriented by its shape (a matrix
-#' whose column count equals \code{length(obs_vars)} is transposed). A square
-#' matrix is ambiguous by shape, so it is oriented by its dimnames: column
-#' names equal to \code{obs_vars} mean \code{T x n_obs}, row names equal to
-#' \code{obs_vars} mean \code{n_obs x T}. A square matrix that cannot be
-#' oriented from its names (unnamed, or named both ways) is an error rather
-#' than a guess.
-#'
-#' @param data     Numeric matrix (or data frame).
-#' @param obs_vars Character vector of observed variable names.
-#' @param fn       Calling function name, for the error message.
-#' @return Numeric matrix, n_obs x T.
-#' @noRd
-.pskf_orient_data <- function(data, obs_vars, fn) {
-  n_obs <- length(obs_vars)
-  if (nrow(data) == ncol(data) && ncol(data) == n_obs) {
-    col_ok <- !is.null(colnames(data)) && identical(colnames(data), obs_vars)
-    row_ok <- !is.null(rownames(data)) && identical(rownames(data), obs_vars)
-    if (col_ok && !row_ok) return(t(data))
-    if (row_ok && !col_ok) return(as.matrix(data))
-    .dynhr_abort(sprintf(
-      paste0("%s: `data` is square (%d x %d), so its orientation cannot be ",
-             "inferred from its shape. Give it column names equal to ",
-             "`obs_vars` (T x n_obs) or row names equal to `obs_vars` ",
-             "(n_obs x T), but not both."), fn, n_obs, n_obs),
-      call. = FALSE)
-  }
-  if (ncol(data) == n_obs) t(data) else data
-}
-
-## ---------------------------------------------------------------------------
 ## make_log_posterior_pskf: factory function (mirrors make_log_posterior_tpf)
 ## ---------------------------------------------------------------------------
 #' Create a PSKF log-posterior evaluator
@@ -1945,7 +2149,9 @@ dim_red4_r <- function(Gamma, nu, Delta, Sigma, cut_tol = 0.01, max_q = 5L,
 #' list(logpost, loglik, logprior) using the Pruned Skewed Kalman Filter.
 #'
 #' @param model       dynhr_mod (from parse_mod())
-#' @param data        Observation matrix (T x n_obs), columns = obs_vars
+#' @param data        Observation matrix (T x n_obs, rows are periods),
+#'   columns = obs_vars; oriented by .orient_time_matrix() (names decide; an
+#'   unnamed n_obs x T or square sample is refused)
 #' @param prior_spec  Prior specification (from extract_prior_spec())
 #' @param obs_vars    Character vector of observed variable names
 #' @param compiled    dynhr_compiled (from compile_model())
@@ -1984,8 +2190,9 @@ make_log_posterior_pskf <- function(model, data, prior_spec, obs_vars,
   ## per-draw tryCatch would turn a bad value into -Inf at every theta).
   me_variance <- .kf_me_variance(me_variance, obs_vars,
                                  "make_log_posterior_pskf")
-  ## Data orientation: either T x n_obs or n_obs x T -> Y is n_obs x T
-  Y <- .pskf_orient_data(data, obs_vars, "make_log_posterior_pskf")
+  ## Data orientation: T x n_obs by the package-wide rule -> Y is n_obs x T
+  Y <- t(.orient_time_matrix(data, obs_vars, "data",
+                              "make_log_posterior_pskf"))   # n_obs x T internal
 
   if (is.null(compiled$lead_lag_incidence) &&
       !is.null(compiled$model$lead_lag_incidence))
@@ -2035,6 +2242,7 @@ make_log_posterior_pskf <- function(model, data, prior_spec, obs_vars,
           Delta_eta = csn$Delta_eta,
           mu_eps    = csn$mu_eps,
           Sigma_eps = csn$Sigma_eps,
+          init_cov  = csn$Sigma_eta_init,
           cut_tol   = cut_tol,
           max_q     = max_q,
           offset_miwa_qmax = cdf$offset_miwa_qmax
@@ -2215,11 +2423,12 @@ make_log_posterior_pskf <- function(model, data, prior_spec, obs_vars,
 #' to the Gaussian pruned-order-2 filter \code{\link{pruned_ss_loglik}}.
 #'
 #' @param model       dynhr_mod (from \code{parse_mod}).
-#' @param data        Observation matrix (T x n_obs or n_obs x T). A square
-#'   matrix (T equal to the number of observables) is oriented by its
-#'   dimnames: column names equal to \code{obs_vars} mean T x n_obs, row
-#'   names equal to \code{obs_vars} mean n_obs x T; an unnamed square matrix
-#'   is an error.
+#' @param data        Observation matrix, \code{T x n_obs} (rows are periods,
+#'   columns the \code{obs_vars}). Oriented by the package-wide rule: columns
+#'   named by \code{obs_vars} are matched by name; rows named by them (the
+#'   old \code{n_obs x T} layout) are transposed with a message; an unnamed
+#'   \code{n_obs x T} or square sample is refused (class
+#'   \code{dynhr_error_orientation}).
 #' @param prior_spec  Prior specification (from \code{extract_prior_spec}).
 #' @param obs_vars    Character vector of observed variable names.
 #' @param compiled    dynhr_compiled (from \code{compile_model}, order >= 2).
@@ -2256,8 +2465,9 @@ make_log_posterior_pskf_order2 <- function(model, data, prior_spec, obs_vars,
   cdf   <- .pskf_cdf_settings(pskf_cdf)
   me_variance <- .kf_me_variance(me_variance, obs_vars,
                                  "make_log_posterior_pskf_order2")
-  ## Data orientation: either T x n_obs or n_obs x T -> Y is n_obs x T
-  Y <- .pskf_orient_data(data, obs_vars, "make_log_posterior_pskf_order2")
+  ## Data orientation: T x n_obs by the package-wide rule -> Y is n_obs x T
+  Y <- t(.orient_time_matrix(data, obs_vars, "data",
+                              "make_log_posterior_pskf_order2"))   # n_obs x T internal
 
   if (is.null(compiled$lead_lag_incidence) &&
       !is.null(compiled$model$lead_lag_incidence))
@@ -2317,6 +2527,7 @@ make_log_posterior_pskf_order2 <- function(model, data, prior_spec, obs_vars,
           Delta_eta = csn$Delta_eta,
           mu_eps    = csn$mu_eps,
           Sigma_eps = csn$Sigma_eps,
+          init_cov  = csn$Sigma_eta_init,
           cut_tol   = cut_tol,
           max_q     = max_q,
           offset_miwa_qmax = cdf$offset_miwa_qmax

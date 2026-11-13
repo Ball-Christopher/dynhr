@@ -287,7 +287,7 @@ A \code{dynhr_estimation_result} list with elements:
     \item{\code{convergence}}{List with \code{rhat}, \code{ess}, \code{combined} (multi-chain only)}
     \item{\code{diagnostics}}{Named list of \code{dynhr_diagnostic} objects, or \code{NULL}}
     \item{\code{obc_specs}}{OBC constraint specifications list (when OBC active), else \code{NULL}}
-    \item{\code{smoother}}{List with \code{smoothed_states}, \code{smoothed_shocks},
+    \item{\code{smoother}}{List with \code{smoothed_states} (T x n_state), \code{smoothed_shocks} (T x n_exo; rows = periods),
       \code{hd} (historical decomposition), \code{regime_path} at posterior mode.
       \code{NULL} unless \code{compute_smoother = TRUE} and OBC is active.}
     \item{\code{ramsey}}{A \code{dynhr_ramsey_result}, or \code{NULL} if

@@ -29,7 +29,8 @@
 #'                       single-row matrix, treated as the mode.
 #' @param model          dynhr_mod
 #' @param compiled       dynhr_compiled
-#' @param data           Observation matrix (T x n_obs or n_obs x T)
+#' @param data           Observation matrix, T x n_obs (rows = periods;
+#'                       columns named by \code{obs_vars})
 #' @param prior_spec     Prior specification data.frame
 #' @param obs_vars       Character vector of observed variable names
 #' @param specs          OBC spec list (from obc_parse_tags), or NULL to parse
@@ -81,17 +82,21 @@ ppf_reweight_posterior <- function(chains, model, compiled, data,
       !is.null(compiled$model$lead_lag_incidence))
     compiled$lead_lag_incidence <- compiled$model$lead_lag_incidence
 
-  if (is.data.frame(data)) data <- as.matrix(data)
-  Y <- if (nrow(data) == length(obs_vars)) data else t(data)
+  ## T x n_obs, rows = periods (R/time-orientation.R: names decide).
+  Y <- .kf_time_in(data, obs_vars, "data", "ppf_reweight_posterior")
 
   lp_pkf <- make_log_posterior_obc_pkf(
-    model, t(Y), prior_spec, obs_vars, compiled,
+    model, Y, prior_spec, obs_vars, compiled,
     specs = specs, me_variance = me_variance
   )
 
   ## --- Re-evaluate PKF and PPF at each thinned draw ------------------------
   loglik_pkf <- numeric(n)
   loglik_ppf <- numeric(n)
+  ## Draw i's PPF seed: child i of `seed` (independent PF noise across draws;
+  ## seed + i gave neighbouring draws dependent first particle draws). NULL
+  ## keeps every PPF call unseeded, as before.
+  ppf_seeds <- if (!is.null(seed)) .child_seeds(seed, n, "obc_ppf_draws") else NULL
 
   for (i in seq_len(n)) {
     theta_i <- draws[i, ]
@@ -102,7 +107,7 @@ ppf_reweight_posterior <- function(chains, model, compiled, data,
     res_pkf       <- lp_pkf(theta_i)
     loglik_pkf[i] <- if (!is.null(res_pkf$loglik)) res_pkf$loglik else -Inf
 
-    ## PPF (fresh cache per draw, fixed seed offset by i for independent noise)
+    ## PPF (fresh cache per draw, draw i's own child seed for independent noise)
     if (is.finite(loglik_pkf[i])) {
       params <- .apply_theta_to_params(model, theta_i)
 
@@ -125,7 +130,7 @@ ppf_reweight_posterior <- function(chains, model, compiled, data,
             obs_idx     = obs_idx_i,
             N           = n_particles,
             me_variance = me_variance,
-            seed        = if (!is.null(seed)) seed + i else NULL
+            seed        = if (!is.null(seed)) ppf_seeds[i] else NULL
           )
           loglik_ppf[i] <- if (!is.null(pf_i$loglik)) pf_i$loglik else -Inf
         } else {

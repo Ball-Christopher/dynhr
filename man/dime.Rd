@@ -19,7 +19,15 @@ dime(
 \item{prior_spec}{Prior spec from \code{\link{prior_spec}}}
 
 \item{n_chain}{Number of ensemble walkers (default NULL =
-max(5 * n_par, 20))}
+max(5 * n_par, 20)). All walkers are updated from one snapshot of the
+ensemble, which is exact only for a large enough ensemble. On Gaussian
+targets (12 x 1e6 draws per setting) the stationary variance was within
+0.2\% of the truth from 5 * n_par walkers up, but off by +3.4\% with 3
+walkers (2 parameters), -1.9\% with 6 walkers (5 parameters) and, with
+\code{aimh_prob = 0}, +15\% with 4 walkers (2 parameters) and -28\%
+with 11 walkers (10 parameters). Fewer than \code{max(2 * n_par, 6)}
+walkers (\code{max(5 * n_par, 8)} when \code{aimh_prob < 0.1}) gives a
+warning of class \code{dynhr_warning_dime_small_ensemble}.}
 
 \item{n_iter}{Post-warmup iterations per walker (default 1000)}
 

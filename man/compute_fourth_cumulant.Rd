@@ -16,7 +16,10 @@ compute_fourth_cumulant(
 
 \item{model}{dynhr_mod}
 
-\item{params}{Named numeric parameter vector}
+\item{params}{Named numeric parameter vector, or \code{NULL} (default).
+The shock covariance comes from \code{params} when supplied, else from
+\code{dr$Sigma_e} (set by \code{\link{solve_perturbation}}), else from
+the model's shocks block at \code{model$param_values}.}
 
 \item{method}{Either \code{"window"} (default; the innovation-history
 truncated-window trace, \code{.fourth_cumulant_qform_marginal}) or

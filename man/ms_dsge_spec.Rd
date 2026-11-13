@@ -17,8 +17,11 @@ transitioning from regime \code{i} to regime \code{j}).}
 is a named numeric vector of length \code{n_exo} giving the shock
 standard-deviation scale factors for that regime.  Regime 1 is
 conventionally fixed to all 1s for identification, but this is not
-enforced (any strictly positive values are valid).  Names must match the
-model's exogenous variable names (checked when the filter is called).}
+enforced (any strictly positive values are valid).  Either every
+regime's vector is named by the same distinct shock names (checked here)
+which must be the model's exogenous variable names (checked when the
+filter is called), or none is named (positional, in the model's exo
+order); a mix is refused.}
 
 \item{pi0}{Optional numeric vector of length \code{n_regimes}: initial
 regime probability distribution.  Defaults to the ergodic (stationary)

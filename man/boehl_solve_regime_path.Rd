@@ -19,7 +19,12 @@ boehl_solve_regime_path(
 )
 }
 \arguments{
-\item{shock_seq}{n_exo x T numeric matrix of structural shocks}
+\item{shock_seq}{T x n_exo numeric matrix of structural shocks
+(rows = periods, columns = shocks; name the
+columns by \code{dr_slack$exo_names} -- a matrix
+named by shock on its ROWS, the old n_exo x T
+orientation, is transposed with a message, an
+unnamed n_exo x T or square one is an error)}
 
 \item{dr_slack}{Slack-regime DecisionRules (from solve_perturbation)}
 
@@ -58,7 +63,8 @@ iterative path; ignored when single_spell = TRUE}
 \value{
 Named list with:
   $regime_path -- integer vector (length T): final bitfield regime per period
-  $paths       -- n_endo x T matrix of simulated paths (deviations)
+  $paths       -- T x n_endo matrix of simulated paths (deviations;
+                  rows = periods)
   $fb_norm     -- scalar: Fischer-Burmeister residual norm of the returned
                   path (zero to rounding at an equilibrium)
   $converged   -- logical
@@ -81,7 +87,7 @@ Shocks are surprises: at period 1 and at every period with a non-zero
 shock the regime path expected from then on is re-solved from the current
 state (Dynare's \code{occbin_solver}).  With a single shock in period 1
 the result is the exact perfect-foresight piecewise-linear path (slack
-after the horizon \code{ncol(shock_seq)}).
+after the horizon \code{nrow(shock_seq)}).
 
 Two dispatch paths:
 
@@ -94,6 +100,11 @@ Two dispatch paths:
 \strong{single_spell = TRUE}: spell-duration root-finder (Boehl 2022 §3).
   Parameterises the regime path as a single contiguous block [1, k_star]
   of \code{spell_regime} followed by permanent slack and bisects for
-  k_star.  Intended for single-spell ZLB / ELB IRFs; \code{converged} is
-  FALSE when the resulting path is not an equilibrium.
+  k_star.  Intended for single-spell ZLB / ELB IRFs.  When no spell length
+  gives an equilibrium (the constraints bind in different periods, a
+  constraint outside \code{spell_regime} binds, or the regime re-binds) it
+  falls through to the iterative path, announced by a message of class
+  \code{dynhr_obc_spell_fallthrough}; \code{attr(result,
+  "obc_path_solver")} is \code{"spell"}, \code{"spell_fallthrough"} or
+  \code{"iterative"}.
 }

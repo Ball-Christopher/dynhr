@@ -435,15 +435,15 @@ hank_reiter_linearize <- function(ks, delta_fd = 1e-6) {
 
   ## ---- Klein (2000): qz.dgges(B, A) => growth eigenvalues mu solve
   ## det(B - mu A) = 0; A's zero rows/columns become mu = Inf (see header) ------
-  qzd <- QZ::qz.dgges(B, A)
-  mu  <- complex(real = qzd$ALPHAR, imaginary = qzd$ALPHAI) / qzd$BETA
-  sel <- is.finite(Mod(mu)) & (Mod(mu) < 1 + 1e-6)
-  n_s <- sum(sel)
+  ## The package's one ordered QZ (.ordered_qz(): compiled dgges, stable
+  ## eigenvalues |mu| < 1 + 1e-6 first; infinite mu count as unstable).
+  o   <- .ordered_qz(B, A, critmod = 1 + 1e-6, what = "hank_reiter_statespace()")
+  mu  <- complex(real = o$ALPHAR, imaginary = o$ALPHAI) / o$BETA   # stable first
+  n_s <- o$sdim
   if (n_s != npred)
     stop(sprintf(paste0("hank_reiter_statespace(): Blanchard-Kahn failure -- ",
                         "%d stable generalized eigenvalues, need %d ",
                         "(predetermined states)."), n_s, npred))
-  o <- QZ::qz.dtgsen(qzd$S, qzd$T, qzd$Q, qzd$Z, sel)
   Z11 <- o$Z[1:npred, 1:npred]
   Z21 <- o$Z[npred + 1:n, 1:npred]
   S11 <- o$S[1:npred, 1:npred]
@@ -490,7 +490,7 @@ hank_reiter_linearize <- function(ks, delta_fd = 1e-6) {
     list(T_mat = Tmat, R_mat = matrix(Rvec, ncol = 1L), Z_mat = Zmat,
          state_names = state_names, obs_names = rownames(Zmat),
          spectral_radius = sr, n_stable = n_s,
-         n_infinite = sum(abs(qzd$BETA) < 1e-12),
+         n_infinite = sum(abs(o$BETA) < 1e-12),
          gen_eig_mod = Mod(mu), Qj = Qj,
          rho_z = rho_z, sigma_z = sigma_z,
          drop_dist_coord = drop_dist_coord,
@@ -525,7 +525,7 @@ hank_reiter_irf <- function(rss, T_h = 100L, shock = 0.01) {
 #' state space with the exact stationary (Lyapunov) initial covariance —
 #' the KF-filterable finite-state HANK payoff.
 #'
-#' @param data \code{T x n_obs} matrix of DEMEANED observations (deviations from
+#' @param data \code{T x n_obs} matrix (rows are periods; oriented by the rule in \code{\link{hank_loglik_aggregate}}) of DEMEANED observations (deviations from
 #'   steady state), columns in the order of \code{obs_vars}.
 #' @param rss A \code{hank_reiter_ss} (build with \code{drop_dist_coord = TRUE};
 #'   the Lyapunov initialization requires a strictly stable \code{T}).
@@ -558,9 +558,7 @@ hank_reiter_kalman_loglik <- function(data, rss, obs_vars = "A",
   if (rss$spectral_radius >= 1 - 1e-10)
     stop("hank_reiter_kalman_loglik(): T is not strictly stable; build the ",
          "state space with drop_dist_coord = TRUE.")
-  data <- as.matrix(data)
-  if (ncol(data) != length(obs_vars))
-    stop("hank_reiter_kalman_loglik(): ncol(data) must match obs_vars.")
+  data <- .hank_orient_data(data, obs_vars, "hank_reiter_kalman_loglik")
 
   TT <- rss$T_mat
   RR <- rss$R_mat
@@ -597,18 +595,21 @@ hank_reiter_kalman_loglik <- function(data, rss, obs_vars = "A",
 #' \deqn{s_{t+1} = T s_t + R \epsilon_{t+1}, \qquad
 #'       \epsilon \sim \mathrm{CSN}(\cdot;\ \sigma_z^2,\ \alpha_z),}
 #' mean-corrected so \eqn{E[\epsilon] = 0} (the anchored steady state is
-#' preserved). At \code{alpha_z = 0} this is EXACTLY the Gaussian filter --
+#' preserved), with \eqn{\sigma_z} the innovation's TRUE standard deviation
+#' (the package's skewed-shock convention since 0.9.4.78; the CSN scale is
+#' \eqn{\sigma_z / \sqrt{1 - 2\delta^2/\pi}},
+#' \eqn{\delta = \alpha_z/\sqrt{1+\alpha_z^2}}). At \code{alpha_z = 0} this is EXACTLY the Gaussian filter --
 #' \code{\link{hank_reiter_kalman_loglik}} -- up to the shared stationary
 #' (Lyapunov) initialization, which both use.
 #'
 #' The scalar-shock lift is a special case of the package's DSGE CSN
-#' construction (one skewness dimension, seed covariance \eqn{\sigma_z^2},
-#' \eqn{\Gamma_e = \alpha_z / \sigma_z}); because the single shock loads
+#' construction (one skewness dimension, seed covariance \eqn{\omega_z^2},
+#' \eqn{\Gamma_e = \alpha_z / \omega_z}, \eqn{\omega_z} the CSN scale); because the single shock loads
 #' fully into the state, the pseudoinverse \eqn{\Gamma_\eta} lift and the
 #' \eqn{\Delta_\eta = I} Schur fallback are both EXACT here (zero residual
 #' shock variance off the state range).
 #'
-#' @param data \code{T x n_obs} matrix of DEMEANED observations (deviations from
+#' @param data \code{T x n_obs} matrix (rows are periods; oriented by the rule in \code{\link{hank_loglik_aggregate}}) of DEMEANED observations (deviations from
 #'   steady state), columns in the order of \code{obs_vars}.
 #' @param rss A \code{hank_reiter_ss} (build with \code{drop_dist_coord =
 #'   TRUE}; the Lyapunov initialization requires a strictly stable \code{T}).
@@ -638,9 +639,7 @@ hank_reiter_pskf_loglik <- function(data, rss, alpha_z = 0, obs_vars = "A",
          "state space with drop_dist_coord = TRUE.")
   if (!is.numeric(alpha_z) || length(alpha_z) != 1L || !is.finite(alpha_z))
     stop("hank_reiter_pskf_loglik(): `alpha_z` must be a finite scalar.")
-  data <- as.matrix(data)
-  if (ncol(data) != length(obs_vars))
-    stop("hank_reiter_pskf_loglik(): ncol(data) must match obs_vars.")
+  data <- .hank_orient_data(data, obs_vars, "hank_reiter_pskf_loglik")
 
   ZZ <- rss$Z_mat[obs_vars, , drop = FALSE]
   lift <- .csn_state_noise_lift(
@@ -654,7 +653,7 @@ hank_reiter_pskf_loglik <- function(data, rss, alpha_z = 0, obs_vars = "A",
                mu_eta = lift$mu_eta, Sigma_eta = lift$Sigma_eta,
                Gamma_eta = lift$Gamma_eta, nu_eta = lift$nu_eta,
                Delta_eta = lift$Delta_eta, mu_eps = lift$mu_eps,
-               Sigma_eps = lift$Sigma_eps,
+               Sigma_eps = lift$Sigma_eps, init_cov = lift$Sigma_eta_init,
                cut_tol = cut_tol, max_q = max_q)
 }
 
@@ -711,7 +710,7 @@ hank_reiter_pskf_loglik <- function(data, rss, alpha_z = 0, obs_vars = "A",
 #' \code{loglik}/\code{grad} are an exact gradient of
 #' \code{hank_reiter_kalman_loglik}'s likelihood.
 #'
-#' @param data \code{T x n_obs} matrix (or vector when \code{n_obs = 1}) of
+#' @param data \code{T x n_obs} matrix (rows are periods; oriented by the rule in \code{\link{hank_loglik_aggregate}}) (or vector when \code{n_obs = 1}) of
 #'   DEMEANED observations, columns in the order of \code{obs_vars}. Must
 #'   not contain \code{NA}.
 #' @param rss_fn \code{function(theta)} returning a \code{hank_reiter_ss}
@@ -754,7 +753,7 @@ hank_reiter_kalman_grad <- function(data, rss_fn, theta, obs_vars = "A",
                                     me_variance = 0, fd_step = NULL) {
   if (is.null(names(theta)) || any(!nzchar(names(theta))))
     stop("hank_reiter_kalman_grad(): `theta` must be a NAMED numeric vector.")
-  data <- as.matrix(data)
+  data <- .hank_orient_data(data, obs_vars, "hank_reiter_kalman_grad")
   if (anyNA(data))
     stop("hank_reiter_kalman_grad(): Y must not contain missing values ",
          "(the adjoint path has no univariate/NA dispatch; use ",

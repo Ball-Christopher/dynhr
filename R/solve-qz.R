@@ -1,8 +1,11 @@
 ## R/solve-qz.R
 ## --------------------------------------------------------------------------
-## QZ-decomposition backend with graceful fallback: tries QZ package first,
-## then geigen, then a pure-R eigendecomposition + regularisation. All three
-## return the same shape so .solve_from_system() does not branch.
+## Ordered generalized Schur (QZ) backend. ONE implementation -- the compiled
+## LAPACK dgges with a stable-first SORT callback (src/ordered_qz.cpp), via
+## .ordered_qz() -- serves .solve_from_system() and the HANK Reiter state
+## spaces. The R-level backends (QZ package, geigen, pure R) are reachable only
+## with options(dynhr.use_rcpp = FALSE), as a debugging reference; they are
+## never a fallback for a failed dgges.
 ##
 ## Phase-1 split from perturbation-monolith.R (no logic changes).
 ## --------------------------------------------------------------------------
@@ -13,20 +16,73 @@
 
 #' Generalized Schur (QZ) decomposition with multiple backends
 #'
-#' Tries QZ package, then geigen, then pure-R eigendecomposition fallback.
+#' Compiled ordered dgges (see \code{.ordered_qz()}); a LAPACK failure aborts
+#' with class \code{dynhr_error_qz_failed}. With
+#' \code{options(dynhr.use_rcpp = FALSE)} only: QZ package, then geigen, then a
+#' pure-R eigendecomposition.
 #' Returns S, T, Q, Z matrices with stable eigenvalues ordered first.
 #'
 #' @param D       Left matrix of pencil D * z_t = E * z_{t-1}
 #' @param E       Right matrix of pencil
 #' @param n_minus Number of stable eigenvalues expected (for info only)
 #' @param verbose Print progress
-#' @return List with T, S, Q, Z, eigenvalues, n_stable, or NULL on failure
+#' @param abort   \code{FALSE}: return \code{NULL} on a LAPACK failure instead
+#'   of aborting (the per-draw estimation solve).
+#' @return List with T, S, Q, Z, eigenvalues and the eigenvalue counts
 #' @noRd
 ## Is the compiled ordered-dgges backend available (and not disabled)?
 .HAS_RCPP_QZ <- function() {
   if (!isTRUE(getOption("dynhr.use_rcpp", TRUE))) return(FALSE)
   exists("ordered_qz_cpp", envir = asNamespace("dynhr"),
          inherits = FALSE, mode = "function")
+}
+
+## Ordered generalized Schur of the pencil (A, B): A = Q S Z', B = Q T Z', with
+## the eigenvalues |alpha/beta| < critmod ("stable"; beta = 0 is unstable)
+## ordered first. Returns S, T, Q, Z, ALPHAR, ALPHAI, BETA and sdim (the number
+## of stable eigenvalues). The single entry point for every ordered QZ in the
+## package.
+##
+## Compiled path: ordered_qz_cpp() (dgges with SORT). It reports LAPACK's INFO
+## rather than throwing; any non-zero INFO means the factors are not a valid
+## stable-first ordering, and aborts here (classed, INFO in the message) -- callers
+## that treat an unsolvable draw as infeasible catch the class.
+## options(dynhr.use_rcpp = FALSE): the QZ package's dgges + dtgsen, kept as an
+## independent reference for debugging.
+## @noRd
+.ordered_qz <- function(A, B, critmod = 1 + 1e-6, what = "ordered_qz",
+                        abort = TRUE) {
+  N <- nrow(A)
+  qz_fail <- function(info, backend) {
+    ## abort = FALSE: hand the failure back (ok = FALSE) for a caller that
+    ## treats it as an infeasible point (the per-draw estimation solve).
+    if (!isTRUE(abort)) return(list(ok = FALSE, info = info, backend = backend))
+    .dynhr_abort(sprintf(paste0(
+      "%s: the ordered QZ decomposition failed (%s, LAPACK INFO = %s) on a ",
+      "%d x %d pencil%s."), what, backend, format(info), N, N,
+      if (is.finite(info) && info >= 1 && info <= N) " -- the QZ iteration did not converge"
+      else if (isTRUE(info == N + 2L)) " -- after reordering, roundoff moved an eigenvalue across the stability threshold"
+      else if (isTRUE(info == N + 3L)) " -- the eigenvalue reordering failed (ill-conditioned swap)"
+      else ""),
+      class = "dynhr_error_qz_failed")
+  }
+  if (.HAS_RCPP_QZ()) {
+    oq <- ordered_qz_cpp(A, B, critmod)
+    if (!isTRUE(oq$ok)) return(qz_fail(oq$info %||% NA_integer_, "dgges"))
+    return(oq)
+  }
+  if (!requireNamespace("QZ", quietly = TRUE))
+    .dynhr_abort(what, ": options(dynhr.use_rcpp = FALSE) needs the 'QZ' ",
+                 "package for the ordered QZ decomposition.",
+                 class = "dynhr_error_qz_failed")
+  qzd <- QZ::qz.dgges(A, B)
+  if (!isTRUE(qzd$INFO == 0L)) return(qz_fail(qzd$INFO, "QZ::qz.dgges"))
+  al2 <- qzd$ALPHAR^2 + qzd$ALPHAI^2
+  sel <- al2 < critmod^2 * qzd$BETA^2
+  o <- QZ::qz.dtgsen(qzd$S, qzd$T, qzd$Q, qzd$Z, select = sel)
+  if (!isTRUE(o$INFO == 0L)) return(qz_fail(o$INFO, "QZ::qz.dtgsen"))
+  list(ok = TRUE, info = 0L, sdim = sum(sel), S = o$S, T = o$T, Q = o$Q,
+       Z = o$Z, ALPHAR = o$ALPHAR, ALPHAI = o$ALPHAI, BETA = o$BETA)
 }
 
 ## Classify the (already stable-ordered) generalized eigenvalues from a Schur
@@ -50,7 +106,7 @@
                                  abs(eig_abs_ord - 1) <= tol))
 }
 
-.solve_qz <- function(D, E, n_minus, verbose = TRUE) {
+.solve_qz <- function(D, E, n_minus, verbose = TRUE, abort = TRUE) {
   N <- nrow(D)
 
   if (N == 0) {
@@ -59,25 +115,19 @@
                 eigenvalues = complex(0), n_stable = 0L))
   }
 
-  # Primary: ordered generalized Schur via LAPACK dgges + SORT callback (C++).
-  # Orders stable eigenvalues (|λ| < 1+1e-6) first DURING the decomposition,
-  # avoiding the QZ::qz.dtgsen post-hoc reorder, which has an input-independent
-  # memory-corruption bug (see src/ordered_qz.cpp). Returns the same Schur form
-  # and ALPHAR/ALPHAI/BETA as QZ::qz, so classification is unchanged.
+  # Ordered generalized Schur via LAPACK dgges + SORT callback (C++): stable
+  # eigenvalues (|lambda| < 1+1e-6) are ordered first DURING the decomposition
+  # (Dynare's mjdgges). A LAPACK failure aborts inside .ordered_qz(): there is
+  # no second-library fallback, because QZ::qz() + qz.dtgsen() run the same
+  # LAPACK routines and would meet the same condition.
   if (.HAS_RCPP_QZ()) {
-    oq <- tryCatch(ordered_qz_cpp(E, D), error = function(e) NULL)
-    if (!is.null(oq) && isTRUE(oq$ok)) {
-      if (verbose) .dynhr_cat("  Using ordered dgges (C++)...\n")
-      return(.qz_classify(oq$S, oq$T, oq$Q, oq$Z,
-                          oq$ALPHAR, oq$ALPHAI, oq$BETA))
-    }
-    if (verbose)
-      .dynhr_cat("  C++ ordered QZ unavailable/failed; trying QZ package...\n")
+    oq <- .ordered_qz(E, D, what = "solve_perturbation", abort = abort)
+    if (!isTRUE(oq$ok)) return(NULL)        # abort = FALSE only
+    if (verbose) .dynhr_cat("  Using ordered dgges (C++)...\n")
+    return(.qz_classify(oq$S, oq$T, oq$Q, oq$Z, oq$ALPHAR, oq$ALPHAI, oq$BETA))
   }
 
-  # Fallback: QZ package (QZ::qz + qz.dtgsen). Retained for builds without the
-  # compiled DLL and for options(dynhr.use_rcpp = FALSE). NOTE: qz.dtgsen here
-  # is the routine with the memory bug; this path is intentionally secondary.
+  # options(dynhr.use_rcpp = FALSE) only -- R-level reference backends.
   if (requireNamespace("QZ", quietly = TRUE)) {
     if (verbose) .dynhr_cat("  Using QZ package with Eigenvalue update...\n")
     qz <- QZ::qz(E, D)

@@ -400,10 +400,11 @@ dr    <- solve_perturbation(two, cm, ss, two$param_values, verbose = FALSE)
 specs <- obc_parse_tags(two)                 # one spec per tagged equation
 sys   <- dynhr:::extract_system_matrices(cm, ss, two$param_values)
 
-# Solve with the LCP complementarity approach; shocks is n_exo x T
-shocks <- matrix(0, length(two$varexo_names), 40,
-                 dimnames = list(two$varexo_names, NULL))
-shocks["eps_d", 1] <- -0.10
+# Solve with the LCP complementarity approach; shocks is T x n_exo
+# (rows = periods, columns named by the shocks)
+shocks <- matrix(0, 40, length(two$varexo_names),
+                 dimnames = list(NULL, two$varexo_names))
+shocks[1, "eps_d"] <- -0.10
 lcp_result <- solve_obc_lcp(shocks, dr, sys, specs)
 ```
 

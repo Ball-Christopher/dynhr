@@ -156,6 +156,58 @@
 }
 
 
+#' Third-moment vector E[u (x) u (x) u] of the model's skewed shock law
+#'
+#' The law is the one the simulators draw (\code{.draw_csn_shocks()}) and the
+#' PSKF likelihood evaluates: the mean-zero joint closed skew-normal with
+#' (TRUE) covariance \code{Sigma_e} and shape \code{alpha} (the package's
+#' skewed-shock convention, R/pskf-likelihood.R).  When no skewed shock is
+#' correlated with another shock the joint law is a product of independent
+#' centred skew-normal marginals (the conditioning latents are independent),
+#' and each has third central moment
+#' \deqn{\kappa_{3,i} = \frac{4 - \pi}{2}\,(\omega_i \delta_i \sqrt{2/\pi})^3,
+#'       \quad \delta_i = \alpha_i / \sqrt{1 + \alpha_i^2},}
+#' with \eqn{\omega_i} the skew-normal SCALE of a shock with variance
+#' \eqn{\Sigma_{e,ii}}: \eqn{\omega_i^2 = \Sigma_{e,ii} / (1 - 2\delta_i^2/\pi)}
+#' (\code{.csn_scale_from_cov()}). Equivalently
+#' \eqn{\kappa_{3,i} = \gamma_i \Sigma_{e,ii}^{3/2}} with \eqn{\gamma_i} the
+#' skew-normal skewness coefficient.  Co-skewness terms are then zero, so only
+#' the (i, i, i) entries are filled.
+#'
+#' A skewed shock correlated with another shock makes the truncation latents
+#' couple the shocks (non-zero co-skewness E[u_i u_j u_k]); that tensor is not
+#' derived here, so the call is refused rather than guessed.
+#' @return length n_u^3 vector (k3 fastest), or NULL when no shock is skewed.
+#' @noRd
+.csn_shock_third_moment <- function(Sigma_e, alpha, exo_names = NULL) {
+  alpha   <- as.numeric(alpha)
+  Sigma_e <- as.matrix(Sigma_e)
+  n_u     <- length(alpha)
+  sigma   <- sqrt(diag(Sigma_e))
+  sk <- which(alpha != 0 & is.finite(alpha) & sigma > 0)
+  if (!length(sk)) return(NULL)
+  cross <- Sigma_e[, sk, drop = FALSE]
+  cross[cbind(sk, seq_along(sk))] <- 0
+  if (any(cross != 0)) {
+    bad <- sk[colSums(cross != 0) > 0]
+    .dynhr_abort(
+      "The model's skewed shock(s) ",
+      paste(if (is.null(exo_names)) bad else exo_names[bad], collapse = ", "),
+      " are correlated with other shocks. The third-moment (co-skewness) ",
+      "tensor of that joint closed skew-normal law is not derived, so the ",
+      "order-3 risk term ghs3 cannot be formed. Use uncorrelated skewed ",
+      "shocks, or pass `sigma3` explicitly.",
+      class = "dynhr_error_skew_correlated_order3")
+  }
+  delta <- alpha / sqrt(1 + alpha^2)
+  omega <- sqrt(diag(.csn_scale_from_cov(Sigma_e, alpha)))
+  k3    <- (4 - pi) / 2 * (omega * delta * sqrt(2 / pi))^3
+  out <- numeric(n_u^3)
+  for (i in sk) out[(i - 1L) * n_u^2 + (i - 1L) * n_u + i] <- k3[i]
+  out
+}
+
+
 # =====================================================================
 # Main entry: recompute ghs3 given a third-moment vector
 # =====================================================================
@@ -542,14 +594,16 @@ solve_sigma_cross <- function(dr3, compiled, ss, params, Sigma_e = NULL) {
 
   # ----- canonical matrices ------------------------------------------
   ghx  <- dr3$ghx;   ghu  <- dr3$ghu
-  ghxx <- dr3$ghxx;  ghxu <- dr3$ghxu; ghuu <- dr3$ghuu
+  ghxx <- dr3$ghxx;  ghuu <- dr3$ghuu
+  ## W_xup / W_uup read ghxu in the x_slow layout: MIXED-BLOCK LAYOUT CONVENTION
+  ghxu <- .mixed_block(dr3, "ghxu", "x_slow")
   # dr3$ghxuu is stored in standard Kron layout (state SLOW, u1 MID, u2 FAST),
   # which is exactly the Mutschler/Dynare kron(hx, I_{u^2}) column order — no
   # conversion needed. (Earlier versions of solve_perturbation_order3 emitted
   # an internal (state FAST) layout, which is what the Mutschler converter was
   # designed to flip. After commit "Order-3 perturbation: fix internal/standard
   # col convention", the public field is already in standard layout.)
-  ghxuu_m <- dr3$ghxuu
+  ghxuu_m <- .mixed_block(dr3, "ghxuu", "x_slow")
   hx   <- ghx[state_idx, , drop = FALSE]
   hu   <- ghu[state_idx, , drop = FALSE]
 

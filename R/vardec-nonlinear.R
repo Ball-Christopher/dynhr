@@ -145,7 +145,10 @@
 #'   \code{\link{solve_perturbation}} (order 1, 2 or 3; higher-order rules are
 #'   used up to their order-3 terms).
 #' @param model The parsed model (source of the shock covariance).
-#' @param params Named parameter vector (default \code{model$param_values}).
+#' @param params Named numeric parameter vector, or \code{NULL} (default).
+#'   The shock covariance comes from \code{params} when supplied, else from
+#'   \code{dr$Sigma_e} (set by \code{\link{solve_perturbation}}), else from
+#'   the model's shocks block at \code{model$param_values}.
 #' @param order Pruning order to decompose at: 1, 2 or 3, at most the order of
 #'   \code{dr}.  Default: the order of \code{dr}, capped at 3.
 #' @param method \code{"shapley"} (default) or \code{"sequential"}; see
@@ -222,8 +225,6 @@ variance_decomposition_nonlinear <- function(dr, model, params = NULL,
     .dynhr_abort("variance_decomposition_nonlinear: `dr` must be a ",
                  "DecisionRules object from solve_perturbation().",
                  class = "dynhr_input_error")
-  if (is.null(params)) params <- model$param_values
-
   dr_order <- if (inherits(dr, "DecisionRules3")) 3L
               else if (inherits(dr, "DecisionRules2")) 2L else 1L
   if (is.null(order)) order <- dr_order
@@ -255,7 +256,7 @@ variance_decomposition_nonlinear <- function(dr, model, params = NULL,
     .dynhr_abort("variance_decomposition_nonlinear: the model has no shocks.",
                  class = "dynhr_input_error")
 
-  Sigma_e <- .get_shock_cov(model, exo, params)
+  Sigma_e <- .resolve_sigma_e(dr, model, params)
   L_e     <- .sigma_e_chol_lower(Sigma_e)
   dimnames(L_e) <- list(exo, exo)
 
@@ -452,9 +453,13 @@ variance_decomposition_nonlinear <- function(dr, model, params = NULL,
 ## of .vdnl_value_fun() are carried.
 ## @noRd
 .vdnl_reduce_dr <- function(dr, Lk, order) {
+  ## the (Lk (x) I_s) maps below assume the u_slow layout (e SLOW, states
+  ## FAST): see MIXED-BLOCK LAYOUT CONVENTION; the reduced rule records it
+  dr  <- .with_mixed_layout(dr, "u_slow")
   I_s <- diag(length(dr$state_idx))
   out <- list(ghx = dr$ghx, ghu = dr$ghu %*% Lk, ys = dr$ys,
-              state_idx = dr$state_idx, endo_names = dr$endo_names)
+              state_idx = dr$state_idx, endo_names = dr$endo_names,
+              mixed_layout = "u_slow")
   if (order >= 2L) {
     out$ghxx <- dr$ghxx
     out$ghss <- dr$ghss

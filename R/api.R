@@ -397,7 +397,9 @@ dynhr_mcmc <- function(log_post_fn, theta0, Sigma_prop,
   g <- function(nm) dots[[nm]] %||% eval(formals(rwmh)[[nm]])
   list(n_warmup = as.integer(n_warmup),
        Sigma_prop = .ckpt_md5(Sigma_prop),
-       scale = g("scale"), target_rate = g("target_rate"),
+       scale = g("scale") %||% .rwmh_default_scale(nrow(Sigma_prop),
+                                                   as.integer(g("n_blocks"))),
+       target_rate = g("target_rate"),
        adapt_every = as.integer(g("adapt_every")),
        adapt_cov = isTRUE(dots$adapt_cov),
        n_blocks = as.integer(g("n_blocks")),
@@ -530,7 +532,15 @@ nuts <- function(log_post_fn, theta0, n_draws = 2000L, n_warmup = 1000L, ...) {
 #' @param log_post_fn Log-posterior closure from \code{\link{make_posterior}}
 #' @param prior_spec  Prior spec from \code{\link{prior_spec}}
 #' @param n_chain     Number of ensemble walkers (default NULL =
-#'   max(5 * n_par, 20))
+#'   max(5 * n_par, 20)). All walkers are updated from one snapshot of the
+#'   ensemble, which is exact only for a large enough ensemble. On Gaussian
+#'   targets (12 x 1e6 draws per setting) the stationary variance was within
+#'   0.2\% of the truth from 5 * n_par walkers up, but off by +3.4\% with 3
+#'   walkers (2 parameters), -1.9\% with 6 walkers (5 parameters) and, with
+#'   \code{aimh_prob = 0}, +15\% with 4 walkers (2 parameters) and -28\%
+#'   with 11 walkers (10 parameters). Fewer than \code{max(2 * n_par, 6)}
+#'   walkers (\code{max(5 * n_par, 8)} when \code{aimh_prob < 0.1}) gives a
+#'   warning of class \code{dynhr_warning_dime_small_ensemble}.
 #' @param n_iter      Post-warmup iterations per walker (default 1000)
 #' @param n_burn      Burn-in iterations (default 500)
 #' @param ...         Additional arguments forwarded to \code{run_dime()}:

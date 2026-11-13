@@ -50,8 +50,12 @@
 #' the initial condition has decayed. \code{s0 = NULL} (the default) leaves it
 #' identically zero, i.e. the pre-0.9.2 output.
 #'
-#' @param smoothed_shocks  n_exo x T matrix from pkf_smoother_obc()
-#'                         (rows = shocks, columns = time periods)
+#' @param smoothed_shocks  T x n_exo matrix from pkf_smoother_obc()
+#'                         (rows = periods, columns = the shocks named as
+#'                         \code{dr_slack$exo_names}; a matrix named by
+#'                         shock on its ROWS -- the old n_exo x T orientation
+#'                         -- is transposed with a message, an unnamed
+#'                         n_exo x T or square one is an error)
 #' @param regime_path      Integer vector length T (accepted regime per period)
 #' @param regime_cache     R environment seeded by obc_ensure_policy(); when
 #'                         it holds the per-period rules of a
@@ -70,10 +74,13 @@
 #' @param model            Optional parsed model, used only as the fallback
 #'                         source of \code{shock_groups}.
 #' @return List with:
-#'   $contributions  Named list of n_endo x T matrices, one per shock (or
-#'                   group) plus $constraint for the binding-constant
-#'                   contribution and $initial for the initial condition
-#'   $total          n_endo x T matrix: sum of all contributions
+#'   $contributions  Named list of T x n_endo matrices (rows = periods), one
+#'                   per shock (or group) plus $constraint for the
+#'                   binding-constant contribution and $initial for the
+#'                   initial condition
+#'   $total          T x n_endo matrix: sum of all contributions
+#'   $initial        T x n_endo matrix: the initial-condition contribution
+#'   $orientation    \code{"time_endo"} (as \code{\link{historical_decomposition}})
 #'   $endo_names     Character vector
 #'   $exo_names      Character vector (with "constraint", "initial" last)
 #' @export
@@ -82,12 +89,18 @@ historical_decomposition_obc <- function(smoothed_shocks, regime_path,
                                           s0 = NULL, shock_groups = NULL,
                                           model = NULL) {
 
+  ## `smoothed_shocks` is T x n_exo (rows = periods; R/time-orientation.R:
+  ## names decide, an unnamed old n_exo x T or square matrix is refused). The
+  ## recursions below run on its transpose (column t = period t) and the
+  ## results are transposed back to T x n_endo at the end.
+  exo_names <- dr_slack$exo_names
+  smoothed_shocks <- t(.orient_time_matrix(
+    smoothed_shocks, exo_names, "smoothed_shocks",
+    "historical_decomposition_obc"))
   n_exo   <- nrow(smoothed_shocks)
   n_T     <- ncol(smoothed_shocks)
   n_state <- length(dr_slack$state_idx)
   n_endo  <- nrow(dr_slack$ghx)
-  exo_names  <- if (!is.null(rownames(smoothed_shocks))) rownames(smoothed_shocks)
-                else dr_slack$exo_names
   endo_names <- dr_slack$endo_names
 
   if (length(regime_path) != n_T)
@@ -185,17 +198,18 @@ historical_decomposition_obc <- function(smoothed_shocks, regime_path,
   total <- Reduce(`+`, contributions)
   rownames(total) <- endo_names
 
+  ## Rows = periods: every matrix is T x n_endo.
   structure(
     list(
-      contributions = contributions,
-      total         = total,
-      initial       = initial,
+      contributions = lapply(contributions, t),
+      total         = t(total),
+      initial       = t(initial),
       s0            = s0,
       endo_names    = endo_names,
       exo_names     = c(exo_names, "constraint", "initial"),
       components    = names(contributions),
       shock_groups  = groups,
-      orientation   = "endo_time"
+      orientation   = "time_endo"
     ),
     class = c("dynhr_shock_decomposition", "list")
   )

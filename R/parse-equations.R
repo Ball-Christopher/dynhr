@@ -121,7 +121,9 @@ ast_to_string <- function(node) {
            if (lp < p || (lp == p &&
                           node$op %in% c("^", "<", ">", "<=", ">=")))
              left_str <- paste0("(", left_str, ")")
-           if (rp < p || (rp == p && node$op %in% c("-", "/", "<", ">",
+           ## `^` on the right too: the parser refuses an unparenthesised
+           ## chain `a^b^c`, so `a^(b^c)` must be written with its parens.
+           if (rp < p || (rp == p && node$op %in% c("-", "/", "^", "<", ">",
                                                     "<=", ">=")))
              right_str <- paste0("(", right_str, ")")
            paste0(left_str, " ", node$op, " ", right_str)
@@ -441,7 +443,13 @@ new_expr_parser <- function(tokens, var_names = character(0),
   # -- Grammar rules -----------------------------------------------------
 
   # expression -> relational
+  ## A parenthesised sub-expression or a function argument starts a fresh
+  ## exponent context: `a^(b^c)` and `a^exp(b^c)` are fine.
+  env$in_exponent <- FALSE
   env$parse_expression <- function() {
+    old <- env$in_exponent
+    env$in_exponent <- FALSE
+    on.exit(env$in_exponent <- old)
     env$parse_relational()
   }
 
@@ -523,8 +531,18 @@ new_expr_parser <- function(tokens, var_names = character(0),
     base <- env$parse_primary()
     tok <- env$peek()
     if (!is.null(tok) && tok$type == "OP" && tok$value == "^") {
+      ## An unparenthesised chain `a^b^c` is refused: MATLAB reads it
+      ## left-associatively ((a^b)^c = 64 for 2^3^2), R and this parser used
+      ## to read it right-associatively (a^(b^c) = 512), and Dynare's grammar
+      ## does not settle it either way. Make the user say which.
+      if (isTRUE(env$in_exponent))
+        env$syntax_error("chained power `a^b^c` is ambiguous (MATLAB reads ",
+                         "it as (a^b)^c, R as a^(b^c)); parenthesise it as ",
+                         "`(a^b)^c` or `a^(b^c)`")
       env$advance()
-      exponent <- env$parse_unary()  # unary -> power gives right-assoc + sign
+      env$in_exponent <- TRUE
+      exponent <- env$parse_unary()  # unary -> power permits a signed exponent
+      env$in_exponent <- FALSE
       base <- ast_binop("^", base, exponent)
     }
     base

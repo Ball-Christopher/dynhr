@@ -21,7 +21,7 @@ make_posterior_grad(
   cumulant_orders = 1:4,
   cumulant_weight = "identity",
   weight_matrix = NULL,
-  debias = TRUE,
+  debias = FALSE,
   pruned_order = 2L,
   power = NULL,
   system_priors = NULL,
@@ -138,11 +138,11 @@ equivalence classification (default: prior means).}
   within \code{1:2} the exact first-order mean/covariance gradient. It is what \code{"auto"} selects for the Gaussian
   likelihood and for cumulant orders containing 3 but not 4 (see above).}
 
-\item{me_extra}{Optional n_obs x T matrix of per-period additive
+\item{me_extra}{Optional T x n_obs matrix (rows are periods) of per-period additive
 measurement-error variances (filter_tunes); the gradient is of the same
 tuned likelihood \code{make_log_posterior} evaluates.}
 
-\item{shock_scale}{Optional n_exo x T matrix of known per-period shock-std
+\item{shock_scale}{Optional T x n_exo matrix (rows are periods) of known per-period shock-std
 scale factors (heteroskedastic_shocks).}
 
 \item{likelihood}{\code{"gaussian"} (default), \code{"whittle"}, or
@@ -163,11 +163,13 @@ moment weight matrix for \code{likelihood = "cumulant"} (as from
 the forward \code{make_log_posterior_cumulant} setting. \code{NULL}
 (default) is the identity weighting.}
 
-\item{debias}{Logical; for \code{likelihood = "whittle"}, differentiate
-the debiased Whittle loglik (expected-periodogram form, Sykulski et al.
-2019 — the default of the estimation entry points). Must match the
-\code{debias} setting of the posterior being sampled. Ignored for the
-Gaussian likelihood.}
+\item{debias}{Logical; for \code{likelihood = "whittle"}: \code{FALSE}
+(default, as for the posterior) differentiates the standard Whittle
+loglik, \code{TRUE} the debiased one (expected-periodogram form,
+Sykulski et al. 2019; see the "Whittle debias" section of
+\code{\link{make_log_posterior}}). Must match the \code{debias} setting
+of the posterior being sampled; the estimation paths pass it. Ignored
+for the other likelihoods.}
 
 \item{pruned_order}{Integer perturbation order for the pruned state-space
 likelihood path (default \code{2L}); currently \code{2L} or \code{3L}.}

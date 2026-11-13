@@ -60,6 +60,20 @@
   is.null(x) || inherits(x, "dynhr_posterior_reject")
 
 
+## Particle count of a particle-filter log-posterior factory (SV RB-PF, OBC
+## PPF/COPF, TPF): a positive whole number, checked ONCE at factory time.
+## 0 used to reach the filters and come back as a silent -Inf at every theta
+## (or a cryptic base-R error at the first draw), 2.5 was truncated.
+#' @noRd
+.check_particle_count <- function(n, what, arg) {
+  if (!is.numeric(n) || length(n) != 1L || !is.finite(n) || n < 1 ||
+      n != round(n))
+    .dynhr_abort(sprintf("%s: '%s' must be a positive whole number.", what, arg),
+                 class = "dynhr_error_bad_argument")
+  as.integer(n)
+}
+
+
 ## Spectral radius of the state-transition block.
 ##
 ## `reuse = TRUE`: take the stable generalized eigenvalues the QZ solve
@@ -92,7 +106,8 @@
                               stationarity = c("spectral", "eigen", "none")) {
   stationarity <- match.arg(stationarity)
   sys <- extract_system_matrices_fast(sys_cache, ss, params)
-  dr  <- .solve_from_system(sys, model, compiled, ss, params, FALSE)
+  dr  <- .solve_from_system(sys, model, compiled, ss, params, FALSE,
+        qz_fail = "null")
   if (is.null(dr) || !isTRUE(dr$bk_satisfied)) return(NULL)
   if (stationarity != "none") {
     sr <- .posterior_spectral_radius(dr, reuse = identical(stationarity,

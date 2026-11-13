@@ -58,7 +58,9 @@ each target variable. If NULL, assumed zero.}
 or 0.99.}
 
 \item{params}{Named numeric parameter vector. Defaults to
-\code{model$param_values}.}
+\code{model$param_values}. The instrument IRF's shock covariance comes
+from \code{params} only when supplied, else from \code{dr$Sigma_e},
+else from the model (as in \code{\link{compute_irfs}}).}
 
 \item{normalise_irf}{If TRUE, normalise the IRF so the instrument's own
 impact response is 1.}

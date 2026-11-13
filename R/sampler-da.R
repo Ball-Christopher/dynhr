@@ -166,7 +166,8 @@
 #' @param Sigma_prop  Proposal covariance (n_par x n_par).
 #' @param n_draws     Total draws (including burn-in).
 #' @param n_burn      Burn-in draws to discard from the returned chain.
-#' @param scale       Initial proposal scale factor.
+#' @param scale       Initial proposal scale factor; \code{NULL} (the
+#'   default) = \code{2.38 / sqrt(n_par)}, as in \code{rwmh()}.
 #' @param target_rate Target OVERALL acceptance rate for adaptive scaling.
 #' @param adapt_every Adapt the scale every N draws (during burn-in only).
 #' @param adapt_cov   Opt-in Haario et al. (2001) adaptive proposal covariance
@@ -203,8 +204,8 @@
 #' @noRd
 rwmh_da <- function(log_post_fn, screen_fn, theta0, Sigma_prop,
                     n_draws = 10000L, n_burn = 5000L,
-                    scale = 0.5, target_rate = 0.25,
-                    adapt_every = 100L, adapt_cov = FALSE,
+                    scale = NULL, target_rate = .rwmh_target_rate,
+                    adapt_every = .rwmh_adapt_every, adapt_cov = FALSE,
                     pseudo_marginal = FALSE, preflight_K = 20L,
                     check_screen = TRUE,
                     recompute_incumbent = FALSE,
@@ -228,6 +229,7 @@ rwmh_da <- function(log_post_fn, screen_fn, theta0, Sigma_prop,
 
   n_par     <- length(theta0)
   par_names <- names(theta0)
+  if (is.null(scale)) scale <- .rwmh_default_scale(n_par)
 
   scale0     <- scale
   Sigma_curr <- Sigma_prop
@@ -245,6 +247,7 @@ rwmh_da <- function(log_post_fn, screen_fn, theta0, Sigma_prop,
 
   state_hist  <- if (adapt_cov) matrix(NA_real_, nrow = n_burn, ncol = n_par) else NULL
   adapt_min_n <- max(200L, 10L * n_par)
+  .warn_adapt_cov_skipped(adapt_cov, adapt_min_n, adapt_every, n_burn, "rwmh_da")
 
   ## ---- Bookkeeping ------------------------------------------------------
   n_accept    <- 0L   # proposals accepted (both stages passed)

@@ -703,7 +703,9 @@ dynhr_dsmh <- function(log_post_fn,
     if (verbose)
       .dynhr_inform(sprintf("DSMH: %d chain groups on %d mirai daemons.",
                             G, n_workers))
-    on.exit(mirai::daemons(NULL), add = TRUE)
+    ## Reuse a user's daemons (left running); tear down only a pool we start.
+    owns_pool <- !.mirai_daemons_active()
+    on.exit(.mirai_daemons_stop(owns_pool), add = TRUE)
     .dsmh_keep_rng(.dsmh_pool_start(n_workers, log_post_fn))
   }
 

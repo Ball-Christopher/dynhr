@@ -27,8 +27,10 @@ kalman_smoother(
 )
 }
 \arguments{
-\item{data}{\code{T x n_obs} matrix of observables in \strong{levels},
-in the column order of \code{obs_vars}. The model's own steady state is
+\item{data}{\code{T x n_obs} matrix of observables in \strong{levels}
+(rows are periods), columns named by -- or in the order of --
+\code{obs_vars}; oriented by the same rule as \code{\link{kalman_filter}}'s
+\code{data} (an unnamed square sample is refused). The model's own steady state is
 subtracted, exactly as \code{\link{kalman_filter}()} does; pass
 \code{d = 0} for series already in deviations.}
 
@@ -63,11 +65,13 @@ responses, so the identity is only correct when every shock has
 \code{stderr 1}; falls back to the identity (with a warning) only for
 hand-built state spaces lacking \code{Sigma_e}.}
 
-\item{me_extra}{\code{n_obs x T} matrix of per-period additive
+\item{me_extra}{\code{T x n_obs} matrix (rows are periods, columns the
+observables) of per-period additive
 measurement-error variances (from a \code{filter_tunes} block), or
 \code{NULL} (no filter tunes).}
 
-\item{shock_scale}{\code{n_exo x T} matrix of per-period shock
+\item{shock_scale}{\code{T x n_exo} matrix (rows are periods, columns
+the shocks) of per-period shock
 standard-deviation scale factors (from a \code{heteroskedastic_shocks}
 block), or \code{NULL} (constant shock variances).}
 
@@ -170,12 +174,13 @@ unconditional one.}
   model too, where it inherits the exact diffuse initialisation rather than
   the kappa fallback's arbitrary constant.}
 
-\item{known_shocks}{Known historical shock values: an \code{n_exo x T}
-  matrix carrying the value where a shock is known and \code{NA} where it is
-  not -- the \code{NA}-as-unknown convention \code{data} uses, and the
-  \code{n_exo x T} shape \code{shock_scale} uses. Rows are matched BY NAME
-  when the matrix has rownames. \code{NULL} (default), or a matrix that is
-  all \code{NA}, is a no-op.
+\item{known_shocks}{Known historical shock values: a \code{T x n_exo}
+  matrix (rows are periods) carrying the value where a shock is known and
+  \code{NA} where it is not -- the \code{NA}-as-unknown convention
+  \code{data} uses, and the \code{T x n_exo} shape \code{shock_scale}
+  uses. Columns are matched BY NAME when the matrix has column names, and
+  may then cover only SOME of the shocks (the others are unknown).
+  \code{NULL} (default), or a matrix that is all \code{NA}, is a no-op.
 
   Use it for a shock you actually know: an announced policy change, a
   measured intervention, a judgemental adjustment carried over from another
@@ -189,9 +194,9 @@ unconditional one.}
   \eqn{\log p(y \mid \varepsilon = v)}; see \code{\link{kalman_filter}}
   for the joint.}
 
-\item{shock_means}{Deterministic shock MEANS, an \code{n_exo x T} matrix of
-  mean shifts (\code{NA} and \code{0} both mean "no shift here"), rows
-  matched by name. The same argument \code{\link{kalman_filter}} takes, with
+\item{shock_means}{Deterministic shock MEANS, a \code{T x n_exo} matrix
+  (rows are periods) of mean shifts (\code{NA} and \code{0} both mean "no
+  shift here"), columns matched by name (a subset of the shocks allowed). The same argument \code{\link{kalman_filter}} takes, with
   the same meaning and the same mechanism -- see there for the distinction
   from \code{known_shocks}, which is the point of having both.
 
@@ -203,7 +208,7 @@ unconditional one.}
   would be ignoring the data; one that ignored the mean would be ignoring
   the input.}
 
-\item{shock_timing}{How to read the columns of \code{shock_means}:
+\item{shock_timing}{How to read the rows of \code{shock_means}:
 \code{"dated"} (default) or \code{"transition_next"}. See
 \code{\link{kalman_filter}}, whose \emph{Matching another package's
 shock timing} section gives the experiment that settles which one a given
@@ -241,8 +246,10 @@ List with \code{smoothed_states} (\eqn{T \times n_{state}}, row
   \code{updated_states} (row \eqn{t} is \eqn{s_{t|t}}) and
   \code{predicted_states} (row \eqn{t} is \eqn{s_{t|t-1}}), the mean
   counterpart of \code{predicted_cov}. \code{filtered_states} is the same
-  matrix as \code{updated_states}. Note the orientation differs from the
-  filter's: here rows are periods. Also
+  matrix as \code{updated_states}. Every state and shock path is
+  \code{T x n} -- rows are periods -- exactly as \code{\link{kalman_filter}}
+  returns its \code{updated_states} / \code{predicted_states}, so the two
+  agree field by field. Also
   \code{filtered_cov} / \code{predicted_cov} / \code{smoothed_cov},
   \code{smoothed_initial} (\eqn{s_{0|T}}),
   \code{smoothed_initial_cov} (\eqn{V_{0|T}}), \code{loglik}, and
@@ -348,9 +355,9 @@ simply this function called at the point estimate:
 \preformatted{
   sm <- kalman_smoother(Y, dr_at_mode, model, params_at_mode,
                         obs_vars = obs)
-  se <- sqrt(apply(sm$smoothed_cov, 3, diag))   # n_state x T
-  lo <- t(sm$smoothed_states) - 1.96 * se       # 95\% bands
-  hi <- t(sm$smoothed_states) + 1.96 * se
+  se <- t(sqrt(apply(sm$smoothed_cov, 3, diag)))  # T x n_state
+  lo <- sm$smoothed_states - 1.96 * se            # 95\% bands
+  hi <- sm$smoothed_states + 1.96 * se
 }
 \code{smoothed_cov} is \eqn{V_{t|T} = \mathrm{Var}(s_t \mid y_{1:T})}
 at those parameters -- Dynare's \code{smoothed_state_uncertainty} -- so

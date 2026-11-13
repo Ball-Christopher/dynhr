@@ -18,7 +18,9 @@ ms_kim_smoother_struct(
 )
 }
 \arguments{
-\item{data}{Observation matrix (\code{n_obs x T}).  May contain \code{NA}s.}
+\item{data}{Observation matrix, \code{T x n_obs} (rows = periods, columns
+named by \code{obs_vars}; see \code{\link{ms_kim_filter}}).  May contain
+\code{NA}s.}
 
 \item{ms_dr}{An \code{MsDecisionRules} object from
 \code{\link{solve_ms_perturbation}}.}
@@ -82,7 +84,8 @@ A list of class \code{"ms_kim_smoother"} with all the fields
   documented in \code{\link{ms_kim_smoother}}, plus
   \describe{
     \item{\code{ms_dr}}{The \code{MsDecisionRules} object smoothed.}
-    \item{\code{smoothed_states_level}}{\code{n_state x T} matrix of
+    \item{\code{smoothed_states_level}}{\code{T x n_state} matrix (rows =
+      periods) of
       regime-averaged smoothed states in LEVELS (see the deviation-reference
       section).}
     \item{\code{ss_states_by_regime}}{\code{n_state x h} matrix of

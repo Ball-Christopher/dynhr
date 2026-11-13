@@ -153,10 +153,38 @@
       "needs `", bad[1L], "` out of the model file.",
       class = "dynhr_error_unsafe_mod_expression")
 
+  if (.dynhr_has_chained_power(e))
+    .dynhr_abort(
+      "parse_mod: chained power in ", context, " `", text, "` is ambiguous ",
+      "(MATLAB reads `a^b^c` as (a^b)^c, R as a^(b^c)); parenthesise it as ",
+      "`(a^b)^c` or `a^(b^c)`.", class = "dynhr_error_mod_syntax")
+
   syms <- setdiff(all.vars(e), "pi")
   for (s in syms) if (!exists(s, envir = envir)) return(NULL)
 
   eval(e, envir = envir)
+}
+
+#' Does a parsed R expression contain an unparenthesised `a^b^c`?
+#'
+#' R parses `a^b^c` as `^`(a, `^`(b, c)) and keeps explicit parentheses as
+#' `(` calls, so a `^` whose exponent -- after any unary sign, `2^-3^2` --
+#' is itself a bare `^` call is a chain the user did not parenthesise.
+#' @noRd
+.dynhr_has_chained_power <- function(e) {
+  if (!is.call(e)) {
+    if (is.expression(e) || is.list(e))
+      return(any(vapply(as.list(e), .dynhr_has_chained_power, logical(1))))
+    return(FALSE)
+  }
+  if (identical(e[[1L]], as.name("^")) && length(e) == 3L) {
+    ex <- e[[3L]]
+    while (is.call(ex) && length(ex) == 2L &&
+           (identical(ex[[1L]], as.name("-")) || identical(ex[[1L]], as.name("+"))))
+      ex <- ex[[2L]]
+    if (is.call(ex) && identical(ex[[1L]], as.name("^"))) return(TRUE)
+  }
+  any(vapply(as.list(e)[-1L], .dynhr_has_chained_power, logical(1)))
 }
 
 #' Extract the content of paired blocks (keyword; ... end;)
@@ -635,7 +663,7 @@ parse_calibration <- function(txt, param_names, seed_env = NULL, quiet = FALSE) 
         undef <- Filter(function(tok) {
           !exists(tok, envir = .pcal_env, inherits = FALSE) &&
             !(tok %in% c("TRUE","FALSE","Inf","NaN","NA","NULL")) &&
-            is.null(tryCatch(get(tok, envir = baseenv()), error = function(e) NULL))
+            !exists(tok, envir = baseenv())
         }, toks)
         if (length(undef) > 0L) return(paste(unique(undef), collapse = ", "))
         return(NULL)
@@ -1201,10 +1229,76 @@ parse_shocks_block <- function(body, param_env = NULL) {
   ## emptyenv()), so a shocks-block RHS cannot reach system() and friends.
   eval_env <- if (is.environment(param_env)) param_env
               else .dynhr_sandbox_env(param_env, .dynhr_safe_matrix_fn_names)
+  bad_shocks <- function(...)
+    .dynhr_abort("parse_mod: shocks block: ", ..., class = "dynhr_error_mod_syntax")
+  ## Every shocks-block value must resolve to ONE number. A symbol the model
+  ## does not declare (a typo, `stderr sig_g` with sig_g never declared) used
+  ## to evaluate to NULL -> NA and became a silent stderr of 0 downstream; a
+  ## DECLARED parameter that has no value yet (estimated / set later) is bound
+  ## to NA in `eval_env` and stays allowed -- it is re-read at the draw.
   safe_eval <- function(text) {
     val <- .dynhr_sandbox_eval(text, eval_env, .dynhr_safe_matrix_fn_names,
                                context = "the shocks-block expression")
-    if (is.null(val)) NA_real_ else val
+    if (is.null(val)) {
+      ids <- regmatches(text, gregexpr("(?<![0-9A-Za-z_.])[A-Za-z_][A-Za-z0-9_]*",
+                                       text, perl = TRUE))[[1L]]
+      ids <- setdiff(unique(ids), c("pi", .dynhr_safe_matrix_fn_names))
+      miss <- ids[!vapply(ids, exists, logical(1), envir = eval_env)]
+      if (length(miss) > 0L)
+        bad_shocks("the value `", text, "` uses ",
+                   paste0("`", miss, "`", collapse = ", "),
+                   ", which is not a declared parameter.")
+      bad_shocks("cannot read the value `", text, "`.")
+    }
+    if (!(is.numeric(val) || is.logical(val)) || length(val) != 1L)
+      bad_shocks("the value `", text, "` must be a single number (got ",
+                 if (is.numeric(val)) paste0("length ", length(val))
+                 else class(val)[1L], ").")
+    as.numeric(val)
+  }
+  ## Per-block bookkeeping lives in an environment (no `<<-`).
+  seen <- new.env(parent = emptyenv())
+  seen$var  <- character(0)
+  seen$pair <- character(0)
+  note_var <- function(vname) {
+    if (vname %in% seen$var)
+      bad_shocks("shock `", vname, "` has more than one stderr / var entry ",
+                 "in the same block.")
+    seen$var <- c(seen$var, vname)
+  }
+  note_pair <- function(a, b, kw) {
+    if (identical(a, b))
+      bad_shocks("`", kw, " ", a, ", ", b, "` names the same shock twice; ",
+                 "set its variance with `var ", a, "; stderr ...;`.")
+    key <- paste(sort(c(a, b)), collapse = ",")
+    if (key %in% seen$pair)
+      bad_shocks("the pair (", a, ", ", b, ") has more than one corr / ",
+                 "covariance entry in the same block.")
+    seen$pair <- c(seen$pair, key)
+  }
+  ## Upsert a variance row; a `skew` stub written before the shock's `var`
+  ## entry is filled in rather than duplicated (a duplicate row lost the
+  ## stderr: the downstream reader takes the FIRST row, the stub's 0).
+  ## Returns the updated table: call as `variances <- put_var(variances, ...)`.
+  put_var <- function(variances, vname, stderr, variance, stderr_expr,
+                      variance_expr) {
+    note_var(vname)
+    idx <- which(variances$name == vname)
+    if (length(idx) > 0L) {
+      variances$stderr[idx]        <- stderr
+      variances$variance[idx]      <- variance
+      variances$stderr_expr[idx]   <- stderr_expr
+      variances$variance_expr[idx] <- variance_expr
+    } else {
+      variances <- rbind(variances,
+                          data.frame(name = vname, stderr = stderr,
+                                     variance = variance,
+                                     stderr_expr = stderr_expr,
+                                     variance_expr = variance_expr,
+                                     skew = 0, skew_expr = NA_character_,
+                                     stringsAsFactors = FALSE))
+    }
+    variances
   }
   variances    <- data.frame(name = character(0),
                              stderr = numeric(0),
@@ -1223,7 +1317,9 @@ parse_shocks_block <- function(body, param_env = NULL) {
                              stringsAsFactors = FALSE)
 
   stmts <- strsplit(body, ";")[[1]]
-  stmts <- trimws(stmts)
+  ## A statement may span lines (`values 1\n 2`); the patterns below read one
+  ## line, so fold whitespace first.
+  stmts <- trimws(gsub("\\s+", " ", stmts))
   stmts <- stmts[nchar(stmts) > 0]
 
   # Helper: expand period tokens like "1:4 2 5" -> integer vector
@@ -1260,14 +1356,10 @@ parse_shocks_block <- function(body, param_env = NULL) {
     if (length(m1) > 0 && nchar(m1[1]) > 0) {
       vname <- m1[2]
       val <- safe_eval(m1[3])
-      variances <- rbind(variances,
-                         data.frame(name = vname, stderr = sqrt(abs(val)),
-                                    variance = val,
-                                    stderr_expr = NA_character_,
-                                    variance_expr = trimws(m1[3]),
-                                    skew = 0,
-                                    skew_expr = NA_character_,
-                                    stringsAsFactors = FALSE))
+      if (!is.na(val) && val < 0)
+        bad_shocks("`var ", vname, " = ", trimws(m1[3]), "` is a negative ",
+                   "variance (", val, ").")
+      variances <- put_var(variances, vname, sqrt(val), val, NA_character_, trimws(m1[3]))
       i <- i + 1; next
     }
 
@@ -1280,6 +1372,7 @@ parse_shocks_block <- function(body, param_env = NULL) {
       s, perl = TRUE))[[1]]
     if (length(m1b) > 0 && nchar(m1b[1]) > 0) {
       cov_val <- safe_eval(m1b[4])
+      note_pair(m1b[2], m1b[3], "var")
       correlations <- rbind(correlations,
                             data.frame(var1 = m1b[2], var2 = m1b[3],
                                        corr = NA_real_,
@@ -1304,14 +1397,10 @@ parse_shocks_block <- function(body, param_env = NULL) {
           "^\\s*stderr\\s+(.+)$", s2, perl = TRUE))[[1]]
         if (length(m3) > 0 && nchar(m3[1]) > 0) {
           val <- safe_eval(m3[2])
-          variances <- rbind(variances,
-                             data.frame(name = vname, stderr = val,
-                                        variance = val^2,
-                                        stderr_expr = trimws(m3[2]),
-                                        variance_expr = NA_character_,
-                                        skew = 0,
-                                        skew_expr = NA_character_,
-                                        stringsAsFactors = FALSE))
+          if (!is.na(val) && val < 0)
+            bad_shocks("`var ", vname, "; stderr ", trimws(m3[2]), ";` is a ",
+                       "negative standard deviation (", val, ").")
+          variances <- put_var(variances, vname, val, val^2, trimws(m3[2]), NA_character_)
           i <- i + 2; next
         }
         # --- deterministic: var IDENT; periods ...; values ...; ---
@@ -1367,7 +1456,10 @@ parse_shocks_block <- function(body, param_env = NULL) {
           }
         }
       }
-      i <- i + 1; next
+      bad_shocks("`var ", vname, ";` must be followed by `stderr VALUE;` or by ",
+                 "`periods ...; values ...;`",
+                 if (i + 1 <= length(stmts)) paste0(" (found `", stmts[i + 1], "`)")
+                 else "", ".")
     }
 
     # Pattern: corr IDENT, IDENT = expr
@@ -1380,6 +1472,10 @@ parse_shocks_block <- function(body, param_env = NULL) {
       s, perl = TRUE))[[1]]
     if (length(m4) > 0 && nchar(m4[1]) > 0) {
       val <- safe_eval(m4[4])
+      note_pair(m4[2], m4[3], "corr")
+      if (!is.na(val) && abs(val) > 1)
+        bad_shocks("`corr ", m4[2], ", ", m4[3], " = ", trimws(m4[4]), "` is ",
+                   val, "; a correlation must lie in [-1, 1].")
       correlations <- rbind(correlations,
                             data.frame(var1 = m4[2], var2 = m4[3], corr = val,
                                        corr_expr = trimws(m4[4]),
@@ -1419,7 +1515,10 @@ parse_shocks_block <- function(body, param_env = NULL) {
       i <- i + 1; next
     }
 
-    i <- i + 1
+    bad_shocks("unrecognised statement `", s, "`. A shocks block takes ",
+               "`var NAME; stderr VALUE;`, `var NAME = VARIANCE;`, ",
+               "`var NAME1, NAME2 = COVARIANCE;`, `corr NAME1, NAME2 = VALUE;`, ",
+               "`skew NAME = VALUE;` and `var NAME; periods ...; values ...;`.")
   }
 
   list(variances = variances, correlations = correlations,
@@ -2038,6 +2137,11 @@ parse_estimated_params_block <- function(body) {
 
     if (is.na(shape_idx)) {
       # No prior shape: pure calibration form NAME, INITVAL[, LB, UB].
+      if (!(length(value_parts) %in% c(1L, 3L)))
+        .dynhr_abort("parse_mod: estimated_params: `", s, "` has ",
+                     length(value_parts), " numbers and no prior shape; ",
+                     "write INIT or INIT, LOWER_BOUND, UPPER_BOUND.",
+                     class = "dynhr_error_mod_syntax")
       if (length(value_parts) >= 1) init <- num(value_parts[1])
       if (length(value_parts) >= 3) {
         lb <- num(value_parts[2]); ub <- num(value_parts[3])
@@ -2048,7 +2152,14 @@ parse_estimated_params_block <- function(body) {
       after  <- if (shape_idx < length(value_parts))
         value_parts[(shape_idx + 1L):length(value_parts)] else character(0)
 
-      # Fields before the shape: INITVAL [, LB, UB].
+      # Fields before the shape: INITVAL [, LB, UB]. Exactly two (or more
+      # than three) is not Dynare syntax; the second number used to be
+      # dropped without a word.
+      if (!(length(before) %in% c(0L, 1L, 3L)))
+        .dynhr_abort("parse_mod: estimated_params: `", s, "` has ",
+                     length(before), " numbers before the prior shape `",
+                     prior_name, "`; write INIT or INIT, LOWER_BOUND, ",
+                     "UPPER_BOUND.", class = "dynhr_error_mod_syntax")
       if (length(before) >= 1) init <- num(before[1])
       if (length(before) >= 3) { lb <- num(before[2]); ub <- num(before[3]) }
 
@@ -2059,6 +2170,11 @@ parse_estimated_params_block <- function(body) {
       if (length(after) >= 4) p4 <- num(after[4])
     }
 
+    if (is.finite(init) && ((is.finite(lb) && init < lb) ||
+                            (is.finite(ub) && init > ub)))
+      .dynhr_abort("parse_mod: estimated_params: `", s, "`: the initial ",
+                   "value ", init, " lies outside [", lb, ", ", ub, "].",
+                   class = "dynhr_error_mod_syntax")
     rows[[length(rows) + 1L]] <- data.frame(
       type = etype, name = ename, name2 = ename2,
       prior = prior_name,

@@ -369,11 +369,14 @@ historical_decomposition_nonlinear <- function(dr, shocks, init_state = NULL,
 
 ## Pruned order-`order` paths for M shock coalitions at once (the columns of
 ## `active`, n_exo x M logical).  Same recursion and Kronecker conventions as
-## simulate_model_order2() / simulate_model_order3() (pruning = TRUE); each
+## simulate_model_order2() / simulate_model_order3() (pruning = TRUE; mixed
+## blocks read in the u_slow layout); each
 ## pruned state layer is the state rows of the matching output layer,
 ## x_k = y_k[state_idx].  Returns an array [T, n_endo, M].
 ## @noRd
 .hdnl_paths <- function(dr, order, shocks, x0, active) {
+  ## mixed blocks contracted as (e %x% x) etc.: MIXED-BLOCK LAYOUT CONVENTION
+  dr   <- .with_mixed_layout(dr, "u_slow")
   TT   <- nrow(shocks)
   n_e  <- ncol(shocks)
   M    <- ncol(active)

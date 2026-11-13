@@ -18,7 +18,9 @@ ms_kim_smoother(
 )
 }
 \arguments{
-\item{data}{Observation matrix (\code{n_obs x T}).  May contain \code{NA}s.}
+\item{data}{Observation matrix, \code{T x n_obs} (rows = periods, columns
+named by \code{obs_vars}; see \code{\link{ms_kim_filter}}).  May contain
+\code{NA}s.}
 
 \item{dr}{Decision rule (output of \code{\link{solve_perturbation}}).}
 
@@ -82,11 +84,11 @@ error.}
 A list of class \code{"ms_kim_smoother"} with:
   \describe{
     \item{\code{loglik}}{Total log-likelihood from the forward pass.}
-    \item{\code{filtered_probs}}{\code{h x T} matrix
+    \item{\code{filtered_probs}}{\code{T x h} matrix (rows = periods)
       \eqn{\Pr[s_t = j \mid y_{1:t}]}.}
-    \item{\code{smoothed_probs}}{\code{h x T} matrix
-      \eqn{\Pr[s_t = j \mid y_{1:T}]}; columns sum to 1.}
-    \item{\code{smoothed_states}}{\code{n_state x T} matrix
+    \item{\code{smoothed_probs}}{\code{T x h} matrix
+      \eqn{\Pr[s_t = j \mid y_{1:T}]}; rows sum to 1.}
+    \item{\code{smoothed_states}}{\code{T x n_state} matrix
       \eqn{E[s_t \mid y_{1:T}]} (regime-averaged).}
     \item{\code{smoothed_states_by_regime}}{\code{n_state x h x T} array
       \eqn{E[s_t \mid s_t = j, y_{1:T}]}.}
@@ -94,14 +96,14 @@ A list of class \code{"ms_kim_smoother"} with:
       regime-averaged smoothed state covariances (including the
       across-regime spread term).}
     \item{\code{smoothed_cov_by_regime}}{\code{n_state x n_state x h x T}.}
-    \item{\code{smoothed_shocks}}{\code{n_shk x T} matrix
+    \item{\code{smoothed_shocks}}{\code{T x n_shk} matrix
       \eqn{E[\varepsilon_t \mid y_{1:T}]} (regime-averaged).}
     \item{\code{smoothed_shocks_by_regime}}{\code{n_shk x h x T} array,
       conditional on \eqn{s_t = j}.}
     \item{\code{smoothed_initial}, \code{smoothed_initial_by_regime}}{
       \eqn{E[s_0 \mid y_{1:T}]}, free from the same backward recursion;
       needed to close the transition identity at \eqn{t = 1}.}
-    \item{\code{filtered_states}}{\code{n_state x T} matrix
+    \item{\code{filtered_states}}{\code{T x n_state} matrix
       \eqn{E[s_t \mid y_{1:t}]} (regime-averaged).}
     \item{\code{state_names}, \code{shock_names}, \code{regime_names}}{
       Labels.}
@@ -112,8 +114,8 @@ A list of class \code{"ms_kim_smoother"} with:
       \code{collapse = "gpb3"} only: the \eqn{h^2} PAIR-indexed
       components the GPB(3) backward pass actually carries, before their
       collapse onto regimes.  \code{smoothed_pair_probs} is
-      \code{h^2 x T} with \eqn{\Pr[s_{t-1} = j, s_t = k \mid y_{1:T}]}
-      at row \eqn{j + (k-1)h}; \code{smoothed_initial_probs} is
+      \code{T x h^2} with \eqn{\Pr[s_{t-1} = j, s_t = k \mid y_{1:T}]}
+      in column \eqn{j + (k-1)h}; \code{smoothed_initial_probs} is
       \eqn{\Pr[s_0 \mid y_{1:T}]}.}
   }
 }

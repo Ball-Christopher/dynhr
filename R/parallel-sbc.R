@@ -13,9 +13,9 @@
 ##     (R/parallel-mirai.R:251-262).  Startup cost: ~0.5-2 s per daemon.
 ##   - prior_sampler is a closure that closes only over prior_spec (a
 ##     data.frame); it is safe to ship via .args.
-##   - Per-replication seeds: seed_base + i, matching the serial loop in
-##     dynhr_sbc(), so serial and parallel give bit-identical results for the
-##     same seed.
+##   - Per-replication seeds: .child_seeds(seed_base, n, "sbc_replications"),
+##     derived on the host exactly as the serial loop in dynhr_sbc() does, so
+##     serial and parallel give bit-identical results for the same seed.
 ##   - RNGkind is forced to Mersenne-Twister on each daemon to match the main
 ##     session (daemons default to L'Ecuyer-CMRG).
 ## ---------------------------------------------------------------------------
@@ -44,7 +44,7 @@
 #' @param transform_params Logical; apply unconstrained reparameterisation.
 #' @param adapt_cov    Logical; adapt RWMH proposal covariance.
 #' @param seed_base    Base seed; replication \code{i} uses
-#'   \code{seed_base + i}.
+#'   \code{.child_seeds(seed_base, n_replications, "sbc_replications")[i]}.
 #' @param n_cores      Number of daemon workers.
 #' @param verbose      Logical; print per-replication progress.
 #' @return A list of length \code{n_replications}; each element is either
@@ -63,10 +63,10 @@ run_sbc_mirai <- function(model, prior_spec, prior_sampler,
   ## BLAS/OpenMP pinned to 1 per daemon (env inherited at spawn, restored on
   ## exit) -- prevents OpenBLAS-build oversubscription; see
   ## .mirai_pin_blas_threads and the note in .smc_pool_setup.
-  .restore_blas <- .mirai_pin_blas_threads()
-  on.exit(.restore_blas(), add = TRUE)
-  mirai::daemons(n_cores)
-  on.exit(mirai::daemons(NULL), add = TRUE)
+  ## Reuse a user's daemons (left running); start + tear down otherwise.
+  owns_pool <- !.mirai_daemons_active()
+  on.exit(.mirai_daemons_stop(owns_pool), add = TRUE)
+  .mirai_daemons_start(n_cores)
 
   ## Load dynhr on every daemon and recompile the model once per daemon.
   ## `<<-` is required so the binding reaches the daemon's global environment
@@ -93,11 +93,11 @@ run_sbc_mirai <- function(model, prior_spec, prior_sampler,
     .args = list(.worker_model = model,
                  .dynhr_state = .dynhr_daemon_state(),
                  .dynhr_apply = .dynhr_daemon_apply)
-  )[])
+  )[], owned = owns_pool)
 
   ## ---- dispatch ----------------------------------------------------------
   ## Build a task wrapper; all per-replication args are shipped via .args.
-  ## seed_base + .i matches the serial loop: seed + i.
+  ## .seeds[.i] matches the serial loop's rep_seeds[i].
   task_args <- list(
     .prior_spec       = prior_spec,
     .obs_vars         = obs_vars,
@@ -111,7 +111,8 @@ run_sbc_mirai <- function(model, prior_spec, prior_sampler,
     .lik_init         = lik_init,
     .transform_params = transform_params,
     .adapt_cov        = adapt_cov,
-    .seed_base        = seed_base,
+    .seeds            = .child_seeds(seed_base, n_replications,
+                                     "sbc_replications"),
     .verbose          = verbose,
     .likelihood       = likelihood,
     .order            = order
@@ -120,11 +121,11 @@ run_sbc_mirai <- function(model, prior_spec, prior_sampler,
   sbc_task <- function(.i,
              .prior_spec, .obs_vars, .T_obs, .presample,
              .n_draws, .n_burn, .thin, .sampler, .me_variance, .lik_init,
-             .transform_params, .adapt_cov, .seed_base, .verbose,
+             .transform_params, .adapt_cov, .seeds, .verbose,
              .likelihood, .order) {
       ## Force Mersenne-Twister to match the main session's RNG.
       RNGkind("Mersenne-Twister", "Inversion", "Rejection")
-      set.seed(.seed_base + .i)
+      set.seed(.seeds[.i])
 
       ## Retrieve the per-daemon globals set by everywhere().
       .m  <- get(".worker_model", envir = globalenv())
@@ -153,7 +154,7 @@ run_sbc_mirai <- function(model, prior_spec, prior_sampler,
         adapt_cov        = .adapt_cov,
         likelihood       = .likelihood,
         order            = .order,
-        seed             = .seed_base + .i,
+        seed             = .seeds[.i],
         verbose          = .verbose
       )
   }

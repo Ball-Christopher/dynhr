@@ -681,7 +681,8 @@ dynhr_nuts_pooled <- function(log_post_fn, theta_init,
 #' Chain start + RNG stream exactly as run_nuts_mirai's independent chain task
 #'
 #' \code{RNGkind("Mersenne-Twister", "Inversion", "Rejection")},
-#' \code{set.seed(seed_base + ch)}; chain 1 starts at \code{theta_mode},
+#' \code{set.seed(.child_seed_at(seed_base, ch, "mcmc_chains"))}; chain 1
+#' starts at \code{theta_mode},
 #' chains 2..N at \code{theta_mode + 0.5 chol(Sigma_prop)' z} (eta space
 #' under \code{transform}; clamped to the prior box otherwise), falling back to
 #' the mode when the log posterior there is not finite. Returns the start and
@@ -691,7 +692,7 @@ dynhr_nuts_pooled <- function(log_post_fn, theta_init,
 .nuts_pooled_chain_start <- function(ch, log_post_fn, theta_mode, Sigma_prop,
                                      prior_spec, transform, seed_base) {
   RNGkind("Mersenne-Twister", "Inversion", "Rejection")
-  set.seed(seed_base + ch)
+  set.seed(.child_seed_at(seed_base, ch, "mcmc_chains"))
   if (ch == 1L) {
     th0 <- theta_mode
   } else if (!is.null(transform)) {
@@ -756,7 +757,11 @@ dynhr_nuts_pooled <- function(log_post_fn, theta_init,
                            me_variance = me_variance, me_extra = me_extra,
                            shock_scale = shock_scale, grad_method = grad_method,
                            likelihood = likelihood, freq_band = freq_band,
-                           lik_init = li, system_priors = system_priors)
+                           lik_init = li, system_priors = system_priors,
+                           ## the Whittle debias .worker_lp was built with
+                           debias = .whittle_debias_resolve(
+                             get0(".worker_lp", envir = globalenv(),
+                                  inherits = FALSE)))
   ## THETA-space: .nuts_sampler_target() (warmup) and dynhr_nuts() (the
   ## frozen chains) both apply the eta chain rule when `transform` is set.
   ## Wrapping here as well applied it twice.

@@ -59,7 +59,7 @@
     h    <- length(dr$dr)
     dr1  <- dr$dr[[1L]]
     exo  <- dr1$exo_names
-    Se   <- .get_shock_cov(model, exo, params)
+    Se   <- .resolve_sigma_e(dr1, model, params)
     list(
       h         = h,
       P         = dr$P,
@@ -83,7 +83,7 @@
            "instead for structural (decision-rule) switching.", call. = FALSE)
     exo   <- dr$exo_names
     n_exo <- length(exo)
-    Se    <- .get_shock_cov(model, exo, params)
+    Se    <- .resolve_sigma_e(dr, model, params)
     h     <- ms_spec$n_regimes
 
     scales <- ms_spec$shock_scales
@@ -163,8 +163,11 @@
 #'   single \code{DecisionRules} object, ignored for \code{MsDecisionRules}.
 #' @param n_periods  IRF horizon (default 40).
 #' @param shock_size  Shock size in standard-deviation units (default 1).
-#' @param params  Named numeric parameter vector (default
-#'   \code{model$param_values}).
+#' @param params Named numeric parameter vector, or \code{NULL} (default).
+#'   The (base) shock covariance comes from \code{params} when supplied, else
+#'   from \code{dr$Sigma_e} (the first regime's, for an
+#'   \code{MsDecisionRules}), else from the model's shocks block at
+#'   \code{model$param_values}.
 #'
 #' @return A list of class \code{"ms_irf"}:
 #'   \describe{
@@ -187,8 +190,6 @@ ms_irf <- function(dr, model, ms_spec = NULL, n_periods = 40L,
   n_periods <- as.integer(n_periods)
   if (length(n_periods) != 1L || is.na(n_periods) || n_periods < 1L)
     stop("ms_irf: n_periods must be a positive integer.", call. = FALSE)
-  if (is.null(params)) params <- model$param_values
-
   reg <- .ms_irf_regimes(dr, model, ms_spec, params)
 
   h         <- reg$h

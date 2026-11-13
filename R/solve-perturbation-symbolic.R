@@ -368,6 +368,9 @@
 #' @return list Plist with Plist[[k]] for k = 1..pol_order
 #' @noRd
 .build_combined_policy_derivs <- function(dr, ns, nu, pol_order) {
+  ## the array reshapes below read the x_slow layout: see MIXED-BLOCK LAYOUT
+  ## CONVENTION (R/solve-perturbation-order3.R)
+  dr <- .with_mixed_layout(dr, "x_slow")
   n  <- nrow(dr$ghx)
   nz <- ns + nu
   xs <- seq_len(ns)

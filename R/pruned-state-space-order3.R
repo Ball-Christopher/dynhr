@@ -559,6 +559,9 @@
 #' @param Sigma_e n_exo x n_exo shock covariance.
 #' @keywords internal
 .order3_aug_system <- function(dr3, Sigma_e) {
+  ## the G / Gv blocks below contract the mixed blocks as (e %x% x),
+  ## (e %x% x %x% x), (e %x% e %x% x): see MIXED-BLOCK LAYOUT CONVENTION
+  dr3  <- .with_mixed_layout(dr3, "u_slow")
   ghx  <- dr3$ghx;  ghu  <- dr3$ghu
   ghxx <- dr3$ghxx; ghxu <- dr3$ghxu; ghuu <- dr3$ghuu; ghss <- dr3$ghss
   ghxxx <- dr3$ghxxx; ghxxu <- dr3$ghxxu; ghxuu <- dr3$ghxuu; ghuuu <- dr3$ghuuu
@@ -871,9 +874,10 @@ pruned_state_space3 <- function(dr3, model, params = NULL) {
   if (!inherits(dr3, "DecisionRules3"))
     stop("pruned_state_space3: dr3 must be a DecisionRules3 object.")
 
+  ## Shared shock-covariance precedence (caller params > dr3$Sigma_e > model):
+  ## .resolve_sigma_e() (adversarial review 2026-11-11 F2).
+  Sigma_e <- .resolve_sigma_e(dr3, model, params)
   if (is.null(params)) params <- model$param_values
-
-  Sigma_e <- .get_shock_cov(model, dr3$exo_names, params)
   sys     <- .order3_aug_system(dr3, Sigma_e)
 
   structure(
@@ -1077,15 +1081,18 @@ pruned_ss_moments3 <- function(pss3, n_ar = 5L) {
 #' used as the primary certification gate.
 #'
 #' @param pss3 A \code{pruned_ss3} object.
-#' @param Y Observations: \code{n_obs x T} (or \code{T x n_obs}, auto-oriented).
+#' @param Y Observations: \code{T x n_obs} (rows are periods), oriented by the
+#'   rule documented in \code{\link{pruned_ss_loglik}} (names decide; an
+#'   unnamed \code{n_obs x T} or square matrix is refused).
 #'   \code{NA} entries get an exact PARTIAL measurement update: a period with
 #'   SOME (but not all) observables missing still updates on the observed
 #'   subset (subsetting \code{ZZ}/\code{HH}/\code{SS} and using the
 #'   observed-count normalizing constant); a period with ALL observables
 #'   missing falls back to predict-only (no update).
 #' @param obs_vars Character vector of observed endogenous variable names.
-#' @param me_variance Scalar measurement-error variance added to the observation
-#'   covariance diagonal (default 0). See \code{\link{pruned_ss_loglik}} for
+#' @param me_variance Measurement-error variance added to the observation
+#'   covariance diagonal (default 0): a scalar or one variance per observable
+#'   (named entries matched to \code{obs_vars}). See \code{\link{pruned_ss_loglik}} for
 #'   the "Riccati lock" hazard on near-perfectly-revealed observables.
 #' @param me_floor_check Logical: warn when the \code{me_variance} floor
 #'   materially inflates the filter's steady-state innovation variances vs
@@ -1102,20 +1109,23 @@ pruned_ss_loglik3 <- function(pss3, Y, obs_vars, me_variance = 0,
   sys <- pss3$sys
 
   n_obs <- length(obs_vars)
-  if (is.null(dim(Y))) Y <- matrix(Y, nrow = n_obs)
-  if (nrow(Y) != n_obs) Y <- t(Y)
+  ## Scalar or per-observable (review 2026-11-11 F8; see pruned_ss_loglik).
+  me_variance <- .kf_me_variance(me_variance, obs_vars, "pruned_ss_loglik3")
+  ## T x n_obs (rows are periods) by the package-wide rule; the filter runs
+  ## on the transpose (n_obs x T).
+  Y <- t(.orient_time_matrix(Y, obs_vars, "Y", "pruned_ss_loglik3"))
 
   inp <- .order3_pruned_kf_inputs(sys, pss3$ys, obs_vars, pss3$endo_names,
                                   me_variance = me_variance)
 
   ## Measurement-error floor guard (see pruned_ss_loglik / the 2026-07-03
   ## MAJOR CORRECTION in ORDER3_PRUNED_SS_FOLLOWUP.md).
-  if (me_variance > 0 && isTRUE(me_floor_check))
+  if (any(me_variance > 0) && isTRUE(me_floor_check))
     .warn_me_floor_lock(
       .pruned_me_floor_ratio(inp$Tlin, inp$ZZ, inp$QQ,
-                             inp$HH - me_variance * diag(n_obs),
-                             inp$SS, inp$Sxi0, me_variance),
-      obs_vars, me_variance)
+                             inp$HH - diag(me_variance, n_obs),
+                             inp$SS, inp$Sxi0, max(me_variance)),
+      obs_vars, max(me_variance))
 
   ## Stationary initial condition: unconditional augmented mean / covariance.
   .pruned_kf_correlated(Y, inp$Tlin, inp$ZZ, inp$d_y, inp$c_drift,
@@ -1171,7 +1181,7 @@ pruned_ss_loglik3 <- function(pss3, Y, obs_vars, me_variance = 0,
 
   QQ <- G  %*% Cu %*% t(G);  QQ <- (QQ + t(QQ)) * 0.5     # d x d
   HH <- Gv %*% Cu %*% t(Gv); HH <- (HH + t(HH)) * 0.5     # n_obs x n_obs
-  if (me_variance > 0) HH <- HH + me_variance * diag(n_obs)
+  if (any(me_variance > 0)) HH <- HH + diag(me_variance, n_obs)
   SS <- G  %*% Cu %*% t(Gv)                                # d x n_obs
 
   ## Observation intercept (the constant b is already inside c_v / c_u); the
@@ -1204,8 +1214,11 @@ make_log_posterior_pruned3 <- function(model, data, prior_spec, obs_vars,
                                         power = NULL) {
   ## Resolve zeta ONCE here, not per draw (see .resolve_power_posterior).
   power <- .resolve_power_posterior(power, "make_log_posterior_pruned3")
-  n_obs <- length(obs_vars)
-  Y <- if (is.matrix(data) && nrow(data) == n_obs) data else t(data)
+  ## T x n_obs (rows are periods), oriented ONCE here by the package-wide
+  ## rule (inside the per-draw tryCatch a refusal would score -Inf).
+  Y <- .orient_time_matrix(data, obs_vars, "data", "make_log_posterior_pruned3")
+  me_variance <- .kf_me_variance(me_variance, obs_vars,
+                                 "make_log_posterior_pruned3")
 
   ## Adapter over the shared closure builder (R/posterior-closure.R); the
   ## order-3 twin of make_log_posterior_pruned's. `sys_cache = FALSE` because

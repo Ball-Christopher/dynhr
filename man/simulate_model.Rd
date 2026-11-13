@@ -28,8 +28,11 @@ columns are matched by name. If NULL, shocks are
 drawn from the model's full shock covariance \eqn{\Sigma_e} (from
 \code{\link{shock_cov}}), \strong{including} the \code{corr} /
 \code{var a, b} entries of the shocks block, via its lower Cholesky
-factor. Skewed shocks (\code{alpha != 0}) are still drawn independently
-from their skew-normal marginals and warn when correlations are declared.}
+factor. Skewed shocks (\code{skew} alpha != 0) are drawn from the
+package's closed skew-normal law, mean-zero and with covariance exactly
+\eqn{\Sigma_e} (\code{stderr} is the shock's true standard deviation;
+alpha sets only the shape -- see \code{\link{make_log_posterior}}),
+correlations included.}
 
 \item{n_replications}{Number of replications for stochastic simulation.
 When \code{1} (default) a plain \code{n_periods x n_endo} matrix is
@@ -39,7 +42,10 @@ returned (backward-compatible).  When \code{> 1} a 3-D array of dimension
 seed.  The pre-existing \code{attr(., "levels")} attribute is attached to
 the first slice only (2-D case) or omitted (3-D case).}
 
-\item{model}{dynhr_mod (for shock variances)}
+\item{model}{dynhr_mod (for shock skewness, and the shock covariance when
+\code{dr} carries none). Drawn shocks use \code{dr$Sigma_e} (set by
+\code{\link{solve_perturbation}}, including its \code{Sigma_e} argument),
+else the model's shocks block; the same rule holds at orders 2 and 3.}
 
 \item{burn_in}{Burn-in periods to discard}
 

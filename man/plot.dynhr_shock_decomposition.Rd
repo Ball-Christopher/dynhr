@@ -31,7 +31,8 @@ default: the first one with non-zero variation.}
 \item{...}{Passed to \code{barplot()}.}
 }
 \value{
-Invisibly, the \code{n_component x T} contribution matrix plotted.
+Invisibly, the \code{T x n_component} contribution matrix plotted
+  (rows = periods).
 }
 \description{
 Stacked contribution bars (positive contributions above zero, negative
@@ -40,6 +41,7 @@ initial-condition component is drawn like any other component but is given
 a neutral grey so it reads as "not a shock".
 }
 \details{
-Handles both orientations: the linear decomposition stores
-\code{T x n_endo} matrices, the OBC one \code{n_endo x T}.
+The decomposition matrices are \code{T x n_endo} (rows = periods), as
+both \code{\link{historical_decomposition}} and
+\code{\link{historical_decomposition_obc}} return them.
 }

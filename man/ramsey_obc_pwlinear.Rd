@@ -61,7 +61,7 @@ An object of class \code{dynhr_ramsey_obc_pwl} containing:
   \item{dr_bind}{Binding-regime rule of a period in which every spec binds
     and the next period is slack (the last period of a spell).}
   \item{regime_path}{Integer vector: optimal regime path (bitfield encoding).}
-  \item{irf}{n_aug x T matrix of deviations from the Ramsey steady state
+  \item{irf}{T x n_aug matrix (rows = periods) of deviations from the Ramsey steady state
     under the Ramsey OBC policy.}
   \item{meta}{Metadata.}
 }

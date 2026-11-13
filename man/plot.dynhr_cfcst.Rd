@@ -4,7 +4,7 @@
 \alias{plot.dynhr_cfcst}
 \title{Plot method for conditional forecast results}
 \usage{
-\method{plot}{dynhr_cfcst}(x, vars = NULL, probs = c(0.1, 0.9), ...)
+\method{plot}{dynhr_cfcst}(x, vars = NULL, probs = c(0.1, 0.9), measurement = FALSE, ...)
 }
 \arguments{
 \item{x}{A \code{dynhr_cfcst} object.}
@@ -13,6 +13,11 @@
 
 \item{probs}{Numeric vector of quantile probabilities for the fan (default
 \code{c(0.1, 0.9)}). Ignored if no draws.}
+
+\item{measurement}{\code{FALSE} (default): the fan is that of the model's
+observables (\code{x$draws}). \code{TRUE}: the fan of the measured
+series, including measurement error (\code{x$draws_me}; an error if the
+forecast was made without \code{me_variance > 0}).}
 
 \item{...}{Additional arguments passed to \code{matplot()}.}
 }

@@ -26,21 +26,33 @@ An \code{IRFCollection}: a named list of \code{n_periods x n_endo}
 }
 \description{
 Implements the Andreasen, Fernandez-Villaverde & Rubio-Ramirez (2018)
-pruning scheme truncated at third order.  IRFs are deviations from the
-stochastic steady state: the constant \code{ghss}/\code{ghs3} terms are
-absorbed into the baseline and cancel, so only the shock-driven deviations
-are returned.
+pruning scheme truncated at third order.  The IRF is the difference
+between the pruned path with the impulse at \eqn{t = 1} and the pruned
+path without it, both started at the deterministic steady state with no
+other shock realised -- exactly
+\code{simulate_model_order3(shocked) - simulate_model_order3(baseline)}.
+Every risk term of the rule enters: \code{ghxss}/\code{ghuss} directly,
+and the constants \code{ghss}/\code{ghs3} through the baseline's drift,
+which interacts with the impulse (e.g. \eqn{h_{xx}(x^f \otimes x^s)}).
+This is the third-order Taylor expansion, jointly in the shock size and
+\eqn{\sigma}, of the exact IRF; \code{\link{compute_irfs_order4}} and
+\code{\link{compute_irfs_order5}} use the same definition one and two
+orders further.  (Before the 2026-11 review the drift interaction terms
+were omitted from \eqn{t = 2} on, an \eqn{O(\sigma^2)} times impulse
+error.)
 }
 \details{
 The pruned state tracks three additive layers \eqn{x^f, x^s, x^{rd}}:
 \itemize{
   \item \eqn{x^f} -- first-order (linear) state response
   \item \eqn{x^s} -- second-order correction driven by \eqn{(x^f)^2}
+    and \eqn{\sigma^2}
   \item \eqn{x^{rd}} -- third-order correction driven by
-    \eqn{(x^f)^3} and \eqn{x^f \otimes x^s} cross terms
+    \eqn{(x^f)^3}, \eqn{x^f \otimes x^s} and \eqn{\sigma^2 x^f}
 }
 
-Output at each horizon: \eqn{y = y^{(1)} + y^{(2)} + y^{(3)}}.
+Output at each horizon: \eqn{y = y^{(1)} + y^{(2)} + y^{(3)}} on the
+impulse path minus the same on the baseline path.
 }
 \references{
 Andreasen, M. M., Fernandez-Villaverde, J., & Rubio-Ramirez,

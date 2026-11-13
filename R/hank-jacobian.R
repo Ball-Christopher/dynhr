@@ -301,7 +301,7 @@ hank_het_jacobian_nd <- function(block, T_h,
     Pi_path <- .hank_pi_path(block, pip, T_h)
     setNames(lapply(extra, function(o) vapply(seq_len(T_h), function(t) {
       Pi_t <- if (is.null(Pi_path)) block$Pi else Pi_path[[t]]
-      hank_aggregate(out$Dpath[, t], .hank_het_output_vector(block, o, Pi_t))
+      hank_aggregate(out$Dpath[t, ], .hank_het_output_vector(block, o, Pi_t))
     }, numeric(1))), extra)
   }
 
@@ -409,8 +409,8 @@ hank_het_dist_jacobian_nd <- function(block, T_h,
       out_m <- hank_td_nonlinear(block, r_path = rm, w_path = wm, T_h = T_h,
                                  pi_input_paths = pip_m, Tr_path = Trm,
                                  r_minus_path = rmm)
-      dD <- (out_p$Dpath - out_m$Dpath) / (2 * delta)   # (n_cell x T_h), col t
-      for (tt in seq_len(T_h)) JD_nd[[i]][tt, s, ] <- dD[, tt]
+      dD <- (out_p$Dpath - out_m$Dpath) / (2 * delta)   # (T_h x n_cell), row t
+      JD_nd[[i]][, s, ] <- dD
     }
   }
   JD_nd

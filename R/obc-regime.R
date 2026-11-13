@@ -291,7 +291,7 @@ obc_ensure_policy <- function(regime_idx, regime_cache, sys, dr_slack, specs, ob
 #' observation pre-pass Dynare does not have).  Both checks are wrong for
 #' spells of two or more periods.
 #'
-#' @param Y           Observation matrix (n_obs x T)
+#' @param Y           Observation matrix (T x n_obs, rows = periods)
 #' @param dr_slack    Slack-regime DecisionRules
 #' @param sys         System matrices (from extract_system_matrices_fast)
 #' @param obs_idx     Integer vector of observable positions in endo vector

@@ -522,6 +522,7 @@ dynhr_model <- function(model, data = NULL, obs_vars = NULL, compiled = NULL,
       .dynhr_abort("dynhr_model: `data` must be a T x n_obs matrix or data.frame ",
                    "(rows = periods, columns = observables).",
                    class = "dynhr_error_bad_argument")
+    .check_time_values(data, "data", "dynhr_model")
     if (!is.null(obs_vars) && !is.null(colnames(data))) {
       missing_cols <- setdiff(obs_vars, colnames(data))
       if (length(missing_cols))
@@ -545,8 +546,23 @@ dynhr_model <- function(model, data = NULL, obs_vars = NULL, compiled = NULL,
   ## (power, ...) are moved to that field by .spec_route_extras() below.
   lik <- if (is.character(likelihood) && length(likelihood) == 1L)
     likelihood_spec(likelihood) else .spec_as_sub(likelihood, "likelihood")
-  if (!is.null(me_variance))
+  if (!is.null(me_variance)) {
+    ## me_variance = x together with likelihood = list(me_variance = y): the
+    ## argument used to win silently. Conflicting values are an error; a
+    ## likelihood_spec() object is compared only when its value is not its
+    ## type's default (it always carries one).
+    lik_me <- if (is.list(likelihood) && !is.object(likelihood))
+      likelihood$me_variance
+    else if (inherits(likelihood, class(lik)[1L]) &&
+             !identical(lik$me_variance, likelihood_spec(lik$type)$me_variance))
+      lik$me_variance
+    if (!is.null(lik_me) && !identical(as.numeric(lik_me), as.numeric(me_variance)))
+      .dynhr_abort("dynhr_model: `me_variance` (", paste(format(me_variance), collapse = ", "),
+                   ") conflicts with `likelihood$me_variance` (",
+                   paste(format(lik_me), collapse = ", "), "); give it once.",
+                   class = "dynhr_error_bad_argument")
     lik <- .spec_build("likelihood", list(me_variance = me_variance), base = lik)
+  }
   dots <- list(...)
   if (length(dots))
     lik <- .spec_build("likelihood", list(extra = utils::modifyList(lik$extra, dots)),
@@ -1019,7 +1035,9 @@ dm_diagnostics <- function(dm, ...) {
 #' Calls the impulse-response routine matching the order the object was
 #' solved at (\code{\link{compute_irfs}} at order 1,
 #' \code{\link{compute_irfs_order2}} at order 2,
-#' \code{\link{compute_irfs_order3}} at order 3) and stores the result in
+#' \code{\link{compute_irfs_order3}} at order 3,
+#' \code{\link{compute_irfs_order4}} / \code{\link{compute_irfs_order5}} at
+#' orders 4 / 5) and stores the result in
 #' \code{$irf} (and the point in \code{$irf_at}).
 #'
 #' @param dm        A \code{\link{dynhr_model}} whose \code{$solution} is set
@@ -1030,7 +1048,9 @@ dm_diagnostics <- function(dm, ...) {
 #'   solved it there, else the model is solved at that point (at the stored
 #'   order, default solver settings) for this call. See \code{\link{dm_solve}}.
 #' @param ...       Further arguments for the underlying IRF routine
-#'   (e.g. \code{shock_size}, and \code{pruning} at order 2).
+#'   (e.g. \code{shock_size}, and \code{pruning} at order 2). The shock
+#'   covariance is the solution's \code{Sigma_e} (the point's parameters, or
+#'   the \code{Sigma_e} given to \code{\link{dm_solve}}).
 #' @return The updated \code{dynhr_model}, with \code{$irf} set.
 #' @seealso \code{\link{dynhr_model}}, \code{\link{compute_irfs}}
 #' @examples
@@ -1049,13 +1069,17 @@ dm_irf <- function(dm, n_periods = 40L, at = c("params", "mode", "posterior_mean
                "1" = compute_irfs,
                "2" = compute_irfs_order2,
                "3" = compute_irfs_order3,
+               "4" = compute_irfs_order4,
+               "5" = compute_irfs_order5,
                .dynhr_abort("dm_irf(): no IRF routine for perturbation order ", ord,
-                            "; call compute_irfs_order4()/compute_irfs_order5() on ",
-                            "`dm$solution` directly.",
-                            class = "dynhr_error_bad_argument"))
+                            ".", class = "dynhr_error_bad_argument"))
+  ## params = NULL: the solution carries the covariance it was solved with
+  ## (dr$Sigma_e: the point's parameters, or dm_solve(Sigma_e = )), which the
+  ## package rule (.resolve_sigma_e()) then uses.  Passing pt$params would
+  ## let the parameters silently override a dm_solve(Sigma_e = ) covariance.
   .dm_set_many(dm, list(
     irf = fn(pt$solution, dm$model, n_periods = as.integer(n_periods),
-             params = pt$params, ...),
+             params = NULL, ...),
     irf_at = at))
 }
 
@@ -1074,13 +1098,16 @@ dm_irf <- function(dm, n_periods = 40L, at = c("params", "mode", "posterior_mean
 #'   forecast)
 #' @param horizon    Forecast horizon (default \code{8L})
 #' @param at         \code{"params"} (default), \code{"mode"} or
-#'   \code{"posterior_mean"}, as in \code{\link{dm_irf}}. Away from
-#'   \code{"params"} the model's parameter values (hence the shock covariance
-#'   of the filter and the forecast) are those at that point.
+#'   \code{"posterior_mean"}, as in \code{\link{dm_irf}}. The model's
+#'   parameter values (hence the shock covariance of the filter and the
+#'   forecast) are those at that point -- \code{dm$params} at
+#'   \code{"params"}.
 #' @param ...        Further arguments for \code{\link{conditional_forecast}}
 #'   (e.g. \code{type}, \code{method}, \code{n_draws}, and the trend-model
 #'   inputs \code{shock_means}, \code{shock_timing}, \code{a0}, \code{P0}:
-#'   a drift carried as a deterministic shock mean).
+#'   a drift carried as a deterministic shock mean). The object's
+#'   \code{me_variance} is forwarded as \code{conditional_forecast}'s
+#'   \code{me_variance} unless given here.
 #' @return The updated \code{dynhr_model}, with \code{$forecast} set.
 #' @seealso \code{\link{dynhr_model}}, \code{\link{conditional_forecast}}
 #' @examples
@@ -1102,14 +1129,25 @@ dm_forecast <- function(dm, conditions = NULL, horizon = 8L,
   if (is.null(dm$solution)) .dm_require("dm_forecast", "solution", "dm_solve")
   if (is.null(dm$data))     .dm_require_field("dm_forecast", "data")
   pt <- .dm_point(dm, at, "dm_forecast")
+  ## conditional_forecast() reads the shock covariance from
+  ## model$param_values, so the point's parameters go there at EVERY `at`:
+  ## at "params" the object's own `params` (e.g. shock stderrs set through
+  ## them), as dm_irf() uses -- not the parsed calibration.
   model <- dm$model
-  if (!identical(at, "params")) model$param_values <- pt$params
+  model$param_values <- pt$params
+  ## The object's measurement error is the terminal-state filter's, unless
+  ## the call sets its own.
+  dots <- list(...)
+  me <- dm$me_variance
+  if (!("me_variance" %in% names(dots)) && !is.null(me) && any(me != 0))
+    dots$me_variance <- me
   .dm_set_many(dm, list(
-    forecast = conditional_forecast(model, pt$solution, dm$data,
-                                    conditions = conditions,
-                                    horizon    = as.integer(horizon),
-                                    obs_vars   = dm$obs_vars,
-                                    compiled   = dm$compiled, ...),
+    forecast = do.call(conditional_forecast,
+                       c(list(model, pt$solution, dm$data,
+                              conditions = conditions,
+                              horizon    = as.integer(horizon),
+                              obs_vars   = dm$obs_vars,
+                              compiled   = dm$compiled), dots)),
     forecast_at = at))
 }
 

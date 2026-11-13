@@ -11,8 +11,10 @@ stochastic_steady_state(dr, model, params = NULL)
 
 \item{model}{dynhr_mod object}
 
-\item{params}{Optional named numeric parameter vector (default:
-\code{model$param_values})}
+\item{params}{Named numeric parameter vector, or \code{NULL} (default).
+The shock covariance comes from \code{params} when supplied, else from
+\code{dr$Sigma_e} (set by \code{\link{solve_perturbation}}), else from
+the model's shocks block at \code{model$param_values}.}
 }
 \value{
 Named numeric vector of length \code{n_endo} giving the stochastic

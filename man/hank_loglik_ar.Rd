@@ -17,7 +17,7 @@ hank_loglik_ar(
 )
 }
 \arguments{
-\item{data}{\code{T_data x n_obs} matrix (or data frame) of demeaned
+\item{data}{\code{T_data x n_obs} matrix (or data frame) (rows are periods; oriented by the rule in \code{\link{hank_loglik_aggregate}}) of demeaned
 observations, columns in the order of \code{ss$obs_names} (for a
 \code{\link{hank_state_space}} object) or of the \code{Theta} columns;
 \code{NA}/\code{NaN} entries allowed.}

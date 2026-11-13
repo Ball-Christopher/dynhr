@@ -44,8 +44,21 @@ model shocks block.}
 Default 1e-4 for order 2, 1e-2 for order 4, 5e-2 for order 5.}
 
 \item{sigma3}{(order=3 only) Optional n_u^3 vector of third-order shock
-product moments E[u_i u_j u_k]. Default NULL leaves the
-third-cumulant correction at zero (Gaussian shocks).}
+product moments E[u_i u_j u_k]. Default NULL uses the
+model's shock law: zero for Gaussian shocks; for skewed
+shocks (\code{skew} alpha != 0, at the current
+\code{params}) the third central moment of the centred
+closed skew-normal law that \code{simulate_model_order3()}
+draws (covariance \code{Sigma_e}).  A skewed shock
+correlated with another shock is refused (class
+\code{dynhr_error_skew_correlated_order3}); pass
+\code{sigma3} explicitly then.
+Orders 4 and 5 are Gaussian-only: a non-zero
+\code{sigma3}, or a model with skewed shocks (\code{skew}
+alpha != 0), is refused with an error of class
+\code{dynhr_error_order45_nongaussian}, because the
+odd-sigma cross terms and fourth-cumulant terms such shocks
+require at those orders are not formed.}
 
 \item{loglinear}{Logical (default FALSE). When TRUE, returns the first-order
 decision rule expressed in log-deviations, matching Dynare's

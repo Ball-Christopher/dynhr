@@ -268,8 +268,8 @@ hank_het3_dist_jacobian_nd <- function(block, T_h, inputs = NULL,
         m[[i]][s] <- m[[i]][s] - delta
       }
       op <- run(p, pip); om <- run(m, pim)
-      dD <- (op$Dpath - om$Dpath) / (2 * delta)   # (n_cell x T_h), col t
-      for (tt in seq_len(T_h)) JD_nd[[i]][tt, s, ] <- dD[, tt]
+      dD <- (op$Dpath - om$Dpath) / (2 * delta)   # (T_h x n_cell), row t
+      JD_nd[[i]][, s, ] <- dD
     }
   }
   JD_nd

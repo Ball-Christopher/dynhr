@@ -24,8 +24,10 @@ simulate_model_order3(
 pre-drawn shocks (in model units, i.e. already scaled by stderr).  If
 \code{NULL}, shocks are drawn from \eqn{N(0, \sigma_e^2)}.}
 
-\item{model}{Optional model object used to retrieve shock standard
-deviations when \code{shocks = NULL}.}
+\item{model}{Optional model object (shock skewness, and the shock
+covariance when \code{dr3} carries none): with \code{shocks = NULL},
+shocks are drawn with \code{dr3$Sigma_e}, else the model's shocks
+block, as in \code{\link{simulate_model}}.}
 
 \item{burn_in}{Integer.  Number of initial periods to discard.}
 

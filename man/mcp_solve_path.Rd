@@ -30,8 +30,11 @@ mcp_solve_path(
 
 \item{y_ss}{Named numeric vector: steady state (terminal condition).}
 
-\item{shock_path}{T × n_exo numeric matrix of structural shocks.  Column
-names must match \code{varexo_names}; missing columns are zero.}
+\item{shock_path}{T × n_exo numeric matrix of structural shocks (rows =
+periods).  Named columns must be shocks of the model
+(\code{varexo_names}); missing shocks are zero.  An unnamed matrix must
+have exactly n_exo columns (an unnamed n_exo x T or square matrix is an
+error; a matrix named by shock on its ROWS is transposed with a message).}
 
 \item{params}{Named numeric parameter vector.}
 
@@ -77,7 +80,7 @@ List with:
   \item{converged}{Logical: TRUE if Newton converged.}
   \item{n_iter}{Integer: Newton iterations used.}
   \item{max_res}{Numeric: final max|R_stack|.}
-  \item{fb_final}{n_spec × T matrix of final FB residuals.}
+  \item{fb_final}{T × n_spec matrix (rows = periods) of final FB residuals.}
   \item{active_set}{Integer vector (length T): per-period binding bitfield.}
   \item{endo_names}{Character: variable ordering of Y columns.}
   \item{merit_history}{Numeric vector: merit function value per iteration.}

@@ -28,7 +28,12 @@ condition and terminal condition)}
 \item{mcp_specs}{List of MCP specs (from \code{\link{mcp_parse_tags}}).
 If NULL, attempts to parse MCP tags from the model automatically.}
 
-\item{n_periods}{Number of IRF periods (default 40)}
+\item{n_periods}{Number of IRF periods (default 40). The
+perfect-foresight problem is solved on an internal horizon of
+\code{max(2 * n_periods, n_periods + 40)} periods (return to steady state
+imposed at its end) and truncated to \code{n_periods}, so the returned
+periods do not depend on \code{n_periods} (the rule
+\code{\link{compute_irfs_obc}} uses for \code{obc_solver = "mcp"}).}
 
 \item{shock_size}{Shock size multiplier applied to each shock's standard
 deviation (default 1: one-standard-deviation impulse)}

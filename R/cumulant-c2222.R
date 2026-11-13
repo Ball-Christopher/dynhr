@@ -129,6 +129,8 @@
 #' @noRd
 .fourth_cumulant_closed_form <- function(dr2, model, params = NULL,
                                          obs_vars = NULL) {
+  ## mixed blocks contracted as (e %x% x): see MIXED-BLOCK LAYOUT CONVENTION
+  dr2 <- .with_mixed_layout(dr2, "u_slow")
   endo      <- dr2$endo_names
   exo       <- dr2$exo_names
   state_idx <- dr2$state_idx
@@ -136,14 +138,12 @@
   n_exo     <- length(exo)
   n_s       <- length(state_idx)
 
-  if (is.null(params)) params <- model$param_values
-
   ghx  <- dr2$ghx;  ghu  <- dr2$ghu
   ghxx <- dr2$ghxx %||% NULL
   ghxu <- dr2$ghxu %||% NULL
   ghuu <- dr2$ghuu %||% NULL
 
-  Sigma_e <- .get_shock_cov(model, exo, params)
+  Sigma_e <- .resolve_sigma_e(dr2, model, params)
 
   hx  <- ghx [state_idx, , drop = FALSE]
   hu  <- ghu [state_idx, , drop = FALSE]

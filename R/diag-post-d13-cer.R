@@ -107,8 +107,8 @@
 #'   has column names; otherwise it names the columns positionally and must
 #'   have length \code{ncol(data)}. Defaults to \code{colnames(data)}.
 #' @param sigma_e     Shock covariance matrix (n_exo x n_exo). If NULL it is
-#'   taken from \code{model} (\code{shock_cov()}), then from
-#'   \code{dr$Sigma_e}; there is no identity fallback.
+#'   taken from \code{dr$Sigma_e} (set by \code{\link{solve_perturbation}}),
+#'   else from \code{model}'s shocks block; there is no identity fallback.
 #' @param model       dynhr_mod object (used for the shock covariance if
 #'   \code{sigma_e} is NULL).
 #' @param me_var      Optional measurement-error variances, one per
@@ -217,11 +217,13 @@ d13_cross_equation_restrictions <- function(dr            = NULL,
     D_mat <- dr$ghu[obs_idx, , drop = FALSE]          # n_obs x n_exo
     n_exo <- ncol(R_mat)
 
-    # Shock covariance: explicit > model > dr$Sigma_e. No identity default.
+    # Shock covariance: explicit `sigma_e` > dr$Sigma_e > model (the package
+    # rule, .resolve_sigma_e(); until 0.9.4.75 the model beat dr$Sigma_e).
+    # No identity default.
     Sigma_e <- if (!is.null(sigma_e)) {
       as.matrix(sigma_e)
     } else if (!is.null(model)) {
-      .get_shock_cov(model, dr$exo_names, model$param_values)
+      as.matrix(.resolve_sigma_e(dr, model))
     } else if (!is.null(dr$Sigma_e)) {
       as.matrix(dr$Sigma_e)
     } else {

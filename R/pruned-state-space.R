@@ -95,9 +95,11 @@ pruned_state_space <- function(dr, model, params = NULL) {
   if (!inherits(dr, "DecisionRules2"))
     stop("pruned_state_space: dr must be a DecisionRules2 object.")
 
+  ## Shared shock-covariance precedence (caller params > dr$Sigma_e > model):
+  ## .resolve_sigma_e().  dr$Sigma_e set by solve_perturbation(Sigma_e = ) was
+  ## silently ignored here (adversarial review 2026-11-11 F2).
+  Sigma_e <- .resolve_sigma_e(dr, model, params)
   if (is.null(params)) params <- model$param_values
-
-  Sigma_e <- .get_shock_cov(model, dr$exo_names, params)
   sys     <- .order2_aug_system(dr, Sigma_e)
 
   structure(
@@ -375,8 +377,12 @@ pruned_ss_moments <- function(pss, n_ar = 5L) {
 #'
 #' @param pss      A \code{pruned_ss} object from
 #'   \code{\link{pruned_state_space}}.
-#' @param Y        Observation matrix (\code{n_obs x T} or \code{T x n_obs};
-#'   transposed automatically when \code{ncol(Y) == n_obs}).  \code{NA}
+#' @param Y        Observation matrix, \code{T x n_obs} (rows are periods,
+#'   columns the \code{obs_vars}). Oriented by the package-wide rule: columns
+#'   named by \code{obs_vars} are matched by name; rows named by them (the
+#'   old \code{n_obs x T} layout) are transposed with a message; an unnamed
+#'   \code{n_obs x T} or square matrix is refused (class
+#'   \code{dynhr_error_orientation}) -- never guessed from the shape.  \code{NA}
 #'   entries are handled with an exact PARTIAL measurement update: for each
 #'   period only the non-\code{NA} observables enter the Kalman update (their
 #'   rows/cols of \code{ZZ}/\code{HH}/\code{SS} and the corresponding
@@ -395,8 +401,10 @@ pruned_ss_moments <- function(pss, n_ar = 5L) {
 #'   to simulated deviations before filtering.
 #' @param obs_vars Character vector of observed variable names (must be a
 #'   subset of \code{pss$endo_names}).
-#' @param me_variance  Scalar measurement-error jitter added to the diagonal
-#'   of the innovation covariance (default 0). CAUTION: when the model
+#' @param me_variance  Measurement-error variance added to the diagonal of
+#'   the observation covariance (default 0): a scalar (\eqn{H = me\,I}) or one
+#'   variance per observable (\eqn{H = \mathrm{diag}(me)}; named entries are
+#'   matched to \code{obs_vars}), as in \code{\link{kalman_filter}}. CAUTION: when the model
 #'   implies a near-degenerate innovation covariance (some combination of
 #'   observables is almost perfectly predictable one step ahead), even a
 #'   tiny floor (1e-8) can dominate the smallest eigenvalue of F and bias
@@ -413,14 +421,15 @@ pruned_ss_moments <- function(pss, n_ar = 5L) {
 #'
 #' @section Mixed-frequency data:
 #' The exact partial-NA update makes \code{Y} a natural home for
-#' mixed-frequency panels: give each observable its own row and set the
+#' mixed-frequency panels: give each observable its own column and set the
 #' periods where it is unobserved to \code{NA}.  For example, a "monthly"
 #' series observed every period alongside a "quarterly" series observed
 #' only every third period:
 #' \preformatted{
 #'   T_n <- 120L
-#'   Y <- rbind(monthly_series, quarterly_series)   # 2 x T_n, levels
-#'   Y[2, -seq(3L, T_n, by = 3L)] <- NA              # quarterly: keep every 3rd
+#'   Y <- cbind(monthly_var = monthly_series,
+#'              quarterly_var = quarterly_series)  # T_n x 2, levels
+#'   Y[-seq(3L, T_n, by = 3L), 2] <- NA             # quarterly: keep every 3rd
 #'   ll <- pruned_ss_loglik(pss, Y, c("monthly_var", "quarterly_var"))
 #' }
 #' Each period's log-density uses only the observables that are non-\code{NA}
@@ -442,8 +451,8 @@ pruned_ss_moments <- function(pss, n_ar = 5L) {
 #' T_n <- 120L
 #' sim <- simulate_model_order2(dr2, n_periods = T_n, burn_in = 1000L,
 #'                               model = m, pruning = TRUE)
-#' Y <- t(sim[, c("c", "y")]) + dr2$ys[c("c", "y")]
-#' Y[2, -seq(3L, T_n, by = 3L)] <- NA
+#' Y <- sweep(sim[, c("c", "y")], 2L, dr2$ys[c("c", "y")], "+")  # T_n x 2
+#' Y[-seq(3L, T_n, by = 3L), "y"] <- NA
 #'
 #' ll <- pruned_ss_loglik(pss, Y, c("c", "y"), me_variance = 1e-4)
 #' ll
@@ -455,6 +464,10 @@ pruned_ss_loglik <- function(pss, Y, obs_vars, me_variance = 0,
                                                         TRUE)) {
   stopifnot(inherits(pss, "pruned_ss"))
   sys <- pss$sys
+  ## Scalar (H = me I) or one variance per observable (H = diag(me), named
+  ## entries matched to obs_vars); a vector died with "the condition has
+  ## length > 1" before (review 2026-11-11 F8).
+  me_variance <- .kf_me_variance(me_variance, obs_vars, "pruned_ss_loglik")
 
   ## -- Observation index ------------------------------------------------------
   obs_idx <- match(obs_vars, pss$endo_names)
@@ -463,9 +476,9 @@ pruned_ss_loglik <- function(pss, Y, obs_vars, me_variance = 0,
          paste(obs_vars[is.na(obs_idx)], collapse = ", "))
   n_obs <- length(obs_vars)
 
-  ## -- Reshape Y to n_obs x T -------------------------------------------------
-  if (is.null(dim(Y))) Y <- matrix(Y, nrow = n_obs)
-  if (nrow(Y) != n_obs) Y <- t(Y)
+  ## -- Y: T x n_obs (rows are periods) by the package-wide rule; the filter
+  ## below runs on the transpose (n_obs x T, one column per period) --------
+  Y <- t(.orient_time_matrix(Y, obs_vars, "Y", "pruned_ss_loglik"))
   n_T <- ncol(Y)
 
   ## -- Augmented-state system matrices ----------------------------------------
@@ -503,7 +516,7 @@ pruned_ss_loglik <- function(pss, Y, obs_vars, me_variance = 0,
   HH  <- Gv %*% Cr0 %*% t(Gv)          # n_obs x n_obs
   HH  <- (HH + t(HH)) * 0.5
   HH_model <- HH                        # model-implied part, pre-floor
-  if (me_variance > 0) HH <- HH + me_variance * diag(n_obs)
+  if (any(me_variance > 0)) HH <- HH + diag(me_variance, n_obs)
   ## Cross-covariance state/observation noise
   SS  <- G  %*% Cr0 %*% t(Gv)          # d x n_obs
 
@@ -521,10 +534,12 @@ pruned_ss_loglik <- function(pss, Y, obs_vars, me_variance = 0,
   Sxi0 <- (Sxi0 + t(Sxi0)) * 0.5
 
   ## -- Measurement-error floor guard ------------------------------------------
-  if (me_variance > 0 && isTRUE(me_floor_check))
+  ## (per-observable me: judged on its largest entry, the conservative side)
+  if (any(me_variance > 0) && isTRUE(me_floor_check))
     .warn_me_floor_lock(
-      .pruned_me_floor_ratio(Tlin, ZZ, QQ, HH_model, SS, Sxi0, me_variance),
-      obs_vars, me_variance)
+      .pruned_me_floor_ratio(Tlin, ZZ, QQ, HH_model, SS, Sxi0,
+                             max(me_variance)),
+      obs_vars, max(me_variance))
 
   ## -- Kalman filter (correlated noise, constant-gain) ------------------------
   ##
@@ -777,9 +792,13 @@ make_log_posterior_pruned <- function(model, data, prior_spec, obs_vars,
   ## closure (see .resolve_power_posterior).
   power <- .resolve_power_posterior(power, "make_log_posterior_pruned")
 
-  ## Data: ensure n_obs x T
-  n_obs <- length(obs_vars)
-  Y <- if (is.matrix(data) && nrow(data) == n_obs) data else t(data)
+  ## Data: T x n_obs (rows are periods), oriented ONCE here by the
+  ## package-wide rule (a refusal inside the per-draw tryCatch would be
+  ## scored as -Inf for every draw).
+  Y <- .orient_time_matrix(data, obs_vars, "data", "make_log_posterior_pruned")
+  ## me_variance: scalar or per-observable, validated ONCE here.
+  me_variance <- .kf_me_variance(me_variance, obs_vars,
+                                 "make_log_posterior_pruned")
 
   ## Adapter over the shared closure builder (R/posterior-closure.R). What is
   ## specific to this branch: the order-2 lift + pruned-SS assembly (solve

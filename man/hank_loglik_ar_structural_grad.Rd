@@ -26,7 +26,7 @@ hank_loglik_ar_structural_grad(
 )
 }
 \arguments{
-\item{data}{\code{T_data x n_obs} matrix of demeaned observations.}
+\item{data}{\code{T_data x n_obs} matrix (rows are periods; oriented by the rule in \code{\link{hank_loglik_aggregate}}) of demeaned observations.}
 
 \item{model_fn}{\code{function(theta)} returning a \code{\link{hank_model}}
 at the structural parameter vector \code{theta}. May be \code{NULL} only

@@ -582,12 +582,17 @@ welfare_decompose <- function(result,
   if (is.null(model)) {
     stop("Could not locate dynhr_mod. Please supply 'model' argument.")
   }
+  params_shock <- params
   if (is.null(params)) params <- model$param_values
 
   dr <- .extract_dr(result)
   if (is.null(dr)) {
     stop("Decision rules not available in the result object.")
   }
+  ## Pin the package-wide shock covariance (.resolve_sigma_e(): caller
+  ## `params` > dr$Sigma_e > model) on the rule, so the analytic and the
+  ## simulated paths below use one covariance.
+  dr$Sigma_e <- .resolve_sigma_e(dr, model, params_shock)
 
   # Detect order of decision rules
   dr_order <- 1L
@@ -855,7 +860,8 @@ welfare_decompose <- function(result,
                                           obj_ast, init_dev_vec, n_periods) {
   endo <- dr$endo_names; exo <- dr$exo_names; sidx <- dr$state_idx
   if (is.null(sidx) || length(sidx) == 0L || is.null(obj_ast)) return(NULL)
-  Sigma_e <- tryCatch(.get_shock_cov(model, exo, params), error = function(e) .dynhr_reraise_bug(e, NULL))
+  ## conditional_welfare() pinned the resolved covariance on dr$Sigma_e.
+  Sigma_e <- tryCatch(.resolve_sigma_e(dr, model), error = function(e) .dynhr_reraise_bug(e, NULL))
   if (is.null(Sigma_e)) return(NULL)
   sys <- tryCatch(.order2_aug_system(dr, Sigma_e), error = function(e) .dynhr_reraise_bug(e, NULL))
   if (is.null(sys)) return(NULL)
@@ -945,7 +951,10 @@ welfare_decompose <- function(result,
 #' @param initial_state Named numeric vector of initial state values. If
 #'   \code{NULL}, uses the steady state (returns steady-state welfare).
 #' @param model        Optional \code{dynhr_mod}.
-#' @param params       Optional named parameter vector.
+#' @param params       Optional named parameter vector. The shock covariance
+#'   of the stochastic paths comes from \code{params} when supplied, else
+#'   from the decision rules' \code{Sigma_e}, else from the model's shocks
+#'   block.
 #' @param planner_objective Optional objective expression text.
 #' @param n_periods    Number of periods to simulate (for order >= 2).
 #' @param burn_in      Burn-in periods discarded before welfare evaluation
@@ -1232,7 +1241,10 @@ conditional_welfare <- function(result,
 #'
 #' @param dr                DecisionRules object (must contain ghx, ghu, etc.).
 #' @param model             dynhr_mod object.
-#' @param params            Named parameter vector.
+#' @param params            Named parameter vector, or \code{NULL}. The shock
+#'   covariance (moments and simulation alike) comes from \code{params} when
+#'   supplied, else from \code{dr$Sigma_e}, else from the model's shocks
+#'   block.
 #' @param planner_objective Character: planner objective expression.
 #' @param discount          Discount factor. Defaults to \code{beta} parameter.
 #' @param ss                Steady-state vector. If NULL, extracted from model
@@ -1282,6 +1294,10 @@ welfare_compute <- function(dr, model, params,
     n_periods <- n_sim
   }
 
+  ## One shock covariance for the Lyapunov moments AND the simulation:
+  ## .resolve_sigma_e() (caller `params` > dr$Sigma_e > model), pinned on the
+  ## rule before `params` is defaulted.
+  dr$Sigma_e <- .resolve_sigma_e(dr, model, params)
   if (is.null(params)) params <- model$param_values
   if (is.null(discount)) {
     beta_val <- if ("beta" %in% names(params)) params[["beta"]] else NA
@@ -1327,7 +1343,7 @@ welfare_compute <- function(dr, model, params,
   welfare_uncond <- NA_real_
 
   if (dr_order == 1) {
-    moments <- compute_moments(dr, model, params = params)
+    moments <- compute_moments(dr, model)
     if (!is.null(moments) && !is.null(moments$var_cov)) {
       # Compute E[f(y)] ≈ f(ss) + ½·tr(Σ · H)
       # where H is the Hessian of the objective at SS

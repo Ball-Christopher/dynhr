@@ -611,7 +611,7 @@ hank_emulator_level_metric <- function(emu, theta, N) {
     td <- hank_mixture_td_nonlinear(b, omega,
                                     r_path = mks$r + rw_scale * cfg$rw_shock$r,
                                     w_path = rep(mks$w, cfg$T_h))
-    D1 <- td$Dpath[, cfg$t_star]
+    D1 <- td$Dpath[cfg$t_star, ]
   }
   list(ss_dir = ss_dir, D0 = D0, D1 = D1, r = mks$r, w = mks$w)
 }
@@ -707,7 +707,8 @@ hank_emulator_level_metric <- function(emu, theta, N) {
 #' \code{me_var = (me_frac * min(per-column sd))^2} is fixed from it and shared
 #' (not truth-dependent) across every replication.
 #'
-#' \strong{Per-replication steps} (\code{set.seed(seed + rep)}): (1) direct-GE DGP
+#' \strong{Per-replication steps} (seeded with replication \code{rep}'s own
+#' child seed of \code{seed}): (1) direct-GE DGP
 #' truth at \code{theta*} (nonlinear snapshot \code{D1}, no clipping); (2) simulate a
 #' macro series \code{Y} from the truth state space, and draw two independent
 #' size-\code{N} multinomial cross-sections \code{Dhat0, Dhat1} from \code{D0, D1}, forming
@@ -761,7 +762,9 @@ hank_emulator_level_metric <- function(emu, theta, N) {
 #'   rw_shock$r}). Default \code{0.005} (50bps): verified to calibrate
 #'   (a smaller \code{0.003} leaves the reweighting channel too weak).
 #' @param T_data_seed Seed for the fixed reference measurement-error series.
-#' @param seed Base seed; replication \code{rep} uses \code{seed + rep}.
+#' @param seed Base seed; replication \code{rep} uses the \code{rep}-th of a
+#'   family of statistically independent seeds derived from \code{seed} (the
+#'   same for any \code{n_rep >= rep}).
 #' @param L_ranks Integer rank resolution: ranks are integers in
 #'   \code{0..L_ranks-1}.
 #' @param rw_metric \code{"fixed_truth"} (default; one
@@ -854,11 +857,13 @@ hank_mixture_sbc <- function(emu, n_rep, prior = NULL, sampler = "grid",
   ## B_ref-basis functional covariance of a single projected size-N survey.
   cov_D <- function(D) crossprod(emu$B_ref, D * emu$B_ref) - tcrossprod(crossprod(emu$B_ref, D))
 
-  ## Each rep re-seeds (seed + rep) in this frame; restore the caller's RNG
-  ## stream when hank_mixture_sbc() exits (C1).
+  ## Each rep re-seeds (its child seed) in this frame; restore the caller's RNG
+  ## stream when hank_mixture_sbc() exits (C1). Child seeds, not seed + rep:
+  ## the first draw is the truth node, dependent across consecutive seeds.
   .local_seed(seed)
+  rep_seeds <- .child_seeds(seed, n_rep, "hank_mixture_sbc_replications")
   for (rep in seq_len(n_rep)) {
-    set.seed(seed + rep)
+    set.seed(rep_seeds[rep])
 
     ## ---- draw truth theta* from the (discrete) eval grid nodes -----------
     k_star <- sample.int(n_eval_nodes, 1L)

@@ -70,7 +70,7 @@
 #' @param betas Numeric length-K vector of discount factors, one per mixture
 #'   type (see \code{\link{hank_mixture_ks_steady}}).
 #' @param omega Numeric length-K mixture weights, non-negative, summing to 1.
-#' @param data \code{T_data x length(observables)} matrix of demeaned
+#' @param data \code{T_data x length(observables)} matrix (rows are periods; oriented by the rule in \code{\link{hank_loglik_aggregate}}) of demeaned
 #'   observations, columns in the order of \code{obs_vars} (as expected by
 #'   \code{\link{hank_kalman_loglik}}).
 #' @param obs_vars Character vector of observable names produced by the

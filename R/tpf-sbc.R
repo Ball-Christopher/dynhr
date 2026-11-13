@@ -247,7 +247,9 @@
 #'   2026-08-04 R = 100 certification run showed a rho_a-specific rank
 #'   shift (mean_rank_z -3.0, sig_b clean) from exactly this, after the
 #'   obs-tensor fix removed the dominant bias.
-#' @param seed Base RNG seed; replication r uses \code{seed + r}.
+#' @param seed Base RNG seed; replication r uses the r-th of a family of
+#'   statistically independent seeds derived from \code{seed} (the same for
+#'   any \code{n_repl >= r} and any \code{cores}).
 #' @param cores Parallel replications via \code{parallel::mclapply}
 #'   (default 1 = serial).
 #' @return A list: \code{ranks} (matrix, rows = successful replications,
@@ -287,7 +289,7 @@ tpf_order3_sbc <- function(n_repl = 100L, T_obs = 20L, n_particles = 150L,
         "); check me_var_frac and the reference panel.", call. = FALSE)
 
   run_one <- function(r) {
-    set.seed(seed + r)
+    set.seed(rep_seeds[r])
     ## 1. theta* ~ prior.
     theta_star <- prior_sampler()[par_nm]
 
@@ -324,7 +326,7 @@ tpf_order3_sbc <- function(n_repl = 100L, T_obs = 20L, n_particles = 150L,
 
     ## 4. Pseudo-marginal RWMH on the likelihood = "tpf", order = 3L
     ##    closure (seed = NULL -> fresh particle cloud every evaluation).
-    lp_fn <- make_log_posterior_tpf(model, t(Y_noisy), priors, obs_vars,
+    lp_fn <- make_log_posterior_tpf(model, Y_noisy, priors, obs_vars,
                                     compiled, me_variance = me_var_const,
                                     n_particles = n_particles, n_mh = n_mh,
                                     seed = NULL, order = 3L,
@@ -392,9 +394,12 @@ tpf_order3_sbc <- function(n_repl = 100L, T_obs = 20L, n_particles = 150L,
         ll_sd = ll_sd, L = k_i)
   }
 
-  ## run_one() re-seeds (seed + r) in THIS process on the serial path; restore
-  ## the caller's RNG stream when this function exits.
+  ## run_one() re-seeds (replication r's child seed) in THIS process on the
+  ## serial path; restore the caller's RNG stream when this function exits.
+  ## Child seeds, not seed + r: the first draw after set.seed() is the true
+  ## theta*, dependent across consecutive integer seeds.
   .local_seed(seed)
+  rep_seeds <- .child_seeds(seed, n_repl, "tpf_sbc_replications")
   reps <- if (cores > 1L) {
     parallel::mclapply(seq_len(n_repl), run_one, mc.cores = cores,
                        mc.preschedule = FALSE)

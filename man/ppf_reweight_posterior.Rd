@@ -27,7 +27,8 @@ single-row matrix, treated as the mode.}
 
 \item{compiled}{dynhr_compiled}
 
-\item{data}{Observation matrix (T x n_obs or n_obs x T)}
+\item{data}{Observation matrix, T x n_obs (rows = periods;
+columns named by \code{obs_vars})}
 
 \item{prior_spec}{Prior specification data.frame}
 

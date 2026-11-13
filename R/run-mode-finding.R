@@ -500,8 +500,11 @@ run_mode_finding <- function(solved,
   ## instead of recompiling the model on every daemon again. shared_pool_ok flags
   ## that a live caller-owned pool exists; it is torn down exactly once on exit
   ## (covers the error path too). build_sigma_prop reads it via pool_ready.
+  ## shared_pool_owned: FALSE when the pool is daemons the USER had already set
+  ## up -- those are used as they are and left running.
   shared_pool_ok <- FALSE
-  on.exit(if (isTRUE(shared_pool_ok)) {
+  shared_pool_owned <- FALSE
+  on.exit(if (isTRUE(shared_pool_ok) && isTRUE(shared_pool_owned)) {
     try(mirai::daemons(NULL), silent = TRUE)
   }, add = TRUE)
 
@@ -732,6 +735,7 @@ run_mode_finding <- function(solved,
     .vcat("  Parallel seeded portfolio (mirai): shared H0 seed + multi-start (chain 1 = serial replica)\n")
     np_ <- length(theta_init)
     ncs <- .mirai_n_cores(n_cores, np_ * (np_ + 1L) %/% 2L)
+    shared_pool_owned <- !.mirai_daemons_active()
     pool_sh <- tryCatch(
       .mirai_pool_init(ncs, model, data, priors, obs_vars, me_variance,
                        me_extra = me_extra, shock_scale = shock_scale_mat,
@@ -751,7 +755,7 @@ run_mode_finding <- function(solved,
         if (!bug)
           .vcat(sprintf("  (shared daemon pool unavailable: %s; each stage self-provisions)\n",
                         conditionMessage(e)))
-        try(mirai::daemons(NULL), silent = TRUE)
+        if (shared_pool_owned) try(mirai::daemons(NULL), silent = TRUE)
         if (bug) stop(e)
         NULL
       })
@@ -928,9 +932,11 @@ run_mode_finding <- function(solved,
         .fm <- filter_method; .so <- singular_obs
         function(theta) {
           ncs <- .mirai_n_cores(.nc, length(theta) * (length(theta) + 1L) %/% 2L)
+          sh <- NULL
+          owns_pool <- !.mirai_daemons_active()
+          on.exit({ .mirai_daemons_stop(owns_pool); if (!is.null(sh)) rm(sh) }, add = TRUE)
           sh <- .mirai_pool_init(ncs, .model, .data, .priors, .obs, .mev,
                                  lik_init = "stationary", filter_method = .fm, singular_obs = .so)
-          on.exit({ mirai::daemons(NULL); if (!is.null(sh)) rm(sh) }, add = TRUE)
           ## .lp is unused on the pool_ready path (daemons evaluate .worker_lp);
           ## pass NULL so num_hessian_mirai's task closure never serialises this
           ## heavy posterior closure (see the note there).
@@ -983,7 +989,7 @@ run_mode_finding <- function(solved,
             ## call below (use_exact_hessian) keeps the auto-guard.
             H_logpost <- posterior_hessian(
               .model, .compiled, dr_h, pm2,
-              names(theta), .obs_vars, t(.data),
+              names(theta), .obs_vars, .data,
               me_variance  = .me_var,
               include_prior = TRUE, prior_spec = .priors,
               system_priors = .sys_pr,
@@ -1088,7 +1094,7 @@ run_mode_finding <- function(solved,
       .kkt6 <- any(.step6_bound_active(theta_mode, .bnd6$lower, .bnd6$upper,
                                        2 * .h6))
       H <- posterior_hessian(model, compiled, dr_m, pm, names(theta_mode),
-                             obs_vars, t(data), me_variance = me_variance,
+                             obs_vars, data, me_variance = me_variance,
                              include_prior = TRUE, prior_spec = priors,
                              system_priors = system_priors,
                              lik_init = lik_init,
@@ -1422,6 +1428,9 @@ build_sigma_prop <- function(lp_fn, theta_mode, prior_spec,
         }
       }
       fit_filter <- "stationary"
+      ## A pool stood up here is torn down here -- unless it is daemons the
+      ## user had already set, which are used and left running.
+      hess_owns_pool <- !isTRUE(pool_ready) && !.mirai_daemons_active()
       sh <- .set_filter("stationary")
       stat_lp_mode <- tryCatch({
         .tm <- theta_mode
@@ -1435,7 +1444,7 @@ build_sigma_prop <- function(lp_fn, theta_mode, prior_spec,
         .vcat(sprintf("  Stationary filter disagrees at the mode; re-initialising with lik_init = %s.\n",
                       lik_init))
         ## Only tear down a pool we OWN; a shared pool is just re-bound.
-        if (!isTRUE(pool_ready)) { mirai::daemons(NULL); if (!is.null(sh)) rm(sh) }
+        if (!isTRUE(pool_ready)) { .mirai_daemons_stop(hess_owns_pool); if (!is.null(sh)) rm(sh) }
         sh <- .set_filter(lik_init)
         fit_filter <- lik_init
       }
@@ -1465,7 +1474,7 @@ build_sigma_prop <- function(lp_fn, theta_mode, prior_spec,
           error = function(e) .dynhr_reraise_bug(e,
             matrix(NA_real_, n_par, n_par)))
       ## Tear down only a pool we created here; the caller owns a shared pool.
-      if (!isTRUE(pool_ready)) { mirai::daemons(NULL); if (!is.null(sh)) rm(sh) }
+      if (!isTRUE(pool_ready)) { .mirai_daemons_stop(hess_owns_pool); if (!is.null(sh)) rm(sh) }
     } else if (is.null(hess) && use_par_hess) {
       ## Non-standard likelihood (me_extra / shock_scale / non-Gaussian): the
       ## per-daemon re-init path does not cover it, so ship the closure.
@@ -1686,8 +1695,10 @@ num_hessian_mirai <- function(fn, theta, h = 1e-4, n_cores = NULL,
   ## model's Rcpp external pointers to dead pointers on the daemon, forcing a
   ## slow per-eval fallback (~45x slower -- 1908s vs 166s on NZSIM).
   if (!pool_ready) {
+    ## Reuse a user's daemons (left running); tear down only a pool we start.
+    owns_pool <- !.mirai_daemons_active()
+    on.exit(.mirai_daemons_stop(owns_pool), add = TRUE)
     .mirai_pool_closure(n_cores, fn)
-    on.exit(mirai::daemons(NULL), add = TRUE)
   }
 
   ## PSKF: the pruning selection the log-posterior makes at theta, recorded

@@ -27,7 +27,10 @@ conditional_welfare(
 
 \item{model}{Optional \code{dynhr_mod}.}
 
-\item{params}{Optional named parameter vector.}
+\item{params}{Optional named parameter vector. The shock covariance
+of the stochastic paths comes from \code{params} when supplied, else
+from the decision rules' \code{Sigma_e}, else from the model's shocks
+block.}
 
 \item{planner_objective}{Optional objective expression text.}
 

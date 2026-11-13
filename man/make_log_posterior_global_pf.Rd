@@ -27,8 +27,10 @@ make_log_posterior_global_pf(
 \arguments{
 \item{model}{Parsed model from \code{\link{parse_mod}}.}
 
-\item{data}{Observation matrix (\code{n_obs x T} or \code{T x n_obs};
-re-oriented automatically, as in \code{\link{kalman_filter}}).}
+\item{data}{Observation matrix, \code{T x n_obs} (rows are periods,
+columns the \code{obs_vars}), oriented by the rule documented in
+\code{\link{kalman_filter}} (names decide; an unnamed \code{n_obs x T}
+or square sample is refused).}
 
 \item{prior_spec}{Prior specification from \code{\link{extract_prior_spec}}.}
 

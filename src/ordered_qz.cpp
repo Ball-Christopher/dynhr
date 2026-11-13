@@ -5,13 +5,16 @@
 // Dynare's mjdgges and the threshold used by dynhr's previous QZ::qz() +
 // QZ::qz.dtgsen() path (select = |eig| <= 1 + 1e-6).
 //
-// Motivation: QZ::qz.dtgsen (the post-hoc eigenvalue reorder in the QZ package,
-// v0.2-4) has an input-INDEPENDENT memory-corruption bug -- hammering it on a
-// fixed, well-conditioned pencil segfaults after enough calls (missing PROTECT /
-// workspace under-allocation in the package C glue). Ordering *during* the
-// decomposition via dgges's SELCTG callback avoids dtgsen entirely. The R path
-// (QZ::qz + qz.dtgsen) is retained as a fallback in R/solve-qz.R for builds
-// without the compiled DLL.
+// Motivation: ordering *during* the decomposition via dgges's SELCTG callback
+// is what Dynare does, is slightly faster than QZ::qz() + a post-hoc
+// QZ::qz.dtgsen() reorder, and removes the per-draw dependence on the QZ
+// package. (An earlier version of this comment said QZ::qz.dtgsen v0.2-4 has
+// an input-independent memory-corruption bug. That is UNVERIFIED: 3e5 calls
+// on a fixed 12 x 12 pencil with a genuine reorder, plus 2e4 under
+// gctorture, were bit-identical with no crash on R 4.6 / macOS arm64
+// (2026-11-11), and the wrapper's workspace sizes meet LAPACK's minimum.)
+// The QZ-package path survives only behind options(dynhr.use_rcpp = FALSE)
+// as a debugging reference -- see .ordered_qz() in R/solve-qz.R.
 //
 // Returns ALPHAR/ALPHAI/BETA so the caller's eigenvalue classification and
 // Blanchard-Kahn counting logic are unchanged (dgges computes the same Schur
@@ -135,8 +138,8 @@ List ordered_qz_cpp(const arma::mat& E, const arma::mat& D,
   // Every non-zero code is a FAILURE -- the Schur factors are not a valid
   // stable-first ordering -- and so is any negative (argument) code. The old
   // test accepted N+1 and N+2 as "usable". Dynare's mjdgges caller likewise
-  // treats any non-zero info as a QZ failure. `ok = FALSE` makes .solve_qz()
-  // fall back to the QZ-package path.
+  // treats any non-zero info as a QZ failure. `ok = FALSE` makes .ordered_qz()
+  // abort with class dynhr_error_qz_failed (no second-library fallback).
   bool ok = (INFO == 0);
 
   return List::create(_["ok"] = ok, _["info"] = INFO, _["sdim"] = SDIM,

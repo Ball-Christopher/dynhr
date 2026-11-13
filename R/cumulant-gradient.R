@@ -99,7 +99,7 @@
   if (2L %in% orders) {
     moments <- mom_cache
     Sigma_y <- moments$var_cov[obs_vars, obs_vars, drop = FALSE]
-    if (me_variance > 0) diag(Sigma_y) <- diag(Sigma_y) + me_variance
+    if (any(me_variance > 0)) diag(Sigma_y) <- diag(Sigma_y) + me_variance
     m_model <- c(m_model, as.numeric(Sigma_y))
   }
 
@@ -871,9 +871,7 @@ cumulant_loglik_grad <- function(model, compiled, dr, params, param_names,
   n_exo   <- length(dr$exo_names)
   obs_idx <- match(obs_vars, endo)
   ## Same Sigma_e compute_moments() (the forward's covariance) uses.
-  Sigma_e <- if (!is.null(dr$Sigma_e) &&
-                 all(dim(dr$Sigma_e) == c(n_exo, n_exo))) dr$Sigma_e
-             else .get_shock_cov(model, dr$exo_names, params)
+  Sigma_e <- .resolve_sigma_e(dr, model, params)
   G  <- dr$ghx; H <- dr$ghu
   hx <- G[si, , drop = FALSE]; hu <- H[si, , drop = FALSE]
   Sx <- if (length(si)) .state_covariance(hx, hu, Sigma_e) else matrix(0, 0, 0)

@@ -1509,7 +1509,7 @@ run_model_diagnostics <- function(model, dr = NULL, ss = NULL, verbose = TRUE) {
 
 ## Measurement-error VARIANCES for D9, off the estimation's mode result.
 ## `me_variance` is the scalar/vector the likelihood used; `me_extra` is the
-## n_obs x T per-period EXTRA variance, whose per-observable MEAN is added
+## T x n_obs per-period EXTRA variance, whose per-observable MEAN is added
 ## (a single SD comparison cannot represent a time-varying variance; the mean
 ## is the variance of the ME process averaged over the sample). NULL when the
 ## estimation carried no measurement error, so D9 is unchanged.
@@ -1520,7 +1520,7 @@ run_model_diagnostics <- function(model, dr = NULL, ss = NULL, verbose = TRUE) {
   if (!is.null(mv) && any(is.finite(mv) & mv > 0)) out <- mv
   ex <- mode_result$me_extra
   if (!is.null(ex) && is.matrix(ex) && any(is.finite(ex) & ex > 0)) {
-    rm_ <- rowMeans(ex, na.rm = TRUE)
+    rm_ <- colMeans(ex, na.rm = TRUE)          # T x n_obs: column = observable
     if (is.null(names(rm_)) && length(rm_) == length(obs_names))
       names(rm_) <- obs_names
     base <- stats::setNames(rep(0, length(obs_names)), obs_names)

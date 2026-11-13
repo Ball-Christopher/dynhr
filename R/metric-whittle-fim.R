@@ -308,7 +308,8 @@ whittle_fim <- function(TT, RR, ZZ, DD, Sigma_e,
     if (is.null(ss) || !isTRUE(ss$converged)) return(NULL)
     params <- ss$params %||% params
     sys <- extract_system_matrices_fast(sys_cache, ss$ss, params)
-    dr  <- .solve_from_system(sys, model, compiled, ss$ss, params, FALSE)
+    dr  <- .solve_from_system(sys, model, compiled, ss$ss, params, FALSE,
+        qz_fail = "null")
     if (is.null(dr) || !isTRUE(dr$bk_satisfied)) return(NULL)
     list(dr = dr, params = params)
   }

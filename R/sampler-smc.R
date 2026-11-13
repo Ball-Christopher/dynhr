@@ -642,11 +642,13 @@ dynhr_smc <- function(
   use_mirai <- isTRUE(parallel) && identical(backend, "mirai") &&
     requireNamespace("mirai", quietly = TRUE)
   ## Counter so each mutation stage draws a fresh, reproducible RNG block
-  ## (stage k seeds particle i with seed_base + k * n_particles + i).
+  ## (stage k seeds particle i with .smc_stage_seeds(seed_base, k, n)[i]).
   .smc_mut_stage <- 0L
   if (use_mirai) {
+    ## Reuse a user's daemons (left running); tear down only a pool we start.
+    owns_pool <- !.mirai_daemons_active()
+    on.exit(.mirai_daemons_stop(owns_pool), add = TRUE)
     .smc_pool_setup(.mirai_n_cores(NULL, n_particles))
-    on.exit(mirai::daemons(NULL), add = TRUE)
   }
 
   # --- Build prior sampler if needed ---
@@ -753,7 +755,7 @@ dynhr_smc <- function(
 
   if (use_mirai) {
     results <- .smc_pmap(seq_len(n_particles), .eval_particle,
-                         seed_base = seed_base)
+                         seeds = .smc_stage_seeds(seed_base, 0L, n_particles))
   } else if (parallel && requireNamespace("future.apply", quietly = TRUE)) {
     results <- future.apply::future_lapply(seq_len(n_particles), .eval_particle,
                                             future.seed = TRUE)
@@ -1034,8 +1036,8 @@ dynhr_smc <- function(
     if (use_mirai) {
       .smc_mut_stage <- .smc_mut_stage + 1L
       mut_results <- .smc_pmap(seq_len(n_particles), .mutate_one,
-                               seed_base = seed_base +
-                                 .smc_mut_stage * n_particles)
+                               seeds = .smc_stage_seeds(seed_base, .smc_mut_stage,
+                                                        n_particles))
     } else if (parallel && requireNamespace("future.apply", quietly = TRUE)) {
       mut_results <- future.apply::future_lapply(seq_len(n_particles), .mutate_one,
                                                   future.seed = TRUE)

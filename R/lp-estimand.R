@@ -232,7 +232,7 @@ lp_estimand <- function(dr, model, shock, outcome = NULL, horizon = 20L,
     nrow(dr$ghxx) == length(endo)
 
   ## ---- shock covariance, impulse direction, delta --------------------------
-  Sigma_e <- .irf_shock_scale(dr, model, params)
+  Sigma_e <- .resolve_sigma_e(dr, model, params)
   Sigma_e <- as.matrix(Sigma_e)
   i  <- match(shock, exo)
   s2 <- Sigma_e[i, i]
@@ -267,7 +267,8 @@ lp_estimand <- function(dr, model, shock, outcome = NULL, horizon = 20L,
   hu   <- ghu[sidx, , drop = FALSE]
   if (order2) {
     ghxx <- matrix(dr$ghxx, n_e, n_s * n_s)
-    ghxu <- matrix(dr$ghxu, n_e, n_s * n_u)
+    ## (e (x) x) contraction below: MIXED-BLOCK LAYOUT CONVENTION
+    ghxu <- matrix(.mixed_block(dr, "ghxu", "u_slow"), n_e, n_s * n_u)
     ghuu <- matrix(dr$ghuu, n_e, n_u * n_u)
   } else {
     ghxx <- matrix(0, n_e, n_s * n_s)

@@ -321,9 +321,22 @@ hank_stationary_dist <- function(Lambda, d0 = NULL, tol = 1e-13,
 #'   error: R's silent recycling previously let an exactly-dividing mismatch
 #'   (e.g. \code{length(d) = 4}, \code{length(x) = 2}) return a plausible,
 #'   numerically wrong scalar.
+#'   The orientation of a matrix \code{x} against a VECTOR \code{d} cannot be
+#'   checked (a plain distribution vector carries no \code{n_e x n_a} shape),
+#'   so pass the policy as returned by the package (\code{n_e x n_a}), not
+#'   transposed; two matrices must have identical dimensions.  A \code{d}
+#'   that does not sum to 1 (tolerance 1e-6) or has negative mass draws a
+#'   \code{dynhr_warning_hank_unnormalised} warning (the result is then a
+#'   weighted sum, not a mean).
 #' @return The scalar mass-weighted mean \code{sum(d * x)}.
 #' @export
-hank_aggregate <- function(d, x) {
+hank_aggregate <- function(d, x) .hank_aggregate_impl(d, x, check_mass = TRUE)
+
+## hank_aggregate() with the probability-mass warning switchable:
+## validate_hank_block() reports mass itself (its D_unit_mass row) and calls
+## this with check_mass = FALSE so a corrupted block is not reported twice.
+## @noRd
+.hank_aggregate_impl <- function(d, x, check_mass = TRUE) {
   if (is.matrix(d) && is.matrix(x) && !identical(dim(d), dim(x)))
     stop("hank_aggregate(): 'd' (", nrow(d), " x ", ncol(d), ") and 'x' (",
          nrow(x), " x ", ncol(x), ") must have identical dimensions.")
@@ -333,6 +346,18 @@ hank_aggregate <- function(d, x) {
     stop("hank_aggregate(): 'd' (", length(dv), " cells) and 'x' (",
          length(xv), " cells) must cover the same number of cells -- ",
          "refusing to recycle.")
+  ## A distribution that is not a probability measure gives a scaled (not
+  ## mean) aggregate.  Warn rather than abort, so a caller aggregating over a
+  ## deliberately unnormalised measure keeps working (review 2026-11-11 F9).
+  tot <- sum(dv)
+  if (isTRUE(check_mass) &&
+      (!is.finite(tot) || abs(tot - 1) > 1e-6 || any(dv < -1e-12)))
+    .dynhr_warn("hank_aggregate(): 'd' is not a probability distribution ",
+                "(sum = ", format(tot, digits = 8),
+                if (any(dv < -1e-12)) ", with negative mass" else "",
+                "), so the result is a mass-weighted SUM, not a mean. ",
+                "Normalise 'd' (d / sum(d)) if a mean was intended.",
+                class = "dynhr_warning_hank_unnormalised")
   sum(dv * xv)
 }
 

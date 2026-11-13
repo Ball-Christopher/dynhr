@@ -27,7 +27,10 @@
 #' creation time, not inside the per-draw closure.
 #'
 #' @param model       dynhr_mod
-#' @param data        Observation matrix (T x n_obs or n_obs x T)
+#' @param data        Observation matrix, T x n_obs (rows = periods; name the
+#'   columns by \code{obs_vars}: a matrix named by series on its ROWS is
+#'   transposed with a message, an unnamed n_obs x T or square one is an
+#'   error)
 #' @param prior_spec  Prior specification data.frame
 #' @param obs_vars    Character vector of observed variable names
 #' @param compiled    dynhr_compiled
@@ -72,9 +75,8 @@ make_log_posterior_obc <- function(model, data, prior_spec, obs_vars,
          paste(obs_vars[is.na(obs_idx)], collapse = ", "))
   }
 
-  # Ensure data is n_obs x T (columns = time periods)
-  if (is.data.frame(data)) data <- as.matrix(data)
-  Y <- if (nrow(data) == length(obs_vars)) data else t(data)
+  # T x n_obs, rows = periods (R/time-orientation.R: names decide)
+  Y <- .kf_time_in(data, obs_vars, "data", "make_log_posterior_obc")
 
   ## Adapter over the shared closure builder (R/posterior-closure.R). Specific
   ## to this branch: the cold (never warm-started) steady-state solve, the
@@ -114,7 +116,10 @@ make_log_posterior_obc <- function(model, data, prior_spec, obs_vars,
 #' ignored now, as a warm start made the likelihood path-dependent.)
 #'
 #' @param model       dynhr_mod
-#' @param data        Observation matrix (T x n_obs or n_obs x T)
+#' @param data        Observation matrix, T x n_obs (rows = periods; name the
+#'   columns by \code{obs_vars}: a matrix named by series on its ROWS is
+#'   transposed with a message, an unnamed n_obs x T or square one is an
+#'   error)
 #' @param prior_spec  Prior specification data.frame
 #' @param obs_vars    Character vector of observed variable names
 #' @param compiled    dynhr_compiled
@@ -163,8 +168,8 @@ make_log_posterior_obc_pkf <- function(model, data, prior_spec, obs_vars,
     stop("obs_vars contains names not found in model$var_names: ",
          paste(obs_vars[is.na(obs_idx)], collapse = ", "))
 
-  if (is.data.frame(data)) data <- as.matrix(data)
-  Y <- if (nrow(data) == length(obs_vars)) data else t(data)
+  ## T x n_obs, rows = periods (R/time-orientation.R: names decide).
+  Y <- .kf_time_in(data, obs_vars, "data", "make_log_posterior_obc_pkf")
 
   ## Adapter over the shared closure builder (R/posterior-closure.R). Two
   ## things are specific here beyond the PKF call itself: the cold

@@ -25,6 +25,7 @@
 #' @param order    Perturbation order: 1 (default), 2, 3, 4, or 5.
 #' @param Sigma_e  (order >= 2) \eqn{n_{exo} \times n_{exo}} shock
 #'   covariance matrix.  \code{NULL} uses the model's \code{shocks} block.
+#'   Stored as \code{dr$Sigma_e}; the stoch_simul IRFs and moments use it.
 #' @param steady_options  List of options passed to \code{solve_steady()},
 #'   e.g. \code{list(y0 = ..., tol = 1e-10)}. \code{list(growth = TRUE)}
 #'   solves the BALANCED-GROWTH path of a \code{model(linear)} with unit roots
@@ -213,8 +214,11 @@ solve_model <- function(mod_file,
   moments <- NULL
   if (isTRUE(stoch_simul)) {
     .vcat("-- Step 5: stoch_simul (IRFs + moments) --\n")
-    irfs <- compute_irfs(dr, model, n_periods = irf_horizons, params = params)
-    moments <- compute_moments(dr, model, params = params)
+    ## params = NULL: dr was solved at `params`, so dr$Sigma_e is their
+    ## covariance -- or the `Sigma_e` the caller passed, which `params` would
+    ## otherwise override (.resolve_sigma_e()).
+    irfs <- compute_irfs(dr, model, n_periods = irf_horizons, params = NULL)
+    moments <- compute_moments(dr, model, params = NULL)
     if (!is.null(irfs))
       .vcat(sprintf("  IRFs: %d shocks x %d periods\n",
                     length(irfs), irf_horizons))

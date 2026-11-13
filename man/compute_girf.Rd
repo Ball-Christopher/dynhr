@@ -28,8 +28,10 @@ deviation (default 1 = a one-standard-deviation impulse). The impact is
 \code{shock_size} times the relevant column of \code{chol(Sigma_e)}, so
 \code{shock_size = 2} is a 2-sigma impulse, not 2 in level units.}
 
-\item{params}{Optional named numeric parameter vector (default:
-\code{model$param_values})}
+\item{params}{Named numeric parameter vector, or \code{NULL} (default).
+The shock covariance comes from \code{params} when supplied, else from
+\code{dr$Sigma_e} (set by \code{\link{solve_perturbation}}), else from
+the model's shocks block at \code{model$param_values}.}
 
 \item{initial_state}{Optional named numeric vector over the state variables
 (names matching \code{dr$endo_names[dr$state_idx]}, in level units) from

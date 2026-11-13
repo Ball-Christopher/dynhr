@@ -37,7 +37,7 @@
 #' @param n_chains     Number of MCMC chains per method (for RWMH and NUTS).
 #'   Recycled. Default \code{4}. Several NUTS chains run on a worker pool when
 #'   \code{parallel = TRUE} and in sequence otherwise (chain \code{k} is
-#'   seeded \code{seed + k}, as on the pool).
+#'   seeded with the k-th child seed of \code{seed}, as on the pool).
 #' @param n_particles  Number of SMC particles (only for \code{"SMC"}), or
 #'   the DSMH cloud size \eqn{N G} (only for \code{"DSMH"}).
 #'   Recycled.  Default \code{2000}.
@@ -210,8 +210,14 @@
 #'   daemons' base seed (before 0.9.3.105 they ignored it and always used
 #'   their fixed default, so different seeds gave identical parallel draws);
 #'   with \code{seed = NULL} they keep that default.
-#' @param ...          Additional arguments forwarded to each sampler
-#'   (e.g. \code{target_accept = 0.25}, \code{adapt_every = 100}).
+#' @param ...          Additional arguments forwarded to each sampler, under
+#'   that sampler's own argument names (e.g. for \code{"RWMH"}
+#'   \code{scale = 0.3}, \code{target_rate = 0.25}, \code{adapt_every = 100};
+#'   for \code{"NUTS"} \code{target_accept = 0.9}). On the parallel (mirai)
+#'   multi-chain RWMH path \code{scale}, \code{target_rate} and
+#'   \code{adapt_every} are forwarded (as \code{run_mcmc_mirai()}'s
+#'   \code{mh_scale}, \code{target_accept}, \code{adapt_every}); any other
+#'   extra is refused there rather than silently ignored.
 #'
 #' @return An object of class \code{"dynhr_posterior_result"} containing:
 #'   \describe{
@@ -657,7 +663,13 @@ run_posterior_estimation <- function(mode_result,
                              lik_init    = par_ctx$lik_init %||% "auto",
                              singular_obs = par_ctx$singular_obs %||% "reject",
                              power         = spec$likelihood$power_posterior,
-                             system_priors = par_ctx$system_priors)
+                             system_priors = par_ctx$system_priors,
+                             ## the Whittle debias the sampled log_post_fn was
+                             ## built with (was: always make_posterior_grad's
+                             ## default, whatever the spec set)
+                             debias = .whittle_debias_resolve(
+                               log_post_fn,
+                               c(spec$likelihood$extra, spec$mode$extra)))
     .vcat(sprintf("  [%s] gradient method: %s\n", tag,
                   .grad_method_label(attr(g, "grad_method"), grad_method)))
     if (!is.null(par_ctx$infeasible_penalty) ||
@@ -1174,8 +1186,9 @@ run_posterior_estimation <- function(mode_result,
           }
         } else {
           ## Several chains without a pool: run them SEQUENTIALLY, seeded and
-          ## dispersed as the parallel path does (chain ch is seeded
-          ## seed_base + ch; chain 1 starts at the mode, chains 2..n at
+          ## dispersed as the parallel path does (chain ch is seeded with
+          ## .child_seeds(seed_base, nc, "mcmc_chains")[ch]; chain 1 starts
+          ## at the mode, chains 2..n at
           ## the mode + 0.5 * chol(Sigma) z, in eta-space under a transform), so
           ## the serial and the parallel runs are comparable and the chains
           ## feed the same R-hat / ESS diagnostics. The ambient RNG state is
@@ -1187,6 +1200,7 @@ run_posterior_estimation <- function(mode_result,
                       assign(".Random.seed", rng_saved, envir = globalenv()))
             nuts_Sig_disp  <- .nuts_disp_cov()
             nuts_seed_base <- .dynhr_opt("seed_base", seed)
+            nuts_chain_seeds <- .child_seeds(nuts_seed_base, nc, "mcmc_chains")
             n_th <- length(current_theta)
             chains_nuts <- list()
             cs_nuts <- data.frame(
@@ -1194,7 +1208,7 @@ run_posterior_estimation <- function(mode_result,
               n_divergent = integer(), mean_treedepth = numeric(),
               elapsed_min = numeric(), stringsAsFactors = FALSE)
             for (ch in seq_len(nc)) {
-              set.seed(nuts_seed_base + ch)
+              set.seed(nuts_chain_seeds[ch])
               th0 <- current_theta
               if (ch > 1L && !is.null(nuts_Sig_disp)) {
                 Lc <- .robust_chol(nuts_Sig_disp, n_th)
@@ -1613,7 +1627,9 @@ print.dynhr_posterior_result <- function(x, ...) {
               (!is.null(parsed_model) && !is.null(Y) && !is.null(obs_names)))
   if (use_par) {
     if (verbose) .dynhr_cat(sprintf("    Parallel RWMH (mirai): %d chains\n", n_chains))
-    par_res <- run_mcmc_mirai(
+    ## The serial path's `...` extras (scale / target_rate / adapt_every)
+    ## map onto run_mcmc_mirai()'s names; any other is refused, not dropped.
+    par_res <- do.call(run_mcmc_mirai, c(list(
       parsed_model = parsed_model, Y = Y,
       prior_spec   = prior_spec, obs_names = obs_names,
       theta_mode   = theta_mode, Sigma_prop = Sigma_prop,
@@ -1628,14 +1644,18 @@ print.dynhr_posterior_result <- function(x, ...) {
       adapt_cov    = adapt_cov,
       n_blocks     = n_blocks,
       checkpoint   = checkpoint,
-      progress     = verbose)
+      progress     = verbose),
+      .par_sampler_extra("rwmh", list(...))))
     chain_list <- par_res$chains
     conv <- .compute_convergence(chain_list)
     combined <- if (!is.null(conv)) {
       new_dynhr_chains(list(
         chain           = conv$combined,
         acceptance_rate = mean(par_res$chain_stats$accept_rate, na.rm = TRUE),
-        sampler         = "rwmh", n_chains = n_chains,
+        ## Chains that failed on the daemons are NULL here (and warned about
+        ## by run_mcmc_mirai): count the chains actually pooled.
+        sampler         = "rwmh",
+        n_chains        = sum(!vapply(chain_list, is.null, logical(1))),
         chain_list      = chain_list, chain_stats = par_res$chain_stats), "rwmh")
     } else NULL
     return(list(chains = chain_list, chain_stats = par_res$chain_stats,
@@ -1824,10 +1844,13 @@ print.dynhr_posterior_result <- function(x, ...) {
 }
 
 
-## The sampler$extra arguments a parallel (mirai) NUTS / DIME run passes on:
-## those its function takes. Any other is refused, never dropped (the
-## parallel paths used to ignore sampler$extra entirely); validate_spec()
-## refuses the same names when the spec is built.
+## The sampler$extra arguments a parallel (mirai) NUTS / DIME / RWMH run
+## passes on: those its function takes (for RWMH, rwmh()'s tuning arguments
+## renamed to run_mcmc_mirai()'s, .rwmh_par_arg_map). Any other is refused,
+## never dropped (the parallel paths used to ignore sampler$extra entirely;
+## parallel RWMH dropped `scale` / `target_rate` / `adapt_every` until review
+## 2026-11-11 F5); validate_spec() refuses the same names when the spec is
+## built.
 .par_sampler_extra <- function(method, sampler_args) {
   uns <- .spec_parallel_extra_unsupported(method, sampler_args)
   if (length(uns))
@@ -1836,5 +1859,7 @@ print.dynhr_posterior_result <- function(x, ...) {
                  " is not supported on the parallel (mirai) ", toupper(method),
                  " path, which would ignore it; set parallel = FALSE or drop it.",
                  class = "dynhr_error_inapplicable_argument")
+  if (identical(method, "rwmh") && length(sampler_args))
+    names(sampler_args) <- unname(.rwmh_par_arg_map[names(sampler_args)])
   sampler_args
 }

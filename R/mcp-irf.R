@@ -20,6 +20,16 @@
 # IRF computation using MCP path solver
 # =============================================================================
 
+## Internal perfect-foresight horizon for an IRF of `n_periods` periods. A
+## perfect-foresight path solved over exactly `n_periods` imposes the return to
+## steady state AT n_periods, so the terminal condition bites inside the
+## reported window and the first k periods change with n_periods. Solving on
+## max(2 * n_periods, n_periods + 40) periods and truncating keeps the reported
+## periods independent of n_periods. Shared by compute_irfs_mcp() and
+## compute_irfs_obc(obc_solver = "mcp").
+.pf_irf_horizon <- function(n_periods)
+  as.integer(max(2L * n_periods, n_periods + 40L))
+
 #' Compute IRFs using the MCP semi-smooth Newton path solver
 #'
 #' For each shock in the model, constructs a unit-impulse shock sequence
@@ -44,7 +54,12 @@
 #' @param params      Named numeric parameter vector; NULL -> model$param_values
 #' @param mcp_specs   List of MCP specs (from \code{\link{mcp_parse_tags}}).
 #'   If NULL, attempts to parse MCP tags from the model automatically.
-#' @param n_periods   Number of IRF periods (default 40)
+#' @param n_periods   Number of IRF periods (default 40). The
+#'   perfect-foresight problem is solved on an internal horizon of
+#'   \code{max(2 * n_periods, n_periods + 40)} periods (return to steady state
+#'   imposed at its end) and truncated to \code{n_periods}, so the returned
+#'   periods do not depend on \code{n_periods} (the rule
+#'   \code{\link{compute_irfs_obc}} uses for \code{obc_solver = "mcp"}).
 #' @param shock_size  Shock size multiplier applied to each shock's standard
 #'   deviation (default 1: one-standard-deviation impulse)
 #' @param ...         Additional arguments passed to \code{\link{mcp_solve_path}}
@@ -75,6 +90,7 @@ compute_irfs_mcp <- function(compiled,
                               n_periods   = 40L,
                               shock_size  = 1,
                               ...) {
+  n_periods <- .check_irf_n_periods(n_periods, "compute_irfs_mcp")
   if (is.null(params)) params <- model$param_values
 
   endo  <- compiled$dynamic$endo_names
@@ -92,20 +108,21 @@ compute_irfs_mcp <- function(compiled,
 
   n_spec <- length(mcp_specs)
 
-  # Get shock standard deviations
-  shock_stderr <- .get_shock_stderr(model, exo, params)
+  # Impulses: lower Cholesky of the full Sigma_e (shared IRF rule)
+  E_imp <- .irf_impulse_matrix(NULL, model, params, shock_size, exo = exo)
 
   irfs <- vector("list", n_exo)
   names(irfs) <- exo
+  n_solve <- .pf_irf_horizon(n_periods)
 
   y0_num <- as.numeric(y_ss[endo])
   names(y0_num) <- endo
 
   for (k in seq_along(exo)) {
     # Build unit impulse: shock hits at t=1, zero thereafter
-    shock_seq <- matrix(0, nrow = n_periods, ncol = n_exo)
+    shock_seq <- matrix(0, nrow = n_solve, ncol = n_exo)
     colnames(shock_seq) <- exo
-    shock_seq[1L, exo[k]] <- shock_stderr[exo[k]] * shock_size
+    shock_seq[1L, ] <- E_imp[, k]
 
     # Run MCP solver
     res <- mcp_solve_path(
@@ -119,7 +136,7 @@ compute_irfs_mcp <- function(compiled,
     )
 
     # Extract IRF matrix
-    irf_mat <- res$Y
+    irf_mat <- res$Y[seq_len(n_periods), , drop = FALSE]
     colnames(irf_mat) <- endo
     rownames(irf_mat) <- paste0("t", seq_len(n_periods))
     irfs[[k]] <- irf_mat

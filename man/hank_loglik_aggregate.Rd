@@ -8,11 +8,20 @@ hank_loglik_aggregate(data, Theta, sigma_eps, me_variance = 0)
 }
 \arguments{
 \item{data}{\code{T_data x n_obs} matrix of demeaned aggregate observations
-(deviations from steady state), columns in the same order as \code{Theta}.}
+(deviations from steady state; rows are periods), columns in the same
+order as \code{Theta}. Oriented by the package-wide rule: when
+\code{Theta} has column names, columns of \code{data} named by them are
+matched by name and a matrix named by them on its ROWS (the old
+\code{n_obs x T} layout) is transposed with a message; an unnamed
+\code{n_obs x T} or square sample is refused (class
+\code{dynhr_error_orientation}) instead of being silently misread.
+The sample must be complete (no \code{NA}); for missing observations use
+\code{\link{hank_loglik_ss}}, which treats \code{NA} as missing.}
 
 \item{Theta}{MA coefficients (see \code{\link{hank_ma_coefficients}}).}
 
-\item{sigma_eps}{Shock innovation standard deviation.}
+\item{sigma_eps}{Shock innovation standard deviation (a single finite
+number \eqn{\ge 0}).}
 
 \item{me_variance}{Measurement-error variance (default 0).}
 }

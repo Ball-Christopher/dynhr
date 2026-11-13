@@ -191,7 +191,7 @@
   pp   <- m$param_values
   loglik_grid <- vapply(grid, function(v) {
     pp["sigma_eps"] <- v
-    kalman_filter(matrix(y, nrow = 1), dr, m, pp, obs_vars = "y",
+    kalman_filter(matrix(y, ncol = 1), dr, m, pp, obs_vars = "y",
                   lik_init = "diffuse", me_variance = 0)$loglik
   }, numeric(1))
   logprior_grid <- vapply(grid, function(v)
@@ -641,9 +641,16 @@ mdd_calibration <- function(case = c("conjugate_regression", "local_level", "dsg
     for (est in estimators) {
       reps <- if (est %in% c("laplace", "d15")) 1L else n_reps
       for (r in seq_len(reps)) {
-        ## Distinct, deterministic seed per (subproblem, estimator, rep).
-        rep_seed <- seed + 1000L * which(sp_name == names(problem$subproblems)) +
-          100L * match(est, c("thames", "smc", "laplace", "d15")) + r
+        ## Distinct, deterministic, independent seed per (subproblem,
+        ## estimator, rep). The old seed + 1000 * sp + 100 * est + r made
+        ## consecutive reps' first draws dependent and COLLIDED across
+        ## estimators once n_reps > 100.
+        rep_seed <- .child_seed_at(
+          .child_seed_at(
+            .child_seed_at(seed, which(sp_name == names(problem$subproblems)),
+                           "mdd_subproblem"),
+            match(est, c("thames", "smc", "laplace", "d15")), "mdd_estimator"),
+          r, "mdd_rep")
         res <- .mdd_run_estimator(case, est, sp, seed = rep_seed)
         rows[[length(rows) + 1L]] <- data.frame(
           case        = case,

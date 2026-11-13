@@ -15,7 +15,9 @@ pruned_ss_loglik3(
 \arguments{
 \item{pss3}{A \code{pruned_ss3} object.}
 
-\item{Y}{Observations: \code{n_obs x T} (or \code{T x n_obs}, auto-oriented).
+\item{Y}{Observations: \code{T x n_obs} (rows are periods), oriented by the
+rule documented in \code{\link{pruned_ss_loglik}} (names decide; an
+unnamed \code{n_obs x T} or square matrix is refused).
 \code{NA} entries get an exact PARTIAL measurement update: a period with
 SOME (but not all) observables missing still updates on the observed
 subset (subsetting \code{ZZ}/\code{HH}/\code{SS} and using the
@@ -24,8 +26,9 @@ missing falls back to predict-only (no update).}
 
 \item{obs_vars}{Character vector of observed endogenous variable names.}
 
-\item{me_variance}{Scalar measurement-error variance added to the observation
-covariance diagonal (default 0). See \code{\link{pruned_ss_loglik}} for
+\item{me_variance}{Measurement-error variance added to the observation
+covariance diagonal (default 0): a scalar or one variance per observable
+(named entries matched to \code{obs_vars}). See \code{\link{pruned_ss_loglik}} for
 the "Riccati lock" hazard on near-perfectly-revealed observables.}
 
 \item{me_floor_check}{Logical: warn when the \code{me_variance} floor

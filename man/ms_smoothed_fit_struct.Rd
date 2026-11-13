@@ -9,12 +9,13 @@ ms_smoothed_fit_struct(sm, data)
 \arguments{
 \item{sm}{An object returned by \code{\link{ms_kim_smoother_struct}}.}
 
-\item{data}{The same observation matrix (\code{n_obs x T}) that was
-smoothed.}
+\item{data}{The same observation matrix that was smoothed, \code{T x n_obs}
+(rows = periods) with the observables as column names.}
 }
 \value{
-A list with \code{fitted} (\code{n_obs x T}), \code{residual}
-  (\code{fitted - data}, \code{NA} columns kept as \code{NA}) and
+A list with \code{fitted} (\code{T x n_obs}, rows = periods),
+  \code{residual} (\code{fitted - data}, \code{NA} entries kept as
+  \code{NA}) and
   \code{max_abs_residual} over the observed entries.
 }
 \description{

@@ -22,10 +22,17 @@ compute_irfs_order4(dr4, model, n_periods = 40L, shock_size = 1, params = NULL)
 An \code{IRFCollection} with \code{attr(., "order") = 4L}.
 }
 \description{
-Implements the Andreasen, Fernandez-Villaverde & Rubio-Ramirez (2018)
-pruning scheme truncated at fourth order. Tracks four additive layers:
-\eqn{x^{(1)}} (linear), \eqn{x^{(2)}} (quadratic), \eqn{x^{(3)}} (cubic),
-\eqn{x^{(4)}} (quartic). The constant mean-correction terms
-(\code{ghss}, \code{ghs3}) are absorbed into the baseline and cancel
-in deviation IRFs.
+Pruned (Andreasen, Fernandez-Villaverde & Rubio-Ramirez 2018) impulse
+responses truncated at fourth order, with the same definition as
+\code{\link{compute_irfs_order3}}: the difference between the pruned path
+with the impulse at \eqn{t = 1} and the pruned path without it, both
+started at the deterministic steady state with no other shock realised.
+The state layers are the coefficients of the path when the shocks and
+\eqn{\sigma} are scaled jointly, so every risk term of the rule enters
+(\code{ghss}, \code{ghxss}, \code{ghuss}, \code{ghxxss}, \code{ghxuss},
+\code{ghuuss}, \code{ghss2})
+and the result is the order-4 Taylor expansion, jointly in the shock
+size and \eqn{\sigma}, of the exact IRF.  (Before the 2026-11 review this
+function dropped every sigma term and mis-weighted the cross-layer
+products.)
 }

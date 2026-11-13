@@ -738,9 +738,9 @@ validate_hank_block <- function(block, check_parity = FALSE, tol = 1e-8) {
                    isTRUE(c_min > 0))
 
   ## stored aggregates match distribution-weighted policies
-  agg_A <- tryCatch(abs(block$A - hank_aggregate(block$D, block$a)),
+  agg_A <- tryCatch(abs(block$A - .hank_aggregate_impl(block$D, block$a, check_mass = FALSE)),
                     error = function(e) NA_real_)
-  agg_C <- tryCatch(abs(block$C - hank_aggregate(block$D, block$c)),
+  agg_C <- tryCatch(abs(block$C - .hank_aggregate_impl(block$D, block$c, check_mass = FALSE)),
                     error = function(e) NA_real_)
   rows$aggA <- row("A_matches_aggregated_policy", agg_A, tol,
                    isTRUE(agg_A <= tol))

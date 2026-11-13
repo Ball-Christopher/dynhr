@@ -333,8 +333,12 @@
 #' @param y0        Named numeric vector: endogenous state at t=0 (initial
 #'                  conditions). Length n_endo. Names must match var_names.
 #' @param y_ss      Named numeric vector: steady state (terminal condition).
-#' @param shock_path  T × n_exo numeric matrix of structural shocks. Column
-#'                    names must match varexo_names; missing columns are zero.
+#' @param shock_path  T × n_exo numeric matrix of structural shocks (rows =
+#'                    periods). Named columns must be shocks of the model
+#'                    (varexo_names); missing shocks are zero. An unnamed
+#'                    matrix must have exactly n_exo columns (an unnamed
+#'                    n_exo x T or square matrix is an error; a matrix named
+#'                    by shock on its ROWS is transposed with a message).
 #' @param params    Named numeric parameter vector.
 #' @param obc_specs List of OBC specs from obc_parse_tags() or
 #'                  obc_collect_specs() (empty list = no OBCs). Each spec must
@@ -366,7 +370,8 @@
 #' @return List with:
 #'   \itemize{
 #'     \item \code{Y} — T x n_endo solution matrix (rows = periods, cols = variables)
-#'     \item \code{regime} — n_spec x T logical matrix (TRUE = binding)
+#'     \item \code{regime} — T x n_spec logical matrix (rows = periods;
+#'       TRUE = binding)
 #'     \item \code{irf} — T x n_endo deviation from steady state
 #'     \item \code{converged} — Logical: TRUE if Newton converged on the final
 #'       regime AND that regime satisfies complementarity in every period
@@ -398,18 +403,13 @@ pf_newton_solve <- function(compiled,
 
   method <- match.arg(method)
 
-  # Normalize shock_path to T x n_exo matrix in exo_names order
-  if (!is.matrix(shock_path)) shock_path <- matrix(shock_path, nrow = 1L)
-  T <- nrow(shock_path)
-  eps_mat <- matrix(0, nrow = T, ncol = length(dyn$exo_names))
-  colnames(eps_mat) <- dyn$exo_names
-  if (!is.null(colnames(shock_path))) {
-    for (nm in intersect(colnames(shock_path), dyn$exo_names))
-      eps_mat[, nm] <- shock_path[, nm]
-  } else {
-    nc <- min(ncol(shock_path), length(dyn$exo_names))
-    eps_mat[, seq_len(nc)] <- shock_path[, seq_len(nc)]
-  }
+  # Normalize shock_path to a T x n_exo matrix in exo_names order by the one
+  # rows = periods rule (R/time-orientation.R): named columns may be a subset
+  # (missing shocks are zero); an unnamed matrix must carry one column per
+  # shock -- an n_exo x T matrix used to run silently as an n_exo-period path.
+  eps_mat <- .kf_time_in(shock_path, dyn$exo_names, "shock_path",
+                         "pf_newton_solve", subset = TRUE, fill = 0)
+  T <- nrow(eps_mat)
 
   # Align y0 and y_ss to endo_names order
   y0_num  <- as.numeric(y0[dyn$endo_names])
@@ -694,7 +694,7 @@ pf_newton_solve <- function(compiled,
 
   list(
     Y                = Y,
-    regime           = regime[seq_len(n_spec), , drop = FALSE],
+    regime           = t(regime[seq_len(n_spec), , drop = FALSE]),  # T x n_spec
     irf              = Y - y_ss_mat,
     converged        = converged_newton && regime_converged,
     n_iter           = n_iter_final,

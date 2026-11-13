@@ -155,8 +155,12 @@ hank_state_space <- function(model, shock_specs, obs_vars, q = NULL) {
 #' nilpotent shift-register state (exact, not approximate, since each block's
 #' transition is strictly nilpotent).
 #'
-#' @param data \code{T_data x n_obs} matrix (or data frame) of demeaned
-#'   observations, columns in the same order as \code{ss$obs_names}.
+#' @param data \code{T_data x n_obs} matrix (or data frame) (rows are periods; oriented by the rule in \code{\link{hank_loglik_aggregate}}) of demeaned
+#'   observations (rows are periods), columns in the same order as
+#'   \code{ss$obs_names}. Oriented by the package-wide rule (see
+#'   \code{\link{hank_loglik_aggregate}}): names decide; an unnamed
+#'   \code{n_obs x T} or square sample is refused (class
+#'   \code{dynhr_error_orientation}).
 #' @param ss A \code{\link{hank_state_space}} object.
 #' @param me_variance Measurement-error variance added to every observable's
 #'   diagonal (default 0; needed when \code{n_obs > n_shock}, i.e. stochastic
@@ -180,7 +184,8 @@ hank_kalman_loglik <- function(data, ss, me_variance = 0,
   singular_obs <- match.arg(singular_obs)
   if (!inherits(ss, "dsge_ss"))
     stop("hank_kalman_loglik: `ss` must be a hank_state_space()/dsge_ss object.")
-  data <- as.matrix(data)
+  data <- .hank_orient_data(data, ss$obs_names %||% ss$n_obs,
+                            "hank_kalman_loglik")
   n_state <- ss$n_state
   q       <- ss$q
   n_shock <- ss$n_shock
@@ -222,7 +227,7 @@ hank_kalman_loglik <- function(data, ss, me_variance = 0,
 #' \code{sigma}.
 #'
 #' @param model A \code{\link{hank_model}}.
-#' @param data \code{T_data x n_obs} matrix of demeaned observations.
+#' @param data \code{T_data x n_obs} matrix (rows are periods; oriented by the rule in \code{\link{hank_loglik_aggregate}}) of demeaned observations.
 #' @param obs_vars Character vector of observable names (see
 #'   \code{\link{hank_state_space}}).
 #' @param q Optional truncation horizon passed to \code{\link{hank_state_space}}
@@ -300,6 +305,9 @@ make_log_posterior_hank <- function(model, data, obs_vars, q = NULL,
   if (length(missing_obs))
     stop("make_log_posterior_hank: observable(s) not produced by model: ",
          paste(missing_obs, collapse = ", "))
+  ## T x n_obs (rows are periods), resolved ONCE at build time: inside the
+  ## per-draw tryCatch a refusal would be scored as an infeasible draw.
+  data <- .hank_orient_data(data, obs_vars, "make_log_posterior_hank")
   rep_named <- function(x, nm) {
     if (is.null(names(x))) setNames(rep(x, length.out = length(nm)), nm)
     else x[nm]

@@ -173,8 +173,10 @@
 #' \code{seed = NULL} (the default).
 #'
 #' @param model      Parsed model from \code{\link{parse_mod}}.
-#' @param data       Observation matrix (\code{n_obs x T} or \code{T x n_obs};
-#'   re-oriented automatically, as in \code{\link{kalman_filter}}).
+#' @param data       Observation matrix, \code{T x n_obs} (rows are periods,
+#'   columns the \code{obs_vars}), oriented by the rule documented in
+#'   \code{\link{kalman_filter}} (names decide; an unnamed \code{n_obs x T}
+#'   or square sample is refused).
 #' @param prior_spec Prior specification from \code{\link{extract_prior_spec}}.
 #' @param obs_vars   Character vector of observed variable names.
 #' @param compiled   \code{dynhr_compiled} from \code{\link{compile_model}}.
@@ -262,10 +264,6 @@ make_log_posterior_global_pf <- function(model, data, prior_spec, obs_vars,
     compiled$lead_lag_incidence <- compiled$model$lead_lag_incidence
 
   n_obs <- length(obs_vars)
-  if (is.null(dim(data))) data <- matrix(data, nrow = n_obs)
-  if (nrow(data) != n_obs) data <- t(data)
-  Y <- data
-
   ## ---- FACTORY-TIME model-class validation --------------------------------
   ## solve_global() represents only a narrow class of models (every shock must
   ## sit in its own LINEAR AR(1) state process; see .global_shock_pairing()).
@@ -278,6 +276,12 @@ make_log_posterior_global_pf <- function(model, data, prior_spec, obs_vars,
   ## once, HERE, so an unsupported model is a build-time error naming the
   ## offending shock and equation.
   .gpf_validate_class(model, compiled, obs_vars)
+
+  ## T x n_obs (rows are periods) by the package-wide rule; the particle
+  ## filter below runs on the transpose (n_obs x T).
+  data <- t(.orient_time_matrix(data, obs_vars, "data",
+                                "make_log_posterior_global_pf"))
+  Y <- data
 
   eval_one <- .make_posterior_closure(
     model, data, prior_spec, obs_vars, compiled,

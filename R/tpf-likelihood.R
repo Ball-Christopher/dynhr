@@ -257,8 +257,9 @@
 #' authoritative recursion; where the AFVRR paper's eq (14) transcription
 #' differs, THE CODE WINS — e.g. hxx %*% (x1 %x% x2) carries coefficient 1).
 #'
-#' Kronecker column-ordering conventions (R/solve-perturbation-order3.R
-#' lines 1310-1320, inherited from solve-perturbation-order2.R):
+#' Kronecker column-ordering conventions: the u_slow layout of the
+#' MIXED-BLOCK LAYOUT CONVENTION (R/solve-perturbation-order3.R); callers
+#' pass slices of a rule normalised with .with_mixed_layout(dr, "u_slow"):
 #'   hxx  cols (state FAST x state SLOW)          -> vector (x1 %x% x2) etc.
 #'   hxu  cols (state FAST x exo SLOW)             -> vector (e %x% x)
 #'   hxxu cols (state1 FASTEST, state2, exo SLOW)  -> vector (e %x% x1 %x% x1)
@@ -574,6 +575,8 @@ tpf_run_period <- function(particles, y_t, dr2, Sigma_e, L_e,
   n_2s <- 2L * n_s
   n_obs <- nrow(ZZ)
 
+  ## mixed blocks contracted as (e %x% x): see MIXED-BLOCK LAYOUT CONVENTION
+  dr2 <- .with_mixed_layout(dr2, "u_slow")
   state_idx <- dr2$state_idx
 
   ## Extract state-row slices
@@ -955,6 +958,8 @@ tpf_run_period3 <- function(particles, y_t, dr3, Sigma_e, L_e,
   n_e  <- nrow(Sigma_e)
   n_3s <- 3L * n_s
 
+  ## mixed blocks contracted as (e %x% x): see MIXED-BLOCK LAYOUT CONVENTION
+  dr3 <- .with_mixed_layout(dr3, "u_slow")
   state_idx <- dr3$state_idx
 
   ## State-row slices (see .tpf_propagate3_R for the recursion reference)
@@ -1217,7 +1222,8 @@ tpf_run_period3 <- function(particles, y_t, dr3, Sigma_e, L_e,
 #' (non-NULL), it calls \code{set.seed(42)} at each evaluation, making the
 #' PF fully deterministic.  This function always builds a fresh
 #' \code{seed = NULL} wrapper around the supplied closure; the external
-#' \code{set.seed(k)} drives the randomness.
+#' \code{set.seed()} with the k-th child seed of a fixed base drives the
+#' randomness.
 #'
 #' @param log_post_fn  A \code{function(theta)} returning
 #'   \code{list(logpost, loglik, logprior)}.  Built with \code{seed = NULL}.
@@ -1260,10 +1266,13 @@ tpf_run_period3 <- function(particles, y_t, dr3, Sigma_e, L_e,
     }
   }, add = TRUE)
 
+  ## Evaluation k runs on child k of a fixed base (independent streams; the
+  ## old set.seed(k) used consecutive integer seeds).
+  pre_seeds <- .child_seeds(1L, K, "tpf_preflight")
   logliks <- vapply(seq_len(K), function(k) {
     ## Vary the RNG stream externally; the closure MUST have seed = NULL for
     ## this to bite (enforced by the exactly-equal check below).
-    set.seed(k)
+    set.seed(pre_seeds[k])
     res <- tryCatch(log_post_fn(theta_mode), error = function(e) .dynhr_reraise_bug(e, NULL))
     if (is.null(res) || !is.finite(res$loglik)) NA_real_ else res$loglik
   }, numeric(1L))
@@ -1453,7 +1462,12 @@ tpf_loglik_sd_preflight <- function(log_post_fn, theta, K = 30L,
 #' state space when \code{order = 3L}.
 #'
 #' @param model       dynhr_mod from \code{\link{parse_mod}}.
-#' @param data        Observation matrix (n_obs x T); columns are time periods.
+#' @param data        Observation matrix, \code{T x n_obs} (rows are periods,
+#'   columns the \code{obs_vars}). Oriented by the package-wide rule: columns
+#'   named by \code{obs_vars} are matched by name; rows named by them (the
+#'   old \code{n_obs x T} layout) are transposed with a message; an unnamed
+#'   \code{n_obs x T} or square sample is refused (class
+#'   \code{dynhr_error_orientation}).
 #' @param prior_spec  Prior specification from \code{extract_prior_spec}.
 #' @param obs_vars    Character vector of observed variable names.
 #' @param compiled    dynhr_compiled from \code{\link{compile_model}}.
@@ -1544,6 +1558,12 @@ make_log_posterior_tpf <- function(model, data, prior_spec, obs_vars,
   force(seed); force(system_priors); force(max_stages_u); force(order)
   force(burn_in_init); force(power)
 
+  ## `data` is T x n_obs (rows are periods), oriented by the package-wide rule
+  ## (R/time-orientation.R); the filter below runs on its transpose
+  ## (n_obs x T, one column per period).
+  data <- t(.orient_time_matrix(data, obs_vars, "data",
+                                "make_log_posterior_tpf"))
+
   ## Power-posterior exponent: explicit arg > global option > 1, resolved ONCE
   ## here so the closure's contract cannot change under it mid-chain.
   power <- .dynhr_opt("power_posterior", power, default = 1)
@@ -1560,6 +1580,8 @@ make_log_posterior_tpf <- function(model, data, prior_spec, obs_vars,
          "integer.", call. = FALSE)
   }
   burn_in_init <- as.integer(burn_in_init)
+  n_particles  <- .check_particle_count(n_particles, "make_log_posterior_tpf",
+                                        "n_particles")
 
   if (!is.numeric(order) || length(order) != 1L || !is.finite(order) ||
       !(as.integer(order) %in% c(2L, 3L)) || order != as.integer(order)) {
@@ -1601,7 +1623,7 @@ make_log_posterior_tpf <- function(model, data, prior_spec, obs_vars,
       !is.null(compiled$model$lead_lag_incidence))
     compiled$lead_lag_incidence <- compiled$model$lead_lag_incidence
 
-  ## data: n_obs x T (columns = time periods)
+  ## data (internal, transposed above): n_obs x T (columns = time periods)
   T_obs <- ncol(data)
 
   ## Solve hook: first-order rule (BK + stationarity guard) then the per-draw
@@ -1640,7 +1662,10 @@ make_log_posterior_tpf <- function(model, data, prior_spec, obs_vars,
   ## R/posterior-closure.R.
   tpf_loglik <- function(sol, params, ss, theta, me_floor_check,
                          U_list = NULL, ...) {
-    dr2     <- sol$dr2
+    ## sol$dr2 is the ORDER-3 rule when order3 = TRUE (x_slow mixed blocks);
+    ## every kernel below (R and C++) contracts them as (e %x% x): see
+    ## MIXED-BLOCK LAYOUT CONVENTION
+    dr2     <- .with_mixed_layout(sol$dr2, "u_slow")
     Sigma_e <- sol$Sigma_e
 
     ## ---- Observation mapping --------------------------------------------

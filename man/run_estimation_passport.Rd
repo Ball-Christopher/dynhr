@@ -26,9 +26,10 @@ run_estimation_passport(
 \arguments{
 \item{model}{Parsed model (output of \code{\link{parse_mod}}).}
 
-\item{data}{Observation matrix/data.frame (T x n_obs, or n_obs x T --
-passed straight through to \code{\link{run_mode_finding}}), or a path
-readable the same way.}
+\item{data}{Observation matrix/data.frame, T x n_obs (rows are
+periods; passed straight through to \code{\link{run_mode_finding}},
+which orients it by the rule \code{\link{kalman_filter}} documents), or
+a path readable the same way.}
 
 \item{prior_spec}{Prior-spec data.frame (output of
 \code{extract_prior_spec} / \code{\link{prior_spec}}). If
@@ -74,8 +75,8 @@ parallelism (default \code{NULL} = serial).}
 
 \item{seed}{Integer seed for every stochastic sub-check (prior
 draws, collision draws, multistart perturbations, SBC replications).
-Reused per-check with a small per-check offset so checks are mutually
-reproducible but not identical draws.}
+Each check (and each multistart chain) draws from its own seed derived
+from \code{seed}, so checks are mutually reproducible but independent.}
 
 \item{verbose}{Print progress. Default \code{FALSE}.}
 

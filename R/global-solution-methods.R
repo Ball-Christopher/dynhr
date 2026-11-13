@@ -323,10 +323,12 @@ euler_errors <- function(x, ...) UseMethod("euler_errors")
 
 ## Unpruned Taylor evaluation of a perturbation decision rule at (x, u), where
 ## x is the state deviation from the steady state and u the current shock.
-## Kronecker conventions follow simulate_model_order2/3 EXACTLY (ghxu columns
-## are state-FAST/exo-SLOW, hence `u %x% x`).
+## Mixed blocks are read in the u_slow layout (`u %x% x`, see MIXED-BLOCK
+## LAYOUT CONVENTION in R/solve-perturbation-order3.R).
 #' @noRd
 .acc_dr_taylor <- function(dr, x, u, order) {
+  ## contracts mixed blocks as (u %x% x): see MIXED-BLOCK LAYOUT CONVENTION
+  dr <- .with_mixed_layout(dr, "u_slow")
   y <- as.numeric(dr$ghx %*% x + dr$ghu %*% u)
   if (order >= 2L) {
     y <- y +

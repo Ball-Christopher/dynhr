@@ -72,7 +72,8 @@
 #' @param n_chains       Number of chains
 #' @param n_draws        Post-burn draws per chain
 #' @param n_burn         Burn-in draws per chain
-#' @param mh_scale       Initial RWMH scale
+#' @param mh_scale       Initial RWMH scale; NULL = rwmh()'s default
+#'   2.38 / sqrt(n_par)
 #' @param target_accept  Target acceptance rate for adaptive scaling
 #' @param adapt_every    Adapt scale every N draws (during burn-in)
 #' @param seed_base      Base RNG seed
@@ -86,9 +87,9 @@ run_mcmc_parallel <- function(
     n_chains      = 4L,
     n_draws       = 100000L,
     n_burn        = 50000L,
-    mh_scale      = 1.50,
-    target_accept = 0.25,
-    adapt_every   = 200L,
+    mh_scale      = NULL,
+    target_accept = .rwmh_target_rate,
+    adapt_every   = .rwmh_adapt_every,
     seed_base     = 42L,
     n_cores       = NULL,
     dynhr_files   = NULL,
@@ -111,13 +112,20 @@ run_mcmc_parallel <- function(
               n_draws / 1000, n_burn / 1000))
 
   n_par <- length(theta_mode)
+  ## Resolved on the host: workers run the INSTALLED rwmh().
+  if (is.null(mh_scale)) mh_scale <- .rwmh_default_scale(n_par)
   L <- t(chol(Sigma_prop))
 
   starts <- vector("list", n_chains)
   ## Host-side start dispersion; restore the caller's RNG stream on exit.
+  ## Chain ch's dispersion stream is child ch of seed_base (stream
+  ## "mcmc_chains", as the sequential and mirai chains); its RWMH task seed is
+  ## child ch of stream "mcmc_chain_tasks" (see .child_seeds()).
   .local_seed(seed_base)
+  chain_seeds <- .child_seeds(seed_base, n_chains, "mcmc_chains")
+  task_seeds  <- .child_seeds(seed_base, n_chains, "mcmc_chain_tasks")
   for (ch in seq_len(n_chains)) {
-    set.seed(seed_base + ch)
+    set.seed(chain_seeds[ch])
     if (ch == 1) {
       starts[[ch]] <- theta_mode
     } else {
@@ -136,7 +144,7 @@ run_mcmc_parallel <- function(
   configs <- lapply(seq_len(n_chains), function(ch) list(
     chain_id      = ch,
     theta0        = starts[[ch]],
-    seed          = seed_base + ch * 1000L,
+    seed          = task_seeds[ch],
     n_draws       = n_draws,
     n_burn        = n_burn,
     total_draws   = total_draws,
@@ -321,9 +329,13 @@ run_mode_parallel <- function(
   starts[[1L]] <- theta_init
 
   ## Host-side start dispersion; restore the caller's RNG stream on exit.
+  ## Start dispersion of chain ch: child ch of seed_base, stream "mode_starts";
+  ## its optimiser task seed: stream "mode_tasks" (as run_mode_mirai()).
   .local_seed(seed_base)
+  start_seeds <- .child_seeds(seed_base, n_chains, "mode_starts")
+  task_seeds  <- .child_seeds(seed_base, n_chains, "mode_tasks")
   for (ch in seq(2L, n_chains)) {
-    set.seed(seed_base + ch)
+    set.seed(start_seeds[ch])
     th <- theta_init
     for (nm in par_names) {
       ps <- prior_sds[nm]
@@ -340,13 +352,15 @@ run_mode_parallel <- function(
   configs <- lapply(seq_len(n_chains), function(ch) list(
     chain_id = ch,
     theta0   = starts[[ch]],
-    seed     = seed_base + ch * 1000L,
+    seed     = task_seeds[ch],
     nm_maxit = nm_maxit,
     method   = method
   ))
 
-  future::plan(future::multisession, workers = n_cores)
-  on.exit(future::plan(future::sequential), add = TRUE)
+  ## Restore the CALLER's future plan on exit (plan() returns the previous
+  ## one); resetting to sequential discarded a plan the user had set.
+  old_plan <- future::plan(future::multisession, workers = n_cores)
+  on.exit(future::plan(old_plan), add = TRUE)
 
   .dynhr_cat(sprintf("  Parallel mode: %d chains on %d cores | %s | maxit=%d/chain\n",
               n_chains, n_cores, method, nm_maxit))

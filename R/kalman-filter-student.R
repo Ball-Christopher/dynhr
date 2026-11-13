@@ -108,7 +108,7 @@
 ## widely in the DSGE fat-tail literature.
 ##
 ## Parameters:
-##   Y           n_obs x T observation matrix (NAs allowed).
+##   Y           T x n_obs observation matrix (rows = periods; NAs allowed).
 ##   dr          decision rule (output of solve_perturbation).
 ##   model       compiled model object.
 ##   params      named numeric vector of parameter values.
@@ -175,8 +175,9 @@ kalman_filter_student_t <- function(Y, dr, model, params, obs_vars,
   Sigma_e <- .get_shock_cov(model, exo, params)
   QQ      <- tcrossprod(RR %*% Sigma_e, RR)
 
-  if (is.null(dim(Y))) Y <- matrix(Y, nrow = n_obs)
-  if (nrow(Y) != n_obs) Y <- t(Y)
+  ## `Y` is T x n_obs (rows = periods) by the package-wide rule; the
+  ## recursion below indexes periods by column.
+  Y <- t(.kf_time_in(Y, obs_vars, "data", "kalman_filter_student_t"))
   n_T <- ncol(Y)
 
   ## Precompute Y - d

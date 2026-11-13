@@ -20,15 +20,22 @@ solve_sigma_order4(dr4, compiled, ss, params, Sigma_e = NULL, verbose = FALSE)
 \item{verbose}{Print progress}
 }
 \value{
-\code{dr4} with fields \code{ghxxss}, \code{ghss2} added
+\code{dr4} with fields \code{ghxxss}, \code{ghxuss},
+  \code{ghuuss}, \code{ghss2} added
 }
 \description{
 Computes:
   \code{ghxxss} (n × n_s²) — mixed 2nd state × sigma^2 correction
+  \code{ghxuss} (n × n_s n_u), \code{ghuuss} (n × n_u²) — state/current
+    shock and shock/shock × sigma^2 corrections (Kronecker layout, shock
+    modes fastest; Taylor weights 1/2 and 1/4)
   \code{ghss2}  (n × 1)     — pure sigma^4 steady-state correction
 }
 \details{
-For Gaussian shocks the sigma^3 and sigma^1 cross terms vanish.
+For Gaussian shocks the sigma^3 and sigma^1 cross terms vanish.  Only
+Gaussian shocks are supported: a rule carrying a non-zero \code{sigma3} /
+\code{ghs3}, or a model with skewed shocks, is refused (class
+\code{dynhr_error_order45_nongaussian}).
 
 Convention: the policy is \eqn{y_t = g(x_t, u_t, \sigma)} with the
 \emph{future} shocks scaled as \eqn{u_{t+1} = \sigma \varepsilon_{t+1}},
@@ -39,9 +46,8 @@ expansion as \code{ghss2 * sigma^4 / 24}, and \code{ghxxss} is
 \eqn{\partial^4 g / \partial x^2 \partial\sigma^2} (Taylor weight
 \eqn{1/4}).  Dynare's \code{k_order_solver} instead reports the collapsed
 coefficients at \eqn{\sigma = 1}, e.g. \code{g_0 = ghss/2 + ghss2/24}.  The
-current shock \eqn{u_t} is a policy argument held at 0 in every sigma
-derivative; only \eqn{u_{t+1}} is random.  Hence a model with no
-forward-looking variable has every pure-sigma term (\code{ghss},
-\code{ghxss}, \code{ghuss}, \code{ghxxss}, \code{ghss2}, \code{ghxxxss},
-\code{ghxss2}) exactly 0.
+current shock \eqn{u_t} is a policy argument (its sigma cross derivatives
+are \code{ghuss}, \code{ghxuss}, \code{ghuuss}, ...); only \eqn{u_{t+1}}
+is random.  Hence a model with no forward-looking variable has every sigma
+term exactly 0.
 }

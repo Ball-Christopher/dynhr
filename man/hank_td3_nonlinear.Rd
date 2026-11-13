@@ -74,8 +74,8 @@ states every period -- the path scales the aggregate, not the rule.}
 A list with numeric length-\code{T_h} paths \code{D}, \code{F},
   \code{A}, \code{C} (aggregate liquid, foreign, capital holdings and
   consumption), \code{CHI} and \code{PHI} (aggregate capital and foreign
-  adjustment resources), and \code{Dpath} (\code{n_cell x T_h}): column
-  \code{t} is the beginning-of-period-\code{t} distribution over which the
+  adjustment resources), and \code{Dpath} (\code{T_h x n_cell}, rows are
+  periods): row \code{t} is the beginning-of-period-\code{t} distribution over which the
   date-\code{t} aggregates are taken. When \code{keep_policies = TRUE},
   also \code{d_pol}, \code{f_pol}, \code{a_pol}, \code{c_pol},
   \code{chi_pol}, \code{phi_pol} (each a length-\code{T_h} list of

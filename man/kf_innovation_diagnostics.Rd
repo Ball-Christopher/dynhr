@@ -15,9 +15,12 @@ kf_innovation_diagnostics(
 )
 }
 \arguments{
-\item{data}{observation matrix (\code{n_obs x T}), or a data frame /
-numeric vector coercible to one; \code{NA} marks a missing observation
-at that observable/period (see Details).}
+\item{data}{observation matrix, \code{T x n_obs} (rows are periods), or a
+data frame (or, for one observable, a numeric vector) coercible to one;
+oriented by the rule \code{\link{kalman_filter}} documents for its
+\code{data} (names decide; an unnamed \code{n_obs x T} or square sample
+is refused). \code{NA} marks a missing observation at that
+period/observable (see Details).}
 
 \item{dr}{decision rule (output of \code{\link{solve_perturbation}}).}
 
@@ -54,8 +57,9 @@ A list with class \code{"kf_innovation_diagnostics"}:
     \code{|z_acf1|} across all observables) and \code{n_flagged} (count
     of individual z-stats with \code{|z| > 4}, a conservative multiple-
     comparisons-aware threshold).}
-  \item{z}{the \code{n_obs x T} matrix of standardized innovations
-    (\code{NA} where \code{data} was missing).}
+  \item{z}{the \code{T x n_obs} matrix of standardized innovations
+    (rows are periods, columns named by \code{obs_vars}; \code{NA} where
+    \code{data} was missing).}
 }
 }
 \description{
@@ -80,10 +84,10 @@ nonzero lag-1 autocorrelation well before they are visible in the raw
 log-likelihood.
 }
 \details{
-\strong{Missing data.} When \code{Y[i, t]} is \code{NA}, observable
+\strong{Missing data.} When \code{data[t, i]} is \code{NA}, observable
 \code{i} is simply skipped at period \code{t}: no innovation is formed
 for it and the Kalman update at \code{t} uses only the non-missing rows
-of \code{Y[, t]} (the standard multivariate missing-data treatment: drop
+of \code{data[t, ]} (the standard multivariate missing-data treatment: drop
 rows of \code{ZZ}/\code{DD} and skip the corresponding entries of
 \code{v}/\code{F} for that observable at that period). Each observable's
 whiteness statistics are then computed only over its own non-missing
@@ -117,7 +121,7 @@ ss <- solve_steady(cm, m$param_values, endo_names = m$var_names,
 dr <- solve_perturbation(m, cm, ss$values, m$param_values, verbose = FALSE)
 set.seed(1)
 sim <- simulate_model(dr, n_periods = 500, model = m, burn_in = 50)
-Y <- t(as.matrix(sim[, c("c", "k")]))
+Y <- as.matrix(sim[, c("c", "k")])     # T x n_obs, rows are periods
 diag <- kf_innovation_diagnostics(Y, dr, m, m$param_values,
                                   obs_vars = c("c", "k"))
 diag$by_obs

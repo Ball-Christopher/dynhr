@@ -75,7 +75,11 @@ run RWMH in unconstrained eta-space via
 use Haario et al. (2001) adaptive proposal covariance in \code{rwmh()}.}
 
 \item{seed}{Base RNG seed (default 1L). Replication \code{i}
-uses seed \code{seed + i} for reproducibility.}
+uses the \code{i}-th of a family of statistically independent seeds
+derived from \code{seed} (the same on the serial and the parallel path,
+and the same for every \code{n_replications >= i}). Earlier builds
+used \code{seed + i}, whose consecutive seeds made the first prior draw
+-- the true parameter -- dependent across neighbouring replications.}
 
 \item{verbose}{Print progress messages (default \code{TRUE}).}
 

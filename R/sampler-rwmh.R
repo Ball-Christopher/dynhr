@@ -229,6 +229,46 @@
 }
 
 
+## Shared RWMH tuning defaults -- the ONE source for rwmh(), rwmh_da(),
+## rwmh_cpm(), run_mcmc_mirai(), run_mcmc_parallel() and estimate_model(), so
+## the serial and parallel paths cannot drift apart again (until 2026-11 the
+## serial sampler started at scale 0.5 adapting every 100 draws and the
+## parallel one at 1.5 every 200, so the same call was tuned differently
+## depending on `parallel`).
+.rwmh_target_rate <- 0.25
+.rwmh_adapt_every <- 100L
+
+## Initial proposal scale when `scale = NULL`: the Roberts-Gelman-Gilks (1997)
+## optimum 2.38 / sqrt(d) for a proposal covariance equal to the posterior's
+## (Sigma_prop = inverse mode Hessian), d = the dimension of the largest block
+## a proposal moves (n_par without blocking). Measured 2026-11-11 (nk_demo,
+## d = 9; sw2007, d = 36): the adapted scale lands near this value, and the
+## old fixed starts (0.5 serial, 1.5 parallel) were still far off it after a
+## short burn-in.
+.rwmh_default_scale <- function(n_par, n_blocks = 1L)
+  2.38 / sqrt(ceiling(n_par / n_blocks))
+
+
+## Haario adaptation runs at multiples of adapt_every in [adapt_min_n, n_burn];
+## with none there, adapt_cov = TRUE did nothing and said nothing. Warns once
+## per run (per call outside a run epoch). Shared by rwmh() and rwmh_da().
+.warn_adapt_cov_skipped <- function(adapt_cov, adapt_min_n, adapt_every,
+                                    n_burn, what) {
+  if (!isTRUE(adapt_cov) ||
+      ceiling(adapt_min_n / adapt_every) * adapt_every <= n_burn)
+    return(invisible(FALSE))
+  .dynhr_warn(what, ": adapt_cov = TRUE has no effect in this run -- the ",
+              "Haario covariance update needs at least max(200, 10 * n_par) = ",
+              adapt_min_n, " warm-up draws (and an adapt_every multiple ",
+              "between that and n_burn), but n_burn (the warm-up) = ", n_burn,
+              ". The proposal covariance stays Sigma_prop; lengthen the ",
+              "warm-up to adapt it.",
+              once = !is.null(.dynhr_msg_state$epoch),
+              key = paste0(what, "_adapt_cov_skipped"),
+              class = "dynhr_warning_adapt_cov_skipped")
+  invisible(TRUE)
+}
+
 #' Random Walk Metropolis-Hastings sampler
 #'
 #' @param log_post_fn  Function(theta) -> list(logpost, loglik, logprior)
@@ -239,6 +279,11 @@
 #' @param n_draws      Total draws (including burn-in)
 #' @param n_burn       Burn-in draws to discard from the returned chain
 #' @param scale        Initial scaling factor for the proposal
+#'   (\code{theta + scale * chol(Sigma_prop) \%*\% z}). \code{NULL} (the
+#'   default) = \code{2.38 / sqrt(d)} (Roberts, Gelman and Gilks 1997), d =
+#'   the largest block dimension \code{ceiling(n_par / n_blocks)}. The same
+#'   default (and the same \code{target_rate} / \code{adapt_every}) is used
+#'   by the parallel path \code{run_mcmc_mirai()}.
 #' @param target_rate  Target acceptance rate for adaptive scaling
 #' @param adapt_every  Adapt scale every N draws (during burn-in)
 #' @param verbose      Print progress messages
@@ -312,8 +357,8 @@
 #' @noRd
 rwmh <- function(log_post_fn, theta0, Sigma_prop,
                  n_draws = 10000L, n_burn = 5000L,
-                 scale = 0.5, target_rate = 0.25,
-                 adapt_every = 100L, verbose = TRUE,
+                 scale = NULL, target_rate = .rwmh_target_rate,
+                 adapt_every = .rwmh_adapt_every, verbose = TRUE,
                  progressor = NULL, chain_id = NULL,
                  transform = NULL,
                  adapt_cov = FALSE, n_blocks = 1L,
@@ -327,6 +372,7 @@ rwmh <- function(log_post_fn, theta0, Sigma_prop,
          scale = scale, target_rate = target_rate, adapt_every = adapt_every,
          adapt_cov = adapt_cov, n_blocks = n_blocks), n_par = n_par))
   n_blocks <- as.integer(n_blocks)
+  if (is.null(scale)) scale <- .rwmh_default_scale(n_par, n_blocks)
 
   Sigma_curr <- Sigma_prop
   L <- .robust_chol(Sigma_curr, n_par)
@@ -374,6 +420,7 @@ rwmh <- function(log_post_fn, theta0, Sigma_prop,
   # allocated and no extra RNG draws occur anywhere below.
   state_hist <- if (adapt_cov) matrix(NA_real_, nrow = n_burn, ncol = n_par) else NULL
   adapt_min_n <- max(200L, 10L * n_par)
+  .warn_adapt_cov_skipped(adapt_cov, adapt_min_n, adapt_every, n_burn, "rwmh")
 
   # ---- Randomized blocking (opt-in): per-block acceptance bookkeeping.
   # `*_window` counters drive the scale adaptation (reset every adapt_every
@@ -669,7 +716,8 @@ rwmh <- function(log_post_fn, theta0, Sigma_prop,
 #'   covariance when \code{transform} is non-NULL, theta-space otherwise.
 #' @param n_draws      Total draws (including burn-in).
 #' @param n_burn       Burn-in draws to discard.
-#' @param scale        Initial proposal scale factor.
+#' @param scale        Initial proposal scale factor; \code{NULL} (the
+#'   default) = \code{2.38 / sqrt(n_par)}, as in \code{rwmh()}.
 #' @param target_rate  Target acceptance rate for adaptive scaling.
 #' @param adapt_every  Adapt scale every N draws (during burn-in).
 #' @param transform    Optional "dynhr_param_transform" (from
@@ -691,8 +739,8 @@ rwmh <- function(log_post_fn, theta0, Sigma_prop,
 #' @noRd
 rwmh_cpm <- function(log_post_fn, theta0, Sigma_prop,
                      n_draws = 10000L, n_burn = 5000L,
-                     scale = 0.5, target_rate = 0.25,
-                     adapt_every = 100L,
+                     scale = NULL, target_rate = .rwmh_target_rate,
+                     adapt_every = .rwmh_adapt_every,
                      rho_u = 0.99,
                      verbose = TRUE,
                      progressor = NULL, chain_id = NULL,
@@ -706,6 +754,7 @@ rwmh_cpm <- function(log_post_fn, theta0, Sigma_prop,
 
   n_par     <- length(theta0)
   par_names <- names(theta0)
+  if (is.null(scale)) scale <- .rwmh_default_scale(n_par)
 
   L <- .robust_chol(Sigma_prop, n_par)
 

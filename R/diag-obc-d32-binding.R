@@ -100,8 +100,9 @@
 #'   Defaults to the spec \code{name} / \code{var_name}, else
 #'   \code{"Constraint k"}.
 #' @param dates Optional Date or numeric vector (length T) for the time axis.
-#' @param var_paths Optional \code{n_endo x T} matrix of endogenous paths.
-#' @param var_names Optional character vector naming the rows of
+#' @param var_paths Optional \code{T x n_endo} matrix of endogenous paths
+#'   (rows = periods).
+#' @param var_names Optional character vector naming the columns of
 #'   \code{var_paths}.
 #' @param constraint_var Optional character vector (one per constraint): the
 #'   constrained variables. Defaults to the specs' \code{var_name}.
@@ -157,8 +158,9 @@ d32_obc_binding_summary <- function(regime_path      = NULL,
                              nrow(S), ncol(S), n_shock))
       sd_k <- sqrt(S[k, k])
     }
-    shock_seq <- matrix(0, nrow = n_shock, ncol = n_periods)
-    shock_seq[k, 1L] <- shock_size * sd_k
+    shock_seq <- matrix(0, nrow = n_periods, ncol = n_shock,
+                        dimnames = list(NULL, exo_nm))
+    shock_seq[1L, k] <- shock_size * sd_k
     if (is.null(obs_idx)) obs_idx <- seq_len(nrow(dr_slack$ghx))
     occ <- boehl_solve_regime_path(shock_seq, dr_slack, sys, obc_specs,
                                    obs_idx = obs_idx, max_iter = 30L)
@@ -341,14 +343,14 @@ d32_obc_binding_summary <- function(regime_path      = NULL,
       vp <- as.matrix(var_paths)
       if (length(cvar) == 1L && n_constr > 1L) cvar <- rep(cvar, n_constr)
       idx <- match(cvar, var_names)
-      ok  <- which(!is.na(idx) & idx <= nrow(vp))
-      if (ncol(vp) == T_total && length(ok)) {
+      ok  <- which(!is.na(idx) & idx <= ncol(vp))
+      if (nrow(vp) == T_total && length(ok)) {
         lab <- ifelse(constraint_names[ok] == cvar[ok], cvar[ok],
                       sprintf("%s (%s)", constraint_names[ok], cvar[ok]))
         lab_f <- function(v) factor(v, levels = lab)
         line_df <- data.frame(
           x = rep(x_all, length(ok)),
-          value = as.vector(t(vp[idx[ok], , drop = FALSE])),
+          value = as.vector(vp[, idx[ok], drop = FALSE]),
           panel = lab_f(rep(lab, each = T_total)))
         rect_df <- do.call(rbind, lapply(seq_along(ok), function(m) {
           sp <- .d32_spells(B[, ok[m]])

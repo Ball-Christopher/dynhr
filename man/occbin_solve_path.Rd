@@ -27,8 +27,11 @@ occbin_solve_path(
 
 \item{y_ss}{Named numeric vector: steady state (terminal condition)}
 
-\item{shock_path}{T × n_exo numeric matrix of structural shocks.
-Column names must match varexo_names.}
+\item{shock_path}{T × n_exo numeric matrix of structural shocks (rows =
+periods). Named columns must be shocks of the model
+(varexo_names; missing shocks are zero); an unnamed
+matrix must have exactly n_exo columns (an unnamed
+n_exo x T or square matrix is an error).}
 
 \item{params}{Named numeric parameter vector}
 

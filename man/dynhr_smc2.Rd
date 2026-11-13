@@ -31,8 +31,10 @@ dynhr_smc2(
 \arguments{
 \item{model}{dynhr_mod from \code{\link{parse_mod}}.}
 
-\item{data}{Observation matrix in the factories' native n_obs x T
-orientation (columns = time periods; rows = \code{obs_vars}, in order).}
+\item{data}{Observation matrix, \code{T x n_obs} (rows are periods,
+columns the \code{obs_vars}), oriented by the rule documented in
+\code{\link{kalman_filter}} (names decide; an unnamed \code{n_obs x T}
+or square sample is refused).}
 
 \item{prior_spec}{Prior specification (data.frame or named list); also
 used to build the theta-particle prior sampler via the same

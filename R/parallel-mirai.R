@@ -52,6 +52,58 @@
 
 
 ## --------------------------------------------------------------------------
+## Daemon-pool ownership: use a pool the user already set up, never kill it.
+##
+## `mirai::daemons(n)` RESETS any daemons already set in the (default) compute
+## profile, and every parallel runner used to end with `mirai::daemons(NULL)`,
+## so a call tore down daemons the user had started (e.g. remote/SSH daemons or
+## a pool shared with other work). The rule now:
+##   * daemons already set  -> use them as they are, leave them running;
+##   * none set             -> start `n_cores`, tear down on exit.
+## A runner captures `owns <- !.mirai_daemons_active()` BEFORE provisioning
+## and registers `on.exit(if (owns) mirai::daemons(NULL))`; on.exit defers
+## evaluation, so the flag must be a value fixed before the pool exists.
+## The provisioning helpers below call .mirai_daemons_start(), which starts
+## daemons only when none are set (and pins BLAS only for daemons it spawns).
+## --------------------------------------------------------------------------
+
+#' TRUE when daemons are already set in mirai's default compute profile.
+#' @noRd
+.mirai_daemons_active <- function() {
+  ## daemons_set() is mirai >= 2.3.0 (DESCRIPTION does not pin a version);
+  ## older mirai: a connected daemon is the best available signal.
+  f <- get0("daemons_set", envir = asNamespace("mirai"), inherits = FALSE)
+  if (is.function(f)) return(isTRUE(f()))
+  isTRUE(mirai::status()$connections > 0L)
+}
+
+#' Start \code{n_cores} daemons unless some are already set.
+#'
+#' @return TRUE (invisibly) when this call started the daemons, FALSE when an
+#'   existing pool is being reused (the caller must then NOT tear it down).
+#' @noRd
+.mirai_daemons_start <- function(n_cores) {
+  if (.mirai_daemons_active()) {
+    .dynhr_inform(sprintf(paste0("Using the mirai daemons already set (%d connected) ",
+                                 "instead of starting %d; they are left running."),
+                          as.integer(mirai::status()$connections), as.integer(n_cores)))
+    return(invisible(FALSE))
+  }
+  .restore_blas <- .mirai_pin_blas_threads()
+  on.exit(.restore_blas(), add = TRUE)
+  mirai::daemons(n_cores)
+  invisible(TRUE)
+}
+
+#' Tear the default daemon pool down only when this caller started it.
+#' @noRd
+.mirai_daemons_stop <- function(owned) {
+  if (isTRUE(owned)) mirai::daemons(NULL)
+  invisible(NULL)
+}
+
+
+## --------------------------------------------------------------------------
 ## Live progress: a nanonext back-channel + a single cli progress bar.
 ##
 ## mori shared memory is read-only (ALTREP / copy-on-write) and mirai_map's
@@ -225,8 +277,8 @@
 #' @param prior_spec prior spec data.frame.
 #' @param obs_names observed variable names.
 #' @param me_variance measurement-error variance forwarded to make_log_posterior.
-#' @param me_extra n_obs x T matrix of per-period extra ME variances (filter_tunes).
-#' @param shock_scale n_exo x T matrix of per-period shock std scale factors.
+#' @param me_extra T x n_obs matrix (rows = periods) of per-period extra ME variances (filter_tunes).
+#' @param shock_scale T x n_exo matrix (rows = periods) of per-period shock std scale factors.
 #' Re-raise a worker version-skew abort from a collected everywhere() result
 #'
 #' `mirai::everywhere(...)[]` does NOT re-throw a daemon-side error: each one
@@ -235,20 +287,111 @@
 #' `dynhr_error_worker_version_skew` abort raised by `.dynhr_daemon_apply()`
 #' (see R/options.R) must reach the caller, so scan the collected values, tear
 #' the (unusable) pool down and re-signal it on the host with the same class.
-#' Other daemon errors keep their existing handling.
+#' Any OTHER daemon-side init error (dynhr not installed in the daemon's
+#' library, a model that fails to compile there, ...) used to be ignored, so the
+#' run carried on with daemons lacking `.worker_lp` and every task failed later
+#' (parallel DIME then read each failure as a rejected proposal). It is now
+#' re-signalled as `dynhr_error_daemon_init` carrying the daemon's message.
 #'
 #' @param res the collected `everywhere()` result (a list).
-#' @return `res`, invisibly, when no daemon reported skew.
+#' @param owned TRUE when the caller started the pool (tear it down before
+#'   aborting); FALSE for a user-owned pool, which is left running.
+#' @return `res`, invisibly, when no daemon reported an error.
 #' @noRd
-.dynhr_raise_worker_skew <- function(res) {
+.dynhr_raise_worker_skew <- function(res, owned = TRUE) {
   for (x in res) {
     if (inherits(x, "errorValue") &&
         "dynhr_error_worker_version_skew" %in% attr(x, "condition.class")) {
-      mirai::daemons(NULL)
+      .mirai_daemons_stop(owned)
       .dynhr_abort(attr(x, "message"), class = "dynhr_error_worker_version_skew")
     }
   }
+  bad <- Filter(function(x) inherits(x, "errorValue"), res)
+  if (length(bad)) {
+    .mirai_daemons_stop(owned)
+    .dynhr_abort(sprintf(paste0("mirai daemon pool initialisation failed on %d ",
+                                "daemon(s): %s"), length(bad),
+                         paste(unique(vapply(bad, function(x)
+                           paste(as.character(x), collapse = " "), character(1))),
+                           collapse = "; ")),
+                 class = "dynhr_error_daemon_init")
+  }
   invisible(res)
+}
+
+#' Report chains that failed on the daemons of a parallel MCMC run
+#'
+#' A chain task that errors (or whose daemon dies: `errorValue` 19, connection
+#' reset) comes back from `mirai_map()[]` as an error VALUE, not a signalled
+#' error. The collectors used to note it with an info-level `.dynhr_cat()` --
+#' nothing at all under a quiet verbosity -- and return the surviving chains
+#' as if the run were complete (all chains failed => an empty result, no
+#' error). The serial path propagates the same error. This surfaces it: a
+#' classed warning naming each failed chain, and an abort when no chain
+#' survived.
+#'
+#' @param raw The collected `mirai_map()` result, one element per chain.
+#' @param what Caller name for the messages.
+#' @return Logical vector, TRUE for each failed chain (invisibly).
+#' @noRd
+.mirai_report_failed_chains <- function(raw, what) {
+  failed <- vapply(raw, function(r)
+    inherits(r, "miraiError") || inherits(r, "errorValue"), logical(1))
+  if (!any(failed)) return(invisible(failed))
+  msgs <- vapply(which(failed), function(i)
+    sprintf("chain %d: %s", i, paste(as.character(raw[[i]]), collapse = " ")),
+    character(1))
+  if (all(failed))
+    .dynhr_abort(sprintf("%s: all %d chains failed on the daemons. %s",
+                         what, length(raw), paste(msgs, collapse = "; ")),
+                 class = "dynhr_error_parallel_chains_failed")
+  .dynhr_warn(sprintf(paste0("%s: %d of %d chains failed on the daemons and ",
+                             "are DROPPED; the result pools the remaining %d. %s"),
+                      what, sum(failed), length(raw), sum(!failed),
+                      paste(msgs, collapse = "; ")),
+              class = "dynhr_warning_parallel_chain_failed")
+  invisible(failed)
+}
+
+#' Per-daemon checkpoint config for a parallel multi-chain run
+#'
+#' The shared \code{meta.rds} is written ONCE here on a fresh run (daemons get
+#' \code{write_meta = FALSE} to avoid a multi-writer race); each chain streams
+#' to its own \code{chain_<id>.*} files. On a RESUME the meta is verified here
+#' (a wrong directory or configuration is refused before any daemon work), and
+#' chains with NO state file are listed in \code{fresh_chains}: a chain that
+#' failed before its first flush saved nothing, so it is re-run from the start
+#' -- with its own seed that is bit-identical to the uninterrupted chain. It
+#' used to be sent a resume, fail with "state file not found" and be dropped
+#' again, so the resumed run silently stayed one chain short.
+#' @param checkpoint the caller's checkpoint list, or NULL.
+#' @param sampler "rwmh" or "nuts".
+#' @param n_chains number of chains.
+#' @return NULL, or the checkpoint list with \code{write_meta = FALSE} and
+#'   \code{fresh_chains} (integer chain ids).
+#' @noRd
+.ckpt_daemon_config <- function(checkpoint, sampler, n_chains) {
+  if (is.null(checkpoint)) return(NULL)
+  paths <- .ckpt_paths(checkpoint$dir)
+  fresh <- integer(0)
+  if (!isTRUE(checkpoint$resume)) {
+    .ckpt_meta_write(paths$meta, sampler, checkpoint$fingerprint)
+  } else {
+    meta <- .ckpt_meta_verify(paths$meta, sampler, checkpoint$fingerprint)
+    ids <- seq_len(n_chains)
+    has_state <- file.exists(vapply(ids, function(k)
+      .ckpt_paths(checkpoint$dir, k)$state, character(1)))
+    fresh <- ids[!has_state]
+    if (length(fresh)) {
+      .dynhr_inform(sprintf(paste0("checkpoint resume: chain(s) %s saved no state ",
+                                   "(failed before the first flush); re-running ",
+                                   "them from the start."),
+                            paste(fresh, collapse = ", ")))
+      .ckpt_warn_seed_scheme(meta, sprintf("the re-run chain(s) %s",
+                                           paste(fresh, collapse = ", ")))
+    }
+  }
+  c(checkpoint, list(write_meta = FALSE, fresh_chains = fresh))
 }
 
 #' Pin single-threaded BLAS for daemons spawned by the next mirai::daemons()
@@ -297,9 +440,8 @@
     singular_obs <- ctx$singular_obs %||% "reject"
     tpf_options   <- ctx$tpf_options %||% list()
   }
-  .restore_blas <- .mirai_pin_blas_threads()
-  on.exit(.restore_blas(), add = TRUE)
-  mirai::daemons(n_cores)
+  ## Start daemons only when none are set; a user's pool is reused as is.
+  .owned <- .mirai_daemons_start(n_cores)
 
   ## share() places Y in OS shared memory under an auto-generated UUID name
   ## (so repeated pools, mode -> mcmc, never collide on a stale segment) and
@@ -377,7 +519,7 @@
                  singular_obs = singular_obs,
                  .dynhr_state = .dynhr_daemon_state(),
                  .dynhr_apply = .dynhr_daemon_apply)
-  )[])
+  )[], owned = .owned)
   ## ^ COLLECT (block) the everywhere() init. It recompiles the model on every
   ## daemon (seconds of work); leaving it uncollected returns while daemons are
   ## still initialising, and the in-flight init tasks' NNG contexts dangle if a
@@ -444,7 +586,7 @@
                  singular_obs = singular_obs,
                  .dynhr_state = .dynhr_daemon_state(),
                  .dynhr_apply = .dynhr_daemon_apply)
-  )[])
+  )[], owned = FALSE)  # the caller owns (and tears down) the pool
   invisible(NULL)
 }
 
@@ -481,7 +623,11 @@
                   get0(".worker_cm", envir = globalenv(), inherits = FALSE),
                   me_variance = me_variance, me_extra = me_extra,
                   shock_scale = shock_scale, system_priors = system_priors,
-                  lik_init = .li),
+                  lik_init = .li,
+                  ## the Whittle debias .worker_lp was built with
+                  debias = utils::getFromNamespace(".whittle_debias_resolve",
+                                                   "dynhr")(
+                    get0(".worker_lp", envir = globalenv(), inherits = FALSE))),
              envir = globalenv())
     },
     .args = list(prior_spec = prior_spec, obs_names = obs_names,
@@ -498,7 +644,8 @@
 #' Run RWMH chains in parallel on a mirai daemon pool.
 #'
 #' Drop-in replacement for \code{run_mcmc_parallel()} (PSOCK). Each chain's task
-#' reproduces the SEQUENTIAL path exactly -- \code{set.seed(seed_base + chain)},
+#' reproduces the SEQUENTIAL path exactly -- \code{set.seed()} with chain k's
+#' child seed (\code{.child_seeds(seed_base, n_chains, "mcmc_chains")[k]}),
 #' compute the dispersed start, then draw with \code{rwmh()} continuing from that
 #' RNG state -- so a mirai run is bit-for-bit identical to the sequential chains
 #' under matched seeds. No \code{dynhr_files} sourcing: daemons load the
@@ -513,14 +660,20 @@
 #' @param n_chains number of chains.
 #' @param n_draws post-burn draws per chain.
 #' @param n_burn burn-in draws per chain.
-#' @param mh_scale initial RWMH scale.
-#' @param target_accept target acceptance rate.
-#' @param adapt_every adapt scale every N draws.
-#' @param seed_base base RNG seed (chain k uses seed_base + k); NULL (the
-#'   default) = the \code{seed_base} option (42L unless set).
+#' @param mh_scale initial RWMH scale (\code{rwmh()}'s \code{scale}, same
+#'   meaning). \code{NULL} (the default) = \code{2.38 / sqrt(d)}, d =
+#'   \code{ceiling(n_par / n_blocks)}, resolved on the host exactly as the
+#'   serial \code{rwmh()} resolves it.
+#' @param target_accept target acceptance rate (\code{rwmh()}'s
+#'   \code{target_rate}; same default).
+#' @param adapt_every adapt scale every N draws (same default as
+#'   \code{rwmh()}).
+#' @param seed_base base RNG seed (chain k uses its k-th child seed, see
+#'   \code{.child_seeds()}); NULL (the default) = the \code{seed_base} option
+#'   (42L unless set).
 #' @param n_cores worker count (NULL = auto, capped at n_chains).
 #' @param me_variance measurement-error variance.
-#' @param me_extra n_obs x T matrix of per-period extra ME variances (filter_tunes).
+#' @param me_extra T x n_obs matrix (rows = periods) of per-period extra ME variances (filter_tunes).
 #' @param log_post_fn optional pre-built log-posterior closure. When supplied,
 #'   the pool ships this closure once via \code{\link{.mirai_pool_closure}}
 #'   instead of recompiling a standard Gaussian posterior per daemon via
@@ -556,9 +709,9 @@ run_mcmc_mirai <- function(
     n_chains      = 4L,
     n_draws       = 100000L,
     n_burn        = 50000L,
-    mh_scale      = 1.50,
-    target_accept = 0.25,
-    adapt_every   = 200L,
+    mh_scale      = NULL,
+    target_accept = .rwmh_target_rate,
+    adapt_every   = .rwmh_adapt_every,
     seed_base     = NULL,
     n_cores       = NULL,
     me_variance   = 0,
@@ -593,6 +746,10 @@ run_mcmc_mirai <- function(
   ## NULL: the seed_base option (registry default 42L), so options(seed_base)
   ## and a spec's compute$seed (the stage option store) reach every chain.
   seed_base <- .dynhr_opt("seed_base", seed_base)
+  ## Resolve the default scale HERE, not on the daemons: they run the
+  ## INSTALLED rwmh(), whose default may differ from this build's.
+  if (is.null(mh_scale))
+    mh_scale <- .rwmh_default_scale(length(theta_mode), as.integer(n_blocks))
   n_cores <- .mirai_n_cores(n_cores, n_chains)
   .dynhr_cat(sprintf("  Parallel MCMC (mirai): %d chains on %d daemons\n",
               n_chains, n_cores))
@@ -601,6 +758,10 @@ run_mcmc_mirai <- function(
 
   t_init <- proc.time()
   sh <- NULL
+  ## Reuse daemons the user already set (and leave them running); tear
+  ## down only a pool started here. Flag fixed BEFORE provisioning.
+  owns_pool <- !.mirai_daemons_active()
+  on.exit({ .mirai_daemons_stop(owns_pool); if (!is.null(sh)) rm(sh) }, add = TRUE)
   if (!is.null(log_post_fn)) {
     .mirai_pool_closure(n_cores, log_post_fn)
   } else {
@@ -613,7 +774,6 @@ run_mcmc_mirai <- function(
                            singular_obs = singular_obs,
                            tpf_options = tpf_options)
   }
-  on.exit({ mirai::daemons(NULL); if (!is.null(sh)) rm(sh) }, add = TRUE)
   .dynhr_cat(sprintf("  Daemon init: %.1f sec (load + compile + lp_fn)\n",
               (proc.time() - t_init)[["elapsed"]]))
 
@@ -647,7 +807,7 @@ run_mcmc_mirai <- function(
     ## reference (and the rest of dynhr) uses Mersenne-Twister. Match it before
     ## seeding so a mirai chain reproduces the sequential chain bit-for-bit.
     RNGkind("Mersenne-Twister", "Inversion", "Rejection")
-    set.seed(seed_base + ch)
+    set.seed(chain_seeds[ch])
     if (ch == 1L) {
       th0 <- theta_mode
     } else if (!is.null(transform)) {
@@ -690,6 +850,14 @@ run_mcmc_mirai <- function(
       }
     }
 
+    ## The per-daemon checkpoint config is `ckpt_daemon` (write_meta = FALSE,
+    ## fresh_chains), NOT `checkpoint`: chain_task's enclosure is this frame,
+    ## whose `checkpoint` (the caller's list) shadows a `checkpoint` passed
+    ## through mirai_map's `...` -- so the daemon config never arrived.
+    ## A chain that died before its first checkpoint flush has no state file:
+    ## run it fresh (bit-identical to the uninterrupted chain), not "resume".
+    ck <- ckpt_daemon
+    if (!is.null(ck) && ch %in% ck$fresh_chains) ck$resume <- FALSE
     t0  <- proc.time()[["elapsed"]]
     res <- run_rwmh(log_post_fn, th0, Sigma_prop,
                     n_draws     = total_draws,
@@ -703,7 +871,7 @@ run_mcmc_mirai <- function(
                     transform   = transform,
                     adapt_cov   = adapt_cov,
                     n_blocks    = n_blocks,
-                    checkpoint  = checkpoint)
+                    checkpoint  = ck)
     list(chain_id = ch, result = res,
          elapsed_min = (proc.time()[["elapsed"]] - t0) / 60)
   }
@@ -712,12 +880,11 @@ run_mcmc_mirai <- function(
   ## write_meta = FALSE to avoid a multi-writer race) and ship a per-daemon
   ## config. Each chain streams to its own chain_<id>.* files, so parallel
   ## writes never collide (parallel-safe by construction).
-  ckpt_daemon <- NULL
-  if (!is.null(checkpoint)) {
-    if (!isTRUE(checkpoint$resume))
-      .ckpt_meta_write(.ckpt_paths(checkpoint$dir)$meta, "rwmh", checkpoint$fingerprint)
-    ckpt_daemon <- c(checkpoint, list(write_meta = FALSE))
-  }
+  ckpt_daemon <- .ckpt_daemon_config(checkpoint, "rwmh", n_chains)
+
+  ## Per-chain seeds: child ch of seed_base (stream "mcmc_chains"), derived on
+  ## the host -- identical to the sequential .run_mcmc() / NUTS chains.
+  chain_seeds <- .child_seeds(seed_base, n_chains, "mcmc_chains")
 
   ## chain_task references these as FREE variables (not formals), so they go
   ## through `...` -- mirai_map injects `...` objects into the task's evaluation
@@ -726,14 +893,14 @@ run_mcmc_mirai <- function(
   ## closures over local data and serializes like any other free variable.
   m_handle <- mirai::mirai_map(
     seq_len(n_chains), chain_task,
-    seed_base = seed_base, theta_mode = theta_mode,
+    chain_seeds = chain_seeds, theta_mode = theta_mode,
     Sigma_prop = Sigma_prop, prior_spec = prior_spec,
     total_draws = total_draws, n_burn = n_burn,
     mh_scale = mh_scale, target_accept = target_accept,
     adapt_every = adapt_every, prog_url = prog_url,
     transform = transform,
     adapt_cov = adapt_cov, n_blocks = n_blocks,
-    checkpoint = ckpt_daemon
+    ckpt_daemon = ckpt_daemon
   )
 
   ## Collect: with a live bar, the render loop drains the socket while polling;
@@ -751,11 +918,8 @@ run_mcmc_mirai <- function(
     final_logpost = numeric(), final_scale = numeric(),
     elapsed_min = numeric(), stringsAsFactors = FALSE
   )
-  for (r in raw) {
-    if (inherits(r, "miraiError") || inherits(r, "errorValue")) {
-      .dynhr_cat(sprintf("  A chain FAILED: %s\n", as.character(r)))
-      next
-    }
+  failed <- .mirai_report_failed_chains(raw, "run_mcmc_mirai")
+  for (r in raw[!failed]) {
     ch <- r$chain_id
     chains[[ch]] <- r$result
     chain_stats <- rbind(chain_stats, data.frame(
@@ -802,11 +966,12 @@ run_mcmc_mirai <- function(
 #' @param n_warmup warmup iterations per chain (step-size + mass adaptation).
 #' @param max_treedepth maximum NUTS tree depth.
 #' @param target_accept dual-averaging target acceptance rate.
-#' @param seed_base base RNG seed (chain k uses seed_base + k); NULL (the
-#'   default) = the \code{seed_base} option (42L unless set).
+#' @param seed_base base RNG seed (chain k uses its k-th child seed, see
+#'   \code{.child_seeds()}); NULL (the default) = the \code{seed_base} option
+#'   (42L unless set).
 #' @param n_cores worker count (NULL = auto, capped at n_chains).
 #' @param me_variance measurement-error variance.
-#' @param me_extra n_obs x T matrix of per-period extra ME variances (filter_tunes).
+#' @param me_extra T x n_obs matrix (rows = periods) of per-period extra ME variances (filter_tunes).
 #' @param log_post_fn optional pre-built log-posterior closure. When supplied,
 #'   the pool ships this closure once via \code{\link{.mirai_pool_closure}}
 #'   instead of recompiling a standard Gaussian posterior per daemon via
@@ -972,6 +1137,10 @@ run_nuts_mirai <- function(
 
   t_init <- proc.time()
   sh <- NULL
+  ## Reuse daemons the user already set (and leave them running); tear
+  ## down only a pool started here. Flag fixed BEFORE provisioning.
+  owns_pool <- !.mirai_daemons_active()
+  on.exit({ .mirai_daemons_stop(owns_pool); if (!is.null(sh)) rm(sh) }, add = TRUE)
   if (!is.null(log_post_fn)) {
     .mirai_pool_closure(n_cores, log_post_fn)
   } else {
@@ -984,7 +1153,6 @@ run_nuts_mirai <- function(
                            singular_obs = singular_obs,
                            tpf_options = tpf_options)
   }
-  on.exit({ mirai::daemons(NULL); if (!is.null(sh)) rm(sh) }, add = TRUE)
   .dynhr_cat(sprintf("  Daemon init: %.1f sec (load + compile + lp_fn)\n",
               (proc.time() - t_init)[["elapsed"]]))
 
@@ -1002,7 +1170,7 @@ run_nuts_mirai <- function(
     log_post_fn <- get0(".worker_lp", envir = globalenv(), inherits = FALSE)
     run_nuts    <- utils::getFromNamespace("dynhr_nuts", "dynhr")
     RNGkind("Mersenne-Twister", "Inversion", "Rejection")
-    set.seed(seed_base + ch)
+    set.seed(chain_seeds[ch])
     if (ch == 1L) {
       th0 <- theta_mode
     } else if (!is.null(transform)) {
@@ -1053,7 +1221,9 @@ run_nuts_mirai <- function(
                                  lik_init    = get0(".worker_lik_init",
                                                     envir = globalenv(),
                                                     inherits = FALSE) %||% "auto",
-                                 system_priors = system_priors)
+                                 system_priors = system_priors,
+                                 ## the Whittle debias .worker_lp was built with
+                                 debias = .whittle_debias_resolve(log_post_fn))
         ## THETA-space gradient: dynhr_nuts(transform = transform) applies
         ## the eta chain rule itself (make_transformed_grad). This used
         ## to pre-wrap it too -- the chain rule fired TWICE and the eta-space
@@ -1079,6 +1249,11 @@ run_nuts_mirai <- function(
       }
     }
 
+    ## Per-daemon checkpoint config: `ckpt_daemon`, not the shadowed
+    ## `checkpoint` (see run_mcmc_mirai). A chain that died before its first
+    ## flush (no state file) is run fresh.
+    ck <- ckpt_daemon
+    if (!is.null(ck) && ch %in% ck$fresh_chains) ck$resume <- FALSE
     t0  <- proc.time()[["elapsed"]]
     res <- run_nuts(log_post_fn, th0,
                     n_draws       = n_draws,
@@ -1091,7 +1266,7 @@ run_nuts_mirai <- function(
                     chain_id      = ch,
                     transform     = transform,
                     grad_fn       = grad_fn,
-                    checkpoint    = checkpoint,
+                    checkpoint    = ck,
                     metric        = metric)
     list(chain_id = ch, result = res,
          elapsed_min = (proc.time()[["elapsed"]] - t0) / 60)
@@ -1100,12 +1275,10 @@ run_nuts_mirai <- function(
   ## Checkpoint: write the shared meta.rds ONCE here (daemons set write_meta =
   ## FALSE to avoid a multi-writer race); each chain streams to its own
   ## chain_<id>.* files (parallel-safe).
-  ckpt_daemon <- NULL
-  if (!is.null(checkpoint)) {
-    if (!isTRUE(checkpoint$resume))
-      .ckpt_meta_write(.ckpt_paths(checkpoint$dir)$meta, "nuts", checkpoint$fingerprint)
-    ckpt_daemon <- c(checkpoint, list(write_meta = FALSE))
-  }
+  ckpt_daemon <- .ckpt_daemon_config(checkpoint, "nuts", n_chains)
+
+  ## Per-chain seeds (stream "mcmc_chains"), as run_mcmc_mirai().
+  chain_seeds <- .child_seeds(seed_base, n_chains, "mcmc_chains")
 
   ## adapt = "pooled": pooled lockstep warmup on one daemon, then the frozen
   ## chains in parallel (R/sampler-nuts-pooled.R). No live progress bar.
@@ -1127,13 +1300,13 @@ run_nuts_mirai <- function(
   ## data and serializes to the daemons like any other free variable here.
   m_handle <- if (pooled) NULL else mirai::mirai_map(
     seq_len(n_chains), chain_task,
-    seed_base = seed_base, theta_mode = theta_mode, Sigma_prop = Sigma_prop,
+    chain_seeds = chain_seeds, theta_mode = theta_mode, Sigma_prop = Sigma_prop,
     prior_spec = prior_spec, obs_names = obs_names, mass_diag = mass_diag,
     n_draws = n_draws, n_warmup = n_warmup, max_treedepth = max_treedepth,
     target_accept = target_accept, prog_url = prog_url, transform = transform,
     analytic_grad = analytic_grad, grad_method = grad_method,
     me_variance = me_variance, me_extra = me_extra, shock_scale = shock_scale,
-    checkpoint = ckpt_daemon, metric = metric,
+    ckpt_daemon = ckpt_daemon, metric = metric,
     system_priors = system_priors
   )
 
@@ -1150,11 +1323,8 @@ run_nuts_mirai <- function(
     chain = integer(), accept_rate = numeric(), final_logpost = numeric(),
     n_divergent = integer(), mean_treedepth = numeric(),
     elapsed_min = numeric(), stringsAsFactors = FALSE)
-  for (r in raw) {
-    if (inherits(r, "miraiError") || inherits(r, "errorValue")) {
-      .dynhr_cat(sprintf("  A NUTS chain FAILED: %s\n", as.character(r)))
-      next
-    }
+  failed <- .mirai_report_failed_chains(raw, "run_nuts_mirai")
+  for (r in raw[!failed]) {
     ch <- r$chain_id
     chains[[ch]] <- r$result
     ## accept_rate: the chain's mean NUTS acceptance statistic
@@ -1181,10 +1351,9 @@ run_nuts_mirai <- function(
 #' Drop-in replacement for \code{run_mode_parallel()} (future). Chain 1 starts at
 #' \code{theta_init}; chains 2..N start at perturbations scaled by
 #' \code{perturb_scale} times the prior std. Each task seeds with
-#' \code{seed_base + chain*1000} then runs \code{.run_mode_finding()} over the
-#' daemon-local log-posterior. With the explicit per-chain seed the results are
-#' deterministic and reproducible (and match the old future backend, which also
-#' set this seed explicitly inside each task).
+#' its child seed (\code{.child_seeds(seed_base, n_chains, "mode_tasks")}) then
+#' runs \code{.run_mode_finding()} over the daemon-local log-posterior. With the
+#' explicit per-chain seed the results are deterministic and reproducible.
 #'
 #' @param parsed_model parsed dynare model.
 #' @param Y observation matrix.
@@ -1199,7 +1368,7 @@ run_nuts_mirai <- function(
 #'   \code{seed_base} option (42L unless set).
 #' @param n_cores worker count (NULL = auto).
 #' @param me_variance measurement-error variance.
-#' @param me_extra n_obs x T matrix of per-period extra ME variances (filter_tunes).
+#' @param me_extra T x n_obs matrix (rows = periods) of per-period extra ME variances (filter_tunes).
 #' @param log_post_fn optional pre-built log-posterior closure. When supplied,
 #'   the pool ships this closure once via \code{\link{.mirai_pool_closure}}
 #'   instead of recompiling a standard Gaussian posterior per daemon via
@@ -1314,9 +1483,13 @@ run_mode_mirai <- function(
   }
   ## The dispersion draws below run on the HOST; restore the caller's RNG
   ## stream when run_mode_mirai() exits.
+  ## Chain ch's start dispersion uses child ch of seed_base (stream
+  ## "mode_starts"); its optimiser task seed is child ch of stream "mode_tasks".
   .local_seed(seed_base)
+  start_seeds <- .child_seeds(seed_base, n_chains, "mode_starts")
+  task_seeds  <- .child_seeds(seed_base, n_chains, "mode_tasks")
   for (ch in seq_len(n_chains)[-1L]) {
-    set.seed(seed_base + ch)
+    set.seed(start_seeds[ch])
     if (!is.null(transform)) {
       eta <- eta_init
       for (nm in par_names) {
@@ -1383,7 +1556,7 @@ run_mode_mirai <- function(
     meth <- chain_methods[[ch]]
     list(
       chain_id = ch, theta0 = starts[[ch]],
-      seed = seed_base + ch * 1000L,
+      seed = task_seeds[ch],
       nm_maxit = if (identical(meth, "newrat")) nm_maxit else global_maxit,
       method = meth
     )
@@ -1408,6 +1581,10 @@ run_mode_mirai <- function(
     .dynhr_cat(sprintf("  Daemon pool reused (lik_init = %s): %.1f sec\n",
                 lik_init, (proc.time() - t_init)[["elapsed"]]))
   } else {
+    ## Reuse daemons the user already set (and leave them running); tear down
+    ## only a pool started here. Flag fixed BEFORE provisioning.
+    owns_pool <- !.mirai_daemons_active()
+    on.exit({ .mirai_daemons_stop(owns_pool); if (!is.null(sh)) rm(sh) }, add = TRUE)
     if (!is.null(log_post_fn)) {
       .mirai_pool_closure(n_cores, log_post_fn)
     } else {
@@ -1418,7 +1595,6 @@ run_mode_mirai <- function(
                              filter_method = filter_method,
                              singular_obs = singular_obs)
     }
-    on.exit({ mirai::daemons(NULL); if (!is.null(sh)) rm(sh) }, add = TRUE)
     .dynhr_cat(sprintf("  Daemon init: %.1f sec\n", (proc.time() - t_init)[["elapsed"]]))
   }
 
@@ -1510,7 +1686,10 @@ run_mode_mirai <- function(
                likelihood = likelihood, freq_band = freq_band,
                system_priors = system_priors,
                lik_init = get0(".worker_lik_init", envir = globalenv(),
-                               inherits = FALSE) %||% "auto")
+                               inherits = FALSE) %||% "auto",
+               ## the Whittle debias .worker_lp was built with
+               debias = .whittle_debias_resolve(
+                 get0(".worker_lp", envir = globalenv(), inherits = FALSE)))
         }, error = function(e) .dynhr_reraise_bug(e, NULL))
       }
     }
@@ -1665,9 +1844,8 @@ run_mode_mirai <- function(
 #' @return invisibly NULL.
 #' @noRd
 .mirai_pool_closure <- function(n_cores, log_post_fn, prior_sampler = NULL) {
-  .restore_blas <- .mirai_pin_blas_threads()
-  on.exit(.restore_blas(), add = TRUE)
-  mirai::daemons(n_cores)
+  ## Start daemons only when none are set; a user's pool is reused as is.
+  .owned <- .mirai_daemons_start(n_cores)
   .dynhr_raise_worker_skew(mirai::everywhere(
     {
       suppressMessages(library(dynhr))
@@ -1685,7 +1863,7 @@ run_mode_mirai <- function(
     .args = list(log_post_fn = log_post_fn, prior_sampler = prior_sampler,
                  .dynhr_state = .dynhr_daemon_state(),
                  .dynhr_apply = .dynhr_daemon_apply)
-  )[])  # collect: block until every daemon has the closure (see .mirai_pool_init)
+  )[], owned = .owned)  # collect: block until every daemon has the closure (see .mirai_pool_init)
   invisible(NULL)
 }
 
@@ -1709,9 +1887,8 @@ run_mode_mirai <- function(
   ## EVERY daemon -> n_cores x blas_threads oversubscription. dynhr's
   ## matrices are too small for threaded BLAS to help even single-daemon
   ## (see the perf-bottleneck profile), so 1 is the right pin, not a tune.
-  .restore_blas <- .mirai_pin_blas_threads()
-  on.exit(.restore_blas(), add = TRUE)
-  mirai::daemons(n_cores)
+  ## Start daemons only when none are set; a user's pool is reused as is.
+  .owned <- .mirai_daemons_start(n_cores)
   ## Load dynhr and replay the host's option state on every daemon (the SMC
   ## task closures reach into the dynhr namespace, so they see `.dynhr_opts`
   ## on the DAEMON, not the host's -- see .dynhr_daemon_state).
@@ -1723,7 +1900,7 @@ run_mode_mirai <- function(
     },
     .args = list(.dynhr_state = .dynhr_daemon_state(),
                  .dynhr_apply = .dynhr_daemon_apply)
-  )[])  # collect: see .mirai_pool_init
+  )[], owned = .owned)  # collect: see .mirai_pool_init
   invisible(NULL)
 }
 
@@ -1731,26 +1908,49 @@ run_mode_mirai <- function(
 #' Parallel map for SMC, with reproducible per-task seeding.
 #'
 #' Replaces \code{future.apply::future_lapply(x, fn, future.seed = TRUE)} on a
-#' mirai pool. Each task seeds deterministically with \code{seed_base + index}
-#' before calling \code{fn}, so a run is reproducible. (This is a DIFFERENT RNG
-#' stream than the old future L'Ecuyer one, so SMC results are reproducible but
-#' not bit-identical to the previous future backend -- expected and documented.)
-#' The closure \code{fn} is shipped once for the whole map, not per task.
+#' mirai pool. Task j seeds deterministically with \code{seeds[j]} before
+#' calling \code{fn(x[[j]])}, so a run is reproducible and independent of the
+#' daemon count. (This is a DIFFERENT RNG stream than the old future L'Ecuyer
+#' one, so SMC results are reproducible but not bit-identical to the previous
+#' future backend -- expected and documented.) The closure \code{fn} is
+#' shipped once for the whole map, not per task.
 #'
 #' @param x vector mapped over (particle indices).
-#' @param fn task closure of one index.
-#' @param seed_base base RNG seed.
+#' @param fn task closure of one element of \code{x}.
+#' @param seeds integer seeds, one per element of \code{x} (normally
+#'   \code{.smc_stage_seeds()}).
 #' @return a list of results, one per element of \code{x}.
 #' @noRd
-.smc_pmap <- function(x, fn, seed_base = 0L) {
-  task <- function(.i, .fn, .sb) {
+.smc_pmap <- function(x, fn, seeds) {
+  if (length(seeds) != length(x))
+    .dynhr_abort(".smc_pmap: one seed per task is required (",
+                 length(seeds), " seeds for ", length(x), " tasks).",
+                 class = "dynhr_error_invalid_argument")
+  task <- function(.j, .fn, .x, .seeds) {
     ## Match the main session's RNG (daemons default to L'Ecuyer-CMRG).
     RNGkind("Mersenne-Twister", "Inversion", "Rejection")
-    set.seed(.sb + .i)
-    .fn(.i)
+    set.seed(.seeds[[.j]])
+    .fn(.x[[.j]])
   }
   ## Sever the env so mirai_map does not serialise .smc_pmap's frame (which
   ## holds `fn`) with every task on top of the once-per-task `.args` copy.
   environment(task) <- asNamespace("dynhr")
-  mirai::mirai_map(x, task, .args = list(.fn = fn, .sb = seed_base))[]
+  mirai::mirai_map(seq_along(x), task,
+                   .args = list(.fn = fn, .x = x, .seeds = seeds))[]
+}
+
+#' Per-particle task seeds of one SMC stage
+#'
+#' Stage \code{stage} (0 = the initial particle evaluation, k = the k-th
+#' mutation) of an SMC run with base seed \code{seed_base}: particle i gets
+#' child i of the stage's own child seed. Replaces
+#' \code{seed_base + stage * n + i}, whose consecutive integer seeds gave
+#' neighbouring particles dependent first draws (see \code{.child_seeds()}).
+#' @param seed_base base seed of the run.
+#' @param stage non-negative stage index.
+#' @param n number of particles.
+#' @return integer vector of length \code{n}.
+#' @noRd
+.smc_stage_seeds <- function(seed_base, stage, n) {
+  .child_seeds(.child_seed_at(seed_base, stage, "smc_stage"), n, "smc_particle")
 }

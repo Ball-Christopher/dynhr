@@ -602,16 +602,27 @@ print.DecisionRules5 <- function(x, ...) {
 
 #' Compute impulse response functions at fifth order (pruned state space)
 #'
-#' Implements the Andreasen, Fernandez-Villaverde & Rubio-Ramirez (2018)
-#' pruning scheme truncated at fifth order. Tracks five additive layers
-#' \eqn{x^{(1)}} through \eqn{x^{(5)}}. Constant mean-correction terms
-#' cancel in deviation IRFs.
+#' Pruned (Andreasen, Fernandez-Villaverde & Rubio-Ramirez 2018) impulse
+#' responses truncated at fifth order, with the same definition as
+#' \code{\link{compute_irfs_order3}}: the difference between the pruned path
+#' with the impulse at \eqn{t = 1} and the pruned path without it, both
+#' started at the deterministic steady state with no other shock realised.
+#' The state layers are the coefficients of the path when the shocks and
+#' \eqn{\sigma} are scaled jointly, so every risk term of the rule enters
+#' (\code{ghss}, \code{ghxss}, \code{ghuss}, \code{ghxxss}, \code{ghxuss},
+#' \code{ghuuss}, \code{ghss2}, and at order 5 \code{ghxxxss}, \code{ghxxuss}, \code{ghxuuss},
+#' \code{ghuuuss}, \code{ghxss2}, \code{ghuss2})
+#' and the result is the order-5 Taylor expansion, jointly in the shock
+#' size and \eqn{\sigma}, of the exact IRF.  (Before the 2026-11 review this
+#' function dropped every sigma term and mis-weighted the cross-layer
+#' products.)
 #'
 #' @param dr5       \code{DecisionRules5} object.
 #' @param model     \code{dynhr_mod} from \code{\link{parse_mod}}.
 #' @param n_periods Number of IRF horizons (default 40).
 #' @param shock_size Shock size in standard-deviation units (default 1).
-#' @param params    Named numeric parameter vector.
+#' @param params    Named numeric parameter vector. \code{NULL} uses
+#'   \code{model$param_values}.
 #' @return An \code{IRFCollection} with \code{attr(., "order") = 5L}.
 #' @export
 compute_irfs_order5 <- function(dr5, model, n_periods = 40L,
@@ -619,106 +630,6 @@ compute_irfs_order5 <- function(dr5, model, n_periods = 40L,
   if (!inherits(dr5, "DecisionRules5")) {
     stop("dr5 must be a DecisionRules5 object.")
   }
-
-  ghx   <- dr5$ghx;   ghu   <- dr5$ghu
-  ghxx  <- dr5$ghxx;  ghuu  <- dr5$ghuu
-  ghxxx <- dr5$ghxxx; ghuuu <- dr5$ghuuu
-  ghxxxx <- dr5$ghxxxx; ghuuuu <- dr5$ghuuuu
-  ghxxxxx <- dr5$ghxxxxx; ghuuuuu <- dr5$ghuuuuu
-
-  endo      <- dr5$endo_names
-  exo       <- dr5$exo_names
-  state_idx <- dr5$state_idx
-  n_endo    <- length(endo)
-  n_exo     <- length(exo)
-  n_s       <- length(state_idx)
-
-  if (is.null(params)) params <- model$param_values
-  shock_stderr <- .get_shock_stderr(model, exo, params)
-
-  hx    <- ghx   [state_idx, , drop = FALSE]
-  hu    <- ghu   [state_idx, , drop = FALSE]
-  hxx   <- ghxx  [state_idx, , drop = FALSE]
-  huu   <- ghuu  [state_idx, , drop = FALSE]
-  hxxx  <- ghxxx [state_idx, , drop = FALSE]
-  huuu  <- ghuuu [state_idx, , drop = FALSE]
-  hxxxx <- ghxxxx[state_idx, , drop = FALSE]
-  huuuu <- ghuuuu[state_idx, , drop = FALSE]
-
-  irfs <- list()
-  for (k in seq_along(exo)) {
-    shock_name <- exo[k]
-    irf_mat    <- matrix(0, n_periods, n_endo)
-    colnames(irf_mat) <- endo
-    rownames(irf_mat) <- paste0("t", seq_len(n_periods))
-
-    eps    <- numeric(n_exo)
-    eps[k] <- shock_stderr[shock_name] * shock_size
-
-    x1 <- x2 <- x3 <- x4 <- x5 <- numeric(n_s)
-
-    # --- Period 1: impact ---
-    eps_vec <- as.numeric(eps)
-
-    x1 <- as.numeric(hu      %*% eps_vec)
-    x2 <- as.numeric(0.5  * huu    %*% (eps_vec %x% eps_vec))
-    x3 <- as.numeric((1/6) * huuu   %*% (eps_vec %x% eps_vec %x% eps_vec))
-    x4 <- as.numeric((1/24)* huuuu  %*% (eps_vec %x% eps_vec %x% eps_vec %x% eps_vec))
-    x5 <- as.numeric((1/120)*ghuuuuu[state_idx, , drop=FALSE] %*%
-                      (eps_vec %x% eps_vec %x% eps_vec %x% eps_vec %x% eps_vec))
-
-    y1 <- as.numeric(ghu      %*% eps_vec)
-    y2 <- as.numeric(0.5  * ghuu    %*% (eps_vec %x% eps_vec))
-    y3 <- as.numeric((1/6) * ghuuu   %*% (eps_vec %x% eps_vec %x% eps_vec))
-    y4 <- as.numeric((1/24)* ghuuuu  %*% (eps_vec %x% eps_vec %x% eps_vec %x% eps_vec))
-    y5 <- as.numeric((1/120)*ghuuuuu %*%
-                      (eps_vec %x% eps_vec %x% eps_vec %x% eps_vec %x% eps_vec))
-
-    irf_mat[1, ] <- y1 + y2 + y3 + y4 + y5
-
-    # --- Periods 2..n_periods: pure propagation ---
-    for (t in 2:n_periods) {
-      x1p <- x1; x2p <- x2; x3p <- x3; x4p <- x4; x5p <- x5
-
-      x1 <- as.numeric(hx %*% x1p)
-      x2 <- as.numeric(hx %*% x2p + 0.5 * hxx %*% (x1p %x% x1p))
-      x3 <- as.numeric(hx %*% x3p + hxx %*% (x1p %x% x2p) +
-                       (1/6) * hxxx %*% (x1p %x% x1p %x% x1p))
-      x4 <- as.numeric(hx %*% x4p + hxx %*% (x1p %x% x3p + x2p %x% x2p) +
-                       hxxx %*% (x1p %x% x1p %x% x2p) +
-                       (1/24) * hxxxx %*% (x1p %x% x1p %x% x1p %x% x1p))
-      x5 <- as.numeric(
-        hx     %*% x5p +
-        hxx    %*% (x1p %x% x4p + x2p %x% x3p) +
-        hxxx   %*% (x1p %x% x1p %x% x3p + x1p %x% x2p %x% x2p) +
-        hxxxx  %*% (x1p %x% x1p %x% x1p %x% x2p)
-      )
-
-      y1 <- as.numeric(ghx  %*% x1p)
-      y2 <- as.numeric(ghx  %*% x2p + 0.5 * ghxx %*% (x1p %x% x1p))
-      y3 <- as.numeric(ghx  %*% x3p + ghxx %*% (x1p %x% x2p) +
-                       (1/6) * ghxxx %*% (x1p %x% x1p %x% x1p))
-      y4 <- as.numeric(ghx  %*% x4p + ghxx %*% (x1p %x% x3p + x2p %x% x2p) +
-                       ghxxx %*% (x1p %x% x1p %x% x2p) +
-                       (1/24) * ghxxxx %*% (x1p %x% x1p %x% x1p %x% x1p))
-      y5 <- as.numeric(
-        ghx    %*% x5p +
-        ghxx   %*% (x1p %x% x4p + x2p %x% x3p) +
-        ghxxx  %*% (x1p %x% x1p %x% x3p + x1p %x% x2p %x% x2p) +
-        ghxxxx %*% (x1p %x% x1p %x% x1p %x% x2p) +
-        (1/120) * ghxxxxx %*% (x1p %x% x1p %x% x1p %x% x1p %x% x1p)
-      )
-
-      irf_mat[t, ] <- y1 + y2 + y3 + y4 + y5
-    }
-
-    irfs[[shock_name]] <- irf_mat
-  }
-
-  class(irfs) <- "IRFCollection"
-  attr(irfs, "n_periods")  <- n_periods
-  attr(irfs, "endo_names") <- endo
-  attr(irfs, "exo_names")  <- exo
-  attr(irfs, "order")      <- 5L
-  irfs
+  n_periods <- .check_irf_n_periods(n_periods, "compute_irfs_order5")
+  .compute_irfs_pruned_k(dr5, model, 5L, n_periods, shock_size, params)
 }

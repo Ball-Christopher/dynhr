@@ -181,7 +181,9 @@
            if (lp < p || (lp == p &&
                           node$op %in% c("^", "<", ">", "<=", ">=")))
              l <- paste0("(", l, ")")
-           if (rp < p || (rp == p && node$op != "^"))
+           ## `^` too: parse_mod refuses an unparenthesised chain `a^b^c`, so
+           ## a right-nested power is written `a ^ (b ^ c)`.
+           if (rp <= p)
              r <- paste0("(", r, ")")
            paste0(l, " ", node$op, " ", r)
          },

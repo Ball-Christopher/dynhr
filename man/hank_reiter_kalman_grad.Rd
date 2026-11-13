@@ -14,7 +14,7 @@ hank_reiter_kalman_grad(
 )
 }
 \arguments{
-\item{data}{\code{T x n_obs} matrix (or vector when \code{n_obs = 1}) of
+\item{data}{\code{T x n_obs} matrix (rows are periods; oriented by the rule in \code{\link{hank_loglik_aggregate}}) (or vector when \code{n_obs = 1}) of
 DEMEANED observations, columns in the order of \code{obs_vars}. Must
 not contain \code{NA}.}
 

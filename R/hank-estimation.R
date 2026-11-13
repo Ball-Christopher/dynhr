@@ -101,6 +101,25 @@ hank_autocov <- function(Theta, sigma_eps, n_lags) {
 }
 
 
+## Time-indexed HANK likelihood inputs -> T x n_obs (rows are periods) by the
+## package-wide rule (R/time-orientation.R): names decide, an unnamed n x T or
+## square sample is refused. `series` is the observable names (character),
+## a matrix whose column names/count give them (Theta), or a count. Before
+## this every HANK likelihood took nrow(data) as T without a check, so an
+## n_obs x T sample was silently read transposed (n_obs = 1: -15.9 vs 44.0).
+#' @noRd
+.hank_orient_data <- function(data, series, caller, arg = "data") {
+  if (inherits(series, "dsge_ss"))
+    series <- series$obs_names %||% series$n_obs
+  else if (is.list(series) && !is.data.frame(series))   # Theta_list
+    series <- as.matrix(series[[1L]])
+  if (is.matrix(series))
+    series <- if (!is.null(colnames(series))) colnames(series)
+              else ncol(series)
+  .orient_time_matrix(data, series, arg, caller)
+}
+
+
 #' Gaussian log-likelihood of aggregate HANK data (ABRS autocovariance form)
 #'
 #' Exact time-domain Gaussian likelihood of the stacked demeaned aggregate
@@ -108,15 +127,46 @@ hank_autocov <- function(Theta, sigma_eps, n_lags) {
 #' Cholesky solve.
 #'
 #' @param data \code{T_data x n_obs} matrix of demeaned aggregate observations
-#'   (deviations from steady state), columns in the same order as \code{Theta}.
+#'   (deviations from steady state; rows are periods), columns in the same
+#'   order as \code{Theta}. Oriented by the package-wide rule: when
+#'   \code{Theta} has column names, columns of \code{data} named by them are
+#'   matched by name and a matrix named by them on its ROWS (the old
+#'   \code{n_obs x T} layout) is transposed with a message; an unnamed
+#'   \code{n_obs x T} or square sample is refused (class
+#'   \code{dynhr_error_orientation}) instead of being silently misread.
+#'   The sample must be complete (no \code{NA}); for missing observations use
+#'   \code{\link{hank_loglik_ss}}, which treats \code{NA} as missing.
 #' @param Theta MA coefficients (see \code{\link{hank_ma_coefficients}}).
-#' @param sigma_eps Shock innovation standard deviation.
+#' @param sigma_eps Shock innovation standard deviation (a single finite
+#'   number \eqn{\ge 0}).
 #' @param me_variance Measurement-error variance (default 0).
 #'
 #' @return The scalar Gaussian log-likelihood.
 #' @export
 hank_loglik_aggregate <- function(data, Theta, sigma_eps, me_variance = 0) {
-  data <- as.matrix(data)
+  ## One scalar shock: sigma_eps must be a single finite non-negative number
+  ## (a negative value gave the |sigma_eps| likelihood, a vector died with a
+  ## replacement-length error; review 2026-11-11 F9).
+  if (!is.numeric(sigma_eps) || length(sigma_eps) != 1L ||
+      !is.finite(sigma_eps) || sigma_eps < 0)
+    .dynhr_abort("hank_loglik_aggregate: `sigma_eps` must be a single finite ",
+                 "non-negative number (the standard deviation of the one ",
+                 "aggregate shock); got ",
+                 if (is.numeric(sigma_eps)) paste(format(sigma_eps), collapse = ", ")
+                 else class(sigma_eps)[1L], ".",
+                 class = "dynhr_error_invalid_argument")
+  Theta <- as.matrix(Theta)
+  data <- .hank_orient_data(data, Theta, "hank_loglik_aggregate")
+  ## The block-Toeplitz Cholesky form needs a complete sample: an NA used to
+  ## propagate to an NA log-likelihood.  Refuse it and point to the Kalman
+  ## form, which treats NA as missing.
+  if (!all(is.finite(data)))
+    .dynhr_abort("hank_loglik_aggregate: `data` contains ",
+                 sum(!is.finite(data)), " NA / non-finite value(s). This ",
+                 "autocovariance (stacked Cholesky) likelihood needs a complete ",
+                 "sample; use hank_loglik_ss(), the equivalent Kalman form, ",
+                 "which treats NA as a missing observation.",
+                 class = "dynhr_error_missing_data")
   T_data <- nrow(data); n_obs <- ncol(data)
   G <- hank_autocov(Theta, sigma_eps, n_lags = T_data - 1L)
   S <- .hank_stacked_cov(G, T_data, me_variance = me_variance)
@@ -179,7 +229,7 @@ hank_ma_state_space <- function(Theta, sigma_eps, q = NULL) {
 #' composes with dynhr's missing-data handling, smoother, priors, samplers and
 #' SBC tooling.
 #'
-#' @param data \code{T_data x n_obs} matrix of demeaned aggregate observations.
+#' @param data \code{T_data x n_obs} matrix (rows are periods; oriented by the rule in \code{\link{hank_loglik_aggregate}}) of demeaned aggregate observations.
 #' @param Theta MA coefficients (see \code{\link{hank_ma_coefficients}}).
 #' @param sigma_eps Innovation standard deviation.
 #' @param me_variance Measurement-error variance (needed when n_obs > n_shocks).
@@ -199,7 +249,8 @@ hank_ma_state_space <- function(Theta, sigma_eps, q = NULL) {
 hank_loglik_ss <- function(data, Theta, sigma_eps, me_variance = 0, q = NULL,
                            singular_obs = c("reject", "skip")) {
   singular_obs <- match.arg(singular_obs)
-  data  <- as.matrix(data)
+  Theta <- as.matrix(Theta)
+  data  <- .hank_orient_data(data, Theta, "hank_loglik_ss")
   ss <- hank_ma_state_space(Theta, sigma_eps, q = q)
   n_state <- ss$n_state
   out <- .kf_univariate_dispatch(

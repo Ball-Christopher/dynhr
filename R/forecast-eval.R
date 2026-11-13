@@ -122,15 +122,17 @@
                      verbose = FALSE)
 }
 
-#' Per-observable measurement-error variance as an n_obs x T matrix
+#' Per-observable measurement-error variance as a T x n_obs matrix (rows are
+#' periods, the orientation every time-indexed input takes)
 #' @noRd
-.fbt_me_extra <- function(me_variance, n_obs, TT) {
+.fbt_me_extra <- function(me_variance, n_obs, TT, obs_names = NULL) {
   v <- as.numeric(me_variance)
   if (length(v) == 0L || all(v == 0)) return(NULL)
   if (any(!is.finite(v)) || any(v < 0))
     stop("forecast_backtest: me_variance must be finite and non-negative.",
          call. = FALSE)
-  matrix(rep_len(v, n_obs), n_obs, TT)
+  matrix(rep_len(v, n_obs), TT, n_obs, byrow = TRUE,
+         dimnames = list(NULL, obs_names))
 }
 
 #' Filtered state mean and covariance for every period of `Y`
@@ -148,7 +150,7 @@
 #' @return List with `s` (T x n_state) and `P` (n_state x n_state x T).
 #' @noRd
 .fbt_filter <- function(ss, Y, me_variance) {
-  me <- .fbt_me_extra(me_variance, ncol(Y), nrow(Y))
+  me <- .fbt_me_extra(me_variance, ncol(Y), nrow(Y), ss$obs_names)
   sm <- .kalman_smoother_ss(Y, ss, me_extra = me)
   list(s = sm$filtered_states, P = sm$filtered_cov, loglik = sm$loglik)
 }

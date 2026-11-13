@@ -141,11 +141,12 @@
 #'     lifetime value \code{V_1} (named \code{V0} for the period-0/period-1
 #'     convention shared with \code{\link{hank_welfare_response}}'s
 #'     \code{dV0}: the value as seen from the start of the transition).}
-#'   \item{V_path}{Numeric \code{(n_e*n_a) x T_h} matrix: column \code{t} is
-#'     the transition value \code{V_t}.}
+#'   \item{V_path}{Numeric \code{T_h x (n_e*n_a)} matrix (rows are
+#'     periods): row \code{t} is the transition value \code{V_t}.}
 #'   \item{V_ss}{Numeric length-\code{n_e*n_a} vector: the terminal/baseline
 #'     stationary value from \code{\link{hank_value_function}}.}
-#'   \item{dV_path}{\code{V_path - V_ss} (recycled column-wise): the EXACT
+#'   \item{dV_path}{\code{V_path} minus \code{V_ss} in every row
+#'     (\code{T_h x (n_e*n_a)}): the EXACT
 #'     (non-marginal) per-period deviation from steady-state value.}
 #'   \item{cev}{Numeric length-\code{n_e*n_a} vector: the exact per-cell
 #'     consumption-equivalent variation, \code{\link{hank_cev}(V_ss, V0,
@@ -187,7 +188,7 @@ hank_value_transition <- function(block, r_path = NULL, w_path = NULL,
 
   ## 3. Backward Bellman value pass using each period's OWN re-optimized
   ## policy and forward operator, from terminal continuation V_{T_h+1} = V_ss.
-  V_path <- matrix(0, n_cell, T_h)
+  V_path <- matrix(0, T_h, n_cell)   # T x n_cell: rows are periods
   V_next <- V_ss
   Lam_keep <- if (keep_policies) vector("list", T_h) else NULL
   for (t in T_h:1L) {
@@ -195,10 +196,10 @@ hank_value_transition <- function(block, r_path = NULL, w_path = NULL,
     if (keep_policies) Lam_keep[[t]] <- Lam_t
     u_t   <- hank_utility(.hank_mat_to_vec(c_pol[[t]]), block$eis)
     V_t   <- u_t + beta * as.numeric(Lam_t %*% V_next)
-    V_path[, t] <- V_t
+    V_path[t, ] <- V_t
     V_next <- V_t
   }
-  V_1 <- V_path[, 1]
+  V_1 <- V_path[1, ]
 
   ## 4. Exact CEV: baseline = the stationary steady-state consumption path
   ## (value V_ss), alternative = actually living through the transition
@@ -206,7 +207,7 @@ hank_value_transition <- function(block, r_path = NULL, w_path = NULL,
   cev <- hank_cev(V0 = V_ss, V1 = V_1, block = block)
 
   out <- list(V0 = V_1, V_path = V_path, V_ss = V_ss,
-              dV_path = V_path - V_ss, cev = cev)
+              dV_path = sweep(V_path, 2L, V_ss), cev = cev)
   if (keep_policies) {
     out$c_pol  <- c_pol
     out$a_pol  <- a_pol

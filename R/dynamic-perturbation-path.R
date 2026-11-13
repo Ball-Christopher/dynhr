@@ -60,8 +60,13 @@
 #' @param ETA        Shock loading matrix (\code{n_state x n_shocks}).
 #'   Rows correspond to state variables in order.  Pass \code{NULL} or a zero
 #'   matrix for a deterministic path.
-#' @param shocks     Shock matrix (\code{n_shocks x T}).  Column \code{t}
-#'   contains the shocks applied at period \code{t}.  Pass \code{NULL} for
+#' @param shocks     Shock matrix (\code{T x n_shocks}, rows = periods).  Row
+#'   \code{t} contains the shocks applied at period \code{t}; fewer than
+#'   \code{T} rows leaves the later periods unshocked.  When \code{ETA} has
+#'   column names, name the columns the same way (a matrix named by shock on
+#'   its ROWS is transposed with a message); an unnamed matrix must have
+#'   exactly \code{ncol(ETA)} columns (an unnamed \code{n_shocks x T} or
+#'   square matrix is an error).  Pass \code{NULL} for
 #'   a zero-shock (deterministic) path.
 #' @param tol        Convergence tolerance for the nonlinear solver (default 1e-10).
 #' @param verbose    Logical; if \code{TRUE}, print progress.
@@ -94,14 +99,16 @@
 #'   \code{Sigma_e = diag(dr$se_estim^2)} or \code{Sigma_e = dr$Sigma_e}.
 #' @return A list with:
 #'   \describe{
-#'     \item{\code{y_sim}}{Matrix (\code{n_jump x T}) of jump variable values.
-#'       Rows correspond to \code{jump_vars} (non-state endogenous variables in
-#'       declaration order).  Column \code{t} is the period-\code{t} jump.}
-#'     \item{\code{x_sim}}{Matrix (\code{n_state x T}) of state variable values.
-#'       Rows correspond to \code{dr$state_vars}.  Column 1 is \code{x_0};
-#'       column \code{t+1} is the state entering period \code{t+1}.}
-#'     \item{\code{state_vars}}{Character vector: names of state variables (rows of x_sim).}
-#'     \item{\code{jump_vars}}{Character vector: names of jump variables (rows of y_sim).}
+#'     \item{\code{y_sim}}{Matrix (\code{T x n_jump}, rows = periods) of jump
+#'       variable values.  Columns correspond to \code{jump_vars} (non-state
+#'       endogenous variables in declaration order).  Row \code{t} is the
+#'       period-\code{t} jump.}
+#'     \item{\code{x_sim}}{Matrix (\code{T x n_state}, rows = periods) of state
+#'       variable values.  Columns correspond to \code{dr$state_vars}.  Row 1
+#'       is \code{x_0}; row \code{t+1} is the state entering period
+#'       \code{t+1}.}
+#'     \item{\code{state_vars}}{Character vector: names of state variables (columns of x_sim).}
+#'     \item{\code{jump_vars}}{Character vector: names of jump variables (columns of y_sim).}
 #'   }
 #' @export
 dynamic_path_perturbation <- function(compiled, ss, params, dr,
@@ -173,8 +180,17 @@ dynamic_path_perturbation <- function(compiled, ss, params, dr,
   # ---- Shock matrices ----------------------------------------------------
   n_shk <- if (!is.null(ETA)) ncol(ETA) else 0L
   if (is.null(ETA))    ETA    <- matrix(0, nx, 0L)
-  if (is.null(shocks)) shocks <- matrix(0, n_shk, T)
-  if (n_shk == 0L && nrow(shocks) == 0L) shocks <- matrix(0, 0L, T)
+  ## `shocks` is T x n_shocks (rows = periods; R/time-orientation.R): columns
+  ## named as colnames(ETA) when ETA has column names (names decide), else an
+  ## unnamed matrix with exactly n_shocks columns. It may have fewer than T
+  ## rows (later periods get zero shocks). The loop below runs on its
+  ## n_shocks x T transpose.
+  if (is.null(shocks) || n_shk == 0L) {
+    shocks <- matrix(0, n_shk, T)
+  } else {
+    shocks <- t(.orient_time_matrix(shocks, colnames(ETA) %||% n_shk,
+                                    "shocks", "dynamic_path_perturbation"))
+  }
 
   # ---- Simulation storage ------------------------------------------------
   x_sim <- matrix(0, nx, T)
@@ -365,9 +381,10 @@ dynamic_path_perturbation <- function(compiled, ss, params, dr,
     if (verbose) .dynhr_cat(sprintf("dynamic_path_perturbation: period %d done\n", t - 1L))
   }
 
+  ## Rows = periods: T x n_jump and T x n_state.
   list(
-    y_sim      = y_sim,
-    x_sim      = x_sim,
+    y_sim      = t(y_sim),
+    x_sim      = t(x_sim),
     state_vars = state_vars,
     jump_vars  = jump_vars
   )

@@ -438,10 +438,10 @@
 #'   requests including order 4 take the \code{"implicit"} path, and orders
 #'   within \code{1:2} the exact first-order mean/covariance gradient. It is what \code{"auto"} selects for the Gaussian
 #'   likelihood and for cumulant orders containing 3 but not 4 (see above).
-#' @param me_extra Optional n_obs x T matrix of per-period additive
+#' @param me_extra Optional T x n_obs matrix (rows are periods) of per-period additive
 #'   measurement-error variances (filter_tunes); the gradient is of the same
 #'   tuned likelihood \code{make_log_posterior} evaluates.
-#' @param shock_scale Optional n_exo x T matrix of known per-period shock-std
+#' @param shock_scale Optional T x n_exo matrix (rows are periods) of known per-period shock-std
 #'   scale factors (heteroskedastic_shocks).
 #' @param likelihood \code{"gaussian"} (default), \code{"whittle"}, or
 #'   \code{"cumulant"}; selects the likelihood whose gradient is built.
@@ -457,11 +457,13 @@
 #'   \eqn{-(T/2) \delta' W \delta} and the gradient is exact for it. Must match
 #'   the forward \code{make_log_posterior_cumulant} setting. \code{NULL}
 #'   (default) is the identity weighting.
-#' @param debias Logical; for \code{likelihood = "whittle"}, differentiate
-#'   the debiased Whittle loglik (expected-periodogram form, Sykulski et al.
-#'   2019 — the default of the estimation entry points). Must match the
-#'   \code{debias} setting of the posterior being sampled. Ignored for the
-#'   Gaussian likelihood.
+#' @param debias Logical; for \code{likelihood = "whittle"}: \code{FALSE}
+#'   (default, as for the posterior) differentiates the standard Whittle
+#'   loglik, \code{TRUE} the debiased one (expected-periodogram form,
+#'   Sykulski et al. 2019; see the "Whittle debias" section of
+#'   \code{\link{make_log_posterior}}). Must match the \code{debias} setting
+#'   of the posterior being sampled; the estimation paths pass it. Ignored
+#'   for the other likelihoods.
 #' @param pruned_order Integer perturbation order for the pruned state-space
 #'   likelihood path (default \code{2L}); currently \code{2L} or \code{3L}.
 #' @param power Power-posterior (generalised-Bayes) exponent zeta in (0, 1].
@@ -581,7 +583,7 @@ make_posterior_grad <- function(model, data, prior_spec, obs_vars, compiled,
                                 cumulant_orders = 1:4,
                                 cumulant_weight = "identity",
                                 weight_matrix = NULL,
-                                debias = TRUE,
+                                debias = FALSE,
                                 pruned_order = 2L,
                                 power = NULL,
                                 system_priors = NULL,
@@ -608,6 +610,15 @@ make_posterior_grad <- function(model, data, prior_spec, obs_vars, compiled,
   exo       <- model$varexo_names
   par_names <- prior_spec$name
   np        <- length(par_names)
+  ## Time-indexed inputs -> T x n (rows = periods), once, at build time (the
+  ## rule make_log_posterior applies). The analytic Kalman kernels below run
+  ## with periods in COLUMNS, so they get the transposes (`*_k`).
+  oi_in <- .mlp_orient_inputs(data, me_extra, shock_scale, obs_vars, model,
+                              "make_posterior_grad")
+  data <- oi_in$data; me_extra <- oi_in$me_extra
+  shock_scale <- oi_in$shock_scale
+  me_extra_k    <- if (!is.null(me_extra)) t(me_extra)
+  shock_scale_k <- if (!is.null(shock_scale)) t(shock_scale)
   use_whittle  <- identical(likelihood, "whittle")
   use_cumulant <- identical(likelihood, "cumulant")
   use_pruned   <- identical(likelihood, "pruned")
@@ -1051,7 +1062,8 @@ make_posterior_grad <- function(model, data, prior_spec, obs_vars, compiled,
       if (is.null(ss) || !isTRUE(ss$converged)) return(g)   # infeasible: prior-only
       params <- ss$params %||% params                       # consistent p_c
       sys <- extract_system_matrices_fast(sys_cache, ss$ss, params)
-      d1  <- .solve_from_system(sys, model, compiled, ss$ss, params, FALSE)
+      d1  <- .solve_from_system(sys, model, compiled, ss$ss, params, FALSE,
+        qz_fail = "null")
       if (is.null(d1) || !isTRUE(d1$bk_satisfied)) return(g)
       ghx_state <- d1$ghx[d1$state_idx, , drop = FALSE]
       ## Radius stored by the solve for exactly this block (.state_radius;
@@ -1173,8 +1185,7 @@ make_posterior_grad <- function(model, data, prior_spec, obs_vars, compiled,
       g <- .dlog_prior(theta, prior_spec)        # analytic prior score (all params)
 
       if (is_pruned3) {
-        Y3 <- if (is.null(dim(data))) matrix(data, nrow = length(obs_vars)) else data
-        if (nrow(Y3) != length(obs_vars)) Y3 <- t(Y3)
+        Y3 <- t(data)   # n_obs x T: the order-3 chain's layout
 
         chain_res3 <- tryCatch(
           .pgo3_grad_chain(theta, model, compiled, par_names, Y3, obs_vars,
@@ -1224,14 +1235,13 @@ make_posterior_grad <- function(model, data, prior_spec, obs_vars, compiled,
                       error = function(e) .dynhr_reraise_bug(e, NULL))
       if (is.null(pss)) return(g)
 
-      Y <- if (is.null(dim(data))) matrix(data, nrow = length(obs_vars)) else data
-      if (nrow(Y) != length(obs_vars)) Y <- t(Y)
+      Y <- t(data)   # n_obs x T: the pruned kernels' layout
 
       sd2 <- tryCatch(
         solution_derivatives_order2(model, compiled, dr2, params, par_names),
         error = function(e) .dynhr_reraise_bug(e, NULL))
       if (is.null(sd2)) {
-        base_ll <- tryCatch(pruned_ss_loglik(pss, Y, obs_vars, me_variance = me_variance),
+        base_ll <- tryCatch(pruned_ss_loglik(pss, data, obs_vars, me_variance = me_variance),
                             error = function(e) .dynhr_reraise_bug(e, -Inf))
         if (!is.finite(base_ll)) return(g)
         for (nm in par_names) {
@@ -1252,7 +1262,7 @@ make_posterior_grad <- function(model, data, prior_spec, obs_vars, compiled,
         error = function(e) .dynhr_reraise_bug(e, NULL))
 
       base_ll <- if (!is.null(chain_res)) chain_res$loglik else
-        tryCatch(pruned_ss_loglik(pss, Y, obs_vars, me_variance = me_variance),
+        tryCatch(pruned_ss_loglik(pss, data, obs_vars, me_variance = me_variance),
                  error = function(e) .dynhr_reraise_bug(e, -Inf))
       if (!is.finite(base_ll)) return(g)
 
@@ -1292,8 +1302,7 @@ make_posterior_grad <- function(model, data, prior_spec, obs_vars, compiled,
     ZZ <- dr$ghx[oi, , drop = FALSE]; DD <- dr$ghu[oi, , drop = FALSE]
     dvec <- dr$ys[obs_vars]
     Sigma_e <- .get_shock_cov(model, exo, params)
-    Y <- if (is.null(dim(data))) matrix(data, nrow = length(obs_vars)) else data
-    if (nrow(Y) != length(obs_vars)) Y <- t(Y)
+    Y <- t(data)   # n_obs x T: the Kalman kernels' layout
 
     ## The P0 initialization the objective runs at this draw (lik_init).
     ## "reject": lik_init = "stationary" on a unit root, where the posterior
@@ -1371,8 +1380,7 @@ make_posterior_grad <- function(model, data, prior_spec, obs_vars, compiled,
   ## shock_scale; the ctx_allows_analytic_gradient guard ensures this).
   if (use_whittle) {
     ## Pre-compute the periodogram once (data is fixed for this grad builder).
-    wdata <- if (is.null(dim(data))) matrix(data, ncol = 1L) else data
-    if (nrow(wdata) < ncol(wdata)) wdata <- t(wdata)
+    wdata <- data   # T x n_obs, oriented at build time
     obs_col_idx <- match(obs_vars, colnames(wdata))
     if (anyNA(obs_col_idx)) obs_col_idx <- seq_along(obs_vars)
     Y_raw_w    <- wdata[, obs_col_idx, drop = FALSE]
@@ -1575,8 +1583,7 @@ make_posterior_grad <- function(model, data, prior_spec, obs_vars, compiled,
     ZZ <- dr$ghx[oi, , drop = FALSE]; DD <- dr$ghu[oi, , drop = FALSE]
     dvec <- dr$ys[obs_vars]
     Sigma_e <- .get_shock_cov(model, exo, params)
-    Y <- if (is.null(dim(data))) matrix(data, nrow = length(obs_vars)) else data
-    if (nrow(Y) != length(obs_vars)) Y <- t(Y)
+    Y <- t(data)   # n_obs x T: the Kalman kernels' layout
 
     ## Per-draw guard (mirrors kalman_filter's lik_init = "auto" eigenvalue test):
     ## the dense tangent/adjoint kernels assume a stationary Lyapunov P0 and
@@ -1747,14 +1754,14 @@ make_posterior_grad <- function(model, data, prior_spec, obs_vars, compiled,
           ## scalar; shock_scale / me_extra enter per period (see
           ## gradient-adjoint-uni.R). Bars only when reversing the solve.
           .kf_loglik_adjoint_uni(Y, ss, d_ss_list, me_variance = me_variance,
-                                 P0 = NULL, shock_scale = shock_scale,
-                                 me_extra = me_extra,
+                                 P0 = NULL, shock_scale = shock_scale_k,
+                                 me_extra = me_extra_k,
                                  return_bars = use_sol_adjoint)
         } else if (use_sol_adjoint) {
           ## Dense stationary adjoint WITH bar export (the _ss long-T variant does
           ## not export bars; the O(T) n^2 storage is accepted here).
           .kf_loglik_adjoint(Y, ss, d_ss_list, me_variance = me_variance,
-                             me_extra = me_extra, shock_scale = shock_scale,
+                             me_extra = me_extra_k, shock_scale = shock_scale_k,
                              return_bars = TRUE)
         } else if (grad_method == "adjoint" || grad_method == "adjoint_solution") {
           ## Stationary dense adjoint. For LONG samples the steady-state-aware
@@ -1769,11 +1776,11 @@ make_posterior_grad <- function(model, data, prior_spec, obs_vars, compiled,
             .kf_loglik_adjoint_ss(Y, ss, d_ss_list, me_variance = me_variance)
           } else {
             .kf_loglik_adjoint(Y, ss, d_ss_list, me_variance = me_variance,
-                               me_extra = me_extra, shock_scale = shock_scale)
+                               me_extra = me_extra_k, shock_scale = shock_scale_k)
           }
         } else {
           .kf_loglik_tangent(Y, ss, d_ss_list, me_variance = me_variance,
-                             me_extra = me_extra, shock_scale = shock_scale)
+                             me_extra = me_extra_k, shock_scale = shock_scale_k)
         }
       }, error = function(e) .dynhr_reraise_bug(e, NULL))
 
@@ -2039,8 +2046,9 @@ make_posterior_grad <- function(model, data, prior_spec, obs_vars, compiled,
   Sigma_e <- .get_shock_cov(model, model$varexo_names, base$params)
   init <- .grad_init_in_force(TT, RR, Sigma_e, lik_init, dr = dr)
   if (!identical(init, "stationary")) return(NULL)
-  Y <- if (is.null(dim(data))) matrix(data, nrow = length(obs_vars)) else data
-  if (nrow(Y) != length(obs_vars)) Y <- t(Y)
+  ## `data`, `me_extra`, `shock_scale` are T x n (oriented by the builder);
+  ## the adjoint kernel takes them n x T.
+  Y <- t(data)
   if (anyNA(Y)) return(NULL)
   kf <- suppressWarnings(
     kalman_filter(data, dr, model, base$params, obs_vars,
@@ -2054,7 +2062,9 @@ make_posterior_grad <- function(model, data, prior_spec, obs_vars, compiled,
              Sigma_e = Sigma_e)
   zero <- list(dSigma_e = matrix(0, ncol(RR), ncol(RR)))
   kern <- .kf_loglik_adjoint(Y, ss, list(zero), me_variance = me_variance,
-                             me_extra = me_extra, shock_scale = shock_scale)
+                             me_extra = if (!is.null(me_extra)) t(me_extra),
+                             shock_scale = if (!is.null(shock_scale))
+                               t(shock_scale))
   if (!is.finite(kern$loglik) ||
       abs(kern$loglik - kf$loglik) <= 1e-6 * max(1, abs(kf$loglik)))
     return(NULL)
@@ -2085,7 +2095,8 @@ make_posterior_grad <- function(model, data, prior_spec, obs_vars, compiled,
   ## state (no-op for non-SSM-parameter models).
   params <- ss$params %||% params
   sys <- extract_system_matrices_fast(sys_cache, ss$ss, params)
-  dr  <- .solve_from_system(sys, model, compiled, ss$ss, params, FALSE)
+  dr  <- .solve_from_system(sys, model, compiled, ss$ss, params, FALSE,
+        qz_fail = "null")
   if (is.null(dr) || !isTRUE(dr$bk_satisfied)) return(NULL)
   if (!is.null(cache))
     .structural_cache_store(cache, key, params_in, params, ss,
@@ -2133,6 +2144,10 @@ make_posterior_grad <- function(model, data, prior_spec, obs_vars, compiled,
                                   cumulant_orders = 1:4,
                                   lik_init = "auto", me_variance = 0) {
   if (!identical(grad_method, "auto")) return(grad_method)
+  oi_in <- .mlp_orient_inputs(data, me_extra, shock_scale, obs_vars, model,
+                              "make_posterior_grad")
+  data <- oi_in$data; me_extra <- oi_in$me_extra
+  shock_scale <- oi_in$shock_scale
   if (is.null(theta_ref))
     theta_ref <- setNames(prior_spec$mean, prior_spec$name)
   base <- .grad_solve_dr(model, compiled, cache_system_structure(compiled),

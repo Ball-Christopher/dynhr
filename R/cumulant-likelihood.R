@@ -713,6 +713,9 @@
 #' @noRd
 .third_cumulant_second_chaos_adjoint <- function(dr, model, params,
                                                  bar_c3_obs) {
+  ## mixed blocks (and their cotangents) in the u_slow layout: see
+  ## MIXED-BLOCK LAYOUT CONVENTION (only DecisionRules2 reach here today)
+  dr <- .with_mixed_layout(dr, "u_slow")
   state_idx <- dr$state_idx
   o <- nrow(dr$ghx)
   Sigma_e <- .get_shock_cov(model, dr$exo_names, params)
@@ -797,7 +800,10 @@
 #'
 #' @param dr    DecisionRules2 (or higher) with ghx, ghu, ghxx, ghuu, ghxu
 #' @param model dynhr_mod (for shock variances)
-#' @param params Named numeric parameter vector
+#' @param params Named numeric parameter vector, or \code{NULL} (default).
+#'   The shock covariance comes from \code{params} when supplied, else from
+#'   \code{dr$Sigma_e} (set by \code{\link{solve_perturbation}}), else from
+#'   the model's shocks block at \code{model$param_values}.
 #' @return List:
 #'   \item{c3_obs}{n_obs x n_obs^2 matrix: vec(kappa_3(y)) with row=var1,
 #'     cols=flattened (var2, var3)}
@@ -813,6 +819,8 @@
 #'     \emph{Review of Economic Studies}, 85(1), 1-49.
 #' @export
 compute_third_cumulant <- function(dr, model, params = NULL) {
+  ## mixed blocks contracted as (e %x% x): see MIXED-BLOCK LAYOUT CONVENTION
+  dr <- .with_mixed_layout(dr, "u_slow")
   # ---- Extract structure ----
   endo      <- dr$endo_names
   exo       <- dr$exo_names
@@ -821,16 +829,14 @@ compute_third_cumulant <- function(dr, model, params = NULL) {
   n_exo     <- length(exo)
   n_s       <- length(state_idx)
 
-  if (is.null(params)) params <- model$param_values
-
   ghx  <- dr$ghx;   ghu  <- dr$ghu
   ghxx <- dr$ghxx %||% NULL
   ghuu <- dr$ghuu %||% NULL
   ghxu <- dr$ghxu %||% NULL
   ghss <- dr$ghss %||% rep(0, n_endo)
 
-  # Shock covariance
-  Sigma_e <- .get_shock_cov(model, exo, params)
+  # Shock covariance: caller `params` > dr$Sigma_e > model (.resolve_sigma_e)
+  Sigma_e <- .resolve_sigma_e(dr, model, params)
   dimnames(Sigma_e) <- list(exo, exo)
 
   # ---- State-row submatrices ----
@@ -1499,7 +1505,10 @@ compute_third_cumulant <- function(dr, model, params = NULL) {
 #'
 #' @param dr    DecisionRules2 (or higher)
 #' @param model dynhr_mod
-#' @param params Named numeric parameter vector
+#' @param params Named numeric parameter vector, or \code{NULL} (default).
+#'   The shock covariance comes from \code{params} when supplied, else from
+#'   \code{dr$Sigma_e} (set by \code{\link{solve_perturbation}}), else from
+#'   the model's shocks block at \code{model$param_values}.
 #' @param method Either \code{"window"} (default; the innovation-history
 #'   truncated-window trace, \code{.fourth_cumulant_qform_marginal}) or
 #'   \code{"closed_form"} (opt-in; delegates to
@@ -1519,6 +1528,8 @@ compute_third_cumulant <- function(dr, model, params = NULL) {
 compute_fourth_cumulant <- function(dr, model, params = NULL,
                                     method = c("window", "closed_form")) {
   method <- match.arg(method)
+  ## mixed blocks contracted as (e %x% x): see MIXED-BLOCK LAYOUT CONVENTION
+  dr <- .with_mixed_layout(dr, "u_slow")
   if (identical(method, "closed_form"))
     return(.fourth_cumulant_closed_form(dr, model, params))
 
@@ -1529,14 +1540,12 @@ compute_fourth_cumulant <- function(dr, model, params = NULL,
   n_exo     <- length(exo)
   n_s       <- length(state_idx)
 
-  if (is.null(params)) params <- model$param_values
-
   ghx  <- dr$ghx;   ghu  <- dr$ghu
   ghxx <- dr$ghxx %||% NULL
   ghxu <- dr$ghxu %||% NULL
   ghuu <- dr$ghuu %||% NULL
 
-  Sigma_e <- .get_shock_cov(model, exo, params)
+  Sigma_e <- .resolve_sigma_e(dr, model, params)
 
   hx  <- ghx [state_idx, , drop = FALSE]
   hu  <- ghu [state_idx, , drop = FALSE]
@@ -1933,7 +1942,7 @@ sample_cumulants <- function(Y, max_order = 4L) {
   }
 
   # Add measurement error to model variance
-  if (me_variance > 0) {
+  if (any(me_variance > 0)) {
     diag(Sigma_y_model) <- diag(Sigma_y_model) + me_variance
   }
 
@@ -2114,6 +2123,14 @@ make_log_posterior_cumulant <- function(model, data, prior_spec, obs_vars,
   ## pointing at the caller's frame. A mirai daemon that ships this closure
   ## before it has been called once would fail to resolve them.
   force(data); force(prior_spec); force(obs_vars); force(me_variance)
+  ## Validated here, at argument time (review 2026-11-11 F8: a vector died
+  ## per draw with "the condition has length > 1").  The cumulant likelihood
+  ## implements H = me_variance * I only -- the rule make_log_posterior(
+  ## likelihood = "cumulant") and validate_spec() already enforce (W53-3f) --
+  ## so a genuine per-observable vector is refused with a classed error.
+  me_variance <- .kf_me_variance(me_variance, obs_vars,
+                                 "make_log_posterior_cumulant",
+                                 allow_vector = FALSE)
   force(cumulant_orders); force(cumulant_weight); force(weight_matrix)
   force(system_priors)
 

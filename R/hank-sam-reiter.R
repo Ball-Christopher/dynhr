@@ -269,15 +269,15 @@ hank_sam_reiter_statespace <- function(x, input_derivs, rho_zm,
   B[ir, iz] <- -sum(D_ss * ga_z)
 
   ## ---- Klein (2000) via QZ, identical bookkeeping to the KS assemble ------
-  qzd <- QZ::qz.dgges(B, A)
-  mu  <- complex(real = qzd$ALPHAR, imaginary = qzd$ALPHAI) / qzd$BETA
-  sel <- is.finite(Mod(mu)) & (Mod(mu) < 1 + 1e-6)
-  n_s <- sum(sel)
+  ## The package's one ordered QZ (.ordered_qz(): compiled dgges, stable
+  ## eigenvalues |mu| < 1 + 1e-6 first; infinite mu count as unstable).
+  o   <- .ordered_qz(B, A, critmod = 1 + 1e-6, what = "hank_sam_reiter_statespace()")
+  mu  <- complex(real = o$ALPHAR, imaginary = o$ALPHAI) / o$BETA   # stable first
+  n_s <- o$sdim
   if (n_s != npred)
     stop(sprintf(paste0("hank_sam_reiter_statespace(): Blanchard-Kahn failure ",
                         "-- %d stable generalized eigenvalues, need %d ",
                         "(predetermined states)."), n_s, npred))
-  o <- QZ::qz.dtgsen(qzd$S, qzd$T, qzd$Q, qzd$Z, sel)
   Z11 <- o$Z[1:npred, 1:npred]
   Z21 <- o$Z[npred + 1:(n + 1L), 1:npred]
   S11 <- o$S[1:npred, 1:npred]
@@ -329,7 +329,7 @@ hank_sam_reiter_statespace <- function(x, input_derivs, rho_zm,
     list(T_mat = Tmat, R_mat = matrix(Rvec, ncol = 1L), Z_mat = Zmat,
          state_names = state_names, obs_names = rownames(Zmat),
          spectral_radius = sr, n_stable = n_s,
-         n_infinite = sum(abs(qzd$BETA) < 1e-12),
+         n_infinite = sum(abs(o$BETA) < 1e-12),
          gen_eig_mod = Mod(mu), Qj = Qj,
          rho_z = rho_zm, sigma_z = sigma_zm,
          input_derivs = input_derivs,

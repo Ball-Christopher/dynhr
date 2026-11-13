@@ -59,7 +59,7 @@
 #' Before 0.9.3.93 every binding period used the one-period policy of
 #' \code{obc_ensure_policy()} (next period slack).
 #'
-#' @param Y             Observation matrix (n_obs x T); columns = time periods
+#' @param Y             Observation matrix (T x n_obs); rows = time periods
 #' @param dr_slack      Slack-regime DecisionRules
 #' @param regime_cache  R environment seeded by obc_ensure_policy() (and, for
 #'                      the PKF rules, filled by kalman_filter_obc_pkf())
@@ -68,7 +68,7 @@
 #' @param obs_vars      Character vector of observed variable names
 #' @param regime_path   Integer vector (length T): bitfield regime per period
 #' @param me_variance   Scalar measurement error variance added to F
-#' @param return_filtered Logical: return the n_state x T filtered states
+#' @param return_filtered Logical: return the T x n_state filtered states
 #' @return List with $loglik, $filtered_states (or NULL), $n_obs, $n_T
 #' @noRd
 kalman_filter_obc <- function(Y, dr_slack, regime_cache,
@@ -82,8 +82,9 @@ kalman_filter_obc <- function(Y, dr_slack, regime_cache,
                  paste(obs_vars[is.na(obs_idx)], collapse = ", "),
                  class = "dynhr_error_obc_filter")
 
-  if (is.null(dim(Y))) Y <- matrix(Y, nrow = n_obs)
-  if (nrow(Y) != n_obs) Y <- t(Y)
+  ## `Y` is T x n_obs (rows = periods; R/time-orientation.R); the recursion
+  ## runs on its transpose.
+  Y <- t(.kf_time_in(Y, obs_vars, "Y", "kalman_filter_obc"))
   n_T <- ncol(Y)
   regime_path <- as.integer(regime_path)
   if (length(regime_path) != n_T)
@@ -112,7 +113,10 @@ kalman_filter_obc <- function(Y, dr_slack, regime_cache,
     P <- up$P_new
     if (return_filtered) filtered[, t] <- s
   }
-  if (return_filtered) rownames(filtered) <- endo[dr_slack$state_idx]
+  if (return_filtered) {
+    rownames(filtered) <- endo[dr_slack$state_idx]
+    filtered <- t(filtered)          # T x n_state (rows = periods)
+  }
   list(loglik = loglik, filtered_states = filtered, n_obs = n_obs, n_T = n_T)
 }
 
@@ -644,7 +648,11 @@ pkf_check_binding <- function(s_backward, eps_hat, specs, dr_slack) {
 #' the first period (it used to warm-start every period, which made the
 #' likelihood depend on the warm start).
 #'
-#' @param data            n_obs x T observation matrix
+#' @param data            T x n_obs observation matrix (rows = periods;
+#'                        columns named by \code{obs_vars} -- a matrix named
+#'                        by series on its ROWS is transposed with a
+#'                        message; an unnamed n_obs x T or square matrix is
+#'                        an error)
 #' @param dr_slack        Slack-regime DecisionRules
 #' @param regime_cache    R environment seeded by obc_ensure_policy(0, ...);
 #'                        the filter stores its per-period rules there
@@ -666,8 +674,9 @@ pkf_check_binding <- function(s_backward, eps_hat, specs, dr_slack) {
 #' @param horizon         Check-ahead horizon of the regime solves (default
 #'                        200, Dynare's \code{check_ahead_periods}); doubled
 #'                        while a solution binds in its last period
-#' @param return_filtered Logical: return the n_state x T filtered states
-#' @param return_shocks   Logical: return the n_exo x T shocks
+#' @param return_filtered Logical: return the T x n_state filtered states
+#'                        (rows = periods)
+#' @param return_shocks   Logical: return the T x n_exo shocks
 #'                        \eqn{\epsilon_{t|t}}
 #' @param return_store    Logical: return the per-period quantities needed by
 #'                        pkf_smoother_obc()
@@ -719,8 +728,10 @@ kalman_filter_obc_pkf <- function(data, dr_slack, regime_cache, sys,
   n_state <- pk$n_state
   n_exo   <- pk$n_exo
 
-  if (is.null(dim(data))) data <- matrix(data, nrow = n_obs)
-  if (nrow(data) != n_obs) data <- t(data)
+  ## `data` is T x n_obs (rows = periods; R/time-orientation.R: names decide,
+  ## an unnamed old n_obs x T or square matrix is refused); the recursion
+  ## runs on its transpose (column t = period t).
+  data <- t(.kf_time_in(data, obs_vars, "data", "kalman_filter_obc_pkf"))
   n_T <- ncol(data)
 
   s     <- numeric(n_state)
@@ -798,8 +809,9 @@ kalman_filter_obc_pkf <- function(data, dr_slack, regime_cache, sys,
                             obs_idx = as.integer(obs_idx)),
          envir = regime_cache)
   if (return_store) kf_store$rules <- rules
-  if (return_filtered) rownames(filtered) <- endo[dr_slack$state_idx]
-  if (return_shocks)   rownames(shocks)   <- exo
+  ## Rows = periods: T x n_state and T x n_exo.
+  if (return_filtered) filtered <- t(`rownames<-`(filtered, endo[dr_slack$state_idx]))
+  if (return_shocks)   shocks   <- t(`rownames<-`(shocks, exo))
 
   list(
     loglik          = loglik,

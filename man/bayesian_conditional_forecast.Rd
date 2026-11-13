@@ -63,10 +63,15 @@ and the trend-model inputs \code{shock_means}, \code{shock_timing},
 \value{
 An object of class \code{"dynhr_bayesian_cfcst"} with:
   \describe{
-    \item{\code{$paths_array}}{3-D array \eqn{n\_use \times H \times n\_obs}
-      of per-draw forecast paths (NA for failed draws).}
-    \item{\code{$quantiles}}{Named list (one entry per observable) of
-      \eqn{n\_probs \times H} quantile matrices.}
+    \item{\code{$paths_array}}{3-D array \eqn{H \times n\_obs \times n\_use}
+      of per-draw forecast paths, periods first (\code{paths_array[, , k]}
+      is draw \code{k}'s \code{H x n_obs} \code{paths_point}; NA for
+      failed draws).}
+    \item{\code{$quantiles}}{3-D array \eqn{H \times n\_obs \times n\_probs}
+      of pointwise quantiles across the successful draws, periods first;
+      the third dimension is named by probability level (e.g.
+      \code{quantiles[, , "50\%"]} is the \code{H x n_obs} median path).
+      An observable with fewer than two complete draws is all \code{NA}.}
     \item{\code{$n_ok}}{Number of draws that produced a valid forecast.}
     \item{\code{$n_fail}}{Number of draws that failed (perturbation
       did not solve or \code{conditional_forecast} errored).}

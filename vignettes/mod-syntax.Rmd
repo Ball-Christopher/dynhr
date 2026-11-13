@@ -409,7 +409,7 @@ m_shk <- parse_mod("
   end;
   shocks;
     var eps_x; stderr 0.1;
-    var eps_y; variance 0.04;
+    var eps_y = 0.04;          // a variance (stderr 0.2)
   end;
 ")
 m_shk$shocks$variances[, c("name", "stderr", "variance")]

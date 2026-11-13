@@ -25,7 +25,12 @@ make_log_posterior_tpf(
 \arguments{
 \item{model}{dynhr_mod from \code{\link{parse_mod}}.}
 
-\item{data}{Observation matrix (n_obs x T); columns are time periods.}
+\item{data}{Observation matrix, \code{T x n_obs} (rows are periods,
+columns the \code{obs_vars}). Oriented by the package-wide rule: columns
+named by \code{obs_vars} are matched by name; rows named by them (the
+old \code{n_obs x T} layout) are transposed with a message; an unnamed
+\code{n_obs x T} or square sample is refused (class
+\code{dynhr_error_orientation}).}
 
 \item{prior_spec}{Prior specification from \code{extract_prior_spec}.}
 

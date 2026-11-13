@@ -557,6 +557,9 @@ cumulant_moment_derivs_3_4 <- function(dr2, model, params, o2d, obs_idx,
 #' @noRd
 .compute_third_cumulant_adjoint <- function(dr, model, params, bar_c3_obs,
                                             fwd = NULL) {
+  ## mixed blocks (and their cotangents) in the u_slow layout: see
+  ## MIXED-BLOCK LAYOUT CONVENTION (only DecisionRules2 reach here today)
+  dr <- .with_mixed_layout(dr, "u_slow")
   endo      <- dr$endo_names
   exo       <- dr$exo_names
   state_idx <- dr$state_idx

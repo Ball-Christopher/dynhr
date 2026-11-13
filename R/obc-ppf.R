@@ -592,7 +592,7 @@
 #' the slack rule and apply the one-period binding policy (next period
 #' slack), which is wrong for spells of two or more periods.
 #'
-#' @param Y             n_obs x T observation matrix
+#' @param Y             T x n_obs observation matrix (rows = periods)
 #' @param dr_slack      Slack-regime DecisionRules
 #' @param regime_cache  Regime cache seeded by obc_ensure_policy(0, ...)
 #' @param sys           System matrices
@@ -652,9 +652,9 @@ ppf_likelihood <- function(Y, dr_slack, regime_cache, sys,
   me_variance <- .kf_me_variance(me_variance, obs_vars, "ppf_likelihood",
                                  allow_vector = FALSE)
 
-  ## Data orientation: n_obs x T
-  if (is.null(dim(Y))) Y <- matrix(Y, nrow = n_obs)
-  if (nrow(Y) != n_obs) Y <- t(Y)
+  ## `Y` is T x n_obs (rows = periods; R/time-orientation.R); the particle
+  ## loop runs on its transpose.
+  Y <- t(.kf_time_in(Y, obs_vars, "Y", "ppf_likelihood"))
   n_T <- ncol(Y)
 
   ## Shock covariance + Cholesky factor
@@ -788,7 +788,10 @@ ppf_likelihood <- function(Y, dr_slack, regime_cache, sys,
 #' when me_variance = 0 with n_obs < n_exo.
 #'
 #' @param model       dynhr_mod
-#' @param data        Observation matrix (T x n_obs or n_obs x T)
+#' @param data        Observation matrix, T x n_obs (rows = periods; name the
+#'   columns by \code{obs_vars}: a matrix named by series on its ROWS is
+#'   transposed with a message, an unnamed n_obs x T or square one is an
+#'   error)
 #' @param prior_spec  Prior specification data.frame
 #' @param obs_vars    Character vector of observed variable names
 #' @param compiled    dynhr_compiled
@@ -827,6 +830,7 @@ make_log_posterior_obc_ppf <- function(model, data, prior_spec, obs_vars,
   power <- .resolve_power_posterior(power, "make_log_posterior_obc_ppf")
   proposal     <- match.arg(proposal)
   regime_guess <- match.arg(regime_guess)
+  N <- .check_particle_count(N, "make_log_posterior_obc_ppf", "N")
 
   ## A per-observable vector: refused with a classed error (the PPF/COPF
   ## weights implement H = me I only); an all-equal vector is the scalar.
@@ -856,8 +860,8 @@ make_log_posterior_obc_ppf <- function(model, data, prior_spec, obs_vars,
     stop("obs_vars contains names not found in model$var_names: ",
          paste(obs_vars[is.na(obs_idx)], collapse = ", "))
 
-  if (is.data.frame(data)) data <- as.matrix(data)
-  Y <- if (nrow(data) == length(obs_vars)) data else t(data)
+  ## T x n_obs, rows = periods (R/time-orientation.R: names decide).
+  Y <- .kf_time_in(data, obs_vars, "data", "make_log_posterior_obc_ppf")
 
   ## Inner evaluator over the shared closure builder (R/posterior-closure.R):
   ## cold steady-state solve, always-eigen() stationarity guard, no system

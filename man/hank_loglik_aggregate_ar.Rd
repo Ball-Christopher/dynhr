@@ -17,7 +17,7 @@ hank_loglik_aggregate_ar(
 )
 }
 \arguments{
-\item{data}{\code{T_data x n_obs} matrix of demeaned aggregate observations
+\item{data}{\code{T_data x n_obs} matrix (rows are periods; oriented by the rule in \code{\link{hank_loglik_aggregate}}) of demeaned aggregate observations
 (deviations from steady state), columns in the same order as
 \code{Theta}; \code{NA}/\code{NaN} entries allowed.}
 

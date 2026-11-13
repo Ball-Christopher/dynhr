@@ -312,7 +312,7 @@ hank_autocov_ar <- function(Theta, rho, sigma_eps, n_lags, q = NULL) {
 #' cap \eqn{\rho} at 0.98 for \code{T_h = 400}); by default the function warns
 #' when the bound is violated.  See \code{\link{hank_theta_boundary_check}}.
 #'
-#' @param data \code{T_data x n_obs} matrix of demeaned aggregate observations
+#' @param data \code{T_data x n_obs} matrix (rows are periods; oriented by the rule in \code{\link{hank_loglik_aggregate}}) of demeaned aggregate observations
 #'   (deviations from steady state), columns in the same order as
 #'   \code{Theta}; \code{NA}/\code{NaN} entries allowed.
 #' @param Theta MA coefficients (see \code{\link{hank_ma_coefficients}}).
@@ -347,8 +347,8 @@ hank_autocov_ar <- function(Theta, rho, sigma_eps, n_lags, q = NULL) {
 hank_loglik_aggregate_ar <- function(data, Theta, rho, sigma_eps, me_variance = 0,
                                      q = NULL, check_boundary = TRUE,
                                      boundary_tol = 1e-3, cache = NULL) {
-  data <- as.matrix(data)
   Theta <- as.matrix(Theta)
+  data <- .hank_orient_data(data, Theta, "hank_loglik_aggregate_ar")
   n_obs <- ncol(data)
   if (ncol(Theta) != n_obs)
     stop("hank_loglik_aggregate_ar: ncol(Theta) must equal ncol(data).")
@@ -398,7 +398,7 @@ hank_loglik_aggregate_ar <- function(data, Theta, rho, sigma_eps, me_variance = 
 #'
 #' @inheritSection hank_loglik_aggregate_ar Representability bound
 #'
-#' @param data \code{T_data x n_obs} matrix (or data frame) of demeaned
+#' @param data \code{T_data x n_obs} matrix (or data frame) (rows are periods; oriented by the rule in \code{\link{hank_loglik_aggregate}}) of demeaned
 #'   observations, columns in the order of \code{ss$obs_names} (for a
 #'   \code{\link{hank_state_space}} object) or of the \code{Theta} columns;
 #'   \code{NA}/\code{NaN} entries allowed.
@@ -433,7 +433,7 @@ hank_loglik_aggregate_ar <- function(data, Theta, rho, sigma_eps, me_variance = 
 hank_loglik_ar <- function(data, ss, rho = NULL, sigma = NULL, me_variance = 0,
                            q = NULL, check_boundary = TRUE,
                            boundary_tol = 1e-3, cache = NULL) {
-  data <- as.matrix(data)
+  data <- .hank_orient_data(data, ss, "hank_loglik_ar")
   me_sd <- .hank_me_sd(me_variance, "hank_loglik_ar")
   p <- .hank_ar_prepare(data, ss, rho = rho, sigma = sigma, me_sd = me_sd, q = q,
                         check_boundary = check_boundary,

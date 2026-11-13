@@ -45,10 +45,15 @@
 #'
 #' @return An object of class \code{"dynhr_bayesian_cfcst"} with:
 #'   \describe{
-#'     \item{\code{$paths_array}}{3-D array \eqn{n\_use \times H \times n\_obs}
-#'       of per-draw forecast paths (NA for failed draws).}
-#'     \item{\code{$quantiles}}{Named list (one entry per observable) of
-#'       \eqn{n\_probs \times H} quantile matrices.}
+#'     \item{\code{$paths_array}}{3-D array \eqn{H \times n\_obs \times n\_use}
+#'       of per-draw forecast paths, periods first (\code{paths_array[, , k]}
+#'       is draw \code{k}'s \code{H x n_obs} \code{paths_point}; NA for
+#'       failed draws).}
+#'     \item{\code{$quantiles}}{3-D array \eqn{H \times n\_obs \times n\_probs}
+#'       of pointwise quantiles across the successful draws, periods first;
+#'       the third dimension is named by probability level (e.g.
+#'       \code{quantiles[, , "50\%"]} is the \code{H x n_obs} median path).
+#'       An observable with fewer than two complete draws is all \code{NA}.}
 #'     \item{\code{$n_ok}}{Number of draws that produced a valid forecast.}
 #'     \item{\code{$n_fail}}{Number of draws that failed (perturbation
 #'       did not solve or \code{conditional_forecast} errored).}
@@ -74,6 +79,24 @@ bayesian_conditional_forecast <- function(
     ...
 ) {
   stopifnot(inherits(plan, "dynhr_plan"))
+  ## `...` goes to conditional_forecast() at every draw, whose per-draw
+  ## failures are counted, not raised: an unknown argument would turn into
+  ## "every draw failed". Check it once, up front.
+  dots <- list(...)
+  fwd  <- setdiff(names(formals(conditional_forecast)),
+                  c("...", "model", "dr", "data", "plan", "horizon", "obs_vars"))
+  bad  <- if (length(dots)) {
+    nm <- names(dots) %||% rep("", length(dots))
+    nm[!nzchar(nm) | !(nm %in% fwd)]
+  } else character(0)
+  if (length(bad))
+    .dynhr_abort("bayesian_conditional_forecast: unknown argument",
+                 if (length(bad) > 1L) "s", " ",
+                 paste0("`", ifelse(nzchar(bad), bad, "<unnamed>"), "`",
+                        collapse = ", "), " in `...` (forwarded to ",
+                 "conditional_forecast(), which takes: ",
+                 paste(fwd, collapse = ", "), ").",
+                 class = "dynhr_error_bad_argument")
 
   draws   <- as.matrix(draws)
   n_total <- nrow(draws)
@@ -98,11 +121,12 @@ bayesian_conditional_forecast <- function(
 
   n_obs <- length(obs_vars)
 
-  ## Storage: [draw, horizon, variable]
+  ## Storage: [horizon, variable, draw] -- periods first (rows = periods), so
+  ## paths_array[, , k] is the H x n_obs paths_point of draw k.
   paths_array <- array(
     NA_real_,
-    dim      = c(n_use, H, n_obs),
-    dimnames = list(NULL, paste0("h", seq_len(H)), obs_vars)
+    dim      = c(H, n_obs, n_use),
+    dimnames = list(paste0("h", seq_len(H)), obs_vars, NULL)
   )
 
   n_ok   <- 0L
@@ -184,7 +208,7 @@ bayesian_conditional_forecast <- function(
       n_fail <- n_fail + 1L
       next
     }
-    paths_array[ki, , ] <- pp
+    paths_array[, , ki] <- pp
     n_ok <- n_ok + 1L
   }
 
@@ -194,15 +218,23 @@ bayesian_conditional_forecast <- function(
   ## ---- Quantile summaries ------------------------------------------------
   probs_all <- sort(unique(c(ci_bands, inner_bands, 0.50)))
 
-  quantiles <- lapply(seq_len(n_obs), function(vi) {
-    mat_vi <- paths_array[, , vi, drop = FALSE]
-    mat_vi <- matrix(mat_vi, nrow = n_use, ncol = H)  ## n_use x H
-    finite_rows <- rowSums(is.finite(mat_vi)) == H
-    if (sum(finite_rows) < 2L) return(NULL)
-    apply(mat_vi[finite_rows, , drop = FALSE], 2L,
-          quantile, probs = probs_all, na.rm = TRUE)
-  })
-  names(quantiles) <- obs_vars
+  ## H x n_obs x n_probs, periods first like paths_array (quantiles[, , p]
+  ## is an H x n_obs matrix shaped like paths_point). An observable with
+  ## fewer than two complete draws gets an all-NA slab.
+  quantiles <- array(
+    NA_real_,
+    dim      = c(H, n_obs, length(probs_all)),
+    dimnames = list(paste0("h", seq_len(H)), obs_vars,
+                    paste0(format(100 * probs_all, trim = TRUE), "%"))
+  )
+  for (vi in seq_len(n_obs)) {
+    mat_vi <- matrix(paths_array[, vi, ], nrow = H, ncol = n_use)  ## H x n_use
+    finite_cols <- colSums(is.finite(mat_vi)) == H
+    if (sum(finite_cols) < 2L) next
+    q_vi <- apply(mat_vi[, finite_cols, drop = FALSE], 1L,
+                  quantile, probs = probs_all, na.rm = TRUE)
+    quantiles[, vi, ] <- t(matrix(q_vi, nrow = length(probs_all), ncol = H))
+  }
 
   structure(
     list(
@@ -229,7 +261,7 @@ print.dynhr_bayesian_cfcst <- function(x, ...) {
   cat("<dynhr_bayesian_cfcst>\n")
   cat(sprintf("  Draws used  : %d / %d ok (%d failed)\n",
               x$n_ok, x$n_use, x$n_fail))
-  cat(sprintf("  Horizon     : %d\n", dim(x$paths_array)[2L]))
+  cat(sprintf("  Horizon     : %d\n", dim(x$paths_array)[1L]))
   cat(sprintf("  Observables : %s\n", paste(x$obs_names, collapse = ", ")))
   cat(sprintf("  Quantiles   : %s\n",
               paste(sprintf("%.0f%%", x$probs * 100), collapse = ", ")))

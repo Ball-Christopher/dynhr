@@ -654,6 +654,7 @@ solve_perturbation_order2 <- function(model, compiled, ss, params,
   dr2[c("ghxx", "ghxu", "ghuu", "ghss", "Sigma_e", "order",
         "hessian_method", "hessian_step", "second_order_ok")] <-
     list(ghxx, ghxu, ghuu, ghss, Sigma_e, 2L, hessian_method, h, TRUE)
+  dr2$mixed_layout <- "u_slow"  # see MIXED-BLOCK LAYOUT CONVENTION (order3.R)
   class(dr2) <- c("DecisionRules2", "DecisionRules")
 
   if (verbose) {
@@ -701,6 +702,7 @@ solve_perturbation_order2 <- function(model, compiled, ss, params,
         "hessian_method", "hessian_step", "second_order_ok")] <-
     list(ghxx, ghxu, ghuu, setNames(numeric(n), endo_names), Sigma_e, 2L,
          "linear_shortcircuit", NA_real_, TRUE)
+  dr2$mixed_layout <- "u_slow"  # see MIXED-BLOCK LAYOUT CONVENTION (order3.R)
   class(dr2) <- c("DecisionRules2", "DecisionRules")
   dr2
 }
@@ -793,6 +795,9 @@ compute_irfs_order2 <- function(dr2, model, n_periods = 40L,
   if (!inherits(dr2, "DecisionRules2")) {
     stop("dr2 must be a DecisionRules2 object.")
   }
+  ## contracts mixed blocks as (e %x% x): see MIXED-BLOCK LAYOUT CONVENTION
+  dr2 <- .with_mixed_layout(dr2, "u_slow")
+  n_periods <- .check_irf_n_periods(n_periods, "compute_irfs_order2")
 
   ghx  <- dr2$ghx; ghu <- dr2$ghu
   ghxx <- dr2$ghxx; ghxu <- dr2$ghxu
@@ -806,12 +811,12 @@ compute_irfs_order2 <- function(dr2, model, n_periods = 40L,
   n_s       <- length(state_idx)
 
   ## Use the SAME shock-scale rule as compute_irfs() --
-  ## .irf_shock_scale() (params wins over dr2$Sigma_e) plus the lower Cholesky
+  ## .resolve_sigma_e() (params wins over dr2$Sigma_e) plus the lower Cholesky
   ## factor of the FULL Sigma_e.  Previously this path rebuilt a diagonal
   ## covariance from `params` via .get_shock_stderr(), so order-1 and order-2
   ## IRFs of the same model disagreed whenever dr$Sigma_e and params differed,
   ## and correlated shocks were silently ignored at order 2.
-  Sigma_e_irf <- .irf_shock_scale(dr2, model, params)
+  Sigma_e_irf <- .resolve_sigma_e(dr2, model, params)
   L_chol      <- .sigma_e_chol_lower(Sigma_e_irf)
   if (is.null(params)) params <- model$param_values
 
@@ -910,7 +915,9 @@ compute_irfs_order2 <- function(dr2, model, n_periods = 40L,
 #' @param dr2         DecisionRules2 object
 #' @param n_periods   Number of simulation periods
 #' @param shocks      Matrix (n_periods + burn_in) x n_exo. If NULL, draws random.
-#' @param model       dynhr_mod (for shock variances)
+#' @param model       dynhr_mod (for shock skewness, and the shock covariance
+#'   when \code{dr2} carries none): shocks are drawn with \code{dr2$Sigma_e},
+#'   else the model's shocks block, as in \code{\link{simulate_model}}.
 #' @param burn_in     Burn-in periods to discard
 #' @param pruning     Use the AFVRR (2018) pruned state space (default
 #'   \code{TRUE}).  \code{FALSE} runs the genuine \strong{unpruned} order-2
@@ -930,6 +937,8 @@ simulate_model_order2 <- function(dr2, n_periods = 200L, shocks = NULL,
   if (!inherits(dr2, "DecisionRules2")) {
     stop("dr2 must be a DecisionRules2 object.")
   }
+  ## contracts mixed blocks as (e %x% x): see MIXED-BLOCK LAYOUT CONVENTION
+  dr2 <- .with_mixed_layout(dr2, "u_slow")
 
   ghx  <- dr2$ghx; ghu  <- dr2$ghu
   ghxx <- dr2$ghxx; ghxu <- dr2$ghxu
@@ -972,11 +981,12 @@ simulate_model_order2 <- function(dr2, n_periods = 200L, shocks = NULL,
 
   total_periods <- n_periods + burn_in
 
-  shock_stderr <- .get_shock_stderr(model, exo, params)
   if (is.null(shocks)) {
     ## Honour cross-shock correlations, exactly as simulate_model()
-    ## now does.  Diagonal Sigma_e keeps the old RNG stream byte-for-byte.
-    Sigma_e_sim <- .get_shock_cov(model, exo, params)
+    ## does, with its covariance rule (.resolve_sigma_e(): dr2$Sigma_e, else
+    ## the model).  Diagonal Sigma_e keeps the old RNG stream byte-for-byte.
+    Sigma_e_sim <- .resolve_sigma_e(dr2, model)
+    shock_stderr <- setNames(sqrt(diag(Sigma_e_sim)), exo)
     off_sim <- Sigma_e_sim
     diag(off_sim) <- 0
     ## L2 follow-up: a `skew` alpha used to be ignored here entirely --
@@ -987,8 +997,7 @@ simulate_model_order2 <- function(dr2, n_periods = 200L, shocks = NULL,
     ## All-Gaussian models keep their exact RNG stream below.
     alpha_sim <- .get_shock_skewness(model, exo, params)
     if (any(alpha_sim != 0)) {
-      shocks <- .draw_csn_shocks(total_periods, Sigma_e_sim, alpha_sim,
-                                 sqrt(diag(Sigma_e_sim)))
+      shocks <- .draw_csn_shocks(total_periods, Sigma_e_sim, alpha_sim)
     } else if (any(abs(off_sim) > 0)) {
       L_sim  <- .sigma_e_chol_lower(Sigma_e_sim)
       shocks <- matrix(rnorm(total_periods * n_exo), ncol = n_exo) %*% t(L_sim)

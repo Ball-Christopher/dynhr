@@ -188,7 +188,10 @@ kf_loglik_hessian <- function(Y, ss, dX_list, d2X_list, me_variance = 0,
 #' @param param_names character vector of parameter names to differentiate
 #'                    (the Hessian is \code{length(param_names) x length(param_names)}).
 #' @param obs_vars  character vector of observable variable names.
-#' @param data         n_obs x T observation matrix (no NAs).
+#' @param data         \code{T x n_obs} observation matrix (rows are periods,
+#'   columns the \code{obs_vars}; no NAs), oriented by the rule documented in
+#'   \code{\link{kalman_filter}} (names decide; an unnamed \code{n_obs x T}
+#'   or square sample is refused).
 #' @param me_variance scalar measurement-error variance (default 0).
 #' @param include_prior logical; if TRUE, add the analytic Hessian of
 #'   \code{log p(theta)} (diagonal for independent priors) to the loglik Hessian.
@@ -366,6 +369,12 @@ posterior_hessian <- function(model, compiled, dr, params, param_names,
   t1_method <- match.arg(t1_method)
   t2_method <- match.arg(t2_method)
   lik_init  <- match.arg(lik_init)
+  ## `data` is T x n_obs (rows are periods), oriented by the package-wide rule
+  ## (R/time-orientation.R). make_posterior_grad() takes it as is; the
+  ## curvature kernels below run on the transpose `Y_k` (n_obs x T).
+  data <- .orient_time_matrix(data, obs_vars, "data", "posterior_hessian")
+  rownames(data) <- NULL
+  Y_k <- t(data)
   if (identical(t2_method, "auto")) {
     ## Re-enter with the fastest method that applies; if its solution-curvature
     ## step could not be formed (a perturbed point failed to solve), redo the
@@ -739,16 +748,16 @@ posterior_hessian <- function(model, compiled, dr, params, param_names,
   ## ------------------------------------------------------------------
   if (t2_method == "hvp_solution") {
     H <- .posterior_hessian_hvp_solution(
-      model, compiled, params, param_names, struct_names, obs_vars, data, ss0,
+      model, compiled, params, param_names, struct_names, obs_vars, Y_k, ss0,
       dX_list, d2Se, base_val, me_variance = me_variance, eps = eps,
       h_t2 = h_t2, t1_method = t1_method)
   } else if (t2_method == "adjoint_solution") {
     H <- .posterior_hessian_adjoint_solution(
-      model, compiled, dr, params, param_names, struct_names, obs_vars, data, ss0,
+      model, compiled, dr, params, param_names, struct_names, obs_vars, Y_k, ss0,
       dX_list, d2Se, me_variance = me_variance, eps = eps,
       h_rel2 = h_rel2, t1_method = t1_method)
   } else {
-    H <- kf_loglik_hessian(data, ss0, dX_list, d2X_list,
+    H <- kf_loglik_hessian(Y_k, ss0, dX_list, d2X_list,
                            me_variance = me_variance, eps = eps,
                            t1_method = t1_method, t2_method = t2_method)
   }
@@ -1069,7 +1078,8 @@ posterior_hessian <- function(model, compiled, dr, params, param_names,
     if (is.null(ssr) || !isTRUE(ssr$converged)) return(-Inf)
     p   <- ssr$params %||% p
     sys <- extract_system_matrices_fast(sp_cache, ssr$ss, p)
-    drp <- .solve_from_system(sys, model, compiled, ssr$ss, p, FALSE)
+    drp <- .solve_from_system(sys, model, compiled, ssr$ss, p, FALSE,
+        qz_fail = "null")
     if (is.null(drp) || !isTRUE(drp$bk_satisfied)) return(-Inf)
     .eval_system_priors(system_priors,
                         list(theta = th, model = model, dr = drp,
@@ -1153,8 +1163,11 @@ posterior_hessian <- function(model, compiled, dr, params, param_names,
 #' cross-check exists to catch.
 #'
 #' @param model     parsed model (from \code{parse_mod}).
-#' @param data      n_obs x T observation matrix (no NAs); passed through to
-#'                  \code{make_posterior_grad} as \code{data}.
+#' @param data      \code{T x n_obs} observation matrix (rows are periods; no
+#'                  NAs), oriented by the rule documented in
+#'                  \code{\link{kalman_filter}} (names decide; an unnamed
+#'                  \code{n_obs x T} or square sample is refused); passed
+#'                  through to \code{make_posterior_grad} as \code{data}.
 #' @param prior_spec prior-spec data.frame (defines the FULL parameter vector
 #'                  ordering that \code{make_posterior_grad}'s closure expects;
 #'                  \code{param_names} may be any subset of \code{prior_spec$name}).
@@ -1205,6 +1218,8 @@ posterior_hessian_fd_grad <- function(model, data, prior_spec, obs_vars,
          "prior_spec$name; missing: ",
          paste(setdiff(param_names, full_names), collapse = ", "))
 
+  data <- .orient_time_matrix(data, obs_vars, "data",
+                              "posterior_hessian_fd_grad")
   grad_fn <- make_posterior_grad(model, data, prior_spec, obs_vars, compiled,
                                  me_variance = me_variance,
                                  lik_init = lik_init, ...)

@@ -21,8 +21,11 @@ posterior_hessian_fd_grad(
 \arguments{
 \item{model}{parsed model (from \code{parse_mod}).}
 
-\item{data}{n_obs x T observation matrix (no NAs); passed through to
-\code{make_posterior_grad} as \code{data}.}
+\item{data}{\code{T x n_obs} observation matrix (rows are periods; no
+NAs), oriented by the rule documented in
+\code{\link{kalman_filter}} (names decide; an unnamed
+\code{n_obs x T} or square sample is refused); passed
+through to \code{make_posterior_grad} as \code{data}.}
 
 \item{prior_spec}{prior-spec data.frame (defines the FULL parameter vector
 ordering that \code{make_posterior_grad}'s closure expects;

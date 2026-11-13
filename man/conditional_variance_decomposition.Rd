@@ -20,7 +20,10 @@ conditional_variance_decomposition(
 \code{Inf} is allowed and triggers the Lyapunov-based unconditional
 decomposition. Default: \code{c(1L, 4L, 8L, 16L, 40L, Inf)}.}
 
-\item{params}{Named numeric parameter vector (default: \code{model$param_values}).}
+\item{params}{Named numeric parameter vector, or \code{NULL} (default).
+The shock covariance comes from \code{params} when supplied, else from
+\code{dr$Sigma_e} (set by \code{\link{solve_perturbation}}), else from
+the model's shocks block at \code{model$param_values}.}
 }
 \value{
 A named list with:

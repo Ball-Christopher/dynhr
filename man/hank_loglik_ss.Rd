@@ -14,7 +14,7 @@ hank_loglik_ss(
 )
 }
 \arguments{
-\item{data}{\code{T_data x n_obs} matrix of demeaned aggregate observations.}
+\item{data}{\code{T_data x n_obs} matrix (rows are periods; oriented by the rule in \code{\link{hank_loglik_aggregate}}) of demeaned aggregate observations.}
 
 \item{Theta}{MA coefficients (see \code{\link{hank_ma_coefficients}}).}
 

@@ -44,7 +44,10 @@ point.}
 
 \item{obs_vars}{character vector of observable variable names.}
 
-\item{data}{n_obs x T observation matrix (no NAs).}
+\item{data}{\code{T x n_obs} observation matrix (rows are periods,
+columns the \code{obs_vars}; no NAs), oriented by the rule documented in
+\code{\link{kalman_filter}} (names decide; an unnamed \code{n_obs x T}
+or square sample is refused).}
 
 \item{me_variance}{scalar measurement-error variance (default 0).}
 

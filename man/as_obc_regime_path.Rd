@@ -4,22 +4,13 @@
 \alias{as_obc_regime_path}
 \title{Coerce an OBC-solver return to the canonical regime-path object}
 \usage{
-as_obc_regime_path(
-  res,
-  n_constr = NULL,
-  paths_endo_by_T = NULL,
-  constraints = NULL
-)
+as_obc_regime_path(res, n_constr = NULL, constraints = NULL)
 }
 \arguments{
 \item{res}{A list returned by an OBC solver (Boehl/LCP/MCP/OccBin/PF-Newton).}
 
 \item{n_constr}{Number of constraints (required when the binding sequence is
 an integer bitfield).}
-
-\item{paths_endo_by_T}{Optional logical: set \code{TRUE} if \code{res$paths}
-is stored as \code{n_endo x T} (as in the DR-based solvers), \code{FALSE}
-if \code{T x n_endo}.  If \code{NULL}, inferred from the period count.}
 
 \item{constraints}{Optional character vector naming the constrained variables.}
 }
@@ -29,6 +20,8 @@ An \code{\link{new_obc_regime_path}} object.
 \description{
 Normalizes the fragmented solver returns: the binding sequence from
 \code{regime_path} / \code{active_set} (integer bitfield) or \code{regime}
-(logical matrix), and the solved paths to the canonical \code{T x n_endo}
-orientation.
+(\code{T x n_constr} logical matrix).  The solved paths (\code{res$paths}
+or \code{res$Y}) must be \code{T x n_endo} (rows = periods), as every
+dynhr OBC solver returns them; an \code{n_endo x T} matrix is an error
+(its orientation is no longer inferred from the period count).
 }

@@ -254,7 +254,9 @@
 #' \eqn{s_t} directly, so \eqn{y_{t+1}} is not conditionally independent of
 #' \eqn{s_t} given \eqn{s_{t+1}} (see \code{\link{kalman_smoother}}).
 #'
-#' @param data  Observation matrix (\code{n_obs x T}).  May contain \code{NA}s.
+#' @param data  Observation matrix, \code{T x n_obs} (rows = periods, columns
+#'   named by \code{obs_vars}; see \code{\link{ms_kim_filter}}).  May contain
+#'   \code{NA}s.
 #' @param dr  Decision rule (output of \code{\link{solve_perturbation}}).
 #' @param model  Compiled model object.
 #' @param params  Named numeric vector of parameter values.
@@ -333,11 +335,11 @@
 #' @return A list of class \code{"ms_kim_smoother"} with:
 #'   \describe{
 #'     \item{\code{loglik}}{Total log-likelihood from the forward pass.}
-#'     \item{\code{filtered_probs}}{\code{h x T} matrix
+#'     \item{\code{filtered_probs}}{\code{T x h} matrix (rows = periods)
 #'       \eqn{\Pr[s_t = j \mid y_{1:t}]}.}
-#'     \item{\code{smoothed_probs}}{\code{h x T} matrix
-#'       \eqn{\Pr[s_t = j \mid y_{1:T}]}; columns sum to 1.}
-#'     \item{\code{smoothed_states}}{\code{n_state x T} matrix
+#'     \item{\code{smoothed_probs}}{\code{T x h} matrix
+#'       \eqn{\Pr[s_t = j \mid y_{1:T}]}; rows sum to 1.}
+#'     \item{\code{smoothed_states}}{\code{T x n_state} matrix
 #'       \eqn{E[s_t \mid y_{1:T}]} (regime-averaged).}
 #'     \item{\code{smoothed_states_by_regime}}{\code{n_state x h x T} array
 #'       \eqn{E[s_t \mid s_t = j, y_{1:T}]}.}
@@ -345,14 +347,14 @@
 #'       regime-averaged smoothed state covariances (including the
 #'       across-regime spread term).}
 #'     \item{\code{smoothed_cov_by_regime}}{\code{n_state x n_state x h x T}.}
-#'     \item{\code{smoothed_shocks}}{\code{n_shk x T} matrix
+#'     \item{\code{smoothed_shocks}}{\code{T x n_shk} matrix
 #'       \eqn{E[\varepsilon_t \mid y_{1:T}]} (regime-averaged).}
 #'     \item{\code{smoothed_shocks_by_regime}}{\code{n_shk x h x T} array,
 #'       conditional on \eqn{s_t = j}.}
 #'     \item{\code{smoothed_initial}, \code{smoothed_initial_by_regime}}{
 #'       \eqn{E[s_0 \mid y_{1:T}]}, free from the same backward recursion;
 #'       needed to close the transition identity at \eqn{t = 1}.}
-#'     \item{\code{filtered_states}}{\code{n_state x T} matrix
+#'     \item{\code{filtered_states}}{\code{T x n_state} matrix
 #'       \eqn{E[s_t \mid y_{1:t}]} (regime-averaged).}
 #'     \item{\code{state_names}, \code{shock_names}, \code{regime_names}}{
 #'       Labels.}
@@ -363,8 +365,8 @@
 #'       \code{collapse = "gpb3"} only: the \eqn{h^2} PAIR-indexed
 #'       components the GPB(3) backward pass actually carries, before their
 #'       collapse onto regimes.  \code{smoothed_pair_probs} is
-#'       \code{h^2 x T} with \eqn{\Pr[s_{t-1} = j, s_t = k \mid y_{1:T}]}
-#'       at row \eqn{j + (k-1)h}; \code{smoothed_initial_probs} is
+#'       \code{T x h^2} with \eqn{\Pr[s_{t-1} = j, s_t = k \mid y_{1:T}]}
+#'       in column \eqn{j + (k-1)h}; \code{smoothed_initial_probs} is
 #'       \eqn{\Pr[s_0 \mid y_{1:T}]}.}
 #'   }
 #' @references Kim, C.-J. (1994). Dynamic linear models with Markov-switching.
@@ -539,7 +541,8 @@ ms_kim_smoother <- function(data, dr, model, params, obs_vars, ms_spec,
   n_state <- dim(fwd$beta_filt)[1L]
   n_shk   <- nrow(fwd$Sigma_e_list[[1L]])
 
-  filt_prob <- fwd$regime_probs        # h x T,  Pr[s_t = j | y_{1:t}]
+  ## The filter returns T x h (rows = periods); the recursion runs on h x T.
+  filt_prob <- t(fwd$regime_probs)     # h x T,  Pr[s_t = j | y_{1:t}]
   beta_f    <- fwd$beta_filt           # n_state x h x T
   P_f       <- fwd$P_filt              # n_state x n_state x h x T
   dk        <- fwd$dk_path             # [[t]][[i + (j-1)*h]] = list(a,M,L,G,du)
@@ -815,18 +818,18 @@ ms_kim_smoother <- function(data, dr, model, params, obs_vars, ms_spec,
   structure(
     list(
       loglik                     = fwd$loglik,
-      filtered_probs             = filt_prob,
-      smoothed_probs             = sm_prob,
-      smoothed_states            = smoothed_states,
+      filtered_probs             = t(filt_prob),
+      smoothed_probs             = t(sm_prob),
+      smoothed_states            = t(smoothed_states),
       smoothed_states_by_regime  = beta_s,
       smoothed_cov               = smoothed_cov,
       smoothed_cov_by_regime     = P_s,
-      smoothed_shocks            = smoothed_shocks,
+      smoothed_shocks            = t(smoothed_shocks),
       smoothed_shocks_by_regime  = eps_s,
       smoothed_lag_states_by_regime = lag_s,
       smoothed_initial           = smoothed_initial,
       smoothed_initial_by_regime = b0_s,
-      filtered_states            = filtered_states,
+      filtered_states            = t(filtered_states),
       state_names                = st_names,
       shock_names                = sh_names,
       regime_names               = regime_names,
@@ -1053,7 +1056,7 @@ ms_kim_smoother <- function(data, dr, model, params, obs_vars, ms_spec,
   P_s    <- array(0, c(n_state, n_state, h, n_T))
   eps_s  <- array(0, c(n_shk, h, n_T))
   lag_s  <- array(0, c(n_state, h, n_T))
-  filt_prob <- fwd$regime_probs
+  filt_prob <- t(fwd$regime_probs)    # filter returns T x h; recursion runs on h x T
   beta_fj   <- array(0, c(n_state, h, n_T))
 
   for (t in seq_len(n_T)) {
@@ -1146,18 +1149,18 @@ ms_kim_smoother <- function(data, dr, model, params, obs_vars, ms_spec,
   structure(
     list(
       loglik                     = fwd$loglik,
-      filtered_probs             = filt_prob,
-      smoothed_probs             = sm_prob,
-      smoothed_states            = smoothed_states,
+      filtered_probs             = t(filt_prob),
+      smoothed_probs             = t(sm_prob),
+      smoothed_states            = t(smoothed_states),
       smoothed_states_by_regime  = beta_s,
       smoothed_cov               = smoothed_cov,
       smoothed_cov_by_regime     = P_s,
-      smoothed_shocks            = smoothed_shocks,
+      smoothed_shocks            = t(smoothed_shocks),
       smoothed_shocks_by_regime  = eps_s,
       smoothed_lag_states_by_regime = lag_s,
       smoothed_initial           = smoothed_initial,
       smoothed_initial_by_regime = b0_s,
-      filtered_states            = filtered_states,
+      filtered_states            = t(filtered_states),
       state_names                = st_names,
       shock_names                = sh_names,
       regime_names               = regime_names,
@@ -1165,7 +1168,7 @@ ms_kim_smoother <- function(data, dr, model, params, obs_vars, ms_spec,
       collapse                   = "gpb3",
       ## Pair-indexed internals, for callers that want the components the
       ## GPB(3) pass actually carries rather than their regime collapse.
-      smoothed_pair_probs        = sm_pair,
+      smoothed_pair_probs        = t(sm_pair),
       smoothed_states_by_pair    = beta_sp,
       smoothed_shocks_by_pair    = eps_sp,
       smoothed_initial_probs     = sm_s0,
@@ -1262,7 +1265,9 @@ ms_kim_smoother <- function(data, dr, model, params, obs_vars, ms_spec,
 #' reduced-form path (\code{\link{ms_kim_smoother}}, common transition, only
 #' shock variances switching) does not show the effect above round-off.
 #'
-#' @param data  Observation matrix (\code{n_obs x T}).  May contain \code{NA}s.
+#' @param data  Observation matrix, \code{T x n_obs} (rows = periods, columns
+#'   named by \code{obs_vars}; see \code{\link{ms_kim_filter}}).  May contain
+#'   \code{NA}s.
 #' @param ms_dr  An \code{MsDecisionRules} object from
 #'   \code{\link{solve_ms_perturbation}}.
 #' @param model  Compiled model object.
@@ -1317,7 +1322,8 @@ ms_kim_smoother <- function(data, dr, model, params, obs_vars, ms_spec,
 #'   documented in \code{\link{ms_kim_smoother}}, plus
 #'   \describe{
 #'     \item{\code{ms_dr}}{The \code{MsDecisionRules} object smoothed.}
-#'     \item{\code{smoothed_states_level}}{\code{n_state x T} matrix of
+#'     \item{\code{smoothed_states_level}}{\code{T x n_state} matrix (rows =
+#'       periods) of
 #'       regime-averaged smoothed states in LEVELS (see the deviation-reference
 #'       section).}
 #'     \item{\code{ss_states_by_regime}}{\code{n_state x h} matrix of
@@ -1394,14 +1400,14 @@ ms_kim_smoother_struct <- function(data, ms_dr, model, params, obs_vars,
   lev <- matrix(0, length(st_names), fwd$n_T,
                 dimnames = list(st_names, NULL))
   for (t in seq_len(fwd$n_T)) {
-    w <- out$smoothed_probs[, t]
+    w <- out$smoothed_probs[t, ]
     for (j in seq_len(h))
       lev[, t] <- lev[, t] + w[j] * (out$smoothed_states_by_regime[, j, t] +
                                        ref)
   }
 
   out$ms_dr                <- ms_dr
-  out$smoothed_states_level <- lev
+  out$smoothed_states_level <- t(lev)   # T x n_state (rows = periods)
   out$ss_states_by_regime  <- ss_by_j
   out$state_ref            <- stats::setNames(ref, st_names)
   out
@@ -1432,10 +1438,11 @@ ms_kim_smoother_struct <- function(data, ms_dr, model, params, obs_vars,
 #' order of the mixing error remains.
 #'
 #' @param sm  An object returned by \code{\link{ms_kim_smoother_struct}}.
-#' @param data  The same observation matrix (\code{n_obs x T}) that was
-#'   smoothed.
-#' @return A list with \code{fitted} (\code{n_obs x T}), \code{residual}
-#'   (\code{fitted - data}, \code{NA} columns kept as \code{NA}) and
+#' @param data  The same observation matrix that was smoothed, \code{T x n_obs}
+#'   (rows = periods) with the observables as column names.
+#' @return A list with \code{fitted} (\code{T x n_obs}, rows = periods),
+#'   \code{residual} (\code{fitted - data}, \code{NA} entries kept as
+#'   \code{NA}) and
 #'   \code{max_abs_residual} over the observed entries.
 #' @seealso \code{\link{ms_kim_smoother_struct}}
 #' @export
@@ -1450,10 +1457,19 @@ ms_smoothed_fit_struct <- function(sm, data) {
   n_T     <- sm$n_T
   dr1     <- ms_dr$dr[[1L]]
   endo    <- dr1$endo_names
-  obs_var <- rownames(data)
-  if (is.null(obs_var))
-    stop("ms_smoothed_fit_struct: `data` must have observable names as ",
-         "rownames.", call. = FALSE)
+  ## `data` is T x n_obs (rows = periods) with the observables as COLUMN
+  ## names (R/time-orientation.R; a matrix named on its rows -- the old
+  ## n_obs x T orientation -- is transposed with a message).
+  if (is.data.frame(data)) data <- as.matrix(data)
+  if (is.null(colnames(data)) && is.null(rownames(data)))
+    stop("ms_smoothed_fit_struct: `data` must have the observable names as ",
+         "column names (T x n_obs, rows = periods).", call. = FALSE)
+  obs_given <- if (!is.null(colnames(data)) && all(colnames(data) %in% endo))
+    colnames(data) else rownames(data)
+  data <- .orient_time_matrix(data, endo, "data", "ms_smoothed_fit_struct",
+                              subset = TRUE, n_periods = n_T)
+  obs_var <- obs_given[obs_given %in% colnames(data)]
+  data    <- data[, obs_var, drop = FALSE]
   obs_idx <- match(obs_var, endo)
   if (anyNA(obs_idx))
     stop("ms_smoothed_fit_struct: observables not found in the model: ",
@@ -1466,7 +1482,7 @@ ms_smoothed_fit_struct <- function(sm, data) {
   dd <- lapply(.ms_struct_intercepts(ms_dr, obs_var)$d_list, as.numeric)
 
   fitted <- matrix(0, length(obs_var), n_T,
-                   dimnames = list(obs_var, colnames(data)))
+                   dimnames = list(obs_var, rownames(data)))
   lag <- sm$smoothed_lag_states_by_regime
   if (is.null(lag))
     stop("ms_smoothed_fit_struct: `sm` carries no ",
@@ -1478,7 +1494,7 @@ ms_smoothed_fit_struct <- function(sm, data) {
   ## as E[s_{t-1} | s_t = j, y_T] (the core collapses it with the SAME weights
   ## as the shock, so each forward cell's identity carries through).
   for (t in seq_len(n_T)) {
-    w_to <- sm$smoothed_probs[, t]
+    w_to <- sm$smoothed_probs[t, ]
     acc  <- numeric(length(obs_var))
     for (j in seq_len(h))
       acc <- acc + w_to[j] * (dd[[j]] + as.numeric(ZZ[[j]] %*% lag[, j, t]) +
@@ -1486,7 +1502,8 @@ ms_smoothed_fit_struct <- function(sm, data) {
     fitted[, t] <- acc
   }
 
-  resid <- fitted - data
+  fitted <- t(fitted)                     # T x n_obs (rows = periods)
+  resid  <- fitted - data
   list(fitted           = fitted,
        residual         = resid,
        max_abs_residual = max(abs(resid[is.finite(resid)])))
@@ -1503,6 +1520,6 @@ print.ms_kim_smoother <- function(x, ...) {
   cat(sprintf("  loglik: %.6f\n", x$loglik))
   cat("  Mean smoothed regime probabilities:\n")
   for (j in seq_len(x$n_regimes))
-    cat(sprintf("    %s: %.4f\n", x$regime_names[j], mean(x$smoothed_probs[j, ])))
+    cat(sprintf("    %s: %.4f\n", x$regime_names[j], mean(x$smoothed_probs[, j])))
   invisible(x)
 }

@@ -224,8 +224,10 @@
 #' (unexported) work on it directly.
 #'
 #' @param model dynhr_mod from \code{\link{parse_mod}}.
-#' @param data Observation matrix in the factories' native n_obs x T
-#'   orientation (columns = time periods; rows = \code{obs_vars}, in order).
+#' @param data Observation matrix, \code{T x n_obs} (rows are periods,
+#'   columns the \code{obs_vars}), oriented by the rule documented in
+#'   \code{\link{kalman_filter}} (names decide; an unnamed \code{n_obs x T}
+#'   or square sample is refused).
 #' @param prior_spec Prior specification (data.frame or named list); also
 #'   used to build the theta-particle prior sampler via the same
 #'   \code{.smc_make_prior_sampler()} dynhr_smc() itself uses.
@@ -369,6 +371,9 @@ dynhr_smc2 <- function(
   if (length(prob))
     stop("dynhr_smc2: ", paste(prob, collapse = " "), call. = FALSE)
   likelihood <- likelihood[1]
+  ## T x n_obs (rows are periods) by the package-wide rule; the factories
+  ## take it in that orientation.
+  data <- .orient_time_matrix(data, obs_vars, "data", "dynhr_smc2")
 
   loglik_fn <- .smc2_make_loglik(likelihood, model, data, prior_spec,
                                   obs_vars, compiled, me_variance,
@@ -391,7 +396,7 @@ dynhr_smc2 <- function(
     ## shipped to workers) evaluate ONLY stage-0 initial draws / fresh RWMH
     ## proposals -- the stored incumbent loglik (ll_i) is closed over from the
     ## driver process and never re-run on a worker -- and .smc_pmap() seeds
-    ## every task deterministically from seed_base + stage*n_particles + i,
+    ## every task deterministically from .smc_stage_seeds(seed_base, stage, n)[i],
     ## giving each (stage, particle) task its own independent PF draw. See
     ## dynhr_smc2()'s `parallel` roxygen for the full argument.
     parallel         = parallel,

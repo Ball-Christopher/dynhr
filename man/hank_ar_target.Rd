@@ -26,7 +26,7 @@ hank_ar_target(
 )
 }
 \arguments{
-\item{data}{\code{T_data x n_obs} matrix of demeaned observations.}
+\item{data}{\code{T_data x n_obs} matrix (rows are periods; oriented by the rule in \code{\link{hank_loglik_aggregate}}) of demeaned observations.}
 
 \item{obs_vars}{Character vector of observable names, in the column order
 of \code{data}.}

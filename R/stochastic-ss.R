@@ -44,8 +44,10 @@
 #'
 #' @param dr DecisionRules2 object returned by \code{solve_perturbation(order=2)}
 #' @param model dynhr_mod object
-#' @param params Optional named numeric parameter vector (default:
-#'   \code{model$param_values})
+#' @param params Named numeric parameter vector, or \code{NULL} (default).
+#'   The shock covariance comes from \code{params} when supplied, else from
+#'   \code{dr$Sigma_e} (set by \code{\link{solve_perturbation}}), else from
+#'   the model's shocks block at \code{model$param_values}.
 #' @return Named numeric vector of length \code{n_endo} giving the stochastic
 #'   steady state in level units (same variables and ordering as
 #'   \code{dr$endo_names}).  The attribute \code{"risk_correction"} holds
@@ -62,9 +64,9 @@ stochastic_steady_state <- function(dr, model, params = NULL) {
       paste(class(dr), collapse = ", ")
     )
   }
-  if (is.null(params)) params <- model$param_values
-
-  Sigma_e <- .get_shock_cov(model, dr$exo_names, params)
+  Sigma_e <- .resolve_sigma_e(dr, model, params)
+  ## ghxu contracted as (e %x% x): see MIXED-BLOCK LAYOUT CONVENTION
+  dr <- .with_mixed_layout(dr, "u_slow")
   sys     <- .order2_aug_system(dr, Sigma_e)
   st      <- .order2_stationary_moments(sys)
 
@@ -125,8 +127,10 @@ stochastic_steady_state <- function(dr, model, params = NULL) {
 #'   deviation (default 1 = a one-standard-deviation impulse). The impact is
 #'   \code{shock_size} times the relevant column of \code{chol(Sigma_e)}, so
 #'   \code{shock_size = 2} is a 2-sigma impulse, not 2 in level units.
-#' @param params Optional named numeric parameter vector (default:
-#'   \code{model$param_values})
+#' @param params Named numeric parameter vector, or \code{NULL} (default).
+#'   The shock covariance comes from \code{params} when supplied, else from
+#'   \code{dr$Sigma_e} (set by \code{\link{solve_perturbation}}), else from
+#'   the model's shocks block at \code{model$param_values}.
 #' @param initial_state Optional named numeric vector over the state variables
 #'   (names matching \code{dr$endo_names[dr$state_idx]}, in level units) from
 #'   which the GIRF is computed.  When \code{NULL} (default), the function
@@ -176,7 +180,8 @@ compute_girf <- function(dr, model, n_periods = 40L, shock_size = 1,
       paste(class(dr), collapse = ", ")
     )
   }
-  if (is.null(params)) params <- model$param_values
+  ## ghxu contracted as (e %x% x): see MIXED-BLOCK LAYOUT CONVENTION
+  dr <- .with_mixed_layout(dr, "u_slow")
   n_periods <- as.integer(n_periods)
 
   ## --- n_replications: switch between the analytic and Monte-Carlo paths ---
@@ -195,7 +200,7 @@ compute_girf <- function(dr, model, n_periods = 40L, shock_size = 1,
     }
   }
 
-  Sigma_e <- .get_shock_cov(model, dr$exo_names, params)
+  Sigma_e <- .resolve_sigma_e(dr, model, params)
   sys     <- .order2_aug_system(dr, Sigma_e)
   st      <- .order2_stationary_moments(sys)
   sss     <- st$mean

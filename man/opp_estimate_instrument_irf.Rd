@@ -28,8 +28,10 @@ opp_estimate_instrument_irf(
 affects the policy instrument (e.g., \code{"eps_r"}). If NULL,
 attempts auto-detection based on common naming conventions.}
 
-\item{params}{Named numeric parameter vector. Defaults to
-\code{model$param_values}.}
+\item{params}{Named numeric parameter vector, or \code{NULL}
+(default). The shock covariance comes from \code{params} when supplied,
+else from \code{dr$Sigma_e}, else from the model's shocks block (as in
+\code{\link{compute_irfs}}).}
 
 \item{n_periods}{Number of IRF periods (default 40).}
 

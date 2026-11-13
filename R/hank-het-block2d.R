@@ -225,7 +225,9 @@ hank_het2d_block <- function(b_grid, a_grid, Pi, e, beta, eis, rb, ra, w,
 #' @param D0 Optional initial distribution (package two-asset cell order).
 #'
 #' @return A list with paths \code{B}, \code{A}, \code{C}, \code{CHI},
-#'   \code{ADJ} (aggregate adjustment probability), and \code{Dpath}.
+#'   \code{ADJ} (aggregate adjustment probability), and \code{Dpath}
+#'   (\code{T_h x n_cell}, rows are periods: row \code{t} is the
+#'   beginning-of-period-\code{t} distribution).
 #' @seealso \code{\link{hank_het2d_block}}, \code{\link{hank_td2_nonlinear}}
 #' @export
 hank_td2d_nonlinear <- function(block, rb_path = NULL, ra_path = NULL,
@@ -272,11 +274,11 @@ hank_td2d_nonlinear <- function(block, rb_path = NULL, ra_path = NULL,
   D <- if (is.null(D0)) block$D else D0
   B <- numeric(T_h); A <- numeric(T_h); C <- numeric(T_h)
   CHI <- numeric(T_h); ADJ <- numeric(T_h)
-  Dpath <- matrix(0, length(D), T_h)
+  Dpath <- matrix(0, T_h, length(D))   # T x n_cell: rows are periods
   Lam_keep <- if (keep_policies) vector("list", T_h) else NULL
   for (t in seq_len(T_h)) {
     st <- steps[[t]]
-    Dpath[, t] <- D
+    Dpath[t, ] <- D
     b_mix <- st$P * st$b_A + (1 - st$P) * st$b_N
     a_mix <- st$P * st$a_A + (1 - st$P) * st$a_N
     c_mix <- st$P * st$c_A + (1 - st$P) * st$c_N

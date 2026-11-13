@@ -20,16 +20,23 @@ solve_sigma_order5(dr5, compiled, ss, params, Sigma_e = NULL, verbose = FALSE)
 \item{verbose}{Print progress}
 }
 \value{
-\code{dr5} with \code{ghxxxss}, \code{ghxss2} added
+\code{dr5} with \code{ghxxxss}, \code{ghxxuss}, \code{ghxuuss},
+  \code{ghuuuss}, \code{ghxss2}, \code{ghuss2} added
 }
 \description{
 Computes:
   \code{ghxxxss} (n × n_s³) — mixed 3rd state × sigma^2 correction
+  \code{ghxxuss}, \code{ghxuuss}, \code{ghuuuss} — the same with one,
+    two, three current-shock modes (Kronecker layout, shock modes fastest;
+    Taylor weights 1/4, 1/4, 1/12)
   \code{ghxss2}  (n × n_s)   — mixed 1st state × sigma^4 correction
+  \code{ghuss2}  (n × n_u)   — current shock × sigma^4 correction (weight
+    1/24)
 }
 \details{
 Requires order-4 sigma terms (\code{ghxxss}, \code{ghss2}) from
-\code{solve_sigma_order4()}.
+\code{solve_sigma_order4()}.  Gaussian shocks only, as for
+\code{\link{solve_sigma_order4}}.
 
 Same convention as \code{\link{solve_sigma_order4}}: plain derivatives
 (\code{ghxxxss} = \eqn{\partial^5 g/\partial x^3\partial\sigma^2}, Taylor

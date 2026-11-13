@@ -142,6 +142,18 @@
   .get_shock_cov_eval(model, exo_names, params)
 }
 
+## A correlation / covariance row naming one shock twice wrote rho * se^2 onto
+## the DIAGONAL (the shock's variance silently became rho * var). parse_mod
+## refuses it; a programmatically built shocks table is refused here. A
+## property of the block, not of theta, so it never fires at one draw only.
+.shock_pair_distinct <- function(r, i, j) {
+  if (i == j)
+    .dynhr_abort("shock covariance: the correlation / covariance entry (",
+                 r$var1, ", ", r$var2, ") names the same shock twice.",
+                 class = "dynhr_error_shocks_spec")
+  invisible(TRUE)
+}
+
 .get_shock_cov_eval <- function(model, exo_names, params) {
   n_exo   <- length(exo_names)
   stderr  <- .get_shock_stderr(model, exo_names, params)
@@ -163,6 +175,7 @@
       i <- match(r$var1, exo_names)
       j <- match(r$var2, exo_names)
       if (is.na(i) || is.na(j)) next
+      .shock_pair_distinct(r, i, j)
 
       ## Distinguish cov-type rows (absolute covariance; from `var a,b=expr`)
       ## from corr-type rows (correlation ratio; from `corr a,b=expr`).
@@ -325,6 +338,7 @@
       i <- match(r$var1, exo_names)
       j <- match(r$var2, exo_names)
       if (is.na(i) || is.na(j)) next
+      .shock_pair_distinct(r, i, j)
       has_cov_expr <- "cov_expr" %in% names(r) && !is.na(r$cov_expr) &&
                       nzchar(as.character(r$cov_expr))
       has_cov_val  <- "cov" %in% names(r) && !is.na(r$cov)
@@ -1017,7 +1031,8 @@ apply_theta_to_params <- function(model, theta, params = NULL) {
   ## Re-derive any steady_state_model-computed parameter.
   params <- ss_result$params %||% params
   sys <- extract_system_matrices_fast(sys_cache, ss_result$ss, params)
-  dr  <- .solve_from_system(sys, model, compiled, ss_result$ss, params, FALSE)
+  dr  <- .solve_from_system(sys, model, compiled, ss_result$ss, params, FALSE,
+                            qz_fail = "null")
   if (is.null(dr) || !isTRUE(dr$bk_satisfied)) return(NULL)
   ## Balanced growth (R/balanced-growth.R): the steady state above re-solved
   ## the path at this theta; carry it on the dr as the posterior closure does.
@@ -1211,6 +1226,29 @@ apply_theta_to_params <- function(model, theta, params = NULL) {
   invisible(NULL)
 }
 
+## Time-indexed estimation inputs -> T x n (rows = periods), via the one
+## orientation rule (.kf_time_in -> R/time-orientation.R). Resolved ONCE, at
+## build time: inside the per-draw closures a kalman_filter() refusal would
+## be caught and scored as loglik = -Inf for every draw.
+.mlp_orient_inputs <- function(data, me_extra, shock_scale, obs_vars, model,
+                               caller) {
+  data <- .kf_time_in(data, obs_vars, "data", caller)
+  n_T <- nrow(data)
+  if (!is.null(me_extra))
+    me_extra <- .kf_time_in(me_extra, obs_vars, "me_extra", caller,
+                            n_periods = n_T)
+  if (!is.null(shock_scale))
+    shock_scale <- .kf_time_in(shock_scale,
+                               model$varexo_names %||% model$exo_names,
+                               "shock_scale", caller, n_periods = n_T)
+  ## Row labels (dates) carry nothing once the columns are matched; dropping
+  ## them keeps every per-draw kalman_filter() call on .kf_time_in()'s fast
+  ## path (T x n, columns named exactly as expected, no row names).
+  drop_rn <- function(x) { if (!is.null(x)) rownames(x) <- NULL; x }
+  list(data = drop_rn(data), me_extra = drop_rn(me_extra),
+       shock_scale = drop_rn(shock_scale))
+}
+
 ## Validate `singular_obs` (see kalman_filter()).
 #' @noRd
 .mlp_check_singular_obs <- function(singular_obs, where = "make_log_posterior") {
@@ -1283,7 +1321,10 @@ apply_theta_to_params <- function(model, theta, params = NULL) {
 #' system structure to avoid repeated compilation.
 #'
 #' @param model       dynhr_mod (from parse_mod())
-#' @param data        Observation matrix (T x n_obs), columns = obs_vars
+#' @param data        Observation matrix, \code{T x n_obs} (rows are
+#'   periods), columns = obs_vars. Oriented once, at build time, by the rule
+#'   \code{\link{kalman_filter}} documents for its \code{data} (names decide;
+#'   an unnamed \code{n_obs x T} or square sample is refused).
 #' @param prior_spec  Prior specification data.frame (from extract_prior_spec())
 #' @param obs_vars    Character vector of observed variable names
 #' @param compiled    dynhr_compiled (from compile_model())
@@ -1305,6 +1346,20 @@ apply_theta_to_params <- function(model, theta, params = NULL) {
 #'   it supports band-restricted estimation via \code{freq_band}.
 #'   The PSKF uses the CSN state-space recursion; set \code{skew} in the
 #'   shocks block (or \code{estimated_params}) to specify shock shapes.
+#'   \strong{Skewed-shock convention (one rule package-wide, since
+#'   0.9.4.78):} the shock covariance \eqn{\Sigma_e} -- \code{stderr},
+#'   \code{var}, \code{corr}, estimated \code{stderr} / \code{corr} and
+#'   their priors -- is the TRUE covariance of the shocks; the shocks are
+#'   mean-zero; \code{skew} alpha sets only the shape (skew-normal,
+#'   \eqn{\delta = \alpha/\sqrt{1+\alpha^2}}, scale
+#'   \eqn{\omega = \sigma/\sqrt{1 - 2\delta^2/\pi}}). The simulators,
+#'   the PSKF (orders 1 and 2), the order-2/3 risk terms and the order-3
+#'   third moment all use it. (Before 0.9.4.78 the PSKF and the simulators
+#'   read \code{stderr} as the skew-normal scale \eqn{\omega}, so a
+#'   \code{stderr} estimate under skewness was \eqn{\omega}, not the
+#'   shock's standard deviation.) A skewed shock correlated with others is
+#'   supported; a covariance that no skew-normal law with those alphas can
+#'   attain is refused (class \code{dynhr_error_skew_cov_unattainable}).
 #' @param lik_init    Kalman filter \code{P0} initialization, forwarded to
 #'   \code{\link{kalman_filter}} on the \code{likelihood = "gaussian"} path
 #'   (default \code{"auto"}: stationary models use the Lyapunov \code{P0};
@@ -1398,14 +1453,16 @@ apply_theta_to_params <- function(model, theta, params = NULL) {
 #'   Applies to \code{likelihood = "gaussian"}; recorded on the closure as
 #'   \code{attr(, "filter_method")$singular_obs}. Invalid values have class
 #'   \code{dynhr_error_singular_obs}.
-#' @param me_extra Optional \code{n_obs x T} matrix of ADDITIONAL per-period
+#' @param me_extra Optional \code{T x n_obs} matrix of ADDITIONAL per-period
 #'   measurement-error variance, added on top of \code{me_variance}. Rows are
-#'   observables in \code{obs_vars} order and columns are periods, so a row
-#'   swap is a different model -- see the multi-value testing note in
-#'   \code{CLAUDE.md}.
-#' @param shock_scale Optional \code{n_exo x T} matrix of KNOWN per-period
+#'   periods and columns are observables (by name, or in \code{obs_vars}
+#'   order when unnamed), so a column swap is a different model -- see the
+#'   multi-value testing note in \code{CLAUDE.md}. Oriented by the same rule
+#'   as \code{data} (see \code{\link{kalman_filter}}).
+#' @param shock_scale Optional \code{T x n_exo} matrix of KNOWN per-period
 #'   shock standard-deviation scale factors (the deterministic-volatility
-#'   path). Rows are shocks in declaration order.
+#'   path). Rows are periods; columns are shocks (by name, or in declaration
+#'   order when unnamed).
 #' @param system_priors Optional \code{system_prior_spec} object placing priors
 #'   on model-implied quantities (moments, IRF features) rather than on
 #'   parameters directly; its log-density is added to the parameter prior.
@@ -1461,6 +1518,45 @@ apply_theta_to_params <- function(model, theta, params = NULL) {
 #' \code{\link{run_full_estimation}}) applies every block. The same holds for
 #' \code{\link{make_posterior}} and \code{\link{dm_posterior}}, which call
 #' this constructor.
+#'
+#' @section Whittle \code{debias}:
+#' \code{likelihood = "whittle"} takes \code{debias} through \code{...} (in an
+#' estimation spec: \code{likelihood_spec("whittle", extra = list(debias =
+#' TRUE))}). \code{debias = FALSE} (the default; it was \code{TRUE} through
+#' 0.9.4.77) is the
+#' standard Whittle likelihood, built on the model spectral density
+#' \eqn{f(\omega_j)}. \code{debias = TRUE} is the debiased Whittle likelihood
+#' of Sykulski, Olhede, Guillaumin, Lilly and Early (2019, Biometrika), which
+#' replaces \eqn{f(\omega_j)} by the expected periodogram
+#' \eqn{E_\theta[I(\omega_j)]} (a Hermitian matrix for two or more
+#' observables). The analytic gradient (\code{\link{make_posterior_grad}}) and
+#' every estimation path use the setting of the posterior they differentiate.
+#'
+#' Measured against the exact Gaussian log-likelihood (expected values under
+#' the true parameters, block-Toeplitz covariance of the demeaned sample):
+#' \itemize{
+#'   \item Standard: an O(1)-nat error that does not grow with \eqn{T}; its
+#'     expected maximiser carries the O(1/T) Whittle bias (rbc2shock with
+#'     observables \code{c}, \code{y}: +0.015 in \code{rho_a} at
+#'     \eqn{T = 100}); posterior sd of \code{rho_a} 1.3x too small at
+#'     \eqn{T = 100} and \eqn{200} against the Monte Carlo sd of its estimator.
+#'   \item Debiased: the expected maximiser is exactly the true value, but with
+#'     two or more persistent / strongly co-moving observables the error at
+#'     distant parameter vectors GROWS with \eqn{T} (rbc2shock: loglik
+#'     difference to \code{(rho_a, rho_b) = (0.8, 0.97)} understated by
+#'     12-23\% at \eqn{T = 200}-\eqn{2000}, standard within 3.4\%; a bivariate
+#'     VAR with shock correlation 0.999 loses 84-98\%) and the posterior is
+#'     too narrow (sd of \code{rho_a} 2.8x too small at \eqn{T = 100}, 1.9x
+#'     at \eqn{T = 200}).
+#'   \item Debiasing was the better of the two in these measured cases: a bivariate VAR(1) with
+#'     uncorrelated shocks at short \eqn{T} (difference error -6.7\% vs -22.7\%
+#'     at \eqn{T = 100}), the univariate rbc2shock \code{c} (+3.6\% vs
+#'     -26\% at \eqn{T = 100}), and near the true value (rbc2shock, a vector
+#'     about one posterior sd away: within 5\% where standard is off by
+#'     48-98\% at \eqn{T = 100}-\eqn{200}, an absolute error of ~0.5 nats).
+#' }
+#' \code{debias = TRUE} with two or more observables therefore warns (class
+#' \code{dynhr_warning_whittle_debias}, once per run).
 #'
 #' @seealso \code{\link{estimation_context}}, \code{\link{extract_prior_spec}},
 #'   \code{\link{log_prior}}
@@ -1593,9 +1689,14 @@ make_log_posterior <- function(model, data, prior_spec, obs_vars = NULL,
            "the .mod.", call. = FALSE)
   }
 
+  ## Time-indexed inputs -> T x n (rows = periods), resolved ONCE here.
+  oi <- .mlp_orient_inputs(data, me_extra, shock_scale, obs_vars, model,
+                           "make_log_posterior")
+  data <- oi$data; me_extra <- oi$me_extra; shock_scale <- oi$shock_scale
+
   ## ---- Measurement-error variance: validated ONCE, at build time ----------
-  ## A scalar, or (Kalman filter and PSKF only) one variance per observable,
-  ## H = diag(me). Checked here rather than inside the closure: every
+  ## A scalar, or (Kalman filter, PSKF and the pruned state-space KF only)
+  ## one variance per observable, H = diag(me). Checked here rather than inside the closure: every
   ## per-draw likelihood call is wrapped in a tryCatch that maps errors to
   ## loglik = -Inf, so an unusable me_variance used to surface as a posterior
   ## that is -Inf at EVERY theta instead of as an error (0.9.4). The
@@ -1604,7 +1705,7 @@ make_log_posterior <- function(model, data, prior_spec, obs_vars = NULL,
   me_variance <- .kf_me_variance(
     me_variance, obs_vars,
     sprintf("make_log_posterior(likelihood = \"%s\")", likelihood),
-    allow_vector = likelihood %in% c("gaussian", "pskf") &&
+    allow_vector = likelihood %in% c("gaussian", "pskf", "pruned") &&
       is.null(ms_spec_ctx) && is.null(ms_struct_spec_ctx))
 
   ## Power-posterior (generalised-Bayes) tempering exponent zeta in (0, 1].
@@ -1721,9 +1822,8 @@ make_log_posterior <- function(model, data, prior_spec, obs_vars = NULL,
         "shock_scale (heteroskedastic_shocks). Use the Gaussian likelihood."
       )
     }
-    ## data must be n_obs x T (TPF convention) — transpose if needed.
-    ## make_log_posterior callers pass data T x n_obs; tpf expects n_obs x T.
-    data_tpf <- if (ncol(data) == length(obs_vars)) t(data) else data
+    ## `data` is T x n_obs (oriented above): the TPF factory takes it as is.
+    data_tpf <- data
     ## Merge ctx$tpf_options (if any) with ... ; explicit ... wins over ctx.
     tpf_extra_args <- if (!is.null(ctx) && length(ctx$tpf_options) > 0L) {
       ## only use ctx$tpf_options keys not already in ...
@@ -1763,8 +1863,8 @@ make_log_posterior <- function(model, data, prior_spec, obs_vars = NULL,
            "deterministic shock_scale (heteroskedastic_shocks). The SV filter ",
            "supplies the shock scale from the latent volatility path itself.",
            call. = FALSE)
-    ## data must be n_obs x T (particle-filter convention) — transpose if needed.
-    data_sv <- if (ncol(data) == length(obs_vars)) t(data) else data
+    ## `data` is T x n_obs (oriented above): the SV factory takes it as is.
+    data_sv <- data
     ## Forward ONLY the SV factory's own tuning args from ... (run_full_estimation
     ## forwards its whole ... here, so a blind splat would pass unrelated args
     ## like n_iter into the strict factory signature and error).
@@ -1798,6 +1898,8 @@ make_log_posterior <- function(model, data, prior_spec, obs_vars = NULL,
       names(dots),
       c("n_particles", "poly_degree", "n_quad", "n_nodes", "state_domain",
         "solve_tol", "solve_max_iter", "ess_frac", "seed"))]
+    ## `data` is T x n_obs with named columns (oriented above); the factory
+    ## takes it as is.
     return(do.call(make_log_posterior_global_pf,
                    c(list(model = model, data = data, prior_spec = prior_spec,
                           obs_vars = obs_vars, compiled = compiled,
@@ -1837,9 +1939,8 @@ make_log_posterior <- function(model, data, prior_spec, obs_vars = NULL,
         "with shock_scale (heteroskedastic_shocks). Use the Gaussian likelihood."
       )
     }
-    ## make_log_posterior_obc_ppf accepts data either orientation, but pass the
-    ## n_obs x T convention explicitly for parity with the tpf branch.
-    data_ppf <- if (ncol(data) == length(obs_vars)) t(data) else data
+    ## `data` is T x n_obs (oriented above): the obc_ppf factory takes it as is.
+    data_ppf <- data
     ## The obc_ppf factory has a NARROWER interface than the Gaussian/TPF
     ## paths: it takes only (model, data, prior_spec, obs_vars, compiled,
     ## specs, me_variance, N, proposal, regime_guess, seed, power). It does NOT
@@ -1947,7 +2048,7 @@ make_log_posterior <- function(model, data, prior_spec, obs_vars = NULL,
 
   if (likelihood == "whittle") {
     extra <- list(...)
-    debias_arg <- if (!is.null(extra$debias)) extra$debias else TRUE
+    debias_arg <- .whittle_debias_resolve(extras = extra)
     return(make_log_posterior_whittle(model, data, prior_spec, obs_vars,
                                        compiled, me_variance = me_variance,
                                        freq_band = freq_band,
@@ -2066,10 +2167,10 @@ make_log_posterior <- function(model, data, prior_spec, obs_vars = NULL,
 
         ## Kim-Nelson structural filter
         ## obs_vars and data use the same T x n_obs convention as the standard path.
-        ## ms_kim_filter_struct expects data as n_obs x T.
+        ## ms_kim_filter_struct takes data T x n_obs (names rule, agent B).
         kf <- tryCatch(
           ms_kim_filter_struct(
-            t(data), ms_dr, model,
+            data, ms_dr, model,
             params     = params_list[[1L]],   # common params for obs equation
             obs_vars   = obs_vars,
             me_variance = mv_ms,
@@ -2122,7 +2223,8 @@ make_log_posterior <- function(model, data, prior_spec, obs_vars = NULL,
   ## with the continuous infeasibility penalty when it is switched on.
   .gaussian_solve <- function(model, compiled, sys_cache, ss, params, theta) {
     sys <- extract_system_matrices_fast(sys_cache, ss, params)
-    dr  <- .solve_from_system(sys, model, compiled, ss, params, FALSE)
+    dr  <- .solve_from_system(sys, model, compiled, ss, params, FALSE,
+        qz_fail = "null")
     if (is.null(dr) || !isTRUE(dr$bk_satisfied)) {
       if (is.null(.penalty_cfg)) return(NULL)
       ## Penalty mode: measure the BK violation as the continuous distance of
@@ -2200,7 +2302,7 @@ make_log_posterior <- function(model, data, prior_spec, obs_vars = NULL,
       ## The non-MS (default) path is bit-identical when ms_spec is NULL.
       kf <- if (!is.null(ms_spec_ctx)) {
         tryCatch(
-          ms_kim_filter(t(data), sol$dr, model, params, obs_vars,
+          ms_kim_filter(data, sol$dr, model, params, obs_vars,
                         ms_spec     = ms_spec_ctx,
                         me_variance = me_variance,
                         lik_init    = lik_init,
@@ -2301,10 +2403,10 @@ make_log_posterior <- function(model, data, prior_spec, obs_vars = NULL,
 #' @param singular_obs As in \code{\link{make_log_posterior}}: \code{"reject"}
 #'   (default) returns \code{-Inf} contributions on an informative singular
 #'   observation, \code{"skip"} is the Dynare convention.
-#' @param me_extra    \code{n_obs x T} matrix of additional per-observable,
+#' @param me_extra    \code{T x n_obs} matrix (rows are periods) of additional per-observable,
 #'   per-period measurement-error variance (filter_tunes soft tunes); see
 #'   \code{\link{kalman_filter}}.
-#' @param shock_scale \code{n_exo x T} heteroskedastic shock-scale matrix;
+#' @param shock_scale \code{T x n_exo} (rows are periods) heteroskedastic shock-scale matrix;
 #'   see \code{\link{kalman_filter}}.
 #' @param likelihood  Likelihood type. Only \code{"gaussian"} (the default)
 #'   is supported; any other value errors ("gaussian only for now") rather
@@ -2357,6 +2459,9 @@ make_loglik_contrib <- function(model, data, prior_spec = NULL, obs_vars = NULL,
            "declares no `varobs`; pass obs_vars= or add a varobs line to ",
            "the .mod.", call. = FALSE)
   }
+  oi <- .mlp_orient_inputs(data, me_extra, shock_scale, obs_vars, model,
+                           "make_loglik_contrib")
+  data <- oi$data; me_extra <- oi$me_extra; shock_scale <- oi$shock_scale
 
   ## Scalar or per-observable H = diag(me); validated at build time (the
   ## per-draw tryCatch below would otherwise turn a bad value into -Inf).

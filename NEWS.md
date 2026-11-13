@@ -1,3 +1,577 @@
+# dynhr 0.9.4.81
+
+**Public release: everything since 0.9.4.64** (the 0.9.4.65 - 0.9.4.81
+entries below). Several fixes change results; resuming a checkpoint or
+comparing stored output across these versions reports the affected
+components. Highlights:
+
+- **Order-3 simulation, pruned filter, TPF and decompositions** read the
+  mixed coefficient blocks in the wrong layout whenever a model had at least
+  two states and two shocks (every earlier public release). Order-3 standard
+  deviations on `rbc2shock` were overstated by 42% (c) and 284% (y); the
+  pruned order-3 path now matches Dynare 7.1 to 2e-8.
+- **Orders 4-5** gain the missing current-shock risk blocks, IRFs at orders
+  3-5 include all risk terms, `dm_irf()` supports orders 4-5, and orders 4-5
+  refuse non-Gaussian shocks instead of omitting terms.
+- **Skewed shocks**: `Sigma_e` (`stderr`, `corr`) is the true covariance
+  everywhere. The simulators and the PSKF read it as the skew-normal scale,
+  so **skewed PSKF estimates are re-parameterised** (`stderr` was about 1.42x
+  the true sd at alpha = 2). Order-3 policies of skew-declared models now
+  carry the third-cumulant term.
+- **Whittle likelihood**: the multivariate likelihood was O(T) off with two
+  or more observables (conjugated periodogram); fixed. The default is now
+  the standard Whittle (`debias = FALSE`); the debiased form is too narrow as
+  a posterior on persistent multi-observable models and warns.
+- **SV particle filter**: the initial state law ignored the volatility level
+  and its variance; every SV log-likelihood changes.
+- **Seeds**: per-chain, per-replication and per-task seeds are independent
+  children of the seed (they were `seed + k`, whose first draws are
+  dependent); seeded multi-chain and parallel results differ for a given
+  seed.
+- **SBC verdicts** are family-wise: `sbc_uniformity_test()` no longer flags
+  most many-parameter models that are in fact calibrated.
+- **One `Sigma_e` rule** for every post-solve function (explicit `params`,
+  then the solution's `Sigma_e`, then the model); **rows are periods** in
+  every data and shock matrix, with square samples no longer mis-oriented.
+- **Samplers and parallel runs**: serial and parallel RWMH share defaults
+  (`scale = 2.38 / sqrt(d)`, target 0.25); parallel runners reuse and keep
+  daemons you set; failed chains are reported, not silently dropped;
+  checkpoint resume in parallel runs is bit-identical; DIME warns on small
+  ensembles.
+- **OBC**: `compute_irfs_mcp()` no longer depends on `n_periods` for the
+  path it returns; the Boehl `single_spell` fast path finds the right spell
+  or falls through to the general solver.
+- A single ordered QZ, front-door argument validation, and many silent
+  fallbacks turned into classed errors or warnings.
+
+**Result-changing: `profile_ci()` seeding** (2026-11-13).
+
+- **`profile_ci(seed = , cores > 1)` is now reproducible and equal to the
+  serial run.** The seed was set once and the grid points then ran in forked
+  workers, each of which started from a clock-and-process seed, so a seeded
+  parallel profile differed from run to run and from the serial one. Each
+  grid point now carries its own child seed. Seeded serial profiles draw
+  different feasibility starts than before for a given seed.
+- **Parallel SMC no longer overwrites the caller's random stream**: the
+  host-side `set.seed()` in `run_smc_mirai()` is restored on exit. Results
+  are unchanged.
+- The `dynhr_benchmark_posterior()` end-to-end test no longer requires a
+  non-zero minimum time (a 1 ms evaluation on a 1 ms clock can read 0).
+
+# dynhr 0.9.4.80
+
+**Result-changing: independent child seeds** (2026-11-13).
+
+- **Per-chain, per-replication and per-task seeds are independent children
+  of the seed** rather than `seed + k`. Streams from consecutive
+  Mersenne-Twister seeds are dependent in their first draws: over 200000
+  consecutive seeds the first normal draw has lag-1 correlation -0.05
+  (23 standard errors), still visible at a stride of 1000 and gone by about
+  the tenth draw. Children are now a hash of (seed, call site, index): they
+  never touch the random-number stream, child `k` does not depend on how
+  many are requested (adding chains or resuming keeps existing streams), and
+  serial, parallel and pooled runs of the same sampler still agree.
+- **What changes for a given seed** (same distribution, different draws):
+  RWMH / PMMH / NUTS runs with two or more chains, mode-finding portfolio
+  starts, parallel SMC / SMC2 and DIME, `dynhr_sbc()`, `global_pf_sbc()`,
+  `tpf_order3_sbc()`, `hank_mixture_sbc()`, `sv_rbpf_sbc()`,
+  `ppf_reweight_posterior()`, `run_estimation_passport()`,
+  `mdd_calibration()` and the TPF particle-count preflight. Single-chain
+  runs and deterministic likelihoods are unchanged.
+- **`mdd_calibration()` repeated seeds across estimators** once `n_reps`
+  exceeded 100; seeds are now nested by subproblem, estimator and
+  replication.
+- **Parallel SMC stage 0 is seeded.** The initial particle evaluation ran
+  unseeded on the daemons, so a particle-filter likelihood was not
+  reproducible there.
+- Checkpoints record the seed scheme. Chains that saved state resume exactly
+  from an older checkpoint; a resume that has to re-derive seeds from one
+  (chains with no saved state, parallel DIME) warns with class
+  `dynhr_warning_checkpoint_seed_scheme`.
+- The dependence did not explain any calibration result: an exact conjugate
+  SBC and the SV harness's joint law of parameters and data are
+  indistinguishable under consecutive and independent seeds. The random-number
+  generator is unchanged (Mersenne-Twister); L'Ecuyer streams and a jumpable
+  generator in the compiled code were assessed and not adopted, since either
+  would change every serial result or take the compiled filters out of
+  `set.seed()` control.
+
+# dynhr 0.9.4.79
+
+**Result-changing: SV burn-in and SBC verdicts** (2026-11-13).
+
+- **SV particle filter burn-in.** The pre-sample burn-in introduced in
+  0.9.4.77 was sized from the state persistence alone. It starts each
+  particle at the unconditional state covariance, which averages `exp(h)`
+  and sits far above a typical particle's own covariance when the
+  log-volatility has a large stationary variance
+  `v = sigma_eta^2 / (1 - rho^2)`. The log-likelihood was then too high:
+  +0.21 nats at `v = 18` and +0.06 at `v = 14` against an exact
+  Monte-Carlo-over-paths likelihood (within 0.003 at `v < 1`). The burn-in
+  now lengthens with `v`; with the fix the same cases agree within 0.01.
+  SV log-likelihoods move slightly everywhere (the default burn-in grows by
+  a period or two), materially only for very volatile volatility.
+- **`sbc_uniformity_test()` verdict is family-wise.** The verdict applied
+  fixed thresholds to every parameter (`|z| > 3`, `|z| >= 2`, chi-squared
+  Bonferroni over parameters only), so its false-alarm rate grew with the
+  number of parameters: on exactly uniform ranks with 12 parameters it
+  returned "calibrated" 40% of the time, "suspect" 50%, "miscalibrated" 10%.
+  The headline `verdict` now applies a Bonferroni correction over every
+  statistic examined (chi-squared, mean-rank z and tail z per parameter):
+  "miscalibrated" at family-wise 5%, "suspect" at 20%, at any dimension
+  (measured 4-7% and 14-18% from 1 to 30 parameters). Nothing is dropped
+  from the output: the table keeps every statistic and gains their p-values
+  (`p_mean_rank`, `p_tail_asym`) and a per-parameter `flag`; the old rule is
+  returned as `verdict_unadjusted`; `note` states the correction and the
+  thresholds it implies. The print method shows all three.
+- **`dynhr_sbc()` data start from the stationary state law** rather than
+  from a zero state plus 50 periods, which left persistent prior draws short
+  of it (root 0.98: first-observation variance 18% low) while the likelihood
+  assumes stationarity. SBC datasets differ for a given seed.
+- **`sv_rbpf_sbc()` runs 32000 draws by default (was 8000)** and returns
+  the per-replication chain effective sample size (`ess`). At 8000 draws the
+  median effective sample size of `mu` and `rho` is about 150 against 75
+  kept draws (worst replications below 50). A classed warning
+  (`dynhr_warning_sbc_low_ess`) is raised when the median falls below
+  `5 * thin_L`.
+- Found by assuming a hidden fault behind two borderline SBC results and
+  checking each component against an independent calculation: the Ireland
+  (2004) Kalman likelihood matches a dense multivariate-normal likelihood to
+  1e-10, prior samplers match prior densities, and RWMH and NUTS agree on
+  identical datasets; the Ireland SBC cell needed 4x deeper RWMH chains
+  (`rho_pi` under-mixed), not a code change.
+
+# dynhr 0.9.4.78
+
+**Result-changing: skewed shocks and the Whittle default** (2026-11-14).
+
+- **`Sigma_e` is the true covariance of skewed shocks, everywhere.** For
+  shocks with a `skew` shape the simulators, the order-1 and order-2 PSKF
+  (filter, smoother, conditional forecast, the HANK PSKF) and the SVAR-ICA
+  code read `stderr` / `corr` as the closed-skew-normal *scale*, so the
+  variance actually used was `(1 - 2 delta^2 / pi)` times the declared one
+  (0.49x at alpha = 2), while the order-2/3 risk terms and the moment code
+  already read it as the variance. One helper (`.csn_scale_from_cov()`) now
+  converts for every consumer; correlated skewed shocks are solved exactly
+  and an unattainable covariance is refused
+  (`dynhr_error_skew_cov_unattainable`).
+  **This re-parameterises every skewed PSKF estimate**: `stderr` and its
+  prior now mean the true standard deviation. On skewed AR(1) data with true
+  sd 0.3 the likelihood peaked at 0.426 before and at 0.299 now. Simulated
+  paths of skewed models change (their shock variance was too small).
+  Gaussian models (all `skew` zero) are bit-identical.
+- **Whittle likelihood: `debias = FALSE` is the default.** The debiased
+  Whittle is implemented as published (checked against simulated
+  periodograms and exact expected log-likelihoods), but as a posterior it is
+  too narrow on persistent, strongly co-moving models: on `rbc2shock` the
+  curvature-implied sd of rho_a is 2.8x (T = 100) and 1.9x (T = 200) below the
+  sampling sd, against 1.3x for the standard Whittle, and its error at
+  distant parameter vectors grows with T (-7 nats at T = 200, -145 at
+  T = 2000). `debias = TRUE` remains available and warns with two or more
+  observables (`dynhr_warning_whittle_debias`). Every default Whittle
+  posterior changes. Note the standard Whittle's *level* is unreliable at
+  very short T (T = 60: about -96 nats on `rbc2shock`), which matters for
+  marginal-likelihood comparisons, not posterior shape.
+- **Whittle value/gradient mismatch.** The sampler gradient paths (staged
+  estimation, pooled NUTS, the mirai workers, SBC) never forwarded `debias`,
+  so an explicit `debias = FALSE` paired a standard-Whittle posterior with a
+  debiased gradient (relative error 6-9%). Every gradient now reads the
+  setting from the posterior it belongs to.
+
+# dynhr 0.9.4.77
+
+**Result-changing fixes and new refusals** (open items from the 2026-11-12
+review, each checked against an independent oracle, 2026-11-13).
+
+- **SV Rao-Blackwellised particle filter: initial state law.** Every particle
+  started from the Lyapunov covariance of the *baseline* `Sigma_e`, as if the
+  log-variance level `mu` and its volatility `sigma_eta` were both zero. The
+  filter now starts from the SV-unconditional covariance (`Sigma_e` weighted
+  by `E[exp(h)]`) and runs each particle through a pre-sample burn-in, so its
+  covariance is conditional on its own volatility history. Against an exact
+  likelihood (two shocks, mu = 2 / -1.5) the error falls from -0.47 nats to
+  +0.004 (se 0.003); it was also wrong at mu = 0 (+0.11). **Every SV
+  log-likelihood changes**, and seeded values move because the burn-in draws
+  random numbers. Cost: about +24% run time at state persistence 0.95 and
+  +74% at 0.99.
+- **Order 3 with skewed shocks.** A model that declares `skew` now gets the
+  third-cumulant term `ghs3` in its order-3 policy automatically (it was zero
+  unless `sigma3` was passed by hand, while `simulate_model_order3()` did
+  draw skewed shocks). Explicit `sigma3` still wins. A skewed shock correlated
+  with another shock in a forward-looking model is refused
+  (`dynhr_error_skew_correlated_order3`).
+- **Orders 4-5 refuse non-Gaussian shocks** (`dynhr_error_order45_nongaussian`)
+  instead of returning a solution without the odd-sigma cross terms and
+  fourth-cumulant terms. Gaussian results are unchanged.
+- **`dm_irf()` supports orders 4 and 5.**
+- **Boehl `single_spell` fast path** searched for the spell length assuming a
+  monotone end-of-spell gap and failed on a valid one-spell case in
+  `nk_2obc`; it now scans, and when no single spell is an equilibrium it
+  falls through to the general solver with a classed message
+  (`dynhr_obc_spell_fallthrough`).
+- **Parallel runners leave your daemons alone.** Every mirai runner reuses a
+  daemon pool that is already set and tears down only a pool it started;
+  `run_mode_parallel()` restores the caller's `future::plan`. Daemon-side
+  initialisation errors abort (`dynhr_error_daemon_init`).
+- **Parallel RWMH / NUTS checkpoints.** The per-daemon checkpoint
+  configuration never reached the daemons, and a chain lost before its first
+  flush was dropped again on resume; such chains are now re-run from the
+  start. Resume is bit-identical to an uninterrupted run.
+- **Parallel DIME** aborts on a daemon-side failure
+  (`dynhr_error_dime_daemon`) instead of reading it as a rejected proposal;
+  an all-infeasible start aborts with `dynhr_error_dime_no_feasible_start`.
+- **DIME small ensembles warn** (`dynhr_warning_dime_small_ensemble`). All
+  walkers are updated from one snapshot, which is exact only as the ensemble
+  grows; at the default size the stationary variance is within 0.2% of truth
+  (numbers in `?dime`). The algorithm is unchanged.
+
+Known and not changed: for skewed shocks the simulators treat `Sigma_e` as
+the skew-normal scale (drawn variance is `(1 - 2 delta^2 / pi) Sigma_e`)
+while the order-2/3 risk terms treat it as the variance; debiased Whittle
+departs from the exact likelihood away from the truth on strongly co-moving
+models at long T (standard Whittle does not).
+
+# dynhr 0.9.4.76
+
+**Result-changing fixes: order 3, 4 and 5** (oracle review against closed-form
+models and Dynare 7.1, 2026-11-12).
+
+- **Order-3 simulation, pruned filter, TPF and decompositions contracted the
+  mixed blocks in the wrong layout.** An order-3 solution stores `ghxu`,
+  `ghxxu` and `ghxuu` in Dynare's layout (shock index fastest); an order-2
+  solution stores `ghxu` with the state index fastest. The consumers all read
+  the order-2 layout, so with **at least two states and at least two shocks**
+  they multiplied the wrong coefficients. Affected: `simulate_model_order3()`
+  (pruned and unpruned), `pruned_state_space3()` and its moments and Kalman
+  log-likelihood (`pruned_ss_loglik3()`, the `pruned` order-3 posterior), the
+  order-3 TPF, `historical_decomposition_nonlinear()` and
+  `variance_decomposition_nonlinear()` at order 3, and any order-2 function
+  handed an order-3 rule (`simulate_model_order2()`, `pruned_state_space()`,
+  `compute_girf()`, `compute_third_cumulant()`, `compute_fourth_cumulant()`,
+  D19). Magnitude on the bundled `rbc2shock` model: order-3 standard
+  deviations were overstated (c +42%, y +284%); Dynare's order-3 pruned path
+  on a 3-state, 2-shock RBC now matches to 2e-8 (was 5e-2 relative). The
+  stored tensors themselves were right, which is why the tensor-level Dynare
+  parity tests passed; the simulation, moment and filter tests shared the
+  wrong contraction. Models with one state or one shock, and all order-2
+  results from an order-2 solve, are unchanged. The layout is now tagged on
+  the rule (`dr$mixed_layout`) and read through one helper.
+- **Order-4 / order-5 decision rules were missing risk terms.** The
+  sigma-dependent blocks that involve the current shock (`ghxuss`, `ghuuss`,
+  `ghxxuss`, `ghxuuss`, `ghuuuss`, `ghuss2`) were never formed, and `ghss2` /
+  `ghxss2` lacked one term (42% / 52% off on a closed-form Lucas-tree model).
+  Every order-4/5 rule was wrong by O(sigma^2 u^2) plus a constant. All blocks
+  now match the closed form to 1e-15 and Dynare's order-4/5 simulated paths
+  to solver tolerance. The order-5 solve is roughly 2x slower on a 6-state
+  model.
+- **Impulse responses at orders 3-5** are now one definition: the shocked
+  pruned path minus the unshocked pruned path, both from the deterministic
+  steady state, with every risk term at that order. Orders 4 and 5 used to
+  drop all sigma terms and mis-weighted two products; order 3 omitted the
+  impulse-times-risk-drift term from period 2. Error against the exact
+  response now falls at the expected rate (slopes 4 / 5 / 6; orders 4 and 5
+  were stuck at 3).
+- Column names of the order-3/4 mixed blocks were generated in the wrong
+  index order (labels only).
+
+Not changed: skewed shocks at orders 4-5 (the sigma terms assume Gaussian
+shocks); `dm_irf()` still refuses orders 4-5.
+
+# dynhr 0.9.4.75
+
+**Result-changing fixes** (third review pass, 2026-11-12).
+
+- **Multivariate Whittle likelihood.** With two or more observables the
+  periodogram was the conjugate of what the spectral density models (every
+  lead-lag cross-spectrum was flipped), and the debiased expected periodogram
+  (the default) dropped the quadrature spectrum. Both drifted O(T) from the
+  exact Gaussian log-likelihood: on a bivariate VAR(1) about 1.1 nats per
+  period (standard) and 0.19 (debiased); now O(1). Univariate results are
+  unchanged.
+- **One shock-covariance rule after the solve.** Every post-solve function
+  now resolves `Sigma_e` as: an explicit `params` argument, then
+  `dr$Sigma_e` (e.g. from `solve_perturbation(Sigma_e =)`), then the model's
+  `shocks` block (`.resolve_sigma_e()`). Changes:
+  `compute_moments(dr, model, params =)` follows `params` even when `dr`
+  carries a `Sigma_e` (so does `estimate_gmm_weight_matrix()`);
+  `conditional_variance_decomposition()`, `hp_filtered_moments()`,
+  `variance_decomposition_nonlinear()`, `stochastic_steady_state()`,
+  `compute_girf()`, `compute_third_cumulant()`, `compute_fourth_cumulant()`,
+  `ms_irf()`, `opp_estimate_instrument_irf()`, `welfare_compute()`,
+  `conditional_welfare()`, the D13 / D15 diagnostics and the simulators
+  (`simulate_model()`, `_order2()`, `_order3()`) used to ignore `dr$Sigma_e`
+  and now use it; `dm_irf()` and `solve_model()` reflect a `Sigma_e` given at
+  solve time. Results are unchanged when `dr` carries no override. Not
+  covered, by design: the likelihood / Kalman paths (filter, smoother,
+  forecasts) always use `params`, and D19 keeps the covariance its risk
+  correction was solved with.
+- **RWMH tuning defaults are the same in serial and parallel.** `rwmh()`
+  started at scale 0.5 adapting every 100 draws, the parallel path at 1.5
+  every 200, so the same call was tuned differently depending on `parallel`
+  (on SW2007, 36 parameters, the parallel default left 0% acceptance after a
+  500-draw burn-in). Both now default to `scale = NULL` =
+  `2.38 / sqrt(d)` (d = largest block dimension), target rate 0.25,
+  adaptation every 100 draws. Draws from runs that relied on the defaults
+  change; explicit values are untouched.
+- **`compute_irfs_mcp()`** solved the perfect-foresight problem over exactly
+  `n_periods`, so the terminal condition leaked into the reported window
+  (first 10 periods differed by 4.7e-4 between `n_periods` 20 and 80 on the
+  ZLB example). It now solves on `max(2 * n_periods, n_periods + 40)` periods
+  and truncates, as `compute_irfs_obc(obc_solver = "mcp")` does.
+- **Parallel DIME** scored the initial ensemble on the host without
+  `shock_scale`, `system_priors`, `filter_method` and `singular_obs` while the
+  workers applied them, so the first accept/reject compared two targets.
+
+Other fixes.
+
+- Parallel RWMH / NUTS: a failed chain now raises a classed warning (it was an
+  info line), all chains failing aborts, and the pooled result reports the
+  number of chains actually pooled (a killed worker left 3 of 4 chains with
+  `n_chains = 4`).
+- Refused instead of silently returning `-Inf` / garbage: a non-positive,
+  fractional or vector particle count in the SV, PPF and TPF likelihoods; an
+  `NA` `regime_path_init`, a wrong-length `state_init`, and a `spell_regime`
+  naming a constraint that does not exist in `boehl_solve_regime_path()` /
+  `compute_irfs_obc()`.
+
+# dynhr 0.9.4.74
+
+- `validate_hank_block()` no longer triggers `hank_aggregate()`'s new
+  unnormalised-distribution warning: it already reports the mass defect in
+  its own `D_unit_mass` row (found by the 0.9.4.73 full suite).
+
+# dynhr 0.9.4.73
+
+**Result-changing fixes** (second adversarial review, 2026-11-11).
+
+- **Impulse responses with correlated shocks.** `compute_irfs_order3()` /
+  `_order4()` / `_order5()`, `compute_irfs_obc()`, `occbin_compute_irfs()` and
+  `compute_irfs_mcp()` scaled the impulse by the diagonal stderr and ignored
+  both `corr` and a `dr$Sigma_e` override; they now use the same rule as
+  `compute_irfs()` and `compute_irfs_order2()` (the k-th lower-Cholesky column
+  of `Sigma_e`; `params`, then `dr$Sigma_e`, then the model). Diagonal
+  `Sigma_e` results are unchanged. A zero-variance shock now gets a unit
+  impulse in these functions too, as at orders 1 and 2.
+- **`dr$Sigma_e` honoured at order 2.** `compute_moments_order2()`,
+  `pruned_state_space()` and `pruned_state_space3()` rebuilt `Sigma_e` from the
+  model and ignored the covariance set by `solve_perturbation(Sigma_e =)`.
+- **`compute_irfs_obc()`**: with two or more constraints and
+  `spell_regime = NULL` the default solver is now `"occbin"` (`"boehl"`
+  assumes all constraints bind together and returned a wrong path; it stays
+  available explicitly and remains the single-constraint default). Every
+  returned path is checked against the constraints; non-convergence or a
+  violation warns (`dynhr_warning_obc_path_infeasible`), and the result carries
+  `attr(, "converged")`, `"regime_paths"` and `"obc_solver"`. `params` now
+  means the shock covariance only for all four solvers (the `"mcp"` path used
+  to re-solve the model at `params`); the `"mcp"` path solves on an internal
+  horizon of `max(2 * n_periods, n_periods + 40)` so early responses no longer
+  depend on `n_periods`.
+- **`solve_ms_perturbation()`** aborts on a regime parameter vector that is
+  unnamed or lacks a declared parameter (it was read as 0).
+  `solve_perturbation()` shares the check and now also refuses `Inf`
+  parameters (`dynhr_error_params_invalid`).
+- **Parallel RWMH** (`run_posterior_estimation(parallel = TRUE)`) now forwards
+  `scale`, `target_rate` and `adapt_every` (they were silently dropped) and
+  refuses extras it cannot honour.
+- `pruned_ss_loglik()` / `pruned_ss_loglik3()` and the pruned posterior accept
+  a per-observable `me_variance`; the cumulant posterior and
+  `ms_kim_filter()` refuse a vector cleanly. `ms_dsge_spec()` validates
+  `shock_scales` names.
+- HANK: `hank_loglik_aggregate()` refuses `NA` / non-finite data (use
+  `hank_loglik_ss()` for missing values) and an invalid `sigma_eps`;
+  `hank_aggregate()` warns on a distribution that does not sum to 1.
+
+# dynhr 0.9.4.72
+
+- `conditional_forecast()` with `me_variance > 0` and `n_draws > 0` now also
+  returns `$draws_me`: the forecast draws with an independent
+  `N(0, me_variance)` measurement error added per period and observable, i.e.
+  predictive paths of the *measured* series (Dynare's `_ME` bands). `$draws`
+  (the model's observables) and the point paths are unchanged, bit for bit,
+  for a given seed. `plot()` gains `measurement = TRUE` to draw that fan.
+
+# dynhr 0.9.4.71
+
+- **One ordered QZ.** The compiled LAPACK `dgges` (stable-first SORT callback)
+  is now the only ordered generalized Schur decomposition in the package, via
+  the internal `.ordered_qz()`. `hank_reiter_statespace()` and
+  `hank_sam_reiter_statespace()` use it instead of `QZ::qz.dgges()` +
+  `QZ::qz.dtgsen()` (same stable subspace; `$gen_eig_mod` is now ordered
+  stable-first).
+- **No second-library fallback.** A LAPACK failure in the ordered QZ used to
+  fall back to the QZ package, which runs the same LAPACK routines. It now
+  aborts with class `dynhr_error_qz_failed` and dgges' INFO
+  (`solve_perturbation()`, `stoch_simul()`, the HANK Reiter state spaces);
+  the per-draw estimation solve treats it as an infeasible draw (`-Inf`).
+  The fallback never fired in the full test suite. The QZ-package, geigen
+  and pure-R backends remain only behind `options(dynhr.use_rcpp = FALSE)`.
+- The source comment claiming `QZ::qz.dtgsen` has a memory-corruption bug is
+  corrected to "unverified": it could not be reproduced (3e5 calls, plus 2e4
+  under gctorture, bit-identical).
+- Tests: the 0.9.4.69 regression tests no longer use `skip_on_cran()` (they
+  tripped the skip budget in the full suite).
+
+# dynhr 0.9.4.70
+
+- The analytic steady_state_model derivative chain no longer swallows every
+  `ast_eval()` error into a silent finite-difference fallback
+  (`.ssm_param_chain_derivs()` / `...2()`). The one recoverable case -- an
+  assignment that depends on a symbol that is neither an endogenous variable
+  nor a parameter -- is checked explicitly and reported once per run
+  (`dynhr_warning_ssm_chain_fallback`); any other error now surfaces.
+- `.solve_qz()` no longer wraps the compiled ordered QZ in `tryCatch()`. A
+  LAPACK failure (`ok = FALSE`) falls back to the QZ package as before but
+  now warns (`dynhr_warning_qz_fallback`) with dgges' INFO.
+- Internal: the `shocks;` parser's duplicate bookkeeping no longer uses `<<-`;
+  the unused `.get_ss_vector()` is removed (both flagged by the 0.9.4.69
+  suite's guard tests).
+
+# dynhr 0.9.4.69
+
+**BREAKING -- malformed input is refused instead of silently accepted**
+(adversarial review 2026-11-10). Results for valid models are unchanged,
+except `dm_forecast()` (below).
+
+- `parse_mod()` now aborts on: a name declared twice across `var` / `varexo` /
+  `varexo_det` / `parameters` (a `var`/`varexo` overlap used to be dropped with
+  a message); an unparenthesised chained power `a^b^c` in equations or
+  calibration (it was read as `a^(b^c)`, MATLAB reads `(a^b)^c` -- write the
+  parentheses); an unterminated `model;` block; an empty or comment-only file;
+  `varobs` entries that are not endogenous variables.
+- `shocks;` block: aborts on `corr e, e` (it scaled that shock's variance), a
+  duplicate stderr / var or repeated `corr` pair within a block (the first
+  silently won), a negative variance or stderr, `|corr| > 1`, a calibrated
+  `Sigma_e` that is not positive semi-definite, an undeclared shock, a value
+  using an undeclared symbol, a non-scalar value, and any unrecognised
+  statement (a typo such as `stdrr` used to leave the shock at stderr 0).
+- `estimated_params`: aborts on `stderr` / `corr` naming something that is not
+  a shock (`stderr <parameter>` used to become a prior on the structural
+  parameter), on two numbers before the prior shape (the second was dropped),
+  and on an initial value outside its bounds.
+- `solve_perturbation()`: a `dynhr_steady` with `converged = FALSE` and a
+  named `ss` missing a model variable abort; an `ss` that does not solve the
+  static model warns (`dynhr_warning_steady_residual`, relative tolerance).
+  `solve_steady()` refuses a non-square system with the equation / variable
+  counts instead of failing inside the solver.
+- Data: `Inf` / `-Inf` in `data` aborts in `kalman_filter()`,
+  `kalman_smoother()`, `make_posterior()`, `dynhr_model()` and
+  `conditional_forecast()` (it was read as missing by the filter and gave NaN
+  in the smoother). `NA` and `NaN` remain missing values. `me_extra` must be
+  finite and non-negative, `shock_scale` finite. Duplicate `obs_vars` abort.
+- `conditional_forecast()` gains `me_variance` (scalar or per observable) for
+  the terminal-state filter -- it was always 0 -- and aborts on unknown
+  arguments (they were swallowed by `...`). `dm_forecast()` forwards the
+  object's `me_variance`, and **now uses the object's `params` for the shock
+  covariance** (it used the `.mod` calibration; `dm_irf()` already honoured
+  `params`). `dynhr_model()` aborts on two conflicting `me_variance` values.
+- `compute_irfs()` and its order-2..5 / MCP / OBC siblings validate
+  `n_periods`; `build_dsge_state_space()` checks its argument classes.
+- New warnings: an identically zero `Sigma_e` in `stoch_simul()` /
+  `compute_irfs()` / `compute_moments()`; a 0-period or all-missing sample in
+  `kalman_filter()`; `adapt_cov = TRUE` skipped because the warmup is too
+  short (`rwmh`, `rwmh_da`).
+- `write_mod()` parenthesises right-nested operators, so `a^(b^c)` and
+  `a*(b*c)` round-trip with their grouping.
+- `inst/extdata/models/nz_base_nonlinear_compact.mod` repaired: it had 16
+  equations for 15 variables and never solved. The placeholder `q` identity
+  is removed, the parent's NFA block (`b_nfa`, premium `psi_b*b_nfa`) is
+  restored for determinacy, and `eps_cp` enters the goods market.
+
+# dynhr 0.9.4.68
+
+**BREAKING -- rows are periods, part 3: HANK, Bayesian forecast arrays and
+the non-Gaussian / higher-order filters** (completes the standardisation
+begun in 0.9.4.66; same rule).
+
+- HANK outputs now `T x n_cell`: `$Dpath` of `hank_td_nonlinear()`,
+  `hank_td2_nonlinear()`, `hank_td2d_nonlinear()`, `hank_td3_nonlinear()`
+  and `hank_mixture_td_nonlinear()` (also `$Dpath_by_type`);
+  `hank_model_dist_irf()` `$dD`; `hank_value_transition()` `$V_path` /
+  `$dV_path`. The native kernels are unchanged.
+- `bayesian_conditional_forecast()`: `$paths_array` is `H x n_obs x draws`
+  (was `draws x H x n_obs`) and `$quantiles` an `H x n_obs x n_probs` array
+  with probability names on the third dimension (was a list of
+  `n_probs x H` matrices); `posterior_log_scores()` `$loglik` is `T x S`.
+- Inputs now `T x n` through the shared rule: the HANK likelihoods' `data`
+  (`hank_loglik_aggregate()`, `hank_loglik_aggregate_ar()`,
+  `hank_loglik_ss()`, `hank_kalman_loglik()`, `hank_loglik_ar()` and its
+  gradients, `make_log_posterior_hank()`, `make_posterior_grad_hank_ar()`,
+  `hank_ar_target()`, the Reiter likelihoods) -- they had NO orientation
+  check, so an `n_obs x T` sample was silently read transposed;
+  `hank_filter_shocks()` `shock_sd` (`T x J`); `pruned_ss_loglik()` /
+  `pruned_ss_loglik3()` `Y`; the TPF, SV-RBPF, global-PF and order-2 PSKF
+  posterior factories; `posterior_hessian()` / `posterior_hessian_fd_grad()`;
+  `dynhr_smc2()`; `diag_sloppiness()`.
+- Covariance stacks keep time last (`n x n x T`); every path, draw and
+  quantile array puts periods first.
+
+# dynhr 0.9.4.67
+
+**BREAKING -- rows are periods, part 2: Markov-switching, OBC and
+perfect-foresight code** (same rule as 0.9.4.66).
+
+- Outputs now `T x n`: `ms_kim_filter[_struct]()` `$regime_probs`;
+  `ms_kim_smoother[_struct]()` `$filtered_probs`, `$smoothed_probs`,
+  `$smoothed_states`, `$filtered_states`, `$smoothed_shocks`,
+  `$smoothed_pair_probs`, `$smoothed_states_level`;
+  `ms_smoothed_fit_struct()` `$fitted` / `$residual`;
+  `kalman_filter_obc_pkf()` `$filtered_states` / `$filtered_shocks`;
+  `pkf_smoother_obc()` `$smoothed_states` / `$smoothed_shocks`;
+  `historical_decomposition_obc()` `$contributions` / `$total` / `$initial`
+  (`$orientation` is now `"time_endo"`), and the OBC smoother in
+  `run_full_estimation()`; `boehl_solve_regime_path()` / `solve_obc_lcp()`
+  `$paths`; `pf_newton_solve()` / `ramsey_obc_pf()` `$regime`;
+  `mcp_solve_path()` `$fb_final`; `ramsey_obc_pwlinear()` `$irf`;
+  `dynamic_path_perturbation()` `$y_sim` / `$x_sim`; the value of
+  `plot.dynhr_shock_decomposition()`. Covariance / regime 3-D arrays keep
+  time last.
+- Inputs now `T x n` through the shared rule: `data` of the MS filters /
+  smoothers and of the OBC PKF / PPF filters and posterior factories;
+  `shock_seq` (`boehl_solve_regime_path()`, `solve_obc_lcp()`);
+  `shock_path` (`pf_newton_solve()`, `mcp_solve_path()`,
+  `occbin_solve_path()`, `ramsey_obc_pf()`); `smoothed_shocks` of
+  `historical_decomposition_obc()`; `shocks` of
+  `dynamic_path_perturbation()`. `as_obc_regime_path()` loses
+  `paths_endo_by_T` and refuses `n x T` paths.
+- Bugs fixed on the way: an unnamed `n_exo x T` shock path to
+  `pf_newton_solve()` ran silently as an `n_exo`-period path (no column
+  check); `ramsey_obc_pf()` replaced an unnamed shock path with zeros;
+  `as_obc_regime_path()` and D32 misread `pf_newton_solve()`'s regime
+  matrix; the MS filters and OBC posterior factories had the same
+  square-sample misread as `kalman_filter()`.
+
+# dynhr 0.9.4.66
+
+**BREAKING -- rows are periods** (orientation standardisation, part 1 of 3:
+the core Kalman layer). Every time-indexed matrix is `T x n`: periods in
+rows, series in columns. Inputs follow one rule (`R/time-orientation.R`):
+columns named by the series are used as given; a matrix named on its ROWS
+(the old orientation) is transposed with a one-time message; an unnamed
+matrix in the old `n x T` shape is an error with a `t()` hint, and an
+unnamed square one is an error asking for column names. Nothing guesses
+the orientation from the shape any more.
+
+- **Bug fixed:** `kalman_filter()` guessed the orientation of `data` from its
+  shape, so a correctly oriented sample whose length equalled the number of
+  observables was read transposed (2 periods x 2 observables: -6639.3
+  instead of -1926.7); `make_log_posterior()` relied on the guess.
+- `kalman_filter()`: `updated_states`, `predicted_states`, `filtered_states`
+  and `growth_path` are now `T x n_state` (were `n_state x T`), matching
+  `kalman_smoother()`; `a0` is matched to their column names. `data` is
+  `T x n_obs` (was documented `n_obs x T`).
+- `me_extra` is `T x n_obs`; `shock_scale`, `known_shocks`,
+  `known_shocks_sd` and `shock_means` are `T x n_exo` (were `n x T`), in
+  `kalman_filter()`, `kalman_smoother()`, `make_log_posterior()`,
+  `make_loglik_contrib()`, `make_posterior_grad()`, `estimation_context()`
+  and `conditional_forecast()` (whose `shock_means` is `(T + H) x n_exo`; a
+  named vector still means a constant mean). `known_shocks` / `shock_means`
+  may name a SUBSET of the shocks by column. The `filter_tunes` /
+  `heteroskedastic_shocks` blocks build `T x n` matrices.
+- `kf_innovation_diagnostics()`: `data` and `$z` are `T x n_obs`.
+- `kalman_smoother()` was already `T x n`; its inputs follow the rule above
+  and `pre_sample` pads rows.
+- Results are otherwise unchanged (orientation only).
+
 # dynhr 0.9.4.64
 
 **Public release: everything since 0.9.4.48** (the 0.9.4.49 - 0.9.4.64

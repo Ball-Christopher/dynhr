@@ -28,7 +28,7 @@ type (see \code{\link{hank_mixture_ks_steady}}).}
 
 \item{omega}{Numeric length-K mixture weights, non-negative, summing to 1.}
 
-\item{data}{\code{T_data x length(observables)} matrix of demeaned
+\item{data}{\code{T_data x length(observables)} matrix (rows are periods; oriented by the rule in \code{\link{hank_loglik_aggregate}}) of demeaned
 observations, columns in the order of \code{obs_vars} (as expected by
 \code{\link{hank_kalman_loglik}}).}
 

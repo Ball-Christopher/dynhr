@@ -44,8 +44,13 @@ Defaults to \code{ss[state_vars]} (start at steady state).}
 Rows correspond to state variables in order.  Pass \code{NULL} or a zero
 matrix for a deterministic path.}
 
-\item{shocks}{Shock matrix (\code{n_shocks x T}).  Column \code{t}
-contains the shocks applied at period \code{t}.  Pass \code{NULL} for
+\item{shocks}{Shock matrix (\code{T x n_shocks}, rows = periods).  Row
+\code{t} contains the shocks applied at period \code{t}; fewer than
+\code{T} rows leaves the later periods unshocked.  When \code{ETA} has
+column names, name the columns the same way (a matrix named by shock on
+its ROWS is transposed with a message); an unnamed matrix must have
+exactly \code{ncol(ETA)} columns (an unnamed \code{n_shocks x T} or
+square matrix is an error).  Pass \code{NULL} for
 a zero-shock (deterministic) path.}
 
 \item{tol}{Convergence tolerance for the nonlinear solver (default 1e-10).}
@@ -84,14 +89,16 @@ when \code{quadrature} is non-NULL.  Typical usage:
 \value{
 A list with:
   \describe{
-    \item{\code{y_sim}}{Matrix (\code{n_jump x T}) of jump variable values.
-      Rows correspond to \code{jump_vars} (non-state endogenous variables in
-      declaration order).  Column \code{t} is the period-\code{t} jump.}
-    \item{\code{x_sim}}{Matrix (\code{n_state x T}) of state variable values.
-      Rows correspond to \code{dr$state_vars}.  Column 1 is \code{x_0};
-      column \code{t+1} is the state entering period \code{t+1}.}
-    \item{\code{state_vars}}{Character vector: names of state variables (rows of x_sim).}
-    \item{\code{jump_vars}}{Character vector: names of jump variables (rows of y_sim).}
+    \item{\code{y_sim}}{Matrix (\code{T x n_jump}, rows = periods) of jump
+      variable values.  Columns correspond to \code{jump_vars} (non-state
+      endogenous variables in declaration order).  Row \code{t} is the
+      period-\code{t} jump.}
+    \item{\code{x_sim}}{Matrix (\code{T x n_state}, rows = periods) of state
+      variable values.  Columns correspond to \code{dr$state_vars}.  Row 1
+      is \code{x_0}; row \code{t+1} is the state entering period
+      \code{t+1}.}
+    \item{\code{state_vars}}{Character vector: names of state variables (columns of x_sim).}
+    \item{\code{jump_vars}}{Character vector: names of jump variables (columns of y_sim).}
   }
 }
 \description{

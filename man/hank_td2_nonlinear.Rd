@@ -67,8 +67,8 @@ this is a speed knob only.  Ignored by \code{backend = "R"}.}
 }
 \value{
 A list with numeric length-\code{T_h} paths \code{B}, \code{A},
-  \code{C}, \code{CHI}, and \code{Dpath} (\code{n_cell x T_h}): column
-  \code{t} is the beginning-of-period-\code{t} distribution over which the
+  \code{C}, \code{CHI}, and \code{Dpath} (\code{T_h x n_cell}, rows are
+  periods): row \code{t} is the beginning-of-period-\code{t} distribution over which the
   date-\code{t} aggregates are taken.
 }
 \description{

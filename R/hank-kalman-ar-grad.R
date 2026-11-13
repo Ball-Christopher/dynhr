@@ -343,7 +343,7 @@ hank_loglik_ar_grad <- function(data, ss, rho = NULL, sigma = NULL,
   ## factorization inside a separate hank_loglik_ar() call -- bit-identical by
   ## construction, since .hank_stacked_loglik() evaluates the same expression
   ## on the same (ch, yk).
-  data <- as.matrix(data)
+  data <- .hank_orient_data(data, ss, "hank_loglik_ar_grad")
   me_sd <- .hank_me_sd(me_variance, "hank_loglik_ar_grad")
   prep <- .hank_ar_prepare(data, ss, rho = rho, sigma = sigma, me_sd = me_sd,
                            q = q, check_boundary = check_boundary,
@@ -496,7 +496,7 @@ hank_loglik_ar_grad <- function(data, ss, rho = NULL, sigma = NULL,
 #'   on the same "pay for it once, then turn it off" logic as the
 #'   \code{dtheta_fn} verification.
 #'
-#' @param data \code{T_data x n_obs} matrix of demeaned observations.
+#' @param data \code{T_data x n_obs} matrix (rows are periods; oriented by the rule in \code{\link{hank_loglik_aggregate}}) of demeaned observations.
 #' @param model_fn \code{function(theta)} returning a \code{\link{hank_model}}
 #'   at the structural parameter vector \code{theta}. May be \code{NULL} only
 #'   when a prebuilt base (\code{model} or \code{Theta_list}) and an exact
@@ -571,7 +571,7 @@ hank_loglik_ar_structural_grad <- function(data, model_fn, theta, obs_vars,
   if (!is.null(model) && !inherits(model, "hank_model"))
     stop("hank_loglik_ar_structural_grad: `model` must be a hank_model() ",
          "object built at `theta`, or NULL.")
-  data <- as.matrix(data)
+  data <- .hank_orient_data(data, obs_vars, "hank_loglik_ar_structural_grad")
 
   shock_specs <- stats::setNames(
     lapply(names(rho), function(z) list(rho = rho[[z]], sigma = sigma[[z]])),
@@ -744,6 +744,9 @@ make_posterior_grad_hank_ar <- function(model, data, obs_vars, q = NULL,
   if (length(missing_obs))
     stop("make_posterior_grad_hank_ar: observable(s) not produced by model: ",
          paste(missing_obs, collapse = ", "))
+  ## T x n_obs (rows are periods), resolved ONCE at build time: inside the
+  ## per-draw tryCatch a refusal would be scored as an infeasible draw.
+  data <- .hank_orient_data(data, obs_vars, "make_posterior_grad_hank_ar")
   rep_named <- function(x, nm) {
     if (is.null(names(x))) stats::setNames(rep(x, length.out = length(nm)), nm)
     else x[nm]

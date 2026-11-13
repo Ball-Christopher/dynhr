@@ -21,7 +21,7 @@ make_posterior_grad_hank_ar(
 \arguments{
 \item{model}{A \code{\link{hank_model}}.}
 
-\item{data}{\code{T_data x n_obs} matrix of demeaned observations.}
+\item{data}{\code{T_data x n_obs} matrix (rows are periods; oriented by the rule in \code{\link{hank_loglik_aggregate}}) of demeaned observations.}
 
 \item{obs_vars}{Character vector of observable names (see
 \code{\link{hank_state_space}}).}

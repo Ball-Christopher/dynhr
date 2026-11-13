@@ -223,6 +223,10 @@
 ##             when an exactly-Gaussian forward mean recursion is required
 ##             (e.g. the method = "gaussian" backward-compat oracle).
 ##   method    "csn" (default) or "gaussian". See above.
+##   init_cov  Innovation covariance for the Gaussian stationary initial law
+##             (default NULL = Sigma_eta); pass .csn_state_noise_lift()'s
+##             Sigma_eta_init so a skewed model starts at its TRUE stationary
+##             covariance (Sigma_eta is the CSN scale there).
 ##
 ## Returns: list(
 ##   smoothed_means  T x n_state matrix of E[x_t | Y_{1:T}].
@@ -244,7 +248,8 @@
 ## @noRd
 pskf_smoother <- function(Y, TT, ZZ, mu_eta, Sigma_eta, Gamma_eta, nu_eta,
                            Delta_eta, mu_eps, Sigma_eps, cut_tol = 0.01,
-                           method = c("csn", "gaussian"), max_q = 5L) {
+                           method = c("csn", "gaussian"), max_q = 5L,
+                           init_cov = NULL) {
   method <- match.arg(method)
 
   ## Ensure Y is a matrix (n_obs x T)
@@ -279,7 +284,8 @@ pskf_smoother <- function(Y, TT, ZZ, mu_eta, Sigma_eta, Gamma_eta, nu_eta,
     ## from .pskf_filter()'s default (offset_miwa_qmax = 5: ME there, whose
     ## log-CDF error is ~0.016 median).
     offset_miwa_qmax = 7L,
-    store_path = TRUE
+    store_path = TRUE,
+    init_cov  = init_cov
   )
 
   ## An infeasible forward pass (non-stationary TT: no Lyapunov initial

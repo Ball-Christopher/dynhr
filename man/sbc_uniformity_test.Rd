@@ -41,16 +41,26 @@ noise-dominated"). Default \code{NULL} (no ESS diagnostic).}
 A list with class \code{"dynhr_sbc_uniformity"}:
   \describe{
     \item{table}{\code{data.frame(parameter, chisq, df, p_value,
-      mean_rank_z, tail_asym_z, extreme_frac)}.}
+      mean_rank_z, tail_asym_z, extreme_frac, p_mean_rank, p_tail_asym,
+      flag)}.}
     \item{n_bins}{Number of bins used.}
-    \item{alpha}{Nominal family-wise significance level (0.05).}
-    \item{alpha_bonferroni}{Bonferroni-adjusted per-test threshold,
-      \code{alpha / d}.}
-    \item{alpha_sidak}{Sidak-adjusted per-test threshold,
-      \code{1 - (1 - alpha)^(1/d)}.}
-    \item{verdict}{\code{"calibrated"}, \code{"suspect"},
+    \item{alpha, alpha_suspect}{Family-wise levels of the headline
+      verdict (0.05 and 0.20).}
+    \item{n_tests}{Number of usable statistics the headline correction
+      runs over.}
+    \item{alpha_per_test, alpha_suspect_per_test}{The per-statistic
+      thresholds \code{alpha / n_tests} and
+      \code{alpha_suspect / n_tests}.}
+    \item{alpha_bonferroni}{\code{alpha / d}, the chi-squared threshold
+      of the unadjusted screen.}
+    \item{alpha_sidak}{\code{1 - (1 - alpha)^(1/d)}.}
+    \item{verdict}{Headline: \code{"calibrated"}, \code{"suspect"},
       \code{"miscalibrated"}, or \code{"insufficient"} -- see "Verdict
       logic" above.}
+    \item{verdict_unadjusted}{The fixed-threshold screen -- see
+      "Unadjusted screen" above.}
+    \item{note}{One-paragraph statement of the correction applied and
+      the thresholds it implies for this input.}
     \item{ess}{Named numeric vector of per-parameter chain ESS, or
       \code{NULL} if \code{draws} was not supplied.}
   }
@@ -123,15 +133,33 @@ n_bins}.
     endpoints).}
 }
 
-\strong{Verdict logic (composite).} \code{"miscalibrated"} if EITHER the
-chi-squared p-value is Bonferroni-significant for any parameter, OR
-\code{|mean_rank_z| > 3}, OR \code{|tail_asym_z| > 3} for any parameter.
-\code{"suspect"} (new) if none of those trip but any of
-\code{|mean_rank_z|}, \code{|tail_asym_z|} lies in \code{[2, 3]} for some
-parameter. Else \code{"calibrated"}. This composite catches shift/tail
-patterns the chi-squared alone can miss at moderate \code{n_repl} (see the
-P2c motivation above), while still flagging anything the chi-squared alone
-would have caught. \code{"insufficient"} (new) if the input carries no
+\strong{Verdict logic (family-wise).} Each parameter contributes up to
+three statistics: the chi-squared p-value and two-sided normal p-values
+for \code{mean_rank_z} and \code{tail_asym_z} (table columns
+\code{p_mean_rank}, \code{p_tail_asym}). The headline \code{verdict}
+applies a Bonferroni correction over ALL \code{n_tests} (up to
+\code{3 * d}) statistics: \code{"miscalibrated"} if any p-value is at or
+below \code{alpha / n_tests} (\code{alpha = 0.05}), \code{"suspect"} if
+none is but one is at or below \code{alpha_suspect / n_tests}
+(\code{alpha_suspect = 0.20}), else \code{"calibrated"}. A calibrated
+sampler is therefore called \code{"miscalibrated"} about 5\% of the time
+and \code{"suspect"} or worse about 20\%, whatever the number of
+parameters. The table's \code{flag} column marks the parameters
+responsible.
+
+\strong{Unadjusted screen.} \code{verdict_unadjusted} is the rule used up
+to 0.9.4.78, kept as a more sensitive per-parameter screen:
+\code{"miscalibrated"} if the chi-squared p-value is significant after a
+Bonferroni correction over the \code{d} parameters only, or
+\code{|mean_rank_z| > 3}, or \code{|tail_asym_z| > 3}; \code{"suspect"}
+if either \code{|z|} lies in \code{[2, 3]}. Its thresholds do not depend
+on \code{d}, so its false-alarm rate grows with the number of parameters:
+on exactly uniform ranks with 12 parameters it returns
+\code{"calibrated"} about 40\% of the time, \code{"suspect"} about 50\%
+and \code{"miscalibrated"} about 10\%. Read it as a prompt to look at
+the histograms, not as a finding.
+
+\code{"insufficient"} if the input carries no
 usable rank-uniformity signal: either every observed rank is identical
 (\code{L == 0}, e.g. a single posterior draw or too few replications to
 see any spread) or every parameter's chi-squared test degenerated to

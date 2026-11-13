@@ -190,7 +190,9 @@
   ss[] <- 0   # we work in deviations
   n_s  <- length(dr2$state_idx)
   n_u  <- length(dr2$exo_names)
-  # ghxu cols are (state FAST, exo SLOW); the matching Kron is (u %x% x_dev).
+  # ghxu in the u_slow layout; the matching Kron is (u %x% x_dev)
+  # (MIXED-BLOCK LAYOUT CONVENTION, R/solve-perturbation-order3.R).
+  dr2 <- .with_mixed_layout(dr2, "u_slow")
   y <- as.numeric(dr2$ghx %*% x_dev) +
        as.numeric(dr2$ghu %*% u) +
        0.5 * as.numeric(dr2$ghxx %*% (x_dev %x% x_dev)) +

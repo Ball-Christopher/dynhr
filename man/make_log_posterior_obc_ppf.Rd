@@ -22,7 +22,10 @@ make_log_posterior_obc_ppf(
 \arguments{
 \item{model}{dynhr_mod}
 
-\item{data}{Observation matrix (T x n_obs or n_obs x T)}
+\item{data}{Observation matrix, T x n_obs (rows = periods; name the
+columns by \code{obs_vars}: a matrix named by series on its ROWS is
+transposed with a message, an unnamed n_obs x T or square one is an
+error)}
 
 \item{prior_spec}{Prior specification data.frame}
 

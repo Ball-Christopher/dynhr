@@ -647,6 +647,32 @@
   }
 }
 
+### -- Public time-indexed inputs ----------------------------------------------
+###
+### Every time-indexed input of the Kalman layer (data, me_extra, shock_scale,
+### known_shocks, known_shocks_sd, shock_means) is T x n -- rows are periods --
+### and goes through the ONE rule in R/time-orientation.R (names decide; an
+### unnamed old n x T or square matrix is refused). The fast path is the shape
+### every in-package caller passes per likelihood draw (already T x n, columns
+### named exactly `series`), so it costs one identical() there. `fill` expands
+### a column subset (subset = TRUE) to every series, in `series` order.
+.kf_time_in <- function(x, series, arg, caller, n_periods = NULL,
+                        subset = FALSE, fill = NULL) {
+  if (is.matrix(x) && is.double(x) && is.character(series) &&
+      identical(colnames(x), series) && is.null(rownames(x)) &&
+      (is.null(n_periods) || nrow(x) == n_periods))
+    return(.check_time_values(x, arg, caller))
+  x <- .orient_time_matrix(x, series, arg, caller, subset = subset,
+                           n_periods = n_periods)
+  if (!is.null(fill) && ncol(x) < length(series)) {
+    full <- matrix(fill, nrow(x), length(series),
+                   dimnames = list(NULL, series))
+    full[, colnames(x)] <- x
+    x <- full
+  }
+  x
+}
+
 ### -- Deterministic shock MEANS ---------------------------------------------
 ###
 ### A different statement from `known_shocks`, and the difference is the whole
@@ -678,9 +704,10 @@
 ### routing to the univariate filter, no new recursion, and zero-variance
 ### shocks and missing observations are non-events.
 ###
-### TIMING. `shock_means[, t]` is the shock DATED t by default, exactly as
-### `known_shocks` and `shock_scale` date their columns: it enters s_t and y_t.
-### `shock_timing = "transition_next"` instead reads column t as driving the
+### TIMING. `shock_means[t, ]` is the shock DATED t by default, exactly as
+### `known_shocks` and `shock_scale` date their rows: it enters s_t and y_t.
+### (Internally it is held n_exo x T, so below "column t" is period t.)
+### `shock_timing = "transition_next"` instead reads period t as driving the
 ### transition OUT of period t, so it enters s_{t+1} and y_{t+1} -- one column
 ### to the right, which is the adapter shift a caller comparing against a
 ### package with the other convention would otherwise apply by hand.
@@ -688,16 +715,10 @@
                             what = "kalman_filter") {
   if (is.null(shock_means)) return(NULL)
   n_e <- length(shock_names)
-  M <- as.matrix(shock_means)
-  if (nrow(M) != n_e || ncol(M) != n_T)
-    stop(sprintf("%s: `shock_means` must be n_exo x T (%d x %d); got %d x %d.",
-                 what, n_e, n_T, nrow(M), ncol(M)), call. = FALSE)
-  if (!is.null(rownames(M))) {
-    if (!setequal(rownames(M), shock_names))
-      stop(sprintf("%s: `shock_means` rownames do not match the model's shocks (%s).",
-                   what, paste(shock_names, collapse = ", ")), call. = FALSE)
-    M <- M[shock_names, , drop = FALSE]
-  }
+  ## Public form: T x n_exo, columns by name (a subset allowed: the others
+  ## carry no shift). Held n_exo x T below, the recursions' layout.
+  M <- unname(t(.kf_time_in(shock_means, shock_names, "shock_means", what,
+                            n_periods = n_T, subset = TRUE, fill = 0)))
   if (any(!is.na(M) & !is.finite(M)))
     stop(what, ": `shock_means` entries must be finite or NA.", call. = FALSE)
   ## NA means "no shift here", i.e. zero -- the same shape a caller builds for
@@ -734,8 +755,9 @@
 
 ### -- Which Sigma_e wins, and why it is NOT dr$Sigma_e ----------------------
 ###
-### `solve_perturbation()` populates `dr$Sigma_e`, compute_irfs() and
-### compute_moments() honour it, and there is no override argument on
+### `solve_perturbation()` populates `dr$Sigma_e`, the post-solve functions
+### (compute_irfs(), compute_moments(), ...; .resolve_sigma_e()) honour it when
+### called without `params`, and there is no override argument on
 ### `build_dsge_state_space()` -- so patching `dr$Sigma_e` and expecting the
 ### Kalman path to follow is a natural thing to try. It does not work, and used
 ### to fail in SILENCE: a model whose shocks block was missing (or partly
@@ -770,8 +792,9 @@
           "be reused while the likelihood is evaluated at many parameter ",
           "values. To inject a covariance deliberately, pass `Sigma_e =` to ",
           "build_dsge_state_space(); to change the model, edit the `shocks;` ",
-          "block. (compute_irfs() and compute_moments() DO honour ",
-          "dr$Sigma_e -- that difference is the trap this warning exists for.)",
+          "block. (compute_irfs(), compute_moments() and the other post-solve ",
+          "functions DO honour dr$Sigma_e when called without `params` -- ",
+          "that difference is the trap this warning exists for.)",
           call. = FALSE)
   invisible(TRUE)
 }
@@ -894,10 +917,11 @@
 
 ### -- Known historical shocks ------------------------------------------------
 ###
-### `known_shocks` is n_exo x T: the VALUE where a shock is known, NA where it
-### is not. NA-as-unknown is the same convention `data` already uses, and the
-### n_exo x T shape is the one `shock_scale` already uses, so a caller who has
-### met either has met this.
+### `known_shocks` is T x n_exo (rows = periods; columns by name, a subset
+### allowed): the VALUE where a shock is known, NA where it is not.
+### NA-as-unknown is the same convention `data` already uses, and the shape is
+### the one `shock_scale` uses, so a caller who has met either has met this.
+### Returned n_exo x T (`values`, `sd`), the layout the recursions index.
 ###
 ### The mechanism costs almost nothing because of an accident of the univariate
 ### filter: it runs on the AUGMENTED state x_t = [s_{t-1}; eps_t] (see
@@ -916,28 +940,22 @@
                              what = "kalman_filter") {
   if (is.null(known_shocks)) return(NULL)
   n_e <- length(shock_names)
-  K <- as.matrix(known_shocks)
-  if (nrow(K) != n_e || ncol(K) != n_T)
-    stop(sprintf("%s: `known_shocks` must be n_exo x T (%d x %d); got %d x %d.",
-                 what, n_e, n_T, nrow(K), ncol(K)), call. = FALSE)
-  if (!is.null(rownames(K))) {
-    if (!setequal(rownames(K), shock_names))
-      stop(sprintf("%s: `known_shocks` rownames do not match the model's shocks (%s).",
-                   what, paste(shock_names, collapse = ", ")), call. = FALSE)
-    K <- K[shock_names, , drop = FALSE]
-  }
-  if (any(is.finite(K) & !is.finite(K)) || any(!is.na(K) & !is.finite(K)))
+  ## Public form: T x n_exo, columns by name (a subset allowed: the others are
+  ## unknown, NA). Held n_exo x T below, the recursions' layout.
+  K <- unname(t(.kf_time_in(known_shocks, shock_names, "known_shocks", what,
+                            n_periods = n_T, subset = TRUE, fill = NA_real_)))
+  if (any(!is.na(K) & !is.finite(K)))
     stop(what, ": `known_shocks` entries must be finite or NA.", call. = FALSE)
 
   S <- NULL
   if (!is.null(known_shocks_sd)) {
-    S <- as.matrix(known_shocks_sd)
-    if (length(S) == 1L) S <- matrix(as.numeric(S), n_e, n_T)
-    if (nrow(S) != n_e || ncol(S) != n_T)
-      stop(sprintf("%s: `known_shocks_sd` must be n_exo x T (%d x %d) or a scalar; got %d x %d.",
-                   what, n_e, n_T, nrow(S), ncol(S)), call. = FALSE)
-    if (!is.null(rownames(S)) && setequal(rownames(S), shock_names))
-      S <- S[shock_names, , drop = FALSE]
+    if (length(unlist(known_shocks_sd)) == 1L) {
+      S <- matrix(as.numeric(known_shocks_sd), n_e, n_T)
+    } else {
+      S <- unname(t(.kf_time_in(known_shocks_sd, shock_names,
+                                "known_shocks_sd", what, n_periods = n_T,
+                                subset = TRUE, fill = NA_real_)))
+    }
     if (any(!is.na(S) & (!is.finite(S) | S < 0)))
       stop(what, ": `known_shocks_sd` must be non-negative and finite (or NA).",
            call. = FALSE)
@@ -1400,7 +1418,15 @@
 #' (alias for \code{"dare"}), \code{"chandrasekhar"}, \code{"univariate"}.
 #' There is no \code{"block"} method.
 #'
-#' @param data observation matrix (\code{n_obs} x \code{T}).
+#' @param data observation matrix, \code{T x n_obs} (rows are periods,
+#'   columns the observables in \code{obs_vars} order). Column names decide
+#'   the orientation when present: columns named by \code{obs_vars} are used
+#'   as given (reordered by name); a matrix whose ROWS carry those names (the
+#'   pre-0.9.4.66 \code{n_obs x T} layout) is transposed with a one-time
+#'   message. An unnamed \code{n_obs x T} matrix is an error with a
+#'   \code{t()} hint, and an unnamed square sample (\code{T == n_obs}) is an
+#'   error asking for column names -- the orientation is never guessed from
+#'   the shape. A plain vector is accepted for a single observable.
 #' @param dr decision rule (output of \code{\link{solve_perturbation}}).
 #' @param model compiled model object (output of \code{\link{compile_model}}).
 #' @param params named numeric vector of parameter values.
@@ -1447,7 +1473,7 @@
 #'   \code{filtered_states} are in. \code{NULL} (default) starts at the steady
 #'   state, i.e. a vector of zeros. Matched BY NAME when named (a same-length
 #'   vector in a different order is a reorder request, not a relabelling); the
-#'   state names are the \code{rownames} of \code{filtered_states}. Composes
+#'   state names are the \code{colnames} of \code{filtered_states}. Composes
 #'   with every \code{lik_init}, including \code{"diffuse"}.
 #' @param P0 Initial state covariance, \code{n_state x n_state} (or a scalar
 #'   for a multiple of the identity). \code{NULL} (default) takes the
@@ -1458,12 +1484,13 @@
 #'   prior the Chandrasekhar increment recursion is initialised from, so
 #'   \code{method = "auto"} routes to \code{"standard"} and explicit
 #'   \code{method = "chandrasekhar"} is refused.
-#' @param me_extra \code{n_obs x T} matrix of additional per-observable,
+#' @param me_extra \code{T x n_obs} matrix (rows are periods, columns the
+#'   observables, oriented by name as \code{data} is) of additional per-observable,
 #'   per-period measurement-error variances (default \code{NULL}, no extra
 #'   variance).  Like the scalar \code{me_variance}, \code{me_extra} is TRUE
 #'   per-period measurement noise on all paths: it enters the innovation
 #'   covariance \code{F_t} AND the Joseph-form state-covariance update
-#'   (\code{P += K_t \%*\% (diag(me_variance + me_extra[, t]) \%*\% t(K_t))}), so the
+#'   (\code{P += K_t \%*\% (diag(me_variance + me_extra[t, ]) \%*\% t(K_t))}), so the
 #'   \code{"standard"}, \code{"dare"}/\code{"reference"}, and
 #'   \code{"univariate"} methods agree exactly under any combination of
 #'   \code{me_variance} and \code{me_extra}.
@@ -1483,13 +1510,16 @@
 #'   exact-diffuse phase with missing observations (including NA rows
 #'   introduced by \code{me_extra}) runs on the sequential univariate filter,
 #'   which handles it exactly -- see \code{lik_init} in Details.
-#' @param shock_scale \code{n_exo x T} matrix of shock standard-deviation
-#'   scale factors (multiplicative, so 1 = baseline).  At period \code{t}
+#' @param shock_scale \code{T x n_exo} matrix (rows are periods, columns the
+#'   shocks in \code{dr$exo_names} order, oriented by name as \code{data}
+#'   is) of shock standard-deviation scale factors (multiplicative, so 1 =
+#'   baseline).  At period \code{t}
 #'   the effective shock covariance is
 #'   \eqn{\\Sigma_{e,t} = \\mathrm{diag}(s_t)\\,\\Sigma_e\\,\\mathrm{diag}(s_t)}
-#'   where \eqn{s_t} is column \code{t} of \code{shock_scale}.
+#'   where \eqn{s_t} is row \code{t} of \code{shock_scale}.
 #'   \code{NULL} (default) and an all-ones matrix are treated as identity
-#'   (no heteroskedasticity). Rows must be ordered to match \code{dr$exo_names}.
+#'   (no heteroskedasticity). Unnamed columns must be ordered to match
+#'   \code{dr$exo_names}.
 #'   Incompatible with \code{method = "chandrasekhar"}. An exact-diffuse
 #'   initialization (\code{lik_init = "diffuse"}, or \code{"auto"} on a model
 #'   with a unit root) runs on the sequential (univariate) filter, which
@@ -1521,12 +1551,14 @@
 #'   Markov-switching Kim filter reject it, and the ANALYTIC score
 #'   (\code{make_posterior_grad}) has no aggregation awareness -- sample a
 #'   mixed-frequency posterior with a gradient-free sampler.
-#' @param known_shocks Known historical shock values: an \code{n_exo x T}
-#'   matrix carrying the value where a shock is known and \code{NA} where it is
-#'   not -- the \code{NA}-as-unknown convention \code{data} uses, and the
-#'   \code{n_exo x T} shape \code{shock_scale} uses. Rows are matched BY NAME
-#'   when the matrix has rownames. \code{NULL} (default), or a matrix that is
-#'   all \code{NA}, is a no-op.
+#' @param known_shocks Known historical shock values: a \code{T x n_exo}
+#'   matrix (rows are periods) carrying the value where a shock is known and
+#'   \code{NA} where it is not -- the \code{NA}-as-unknown convention
+#'   \code{data} uses, and the \code{T x n_exo} shape \code{shock_scale}
+#'   uses. Columns are matched BY NAME when the matrix has column names, and
+#'   then may cover only SOME of the shocks (the others are unknown). An
+#'   unnamed matrix must have one column per shock. \code{NULL} (default), or
+#'   a matrix that is all \code{NA}, is a no-op.
 #'
 #'   Use it for a shock you actually know: an announced policy change, a
 #'   measured intervention, a judgemental adjustment carried over from another
@@ -1558,15 +1590,16 @@
 #'   state components and a known shock is an exact observation of one. Passing
 #'   \code{known_shocks} therefore routes to \code{method = "univariate"}.
 #' @param known_shocks_sd Optional standard errors for \code{known_shocks},
-#'   same shape (or a scalar). The injection is then SOFT -- the value is an
+#'   same \code{T x n_exo} shape and column-naming rule (or a scalar). The injection is then SOFT -- the value is an
 #'   observation with that standard deviation rather than an exact constraint,
 #'   which is what a judgemental adjustment usually is. \code{NULL} or
 #'   \code{NA} means exact.
-#' @param shock_means Deterministic shock MEANS: an \code{n_exo x T} matrix of
-#'   mean shifts, \code{NULL} (default) for none. \code{NA} and \code{0} both
-#'   mean "no shift here", so the same matrix shape used for
-#'   \code{known_shocks} works. Rows are matched BY NAME when the matrix has
-#'   rownames.
+#' @param shock_means Deterministic shock MEANS: a \code{T x n_exo} matrix
+#'   (rows are periods) of mean shifts, \code{NULL} (default) for none.
+#'   \code{NA} and \code{0} both mean "no shift here", so the same matrix
+#'   shape used for \code{known_shocks} works. Columns are matched BY NAME
+#'   when the matrix has column names, and may then cover only some of the
+#'   shocks (the others get no shift).
 #'
 #'   \strong{This is a different statement from \code{known_shocks}, and the
 #'   difference is the point of having both.} \code{known_shocks} says the
@@ -1590,15 +1623,15 @@
 #'   trajectory that is subtracted from the data and added back to the reported
 #'   states, so every \code{method} evaluates it identically, and zero-variance
 #'   shocks, missing observations and \code{a0}/\code{P0} are non-events.
-#' @param shock_timing How to read the columns of \code{shock_means}:
+#' @param shock_timing How to read the rows of \code{shock_means}:
 #'   \describe{
-#'     \item{\code{"dated"}}{(default) column \eqn{t} is the shock DATED
+#'     \item{\code{"dated"}}{(default) row \eqn{t} is the shock DATED
 #'       \eqn{t}. It enters \eqn{s_t} and \eqn{y_t}, the same dating
-#'       \code{known_shocks} and \code{shock_scale} use for their columns.}
-#'     \item{\code{"transition_next"}}{column \eqn{t} drives the transition
+#'       \code{known_shocks} and \code{shock_scale} use for their rows.}
+#'     \item{\code{"transition_next"}}{row \eqn{t} drives the transition
 #'       OUT of period \eqn{t}, so it enters \eqn{s_{t+1}} and
-#'       \eqn{y_{t+1}} -- the whole matrix shifted one column right, with the
-#'       last column falling outside the sample. This is the convention to pass
+#'       \eqn{y_{t+1}} -- the whole matrix shifted one row down, with the
+#'       last row falling outside the sample. This is the convention to pass
 #'       when adapting a path written for a package that dates its input by the
 #'       transition rather than by the shock.}
 #'   }
@@ -1763,8 +1796,8 @@
 #' \eqn{A_t} of the filtered state to \eqn{\delta}; \eqn{\delta} is then the
 #' GLS estimate \eqn{S^{+} s} (a pseudo-inverse: a direction the data does not
 #' identify is estimated as 0) and every reported state is corrected:
-#' \code{updated_states[, t]} \eqn{+ A_t \delta}, \code{predicted_states[,
-#' t]} \eqn{+ T A_{t-1} \delta}. Unlike \code{"diffuse"}, the early
+#' \code{updated_states[t, ]} \eqn{+ A_t \delta}, \code{predicted_states[t,
+#' ]} \eqn{+ T A_{t-1} \delta}. Unlike \code{"diffuse"}, the early
 #' periods therefore use the WHOLE sample's estimate of the initial level --
 #' which is what IRIS's \code{filter()} reports; the smoothed states are the
 #' same. \code{loglik} is concentrated over \eqn{\delta},
@@ -1819,9 +1852,11 @@
 #'   \describe{
 #'     \item{\code{loglik}}{the log-likelihood.}
 #'     \item{\code{updated_states}, \code{predicted_states}}{the two state
-#'       paths, \code{n_state x T}, with the timing in the names:
-#'       \code{updated_states[, t]} is \eqn{s_{t|t}} (conditioned on
-#'       \eqn{y_{1:t}}) and \code{predicted_states[, t]} is \eqn{s_{t|t-1}}
+#'       paths, \code{T x n_state} (rows are periods, columns the named
+#'       states -- the orientation \code{\link{kalman_smoother}} uses), with
+#'       the timing in the names: \code{updated_states[t, ]} is
+#'       \eqn{s_{t|t}} (conditioned on \eqn{y_{1:t}}) and
+#'       \code{predicted_states[t, ]} is \eqn{s_{t|t-1}}
 #'       (conditioned on \eqn{y_{1:t-1}}, with \eqn{s_{1|0}} taken from
 #'       \code{a0}). Both only when \code{return_filtered = TRUE}.}
 #'     \item{\code{filtered_states}}{the SAME matrix as
@@ -1830,7 +1865,7 @@
 #'     \item{\code{growth_path}}{BALANCED-GROWTH models only (\code{dr$growth}
 #'       non-zero, from \code{solve_model(steady_options = list(growth =
 #'       TRUE))}): the deterministic path \eqn{y_0 + g\,(first\_obs + t - 1)}
-#'       of the state variables, \code{n_state x T} with the same rows as
+#'       of the state variables, \code{T x n_state} with the same columns as
 #'       \code{updated_states}, so that LEVELS are \code{growth_path +
 #'       updated_states}. The reported states stay deviations; the growth of
 #'       the observables is subtracted from the data as an observation trend
@@ -1869,7 +1904,7 @@
 #' The state space is written in LAGGED form -- \eqn{s_t = T s_{t-1} +
 #' R \varepsilon_t} and \eqn{y_t = Z s_{t-1} + D \varepsilon_t} -- so
 #' \eqn{s_t} is the model's state variables dated \eqn{t}, and
-#' \code{updated_states[, t]} is those variables conditioned on data through
+#' \code{updated_states[t, ]} is those variables conditioned on data through
 #' \eqn{t}. \code{predicted_states} is the one-step-ahead pair,
 #' \eqn{s_{t|t-1}}; it needs nothing extra from the recursion, because
 #' \eqn{E[\varepsilon_t] = 0} in the deviation system makes
@@ -1878,8 +1913,8 @@
 #'
 #' A unit pulse in \code{shock_means} with no data to update on therefore
 #' traces the model's own impulse response exactly: with
-#' \code{shock_timing = "dated"} and a pulse in column 1,
-#' \code{updated_states[, t]} is \eqn{T^{t-1} R e_j}, and the two paths
+#' \code{shock_timing = "dated"} and a pulse in row 1,
+#' \code{updated_states[t, ]} is \eqn{T^{t-1} R e_j}, and the two paths
 #' coincide because there is nothing to update with. That identity is the
 #' bridge to a package that reports shock responses on a different grid --
 #' compare against it once, choose the \code{shock_timing} that lines up, and
@@ -1920,21 +1955,21 @@
 #'
 #' \preformatted{
 #' Yna <- Y; Yna[] <- NA                  # same shape, no observations
-#' M   <- matrix(0, n_exo, T, dimnames = list(exo_names, NULL))
-#' M["e_j", 1] <- 1                       # unit pulse in the FIRST column
+#' M   <- matrix(0, T, n_exo, dimnames = list(NULL, exo_names))
+#' M[1, "e_j"] <- 1                       # unit pulse in the FIRST row
 #' kalman_filter(Yna, dr, model, params, obs_vars = obs,
-#'               return_filtered = TRUE, shock_means = M)$updated_states[, 1:4]
+#'               return_filtered = TRUE, shock_means = M)$updated_states[1:4, ]
 #' }
 #'
 #' With no observations there is nothing to update with, so the filtered path
 #' IS the deterministic path, and the deterministic path of a unit pulse is
 #' the model's impulse response: under \code{"dated"} that is
-#' \eqn{T^{t-1} R e_j}, with the IMPACT in column 1 -- the same column as the
+#' \eqn{T^{t-1} R e_j}, with the IMPACT in row 1 -- the same row as the
 #' pulse -- and \code{predicted_states} identical to it. Produce the other
 #' package's response to the same pulse and compare: impact in the same period
 #' means keep \code{"dated"}; impact one period later means
 #' \code{"transition_next"}, which is exactly the same as shifting the matrix
-#' one column right yourself.
+#' one row down yourself.
 #'
 #' Do not infer the answer from a HISTORICAL filtered path, where an offset in
 #' the shock input and an offset in the state output look alike. The pulse
@@ -2060,6 +2095,11 @@ kalman_filter <- function(data, dr, model, params, obs_vars,
   n_state   <- length(state_idx)
   n_exo     <- length(exo)
   n_obs     <- length(obs_vars)
+  if (anyDuplicated(obs_vars))
+    .dynhr_abort("kalman_filter: `obs_vars` lists ",
+                 paste(unique(obs_vars[duplicated(obs_vars)]), collapse = ", "),
+                 " more than once; each observable must appear once.",
+                 class = "dynhr_error_invalid_argument")
 
   if (n_obs > n_exo)
     .dynhr_warn(sprintf("Stochastic singularity: %d obs but only %d shocks.", n_obs, n_exo))
@@ -2176,9 +2216,40 @@ kalman_filter <- function(data, dr, model, params, obs_vars,
     }
   }
 
-  if (is.null(dim(data))) data <- matrix(data, nrow = n_obs)
-  if (nrow(data) != n_obs) data <- t(data)
+  ## ---- Time-indexed inputs: T x n (rows = periods) at this boundary -----
+  ## One rule for every input (R/time-orientation.R): names decide, an
+  ## unnamed old n x T matrix or an unnamed square one is refused. The
+  ## recursions below index periods by COLUMN, so each input is transposed
+  ## once, here, into that internal layout. (This used to GUESS from the
+  ## shape -- `nrow(data) != n_obs -> t(data)` -- and read a correctly
+  ## oriented sample with T == n_obs transposed.) The internal copies carry
+  ## no dimnames: the names have done their job once the columns are matched,
+  ## and a stray name must not leak into the arithmetic's results.
+  data <- unname(t(.kf_time_in(data, obs_vars, "data", "kalman_filter")))
   n_T <- ncol(data)
+  ## A zero-length or all-missing sample returns loglik 0 (the empty sum),
+  ## which reads like a perfect fit. Keep the value, but say so. Not when a
+  ## deterministic injection (shock_means / known_shocks) is supplied: running
+  ## the filter on an all-NA sample to trace that path is a documented idiom
+  ## (test-shock-means.R "a unit pulse with no data ...").
+  if ((n_T == 0L || all(is.na(data))) &&
+      is.null(shock_means) && is.null(known_shocks))
+    .dynhr_warn("kalman_filter: no observation contributed to the likelihood ",
+                "(", if (n_T == 0L) "the sample has 0 periods"
+                     else "every data value is NA", "); the returned loglik ",
+                "carries no information about the data.",
+                ## Deduplicated only inside an open run epoch (an
+                ## estimation loop); a direct call warns every time --
+                ## `once = TRUE` outside an epoch latched for the session.
+                once = !is.null(.dynhr_msg_state$epoch),
+                key = "kalman_filter_no_observations",
+                class = "dynhr_warning_no_observations")
+  if (!is.null(me_extra))
+    me_extra <- unname(t(.kf_time_in(me_extra, obs_vars, "me_extra",
+                                     "kalman_filter", n_periods = n_T)))
+  if (!is.null(shock_scale))
+    shock_scale <- unname(t(.kf_time_in(shock_scale, exo, "shock_scale",
+                                        "kalman_filter", n_periods = n_T)))
   known <- .kf_known_shocks(known_shocks, known_shocks_sd, exo, n_T)
   mean_path <- .kf_shock_means(shock_means, shock_timing, exo, n_T)
 
@@ -2220,15 +2291,9 @@ kalman_filter <- function(data, dr, model, params, obs_vars,
   chand_from_auto <- FALSE
 
   ## ---- me_extra validation and routing ------------------------------------
-  ## me_extra must be n_obs x T when non-NULL.
+  ## me_extra arrives T x n_obs (validated above) and is held n_obs x T here.
   has_me_extra <- FALSE
   if (!is.null(me_extra)) {
-    if (!is.matrix(me_extra) || nrow(me_extra) != n_obs || ncol(me_extra) != n_T)
-      stop(sprintf(
-        "kalman_filter: me_extra must be an n_obs x T matrix (%d x %d); got %s.",
-        n_obs, n_T,
-        if (is.matrix(me_extra)) paste0(nrow(me_extra), " x ", ncol(me_extra))
-        else "non-matrix"), call. = FALSE)
     ## Only treat as active when at least one entry is nonzero.
     has_me_extra <- any(me_extra != 0)
   }
@@ -2254,15 +2319,10 @@ kalman_filter <- function(data, dr, model, params, obs_vars,
   }
 
   ## ---- shock_scale validation and routing ---------------------------------
-  ## shock_scale must be n_exo x T when non-NULL; rows must align to dr$exo_names.
+  ## shock_scale arrives T x n_exo (columns matched to dr$exo_names, validated
+  ## above) and is held n_exo x T here.
   has_shock_scale <- FALSE
   if (!is.null(shock_scale)) {
-    if (!is.matrix(shock_scale) || nrow(shock_scale) != n_exo || ncol(shock_scale) != n_T)
-      stop(sprintf(
-        "kalman_filter: shock_scale must be an n_exo x T matrix (%d x %d); got %s.",
-        n_exo, n_T,
-        if (is.matrix(shock_scale)) paste0(nrow(shock_scale), " x ", ncol(shock_scale))
-        else "non-matrix"), call. = FALSE)
     ## Only treat as active when at least one entry differs from 1.
     has_shock_scale <- !all(shock_scale == 1)
   }
@@ -2715,6 +2775,10 @@ kalman_filter <- function(data, dr, model, params, obs_vars,
       }
       rownames(filtered_states)  <- state_names_out
       rownames(predicted_states) <- state_names_out
+      ## Reported T x n_state (rows = periods), the package-wide convention;
+      ## the recursions above run with periods in columns.
+      filtered_states  <- t(filtered_states)
+      predicted_states <- t(predicted_states)
     }
     if (!is.null(final_state)) {
       final_state <- as.numeric(final_state)
@@ -2787,7 +2851,7 @@ kalman_filter <- function(data, dr, model, params, obs_vars,
                                             n_cells = sum(mean_path != 0),
                                             names = exo[rowSums(mean_path != 0) > 0]),
              loglik_type        = ll_type)),
-      if (!is.null(growth_path_out)) list(growth_path = growth_path_out),
+      if (!is.null(growth_path_out)) list(growth_path = t(growth_path_out)),
       extra)
   }
 

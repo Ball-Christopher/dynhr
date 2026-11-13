@@ -100,7 +100,10 @@
   np  <- length(param_names)
 
   ghx  <- dr2$ghx; ghu <- dr2$ghu
-  ghxx <- dr2$ghxx; ghxu <- dr2$ghxu; ghuu <- dr2$ghuu; ghss <- dr2$ghss
+  ## order-2 solution derivatives / cotangents in the u_slow layout:
+  ## MIXED-BLOCK LAYOUT CONVENTION
+  ghxx <- dr2$ghxx; ghuu <- dr2$ghuu; ghss <- dr2$ghss
+  ghxu <- .mixed_block(dr2, "ghxu", "u_slow")
   Sigma_e <- dr2$Sigma_e
   ys  <- dr2$ys
 

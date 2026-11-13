@@ -114,12 +114,9 @@
                  "per-period likelihood from. Pass a posterior result that ",
                  "carries them, supply them through `...`, or pass ",
                  "`loglik_contrib_fn`.", class = "dynhr_error_predictive_input")
-  ## Estimation results store data T x n_obs; accept the transpose as the
-  ## estimation drivers do.
-  obs <- args$obs_vars %||% args$model$obs_vars %||% args$model$varobs_names
-  dat <- as.matrix(args$data)
-  if (length(obs) > 0L && ncol(dat) != length(obs) && nrow(dat) == length(obs))
-    args$data <- t(dat)
+  ## Estimation results store data T x n_obs (rows are periods);
+  ## make_loglik_contrib() orients it by the package-wide rule (names decide,
+  ## an unnamed n_obs x T or square sample is refused) -- no shape guess here.
   do.call(make_loglik_contrib, args)
 }
 
@@ -250,8 +247,9 @@
 #'   \code{elpd_waic}, \code{pointwise} (data frame: \code{period},
 #'   \code{lpd}, \code{mc_se}, \code{p_waic}; its \code{lpd} column sums to
 #'   \code{lpd}), \code{per_observable} (\code{NULL} or the \eqn{T \times J}
-#'   matrix described above), \code{loglik} (the \eqn{S \times T} matrix of
-#'   contributions), \code{draw_index} (rows of the draws used) and
+#'   matrix described above), \code{loglik} (the \eqn{T \times S} matrix of
+#'   contributions: rows are periods, columns the draws used),
+#'   \code{draw_index} (rows of the draws used) and
 #'   \code{n_draws}.
 #' @references Vehtari, A., Gelman, A., & Gabry, J. (2017). Practical Bayesian
 #'   model evaluation using leave-one-out cross-validation and WAIC.
@@ -312,7 +310,7 @@ posterior_log_scores <- function(result, n_draws = 1000L,
        pointwise      = data.frame(period = seq_len(ncol(ll)), lpd = lme$lpd,
                                    mc_se = lme$se, p_waic = p_waic),
        per_observable = per_obs,
-       loglik         = ll,
+       loglik         = t(ll),          # T x S: rows are periods
        draw_index     = idx,
        n_draws        = nrow(ll))
 }

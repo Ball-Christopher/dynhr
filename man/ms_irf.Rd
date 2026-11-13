@@ -26,8 +26,11 @@ single \code{DecisionRules} object, ignored for \code{MsDecisionRules}.}
 
 \item{shock_size}{Shock size in standard-deviation units (default 1).}
 
-\item{params}{Named numeric parameter vector (default
-\code{model$param_values}).}
+\item{params}{Named numeric parameter vector, or \code{NULL} (default).
+The (base) shock covariance comes from \code{params} when supplied, else
+from \code{dr$Sigma_e} (the first regime's, for an
+\code{MsDecisionRules}), else from the model's shocks block at
+\code{model$param_values}.}
 }
 \value{
 A list of class \code{"ms_irf"}:
